@@ -1,0 +1,4 @@
+python-telegram-bot[all]~=21.0
+python-dotenv~=1.0.1
+telegram~=0.0.1
+getbible~=1.1.2
