@@ -70,7 +70,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=("The search function for Telegram is not yet finished.\n\n"
-              "You can search the Scriptures at https://getBible.net/search")
+              "You can search the Scriptures at https://getBible.life/search")
     )
     await context.bot.delete_message(
         chat_id=update.effective_chat.id,
