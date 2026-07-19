@@ -18,9 +18,9 @@ from telegram.ext import (
 
 from config import ConfigurationError, Settings
 from modules.commands import (
-    LIMITER_KEY,
-    SERVICE_KEY,
-    SETTINGS_KEY,
+    LIMITER_SLOT,
+    SERVICE_SLOT,
+    SETTINGS_SLOT,
     bible_command,
     error_handler,
     help_command,
@@ -32,7 +32,7 @@ from modules.health import HealthServer
 from modules.rate_limit import InboundRateLimiter
 from modules.service import ScriptureService
 
-HEALTH_KEY = "health_server"
+HEALTH_SLOT = "health_server"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -86,10 +86,10 @@ def build_application(settings: Settings) -> Application:
         .post_shutdown(_post_shutdown)
         .build()
     )
-    application.bot_data[SETTINGS_KEY] = settings
-    application.bot_data[SERVICE_KEY] = service
-    application.bot_data[LIMITER_KEY] = limiter
-    application.bot_data[HEALTH_KEY] = health
+    application.bot_data[SETTINGS_SLOT] = settings
+    application.bot_data[SERVICE_SLOT] = service
+    application.bot_data[LIMITER_SLOT] = limiter
+    application.bot_data[HEALTH_SLOT] = health
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("get", bible_command))
@@ -103,7 +103,7 @@ def build_application(settings: Settings) -> Application:
 
 
 async def _post_init(application: Application) -> None:
-    health: HealthServer = application.bot_data[HEALTH_KEY]
+    health: HealthServer = application.bot_data[HEALTH_SLOT]
     await application.bot.set_my_commands(
         [
             BotCommand("bible", "Retrieve Scripture by reference"),
@@ -117,8 +117,8 @@ async def _post_init(application: Application) -> None:
 
 
 async def _post_shutdown(application: Application) -> None:
-    health: HealthServer = application.bot_data[HEALTH_KEY]
-    service: ScriptureService = application.bot_data[SERVICE_KEY]
+    health: HealthServer = application.bot_data[HEALTH_SLOT]
+    service: ScriptureService = application.bot_data[SERVICE_SLOT]
     await health.close()
     await service.close()
     LOGGER.info("GetBible Robot shut down cleanly")
