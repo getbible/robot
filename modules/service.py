@@ -9,7 +9,9 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Sequence
+from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, TypeVar
@@ -26,7 +28,7 @@ from getbible import (
 )
 
 from config import Settings
-from .errors import CircuitOpen, RobotBusy, RobotInputError, ScriptureUnavailable
+from modules.errors import CircuitOpen, RobotBusy, RobotInputError, ScriptureUnavailable
 
 LOGGER = logging.getLogger(__name__)
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
@@ -192,10 +194,11 @@ class ScriptureService:
         ):
             raise RobotInputError("The Scripture reference is invalid.")
 
+        reference = prefix.strip()
+        self._validate_reference_set(reference, candidate)
         if not await self.translation_exists(candidate):
             raise TranslationNotFoundError(f"Translation ({candidate}) not found.")
-        self._validate_reference_set(prefix.strip(), candidate)
-        return ScriptureQuery(prefix.strip(), candidate)
+        return ScriptureQuery(reference, candidate)
 
     async def translation_exists(self, abbreviation: str) -> bool:
         code = abbreviation.casefold()
@@ -235,12 +238,12 @@ class ScriptureService:
         if self._closed:
             return
         self._closed = True
-        self._client.close()
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None,
             partial(self._executor.shutdown, wait=True, cancel_futures=True),
         )
+        self._client.close()
 
     def _validate_reference_set(self, value: str, translation: str) -> None:
         references = value.split(";")
@@ -274,28 +277,37 @@ class ScriptureService:
                 self._semaphore.acquire(),
                 timeout=self.settings.queue_timeout,
             )
-        except asyncio.TimeoutError as error:
+        except TimeoutError as error:
             self.metrics.increment("queue_rejections")
             raise RobotBusy("The Scripture lookup queue is full.") from error
 
+        submitted = False
+        wrapped_future: asyncio.Future[Any] | None = None
         try:
+            if self._closed:
+                raise ScriptureUnavailable("The Scripture service is closed.")
             await self._circuit.before_call()
             loop = asyncio.get_running_loop()
-            future = loop.run_in_executor(
-                self._executor,
-                partial(function, *arguments),
+            raw_future: ConcurrentFuture[Any] = self._executor.submit(function, *arguments)
+            submitted = True
+            raw_future.add_done_callback(
+                lambda _future: loop.call_soon_threadsafe(self._semaphore.release)
             )
+            wrapped_future = asyncio.wrap_future(raw_future)
             result = await asyncio.wait_for(
-                future,
+                asyncio.shield(wrapped_future),
                 timeout=self.settings.lookup_timeout,
             )
         except CircuitOpen:
+            self.metrics.increment("circuit_rejections")
             raise
         except (ReferenceValidationError, RequestLimitError, TranslationNotFoundError):
             await self._circuit.success()
             raise
-        except asyncio.TimeoutError as error:
+        except TimeoutError as error:
             self.metrics.increment("lookup_timeouts")
+            if wrapped_future is not None:
+                wrapped_future.add_done_callback(_consume_background_result)
             await self._circuit.failure()
             raise ScriptureUnavailable("The Scripture lookup timed out.") from error
         except (RepositoryError, CacheIntegrityError, OSError) as error:
@@ -315,4 +327,13 @@ class ScriptureService:
             await self._circuit.success()
             return result
         finally:
-            self._semaphore.release()
+            # A timed-out thread keeps its permit until it actually exits. This prevents
+            # ThreadPoolExecutor's internal unbounded queue from becoming an attack queue.
+            if not submitted:
+                self._semaphore.release()
+
+
+def _consume_background_result(future: asyncio.Future[Any]) -> None:
+    """Retrieve a timed-out worker's eventual exception without exposing it."""
+    with suppress(asyncio.CancelledError, Exception):
+        future.exception()
