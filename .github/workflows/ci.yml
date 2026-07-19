@@ -134,6 +134,8 @@ jobs:
           set -o pipefail
           detect-secrets scan \
             --all-files \
+            --exclude-files '(^|/)\.git/' \
+            --exclude-files '(^|/)\.(mypy|ruff)_cache/' \
             --exclude-files '(^|/)\.env\.template$' \
             --exclude-files '(^|/)requirements(-dev)?\.txt$' \
             > "${RUNNER_TEMP}/secrets.json"
@@ -166,7 +168,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: quality-failure
-          path: ${{ runner.temp }}/*
+          path: |
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/secrets.json
           if-no-files-found: warn
 
   gate:
