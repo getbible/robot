@@ -53,7 +53,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python -m compileall -q bot.py config.py modules tests \
+          python -m compileall -q bot.py config.py modules scripts tests \
             2>&1 | tee "${RUNNER_TEMP}/compile.log"
 
       - name: Run deterministic test suite
@@ -110,14 +110,22 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          bandit -q -r bot.py config.py modules -ll \
+          librarian_path=$(python - <<'PY'
+          from pathlib import Path
+
+          import getbible
+
+          print(Path(getbible.__file__).resolve().parent)
+          PY
+          )
+          bandit -q -r bot.py config.py modules scripts "$librarian_path" -ll \
             2>&1 | tee "${RUNNER_TEMP}/bandit.log"
 
       - name: Dependency vulnerability scan
         shell: bash
         run: |
           set -o pipefail
-          pip-audit --strict -r requirements.txt \
+          python scripts/audit_runtime.py \
             2>&1 | tee "${RUNNER_TEMP}/pip-audit.log"
 
       - name: Secret scan
