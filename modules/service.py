@@ -105,6 +105,14 @@ class CircuitBreaker:
                 self._opened_at = self._clock()
             self._probe_in_flight = False
 
+    async def abandoned(self) -> None:
+        """Release half-open probe state when its caller is cancelled."""
+        async with self._lock:
+            if self._state == "half_open":
+                self._state = "open"
+                self._opened_at = self._clock()
+            self._probe_in_flight = False
+
     async def snapshot(self) -> dict[str, Any]:
         async with self._lock:
             retry_after = 0.0
@@ -277,7 +285,7 @@ class ScriptureService:
                 self._semaphore.acquire(),
                 timeout=self.settings.queue_timeout,
             )
-        except TimeoutError as error:
+        except (TimeoutError, asyncio.TimeoutError) as error:
             self.metrics.increment("queue_rejections")
             raise RobotBusy("The Scripture lookup queue is full.") from error
 
@@ -304,12 +312,17 @@ class ScriptureService:
         except (ReferenceValidationError, RequestLimitError, TranslationNotFoundError):
             await self._circuit.success()
             raise
-        except TimeoutError as error:
+        except (TimeoutError, asyncio.TimeoutError) as error:
             self.metrics.increment("lookup_timeouts")
             if wrapped_future is not None:
                 wrapped_future.add_done_callback(_consume_background_result)
             await self._circuit.failure()
             raise ScriptureUnavailable("The Scripture lookup timed out.") from error
+        except asyncio.CancelledError:
+            if wrapped_future is not None:
+                wrapped_future.add_done_callback(_consume_background_result)
+            await self._circuit.abandoned()
+            raise
         except (RepositoryError, CacheIntegrityError, OSError) as error:
             self.metrics.increment("repository_failures")
             await self._circuit.failure()
