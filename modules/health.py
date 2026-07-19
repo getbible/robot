@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import suppress
 from typing import Any
 
 from .rate_limit import InboundRateLimiter
@@ -75,17 +76,15 @@ class HealthServer:
                 await self._write_metrics(writer)
             else:
                 await self._write(writer, 404, {"status": "not_found"})
-        except (asyncio.TimeoutError, UnicodeError, ValueError):
+        except (TimeoutError, UnicodeError, ValueError):
             await self._write(writer, 400, {"status": "bad_request"})
         except Exception:
             LOGGER.exception("Health endpoint failed safely")
             await self._write(writer, 500, {"status": "error"})
         finally:
             writer.close()
-            try:
+            with suppress(ConnectionError):
                 await writer.wait_closed()
-            except ConnectionError:
-                pass
 
     async def _write_metrics(self, writer: asyncio.StreamWriter) -> None:
         service = await self._service.snapshot()
