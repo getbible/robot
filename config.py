@@ -100,6 +100,7 @@ class Settings:
     max_references: int
     max_verses_per_reference: int
     max_total_verses: int
+    max_output_chunks: int
     max_concurrent_lookups: int
     max_concurrent_updates: int
     user_rate_capacity: int
@@ -116,7 +117,7 @@ class Settings:
     log_level: int
 
     @classmethod
-    def from_env(cls, *, load_environment_file: bool = True) -> "Settings":
+    def from_env(cls, *, load_environment_file: bool = True) -> Settings:
         if load_environment_file:
             load_dotenv(override=False)
 
@@ -190,6 +191,7 @@ class Settings:
             max_references=max_references,
             max_verses_per_reference=max_verses_per_reference,
             max_total_verses=max_total_verses,
+            max_output_chunks=_integer("MAX_OUTPUT_CHUNKS", 8, 1, 32),
             max_concurrent_lookups=_integer("MAX_CONCURRENT_LOOKUPS", 4, 1, 32),
             max_concurrent_updates=_integer("MAX_CONCURRENT_UPDATES", 16, 1, 64),
             user_rate_capacity=_integer("USER_RATE_CAPACITY", 4, 1, 100),
