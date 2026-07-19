@@ -26,7 +26,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@7c4a2585440bbc7499024911ad98cd011a05164f
+        uses: github/codeql-action/init@cf463419fdde78c727231e445622a9ac37966f84
         with:
           languages: python
           build-mode: none
