@@ -8,7 +8,7 @@ from getbible import ReferenceValidationError, RequestLimitError
 
 from config import Settings
 from modules.errors import CircuitOpen, RobotBusy, ScriptureUnavailable
-from modules.service import ScriptureQuery, ScriptureService
+from modules.service import CircuitBreaker, ScriptureQuery, ScriptureService
 
 
 class _Client:
@@ -48,6 +48,31 @@ def _settings(**environment: str) -> Settings:
     values.update(environment)
     with patch.dict(os.environ, values, clear=True):
         return Settings.from_env(load_environment_file=False)
+
+
+class CircuitBreakerTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_abandoned_half_open_probe_can_be_retried_after_recovery(self) -> None:
+        now = [0.0]
+        circuit = CircuitBreaker(
+            failure_threshold=1,
+            recovery_seconds=5.0,
+            clock=lambda: now[0],
+        )
+
+        await circuit.failure()
+        now[0] = 6.0
+        await circuit.before_call()
+        self.assertEqual((await circuit.snapshot())["state"], "half_open")
+
+        await circuit.abandoned()
+        abandoned = await circuit.snapshot()
+        self.assertEqual(abandoned["state"], "open")
+        self.assertEqual(abandoned["failures"], 1)
+
+        now[0] = 12.0
+        await circuit.before_call()
+        await circuit.success()
+        self.assertEqual((await circuit.snapshot())["state"], "closed")
 
 
 class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
