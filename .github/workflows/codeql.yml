@@ -12,6 +12,7 @@ on:
 permissions:
   contents: read
   security-events: write
+  statuses: write
 
 concurrency:
   group: codeql-${{ github.ref }}
@@ -35,3 +36,41 @@ jobs:
         uses: github/codeql-action/analyze@7c4a2585440bbc7499024911ad98cd011a05164f
         with:
           category: "/language:python"
+
+  gate:
+    name: CodeQL gate status
+    if: always() && github.event_name == 'push'
+    needs: [analyze]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Publish commit status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANALYZE_RESULT: ${{ needs.analyze.result }}
+        run: |
+          state=failure
+          description="CodeQL analysis failed"
+          if [ "$ANALYZE_RESULT" = success ]; then
+            state=success
+            description="CodeQL analysis passed"
+          fi
+          payload=$(python - "$state" "$description" <<'PY'
+          import json
+          import sys
+
+          print(json.dumps({
+              "state": sys.argv[1],
+              "context": "robot/codeql-gate",
+              "description": sys.argv[2],
+          }))
+          PY
+          )
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload"
+          [ "$state" = success ]
