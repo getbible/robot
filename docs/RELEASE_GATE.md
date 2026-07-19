@@ -15,12 +15,12 @@ A robot commit is deployable only when every applicable item below is satisfied.
 
 - The exact runtime lock installs with `--require-hashes` on Python 3.10, 3.11, and 3.12.
 - `pip check` succeeds in every runtime environment.
-- Python source and tests compile.
-- Deterministic unit, asynchronous, regression, and symbol-fuzz tests pass on every supported Python version.
+- Python source, maintenance helpers, and tests compile.
+- Deterministic unit, asynchronous, regression, documentation-contract, audit-contract, and symbol-fuzz tests pass on every supported Python version.
 - Ruff passes without new suppressions added solely for the release.
 - mypy passes with the configured strictness.
-- Bandit reports no medium/high finding.
-- `pip-audit --strict` reports no known vulnerability in the exact runtime lock.
+- Bandit reports no medium/high finding in the robot, maintenance scripts, or exact installed Librarian source.
+- `scripts/audit_runtime.py` verifies the temporary Librarian URL/hash and runs `pip-audit --strict` against every registry dependency; after the package release it audits the complete lock.
 - Secret scanning reports no real secret.
 - The hardened systemd unit passes `systemd-analyze verify`.
 - CodeQL succeeds.
@@ -34,8 +34,9 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - GitHub Actions remain pinned to reviewed immutable commit SHAs.
 - The runtime does not resolve or upgrade dependencies during service startup.
 - Python 3.10 conditional requirements remain represented in the universal lock.
-- Until the Librarian 1.2 package release exists, the temporary reviewed source commit remains explicit.
-- After that release, the robot uses the documented compatible package range and an exact hashed resolved version.
+- Until the Librarian 1.2 package release exists, the temporary reviewed source commit remains explicit, exactly URL-matched, and SHA-256 locked.
+- The direct-source audit contract test fails for a URL mismatch, missing hash, duplicate source, or unfiltered source requirement.
+- After the Librarian release, the robot uses the documented compatible package range and an exact hashed resolved version.
 
 ## Parser and work budgets
 
@@ -52,10 +53,12 @@ A robot commit is deployable only when every applicable item below is satisfied.
 
 - Connect, read, retry, response-byte, queue, and overall lookup limits are active.
 - Repository stalls return a generic response within the configured outer timeout.
+- Python 3.10 and newer enter the same typed timeout and queue-saturation paths.
 - A timed-out worker retains its permit until the underlying thread actually exits.
 - Repeated stalls cannot accumulate work in the executor's internal queue without bound.
 - Repeated upstream failures open the circuit.
 - One later half-open probe can close the circuit after recovery.
+- Cancellation cannot permanently retain a half-open probe marker.
 - Validation and caller-limit errors do not incorrectly open the upstream circuit.
 - Shutdown waits for worker completion before closing Librarian HTTP sessions.
 
@@ -87,6 +90,7 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - README links to the canonical documentation index.
 - Installation was followed successfully on a clean host or clean test image.
 - Every current environment variable appears in the configuration reference and `.env.template`.
+- Required operator documents exist and every relative Markdown link resolves.
 - Deterministic and live test steps match the current commands and files.
 - Dependency refresh instructions reproduce the checked-in lock process.
 - Upgrade and rollback were rehearsed with the target and previous commits.
