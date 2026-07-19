@@ -33,7 +33,7 @@ jobs:
           build-mode: none
 
       - name: Analyze
-        uses: github/codeql-action/analyze@7c4a2585440bbc7499024911ad98cd011a05164f
+        uses: github/codeql-action/analyze@cf463419fdde78c727231e445622a9ac37966f84
         with:
           category: "/language:python"
 
