@@ -25,7 +25,7 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Testing and delivery
 
-- Added deterministic parser, service, circuit, timeout, rate-limit, renderer, error, configuration, and command tests.
+- Added deterministic parser, service, circuit, timeout, rate-limit, renderer, error, configuration, health, command, and documentation-contract tests.
 - Added a Python 3.10–3.12 CI matrix with exact hashed installs.
 - Added Ruff, mypy, Bandit, `pip-audit`, secret scanning, systemd verification, CodeQL, and permanent release-gate statuses.
 - Added reproducible lock-refresh and local-check scripts.
@@ -35,10 +35,14 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 - Updated `actions/checkout` to its reviewed v7 commit.
 - Updated `actions/setup-python` to its reviewed v6 commit.
+- Updated `actions/upload-artifact` to its reviewed v7.0.1 commit.
 - Updated CodeQL init and analyze actions to reviewed immutable commits.
+- Updated `python-telegram-bot` from 21.0 to 22.8.
 - Updated `python-dotenv` to 1.2.2.
 - Updated Ruff to 0.15.22.
+- Updated Bandit to 1.9.4.
 - Updated `pip-audit` to 2.10.1.
+- Updated pip-tools to 7.6.0.
 - Updated `types-requests` to 2.33.0.20260712.
 - Updated mypy to 2.3.0.
 - Made Python 3.10's `exceptiongroup` requirement explicit in the universal runtime input.
