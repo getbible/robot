@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from .errors import RobotRateLimited
 
@@ -18,11 +18,7 @@ class _Bucket:
 
 
 class InboundRateLimiter:
-    """Atomically enforces per-user and per-chat token buckets.
-
-    State is least-recently-used and bounded so arbitrary identifiers cannot grow
-    process memory indefinitely.
-    """
+    """Atomically enforce bounded per-user and per-chat token buckets."""
 
     def __init__(
         self,
