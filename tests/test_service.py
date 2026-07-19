@@ -4,10 +4,10 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-from getbible import RequestLimitError
+from getbible import ReferenceValidationError, RequestLimitError
 
 from config import Settings
-from modules.errors import CircuitOpen, RobotBusy, RobotInputError, ScriptureUnavailable
+from modules.errors import CircuitOpen, RobotBusy, ScriptureUnavailable
 from modules.service import ScriptureQuery, ScriptureService
 
 
@@ -44,7 +44,7 @@ class _Client:
 
 
 def _settings(**environment: str) -> Settings:
-    values = {"TELEGRAM_API_TOKEN": "123456:test-token", "HEALTH_PORT": "0"}
+    values = {"TELEGRAM_API_TOKEN": "test-token", "HEALTH_PORT": "0"}
     values.update(environment)
     with patch.dict(os.environ, values, clear=True):
         return Settings.from_env(load_environment_file=False)
@@ -74,7 +74,7 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         service = ScriptureService(_settings(), client=client)
         self.addAsyncCleanup(service.close)
 
-        with self.assertRaises(RobotInputError):
+        with self.assertRaises(ReferenceValidationError):
             await service.resolve_query(["John", "1:16!", "aov"])
         self.assertEqual(client.translation_calls, [])
 
