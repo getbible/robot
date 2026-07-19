@@ -7,7 +7,7 @@ from config import ConfigurationError, Settings
 
 class SettingsTestCase(unittest.TestCase):
     def environment(self, **overrides: str) -> dict[str, str]:
-        values = {"TELEGRAM_API_TOKEN": "123456:valid-token"}
+        values = {"TELEGRAM_API_TOKEN": "test-token"}
         values.update(overrides)
         return values
 
@@ -21,7 +21,7 @@ class SettingsTestCase(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                self.environment(TELEGRAM_TOKEN="different-token"),
+                self.environment(TELEGRAM_TOKEN="different-test-token"),
                 clear=True,
             ),
             self.assertRaises(ConfigurationError),
