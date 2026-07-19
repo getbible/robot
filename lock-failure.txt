@@ -1,0 +1,53 @@
+Collecting pip-tools==7.4.1
+  Downloading pip_tools-7.4.1-py3-none-any.whl.metadata (26 kB)
+Collecting build>=1.0.0 (from pip-tools==7.4.1)
+  Downloading build-1.5.0-py3-none-any.whl.metadata (5.7 kB)
+Collecting click>=8 (from pip-tools==7.4.1)
+  Downloading click-8.4.2-py3-none-any.whl.metadata (2.6 kB)
+Requirement already satisfied: pip>=22.2 in /opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages (from pip-tools==7.4.1) (26.1.2)
+Collecting pyproject-hooks (from pip-tools==7.4.1)
+  Downloading pyproject_hooks-1.2.0-py3-none-any.whl.metadata (1.3 kB)
+Collecting setuptools (from pip-tools==7.4.1)
+  Downloading setuptools-83.0.0-py3-none-any.whl.metadata (6.6 kB)
+Collecting wheel (from pip-tools==7.4.1)
+  Downloading wheel-0.47.0-py3-none-any.whl.metadata (2.3 kB)
+Collecting packaging>=24.0 (from build>=1.0.0->pip-tools==7.4.1)
+  Downloading packaging-26.2-py3-none-any.whl.metadata (3.5 kB)
+Downloading pip_tools-7.4.1-py3-none-any.whl (61 kB)
+Downloading build-1.5.0-py3-none-any.whl (26 kB)
+Downloading click-8.4.2-py3-none-any.whl (119 kB)
+Downloading packaging-26.2-py3-none-any.whl (100 kB)
+Downloading pyproject_hooks-1.2.0-py3-none-any.whl (10 kB)
+Downloading setuptools-83.0.0-py3-none-any.whl (1.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.0/1.0 MB 37.8 MB/s  0:00:00
+Downloading wheel-0.47.0-py3-none-any.whl (32 kB)
+Installing collected packages: setuptools, pyproject-hooks, packaging, click, wheel, build, pip-tools
+
+Successfully installed build-1.5.0 click-8.4.2 packaging-26.2 pip-tools-7.4.1 pyproject-hooks-1.2.0 setuptools-83.0.0 wheel-0.47.0
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/piptools/__main__.py", line 19, in <module>
+    cli()
+  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/click/core.py", line 1569, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/click/core.py", line 1490, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/click/core.py", line 1970, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/click/core.py", line 1353, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/click/core.py", line 907, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/click/decorators.py", line 34, in new_func
+    return f(get_current_context(), *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/site-packages/piptools/scripts/compile.py", line 464, in cli
+    prereleases=repository.finder.allow_all_prereleases or pre,
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'PackageFinder' object has no attribute 'allow_all_prereleases'
