@@ -103,7 +103,30 @@ python3.12 -m venv /tmp/robot-py312
 /tmp/robot-py312/bin/python -m pip check
 ```
 
-Then run tests, Ruff, mypy, Bandit, `pip-audit`, secret scanning, systemd verification, and CodeQL. Review release notes and the actual diff; a green dependency bot PR is evidence, not a substitute for review.
+Then run tests, Ruff, mypy, Bandit, strict source-aware dependency auditing, secret scanning, systemd verification, and CodeQL. Review release notes and the actual diff; a green dependency bot PR is evidence, not a substitute for review.
+
+## Auditing the temporary source archive
+
+`pip-audit --strict` resolves advisory metadata through package registries. Before the Librarian 1.2.0 package is published there, it correctly refuses to claim that the direct source build was audited as a registry package.
+
+The robot handles that limitation without an ignore rule:
+
+```bash
+venv/bin/python scripts/audit_runtime.py
+```
+
+The helper:
+
+1. permits at most one direct GetBible requirement in `requirements.in`;
+2. requires exactly the same public URL in `requirements.txt`;
+3. requires a locked SHA-256 archive hash;
+4. removes only that one logical requirement from a temporary audit file;
+5. runs `pip-audit --strict` against every remaining registry dependency;
+6. fails for a URL mismatch, missing hash, duplicate source, audit error, or vulnerability.
+
+Bandit separately scans the exact installed Librarian source directory in both CI and `scripts/run-checks.sh`. The Librarian dependencies remain in the robot lock and are included in strict registry auditing.
+
+When `requirements.in` changes to the normal released range, `scripts/audit_runtime.py` detects that there is no direct source and submits the complete lock to `pip-audit --strict`. No audit exception or script change is needed at that transition.
 
 ## GitHub Actions dependencies
 
