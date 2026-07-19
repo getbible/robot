@@ -7,10 +7,13 @@ from collections.abc import Iterable
 from typing import Any
 from urllib.parse import quote
 
+from getbible import RequestLimitError
+
 from .errors import ScriptureUnavailable
 
 TELEGRAM_TEXT_LIMIT = 4096
 DEFAULT_CHUNK_LIMIT = 3900
+DEFAULT_MAX_CHUNKS = 8
 
 
 def render_scripture(
@@ -18,12 +21,15 @@ def render_scripture(
     web_base_url: str,
     *,
     chunk_limit: int = DEFAULT_CHUNK_LIMIT,
+    max_chunks: int = DEFAULT_MAX_CHUNKS,
 ) -> list[str]:
-    """Render trusted repository data without allowing HTML or URL injection."""
+    """Render repository data without allowing HTML, URL, or output amplification."""
     if not isinstance(result, dict) or not result:
         raise ScriptureUnavailable("The Scripture repository returned no verses.")
     if not 256 <= chunk_limit <= TELEGRAM_TEXT_LIMIT:
         raise ValueError("chunk_limit must be between 256 and Telegram's text limit.")
+    if not isinstance(max_chunks, int) or isinstance(max_chunks, bool) or not 1 <= max_chunks <= 32:
+        raise ValueError("max_chunks must be an integer between 1 and 32.")
 
     blocks: list[str] = []
     for chapter in result.values():
@@ -71,13 +77,16 @@ def render_scripture(
                 )
             first_prefix = f"<b>{html.escape(str(number))}.</b> "
             continuation_prefix = "↳ "
-            budget = chunk_limit - max(len(first_prefix), len(continuation_prefix))
+            budget = chunk_limit - max(
+                _telegram_length(first_prefix),
+                _telegram_length(continuation_prefix),
+            )
             pieces = _split_for_html(text, budget)
             for index, piece in enumerate(pieces):
                 prefix = first_prefix if index == 0 else continuation_prefix
                 blocks.append(prefix + piece)
 
-    return _pack_blocks(blocks, chunk_limit)
+    return _pack_blocks(blocks, chunk_limit, max_chunks)
 
 
 def _verse_ranges(verses: Iterable[dict[str, Any]]) -> str:
@@ -102,8 +111,16 @@ def _verse_ranges(verses: Iterable[dict[str, Any]]) -> str:
     return ",".join(ranges)
 
 
+def _telegram_length(value: str) -> int:
+    """Return Telegram's UTF-16 code-unit length rather than Python code points."""
+    try:
+        return len(value.encode("utf-16-le")) // 2
+    except UnicodeEncodeError as error:
+        raise ScriptureUnavailable("Scripture text contains invalid Unicode data.") from error
+
+
 def _split_for_html(text: str, maximum: int) -> list[str]:
-    """Split raw text while accounting for entity expansion after escaping."""
+    """Split raw text while accounting for HTML expansion and UTF-16 units."""
     if maximum < 32:
         raise ValueError("maximum is too small.")
     pieces: list[str] = []
@@ -111,31 +128,40 @@ def _split_for_html(text: str, maximum: int) -> list[str]:
     current_length = 0
     for character in text:
         escaped = html.escape(character)
-        if current and current_length + len(escaped) > maximum:
+        escaped_length = _telegram_length(escaped)
+        if current and current_length + escaped_length > maximum:
             pieces.append("".join(current))
             current = []
             current_length = 0
         current.append(escaped)
-        current_length += len(escaped)
+        current_length += escaped_length
     if current:
         pieces.append("".join(current))
     return pieces
 
 
-def _pack_blocks(blocks: list[str], maximum: int) -> list[str]:
+def _pack_blocks(blocks: list[str], maximum: int, max_chunks: int) -> list[str]:
     chunks: list[str] = []
     current = ""
+
+    def append_chunk(value: str) -> None:
+        chunks.append(value)
+        if len(chunks) > max_chunks:
+            raise RequestLimitError(
+                f"A response cannot exceed {max_chunks} Telegram messages."
+            )
+
     for block in blocks:
-        if len(block) > maximum:
+        if _telegram_length(block) > maximum:
             raise ScriptureUnavailable("A rendered Scripture block exceeded Telegram's limit.")
         candidate = block if not current else f"{current}\n\n{block}"
-        if len(candidate) <= maximum:
+        if _telegram_length(candidate) <= maximum:
             current = candidate
             continue
-        chunks.append(current)
+        append_chunk(current)
         current = block
     if current:
-        chunks.append(current)
-    if not chunks or any(len(chunk) > maximum for chunk in chunks):
+        append_chunk(current)
+    if not chunks or any(_telegram_length(chunk) > maximum for chunk in chunks):
         raise ScriptureUnavailable("Scripture rendering failed safely.")
     return chunks
