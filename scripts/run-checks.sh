@@ -31,6 +31,8 @@ report=$(mktemp)
 trap 'rm -f "$report"' EXIT
 "$VENV/bin/detect-secrets" scan \
   --all-files \
+  --exclude-files '(^|/)\.git/' \
+  --exclude-files '(^|/)\.(mypy|ruff)_cache/' \
   --exclude-files '(^|/)\.env\.template$' \
   --exclude-files '(^|/)requirements(-dev)?\.txt$' \
   > "$report"
