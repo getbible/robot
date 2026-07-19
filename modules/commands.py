@@ -140,7 +140,7 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if not await _allow_command(update, context, limiter):
             return
         await send_typing(update, context)
-        query = await service.resolve_query(context.args)
+        query = await service.resolve_query(context.args or ())
         result = await service.select(query)
         chunks = render_scripture(
             result,
