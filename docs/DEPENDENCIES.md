@@ -66,7 +66,7 @@ Use the same Python and resolver versions every time:
 python3.12 -m venv .lock-venv
 .lock-venv/bin/python -m pip install \
   pip==24.3.1 \
-  pip-tools==7.4.1
+  pip-tools==7.6.0
 
 .lock-venv/bin/python -m piptools compile \
   --resolver=backtracking \
@@ -108,6 +108,8 @@ Then run tests, Ruff, mypy, Bandit, `pip-audit`, secret scanning, systemd verifi
 ## GitHub Actions dependencies
 
 Actions are pinned to immutable commit SHAs in workflow files. Dependabot may update those SHAs. Review that each PR changes only the declared action and expected workflow references before merging.
+
+GitHub-hosted runners satisfy the Node.js 24 runner requirement of the merged `actions/upload-artifact` v7 action. A future move to self-hosted runners must confirm runner version 2.327.1 or newer before using that workflow.
 
 ## Emergency security updates
 
