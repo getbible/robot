@@ -18,7 +18,7 @@ A clean environment matters. A globally installed package can hide a missing loc
 ## Fast deterministic test cycle
 
 ```bash
-venv/bin/python -m compileall -q bot.py config.py modules tests
+venv/bin/python -m compileall -q bot.py config.py modules scripts tests
 venv/bin/python -m unittest discover -s tests -v
 venv/bin/ruff check .
 venv/bin/mypy
@@ -32,18 +32,36 @@ Run one module while developing:
 venv/bin/python -m unittest tests.test_service -v
 venv/bin/python -m unittest tests.test_renderer -v
 venv/bin/python -m unittest tests.test_security -v
+venv/bin/python -m unittest tests.test_audit_runtime -v
+venv/bin/python -m unittest tests.test_documentation -v
 ```
 
 ## Security and dependency checks
 
+Run the same source-aware checks used by CI:
+
 ```bash
-venv/bin/bandit -q -r bot.py config.py modules -ll
-venv/bin/pip-audit --strict -r requirements.txt
+librarian_path=$(
+  venv/bin/python - <<'PY'
+from pathlib import Path
+
+import getbible
+
+print(Path(getbible.__file__).resolve().parent)
+PY
+)
+venv/bin/bandit -q -r \
+  bot.py config.py modules scripts "$librarian_path" -ll
+venv/bin/python scripts/audit_runtime.py
 venv/bin/detect-secrets scan \
   --all-files \
   --exclude-files '(^|/)\.env\.template$' \
   --exclude-files '(^|/)requirements(-dev)?\.txt$'
 ```
+
+While Librarian is installed from the temporary reviewed source URL, `pip-audit --strict` cannot resolve a PyPI advisory record for that unpublished 1.2.0 package. `scripts/audit_runtime.py` therefore fails closed unless it finds exactly the declared GetBible URL and a SHA-256 lock entry, removes only that logical direct requirement, and runs strict registry auditing against every remaining locked dependency. Bandit separately scans the exact installed Librarian source. After the input changes to the released package range, the helper automatically audits the complete lock without filtering.
+
+This is not a vulnerability suppression. A different URL, a missing hash, multiple direct sources, or any vulnerable registry dependency fails the check.
 
 Review secret-scan output rather than blindly suppressing it. The `.env.template` contains a deliberate placeholder and is excluded; real tokens are never acceptable.
 
@@ -53,7 +71,7 @@ Verify the production unit on a Linux host:
 sudo systemd-analyze verify deploy/getbible-robot.service
 ```
 
-The CI quality job also performs an isolated hashed install, Ruff, mypy, Bandit, `pip-audit`, secret scanning, and unit verification. CodeQL runs separately. A deployable commit must have both permanent gate statuses green.
+The CI quality job also performs an isolated hashed install, Ruff, mypy, robot/Librarian Bandit scans, strict source-aware dependency auditing, secret scanning, and unit verification. CodeQL runs separately. A deployable commit must have both permanent gate statuses green.
 
 ## What the regression suite must prove
 
@@ -65,12 +83,15 @@ The tests cover at least these invariants:
 - malformed explicit-translation commands do not trigger repository lookups;
 - request, response-message, queue, timeout, cache, and rate-limit state is bounded;
 - a timed-out worker retains its capacity permit until the actual thread exits;
+- Python 3.10 and newer enter the same typed timeout and queue-rejection paths;
 - repeated upstream failures open the circuit and one later probe can recover it;
 - cached mutable values cannot be corrupted by a caller;
 - Telegram HTML and URL segments are escaped and encoded;
 - Telegram limits are measured in UTF-16 code units, including emoji and other astral text;
 - user-facing errors never echo raw exceptions, paths, URLs, tokens, or hostile input;
 - deletion permission failures do not turn a successful lookup into a failed command;
+- the temporary direct Librarian requirement cannot bypass an exact URL/hash check;
+- all required operator documents and relative links remain valid;
 - all public links use `https://getbible.life` and data access uses `https://api.getbible.net`.
 
 When a defect is found, first add a deterministic regression test that fails for the defect and then implement the fix. Never weaken an assertion or disable a security job merely to make CI green.
