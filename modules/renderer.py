@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import html
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 from urllib.parse import quote
 
 from .errors import ScriptureUnavailable
@@ -59,11 +60,15 @@ def render_scripture(
 
         for verse in verses:
             if not isinstance(verse, dict):
-                raise ScriptureUnavailable("The Scripture repository returned malformed verse data.")
+                raise ScriptureUnavailable(
+                    "The Scripture repository returned malformed verse data."
+                )
             number = verse.get("verse")
             text = str(verse.get("text", "")).strip()
             if number in {None, ""} or not text:
-                raise ScriptureUnavailable("The Scripture repository returned malformed verse data.")
+                raise ScriptureUnavailable(
+                    "The Scripture repository returned malformed verse data."
+                )
             first_prefix = f"<b>{html.escape(str(number))}.</b> "
             continuation_prefix = "↳ "
             budget = chunk_limit - max(len(first_prefix), len(continuation_prefix))
@@ -79,7 +84,9 @@ def _verse_ranges(verses: Iterable[dict[str, Any]]) -> str:
     try:
         numbers = sorted({int(verse["verse"]) for verse in verses})
     except (KeyError, TypeError, ValueError) as error:
-        raise ScriptureUnavailable("The Scripture repository returned invalid verse numbers.") from error
+        raise ScriptureUnavailable(
+            "The Scripture repository returned invalid verse numbers."
+        ) from error
     if not numbers or numbers[0] < 1:
         raise ScriptureUnavailable("The Scripture repository returned invalid verse numbers.")
 

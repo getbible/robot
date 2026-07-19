@@ -1,5 +1,6 @@
 import unittest
 
+from modules.errors import ScriptureUnavailable
 from modules.renderer import render_scripture
 
 
@@ -21,7 +22,10 @@ class RendererTestCase(unittest.TestCase):
     def test_html_and_link_segments_are_escaped(self) -> None:
         chunks = render_scripture(self.result(), "https://getbible.life")
         rendered = "\n".join(chunks)
-        self.assertIn("https://getbible.life/kjv/John%20%3Cscript%3E%26%22/3/16-17%2C19", rendered)
+        self.assertIn(
+            "https://getbible.life/kjv/John%20%3Cscript%3E%26%22/3/16-17%2C19",
+            rendered,
+        )
         self.assertIn("John &lt;script&gt;&amp;&quot;", rendered)
         self.assertIn("Not &lt;b&gt;condemn&lt;/b&gt; &amp; save.", rendered)
         self.assertNotIn("<script>", rendered)
@@ -38,7 +42,7 @@ class RendererTestCase(unittest.TestCase):
             self.assertNotRegex(chunk, r"&(?:a|am|amp|l|lt|g|gt|q|quo|quot)?\Z")
 
     def test_empty_results_fail_closed(self) -> None:
-        with self.assertRaises(Exception):
+        with self.assertRaises(ScriptureUnavailable):
             render_scripture({}, "https://getbible.life")
 
 

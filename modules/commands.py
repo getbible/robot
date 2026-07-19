@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from typing import cast
 
 from getbible import (
     ReferenceValidationError,
@@ -39,7 +40,11 @@ def _components(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> tuple[Settings, ScriptureService, InboundRateLimiter]:
     data = context.application.bot_data
-    return data[SETTINGS_KEY], data[SERVICE_KEY], data[LIMITER_KEY]
+    return (
+        cast(Settings, data[SETTINGS_KEY]),
+        cast(ScriptureService, data[SERVICE_KEY]),
+        cast(InboundRateLimiter, data[LIMITER_KEY]),
+    )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -118,7 +123,11 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 type(error).__name__,
             )
         else:
-            LOGGER.exception("Request %s failed unexpectedly", request_id)
+            LOGGER.error(
+                "Request %s failed unexpectedly (%s)",
+                request_id,
+                type(error).__name__,
+            )
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=message,
@@ -159,7 +168,6 @@ async def error_handler(
         "Unhandled update failure %s (%s)",
         incident_id,
         type(error).__name__ if error is not None else "unknown",
-        exc_info=error,
     )
     if isinstance(error, TelegramError):
         return

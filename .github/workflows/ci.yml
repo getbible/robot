@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install exact runtime
+        run: python -m pip install --require-hashes -r requirements.txt
+
+      - name: Verify installed dependencies
+        run: python -m pip check
+
+      - name: Compile source
+        run: python -m compileall -q bot.py config.py modules tests
+
+      - name: Run deterministic test suite
+        run: python -m unittest discover -s tests -v
+
+  quality:
+    name: Quality and security
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install exact development environment
+        run: python -m pip install --require-hashes -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Type check
+        run: mypy
+
+      - name: Static security scan
+        run: bandit -q -r bot.py config.py modules -ll
+
+      - name: Dependency vulnerability scan
+        run: pip-audit --strict -r requirements.txt
+
+      - name: Secret scan
+        run: |
+          detect-secrets scan \
+            --all-files \
+            --exclude-files '(^|/)\.env\.template$' \
+            --exclude-files '(^|/)requirements(-dev)?\.txt$' \
+            > "${RUNNER_TEMP}/secrets.json"
+          python - "${RUNNER_TEMP}/secrets.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          findings = report.get("results", {})
+          if findings:
+              print(json.dumps(findings, indent=2))
+              raise SystemExit("Potential secrets detected.")
+          PY
+
+      - name: Verify systemd unit
+        run: |
+          sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin getbible-robot
+          sudo install -d /opt/getbible-robot/venv/bin /var/cache/getbible-robot
+          sudo ln -s "$(command -v python)" /opt/getbible-robot/venv/bin/python
+          sudo touch /etc/getbible-robot.env
+          systemd-analyze verify deploy/getbible-robot.service

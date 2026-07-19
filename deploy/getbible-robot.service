@@ -3,6 +3,8 @@ Description=GetBible Telegram Robot
 Documentation=https://github.com/getbible/robot
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -17,8 +19,6 @@ ExecStart=/opt/getbible-robot/venv/bin/python /opt/getbible-robot/bot.py
 
 Restart=on-failure
 RestartSec=5s
-StartLimitIntervalSec=60
-StartLimitBurst=5
 TimeoutStopSec=30
 KillSignal=SIGTERM
 

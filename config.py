@@ -59,7 +59,9 @@ def _base_url(name: str, default: str) -> str:
     raw = _env(name, default) or ""
     parts = urlsplit(raw)
     if not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
-        raise ConfigurationError(f"{name} must be an absolute base URL without credentials, query, or fragment.")
+        raise ConfigurationError(
+            f"{name} must be an absolute base URL without credentials, query, or fragment."
+        )
     if parts.scheme != "https" and not (
         parts.scheme == "http" and parts.hostname.casefold() in _LOCAL_HOSTS
     ):
@@ -139,7 +141,7 @@ class Settings:
             raise ConfigurationError("DEFAULT_VERSE must contain between 1 and 256 characters.")
 
         log_name = (_env("LOG_LEVEL", "INFO") or "").upper()
-        log_level = logging.getLevelNamesMapping().get(log_name)
+        log_level = getattr(logging, log_name, None)
         if not isinstance(log_level, int):
             raise ConfigurationError("LOG_LEVEL must be a standard Python logging level.")
 

@@ -8,10 +8,11 @@ import re
 import threading
 import time
 from collections import Counter
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, Sequence, TypeVar
+from typing import Any, TypeVar
 
 from getbible import (
     CacheIntegrityError,
@@ -304,7 +305,10 @@ class ScriptureService:
         except Exception as error:
             self.metrics.increment("unexpected_failures")
             await self._circuit.failure()
-            LOGGER.exception("Unexpected Scripture service failure")
+            LOGGER.error(
+                "Unexpected Scripture service failure (%s)",
+                type(error).__name__,
+            )
             raise ScriptureUnavailable("The Scripture service failed safely.") from error
         else:
             self.metrics.increment(metric)
