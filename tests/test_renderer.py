@@ -1,7 +1,13 @@
 import unittest
 
+from getbible import RequestLimitError
+
 from modules.errors import ScriptureUnavailable
 from modules.renderer import render_scripture
+
+
+def _telegram_length(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
 
 
 class RendererTestCase(unittest.TestCase):
@@ -35,11 +41,31 @@ class RendererTestCase(unittest.TestCase):
             self.result("<&>" * 5000),
             "https://getbible.life",
             chunk_limit=512,
+            max_chunks=32,
         )
         self.assertGreater(len(chunks), 1)
-        self.assertTrue(all(len(chunk) <= 512 for chunk in chunks))
+        self.assertTrue(all(_telegram_length(chunk) <= 512 for chunk in chunks))
         for chunk in chunks:
             self.assertNotRegex(chunk, r"&(?:a|am|amp|l|lt|g|gt|q|quo|quot)?\Z")
+
+    def test_astral_unicode_is_measured_in_telegram_utf16_units(self) -> None:
+        chunks = render_scripture(
+            self.result("😀" * 1000),
+            "https://getbible.life",
+            chunk_limit=256,
+            max_chunks=32,
+        )
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(_telegram_length(chunk) <= 256 for chunk in chunks))
+
+    def test_response_message_count_is_bounded(self) -> None:
+        with self.assertRaises(RequestLimitError):
+            render_scripture(
+                self.result("<&>" * 5000),
+                "https://getbible.life",
+                chunk_limit=512,
+                max_chunks=1,
+            )
 
     def test_empty_results_fail_closed(self) -> None:
         with self.assertRaises(ScriptureUnavailable):
