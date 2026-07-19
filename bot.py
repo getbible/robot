@@ -1,35 +1,143 @@
-# import the Telegram API token from config.py
-from config import TELEGRAM_API_TOKEN
+"""GetBible Telegram robot entry point."""
 
+from __future__ import annotations
+
+import json
 import logging
+import sys
+from datetime import datetime, timezone
 
-# import the required Telegram modules
+from telegram import BotCommand, Update
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
-    filters,
     CommandHandler,
-    MessageHandler
+    MessageHandler,
+    filters,
 )
 
-# import the required module
-from modules.commands import *
+from config import ConfigurationError, Settings
+from modules.commands import (
+    LIMITER_KEY,
+    SERVICE_KEY,
+    SETTINGS_KEY,
+    bible_command,
+    error_handler,
+    help_command,
+    search_command,
+    start_command,
+    unknown_command,
+)
+from modules.health import HealthServer
+from modules.rate_limit import InboundRateLimiter
+from modules.service import ScriptureService
 
-logging.basicConfig(level=logging.WARN)
+HEALTH_KEY = "health_server"
+LOGGER = logging.getLogger(__name__)
 
-if __name__ == '__main__':
-    # we start the bot application
-    application = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
-    # entry command for all private chats
-    application.add_handler(CommandHandler('start', start))
-    # all handlers to get the Bible text [/get, /getBible, /Bible]
-    application.add_handler(CommandHandler('get', get))
-    application.add_handler(CommandHandler('getbible', get))
-    application.add_handler(CommandHandler('bible', get))
-    # the search handle
-    application.add_handler(CommandHandler('search', search))
-    # the help handle
-    application.add_handler(CommandHandler('help', bot_help))
-    # add a message handler to handle unknown commands or messages
-    application.add_handler(MessageHandler(filters.ALL, unknown))
-    # start polling for now (will add webhook later)
-    application.run_polling()
+
+class JsonFormatter(logging.Formatter):
+    """One JSON object per line without recording Telegram message content."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def configure_logging(level: int) -> None:
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter())
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(level)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+def build_application(settings: Settings) -> Application:
+    service = ScriptureService(settings)
+    limiter = InboundRateLimiter(
+        user_capacity=settings.user_rate_capacity,
+        user_refill_per_second=settings.user_rate_refill_per_second,
+        chat_capacity=settings.chat_rate_capacity,
+        chat_refill_per_second=settings.chat_rate_refill_per_second,
+        max_entries=settings.rate_limit_cache_size,
+    )
+    health = HealthServer(
+        host=settings.health_host,
+        port=settings.health_port,
+        service=service,
+        limiter=limiter,
+    )
+
+    application = (
+        ApplicationBuilder()
+        .token(settings.telegram_api_token)
+        .concurrent_updates(settings.max_concurrent_updates)
+        .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
+        .build()
+    )
+    application.bot_data[SETTINGS_KEY] = settings
+    application.bot_data[SERVICE_KEY] = service
+    application.bot_data[LIMITER_KEY] = limiter
+    application.bot_data[HEALTH_KEY] = health
+
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("get", bible_command))
+    application.add_handler(CommandHandler("getbible", bible_command))
+    application.add_handler(CommandHandler("bible", bible_command))
+    application.add_handler(CommandHandler("search", search_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+    application.add_error_handler(error_handler)
+    return application
+
+
+async def _post_init(application: Application) -> None:
+    health: HealthServer = application.bot_data[HEALTH_KEY]
+    await health.start()
+    await application.bot.set_my_commands(
+        [
+            BotCommand("bible", "Retrieve Scripture by reference"),
+            BotCommand("search", "Open Scripture search"),
+            BotCommand("help", "Show available commands"),
+        ]
+    )
+    LOGGER.info("GetBible Robot initialized")
+
+
+async def _post_shutdown(application: Application) -> None:
+    health: HealthServer = application.bot_data[HEALTH_KEY]
+    service: ScriptureService = application.bot_data[SERVICE_KEY]
+    await health.close()
+    await service.close()
+    LOGGER.info("GetBible Robot shut down cleanly")
+
+
+def main() -> int:
+    try:
+        settings = Settings.from_env()
+    except ConfigurationError as error:
+        logging.basicConfig(level=logging.CRITICAL)
+        logging.critical("Configuration error: %s", error)
+        return 2
+
+    configure_logging(settings.log_level)
+    application = build_application(settings)
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=settings.drop_pending_updates,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

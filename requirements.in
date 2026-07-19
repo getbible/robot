@@ -1,0 +1,4 @@
+# Direct runtime dependencies. Compile with hashes before deployment.
+getbible @ https://github.com/getbible/librarian/archive/95cdcafb6588d60eb2b1b000b4aa59f889c0f772.tar.gz
+python-dotenv==1.0.1
+python-telegram-bot==21.0

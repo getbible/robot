@@ -1,147 +1,124 @@
-# getBible Bot Deployment and Operation Guide
+# GetBible Robot
 
-This is the detailed setup and operation instructions for the getBible Bot, a Telegram bot designed to deliver Bible verses and manage user interactions effectively.
-This bot utilizes Python for its operation, interacting with users through Telegram's bot interface.
+GetBible Robot is the Telegram interface for retrieving Scripture from GetBible. The bot is designed as a bounded public service: hostile input, stalled upstream requests, malformed repository data, and Telegram permission failures must not take down the process or expose internal errors.
 
-## How to use this Bot on Telegram
+## Service boundaries
 
-> These options give you access to this bot, without the need of running your own instance.
-- In your browser: https://t.me/getBibleRobot
-- In Telegram search for: `getBibleRobot`
+These two URLs have intentionally different purposes:
 
-## Purpose of the Bible Bot
+- `https://api.getbible.net` is the machine-readable Scripture data source.
+- `https://getbible.life` is the public website used by every clickable Scripture and search link sent to Telegram.
 
-The Bible Bot is designed to engage users by providing them with instant access to Bible verses and related content through Telegram.
+They are configured independently as `GETBIBLE_API_BASE_URL` and `GETBIBLE_WEB_BASE_URL`.
 
-It supports various commands allowing users to retrieve biblical Scriptures, and more, directly within the Telegram platform.
+## Telegram commands
 
-## Prerequisites
-
-- A Linux system with `systemd` for service management.
-- Python 3.6 or newer, with `python3-venv` for creating virtual environments.
-- `git` for cloning the repository.
-- A Telegram account to create and manage the bot.
-
-## Setup Instructions
-
-### Step 1: Cloning the Repository
-
-Clone the repository to your preferred location:
-
-```bash
-git clone https://git.vdm.dev/getBible/robot /home/<YourUsername>/getBibleRobot
+```text
+/bible 1 John 3:16
+/bible John 3:16-19;1 John 3:10-17
+/bible Gen 1:1-5 codex
+/bible Ps 1:1-5 aov
+/search
+/help
 ```
 
-Navigate to the bot directory:
+`/get` and `/getbible` remain aliases of `/bible`. Telegram's parsed command arguments are used, so `/bible@getBibleRobot John 3:16` works in groups without leaking the bot mention into the reference parser.
+
+## Security and reliability controls
+
+The robot enforces all of the following before or around repository work:
+
+- complete, bounded reference parsing with no silent fallback to a different verse;
+- at most 8 references and 100 total verses per command by default;
+- per-user and per-chat token buckets with bounded in-memory state;
+- a global lookup semaphore and bounded queue wait;
+- explicit connect, read, overall lookup, retry, and response-size limits;
+- synchronous Librarian work isolated in a bounded thread pool;
+- an upstream circuit breaker;
+- typed user-safe errors with correlation IDs instead of raw exceptions;
+- HTML escaping, URL encoding, and verse-boundary Telegram message chunking;
+- optional command deletion that never makes a successful request fail;
+- aggregate-only metrics and structured logs that do not record message content;
+- loopback health and readiness endpoints;
+- deterministic tests, fuzz regressions, linting, type checking, Bandit, dependency auditing, secret scanning, and CodeQL.
+
+See [the architecture](docs/ARCHITECTURE.md), [operations guide](docs/OPERATIONS.md), and [release gate](docs/RELEASE_GATE.md).
+
+## Requirements
+
+- Linux is recommended for production.
+- Python 3.10 through 3.12.
+- A Telegram bot token from `@BotFather`.
+- `git` and a Python virtual environment.
+
+Runtime dependencies are locked with hashes. The GetBible Librarian dependency is pinned to the reviewed hardening commit used by this release.
+
+## Installation
 
 ```bash
-cd /home/<YourUsername>/getBibleRobot
-```
+git clone https://github.com/getbible/robot.git /opt/getbible-robot
+cd /opt/getbible-robot
 
-### Step 2: Creating a Virtual Environment
-
-Within the bot directory, create and activate a Python virtual environment:
-
-```bash
 python3 -m venv venv
-source venv/bin/activate
+venv/bin/python -m pip install --upgrade pip
+venv/bin/python -m pip install --require-hashes -r requirements.txt
+
+cp .env.template /etc/getbible-robot.env
+sudo chmod 600 /etc/getbible-robot.env
+sudo editor /etc/getbible-robot.env
 ```
 
-### Step 3: Installing Dependencies
+At minimum, replace `TELEGRAM_API_TOKEN`. The configuration loader fails before polling if required values, URLs, limits, or token aliases conflict.
 
-Install required Python packages specified in [requirements.txt](https://git.vdm.dev/getBible/robot/src/branch/master/requirements.txt)
+Run interactively:
 
 ```bash
-pip install -r requirements.txt
+set -a
+. /etc/getbible-robot.env
+set +a
+venv/bin/python bot.py
 ```
 
-### Step 4: Configuring the .env File
+## systemd
 
-Copy the provided `.env.template` to a new file named `.env` and populate it with your specific values:
+Create a dedicated account and writable cache directory, then install the supplied hardened unit:
 
 ```bash
-cp .env.template .env
-nano .env
+sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin getbible-robot
+sudo install -d -o getbible-robot -g getbible-robot -m 0700 /var/cache/getbible-robot
+sudo cp deploy/getbible-robot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now getbible-robot.service
 ```
 
-The `.env` file will require the following configurations:
+The unit validates configuration before startup, restarts failed processes, runs without capabilities, protects the host filesystem, and applies task and memory limits.
 
-- `TELEGRAM_TOKEN`: Your Telegram bot's API token.
-- `TRANSLATION`: (Optional) default: `kjv`
-- `DEFAULT_VERSE`: (Optional) default: `1 John 3:16`
-- `GETBIBLE_URL`: (Optional) default: `https://getBible.net/` see [Joomla Component](https://getbible.net/joomla) to host your own getBible.
-- `WELCOME_MESSAGE`: (Optional) default: `Welcome to the official getBible.net telegram bot.\n\n/help for more info.`
-- `HELP_MESSAGE`: (Optional) default: see [config.py](https://git.vdm.dev/getBible/robot/src/branch/master/config.py)
+## Health and metrics
 
-#### Obtaining a Telegram Bot Token
-
-1. Message `@BotFather` on Telegram to create a new bot.
-2. Follow the instructions and copy the provided API token.
-3. Paste this token into your `.env` file for the `TELEGRAM_TOKEN` value.
-
-For more detailed instructions, refer to [Telegram's official bot documentation](https://core.telegram.org/bots#creating-a-new-bot).
-
-### Step 5: Running the Bot
-
-Ensure your virtual environment is activated and start the bot with:
+The default endpoint binds only to `127.0.0.1:8081`:
 
 ```bash
-python bot.py
+curl --fail http://127.0.0.1:8081/healthz
+curl --fail http://127.0.0.1:8081/readyz
+curl --fail http://127.0.0.1:8081/metrics
 ```
 
-This command initiates the bot based on the script's logic and Telegram's bot API interaction.
+Set `HEALTH_PORT=0` to disable it. Do not expose this endpoint publicly without an authenticated reverse proxy.
 
-### Step 6: Setting Up Systemd Service
-
-To run the bot as a systemd service, create a unit file:
+## Development checks
 
 ```bash
-sudo systemctl edit --force --full getBibleRobot.service
+venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
+venv/bin/python -m compileall -q bot.py config.py modules tests
+venv/bin/python -m unittest discover -s tests -v
+venv/bin/ruff check .
+venv/bin/mypy
+venv/bin/bandit -q -r bot.py config.py modules
+venv/bin/pip-audit -r requirements.txt
 ```
 
-Add the following configuration, adjusting paths as necessary:
+Live Telegram and GetBible API credentials are not required by the deterministic test suite.
 
-```ini
-[Unit]
-Description=getBible Bot Service
-After=network.target
+## License
 
-[Service]
-User=<YourUsername>
-Group=<YourGroup>
-WorkingDirectory=/home/<YourUsername>/getBibleRobot
-ExecStart=/home/<YourUsername>/getBibleRobot/venv/bin/python /home/<YourUsername>/getBibleRobot/bot.py
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start the service:
-
-```bash
-sudo systemctl enable getBibleRobot.service
-sudo systemctl start getBibleRobot.service
-```
-
-## Bot Commands
-
-The bot supports various commands for user interaction see [HELP_MESSAGE](https://git.vdm.dev/getBible/robot/src/branch/master/config.py).
-
-```
-Available commands:
-
-  You can use a reference to get verses like:
-- /bible 1 John 3:16
-- /bible John 3:16-19;1 John 3:10-17
-- /bible Gen 1:1-5 codex
-- /bible Ps 1:1-5 aov
-
-- /search: Search the Scriptures (soon..)
-- /help: To get this help message again
-```
-
-Ensure these [commands are registered](https://core.telegram.org/bots/tutorial#executing-commands) with `@BotFather` to make them visible to your bot's users.
-
-## Licensing Notice
-
-This project is licensed under the GNU GPL v2.0. See the LICENSE file for more details.
+GNU GPL v2.0. See [LICENSE](LICENSE).

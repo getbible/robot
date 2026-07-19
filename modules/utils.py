@@ -1,28 +1,45 @@
-# import the required modules
-import asyncio
-import json
-from functools import wraps
+"""Telegram helpers that fail safely without affecting successful commands."""
 
-# import the required Telegram modules
+from __future__ import annotations
+
+import logging
+
+from telegram import Update
 from telegram.constants import ChatAction
+from telegram.error import BadRequest, Forbidden, TelegramError
+from telegram.ext import ContextTypes
+
+LOGGER = logging.getLogger(__name__)
 
 
-# define the send_action decorator
-def send_action(action, delay=1):
-    def decorator(func):
-        @wraps(func)
-        async def command_func(update, context, *args, **kwargs):
-            await context.bot.send_chat_action(
-                chat_id=update.effective_message.chat_id, action=action
-            )
-            await asyncio.sleep(delay)  # wait for the specified delay time
-            return await func(update, context, *args, **kwargs)
-
-        return command_func
-
-    return decorator
+async def send_typing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    try:
+        await context.bot.send_chat_action(
+            chat_id=message.chat_id,
+            action=ChatAction.TYPING,
+        )
+    except TelegramError:
+        LOGGER.debug("Unable to send typing action", exc_info=True)
 
 
-send_typing_action = send_action(
-    ChatAction.TYPING, delay=1
-)
+async def safe_delete_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    enabled: bool,
+) -> None:
+    """Delete only when explicitly configured; permission failures are non-fatal."""
+    if not enabled or update.effective_message is None:
+        return
+    try:
+        await context.bot.delete_message(
+            chat_id=update.effective_message.chat_id,
+            message_id=update.effective_message.message_id,
+        )
+    except (BadRequest, Forbidden):
+        LOGGER.info("Command deletion was not permitted")
+    except TelegramError:
+        LOGGER.warning("Command deletion failed", exc_info=True)

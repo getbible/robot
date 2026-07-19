@@ -1,0 +1,57 @@
+[Unit]
+Description=GetBible Telegram Robot
+Documentation=https://github.com/getbible/robot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=getbible-robot
+Group=getbible-robot
+WorkingDirectory=/opt/getbible-robot
+EnvironmentFile=/etc/getbible-robot.env
+Environment=PYTHONUNBUFFERED=1
+Environment=XDG_CACHE_HOME=/var/cache/getbible-robot
+ExecStartPre=/opt/getbible-robot/venv/bin/python -c "from config import Settings; Settings.from_env()"
+ExecStart=/opt/getbible-robot/venv/bin/python /opt/getbible-robot/bot.py
+
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProtectSystem=strict
+ReadWritePaths=/var/cache/getbible-robot
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+
+MemoryMax=384M
+TasksMax=64
+LimitNOFILE=1024
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

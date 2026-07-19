@@ -1,91 +1,220 @@
-# import the Telegram API token from config.py
-from config import (
-    HELP_MESSAGE,
-    WELCOME_MESSAGE
-)
-# import the required Telegram modules
-from telegram import Update
-from telegram.constants import ParseMode, MessageLimit
-from telegram.ext import (
-    ContextTypes,
-)
+"""Telegram command handlers with bounded work and user-safe failures."""
+
+from __future__ import annotations
+
 import logging
+import secrets
 
-# import the required module
-from modules.get_bible import bible
-from modules.utils import send_typing_action
+from getbible import (
+    ReferenceValidationError,
+    RequestLimitError,
+    TranslationNotFoundError,
+)
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.error import TelegramError
+from telegram.ext import ContextTypes
+
+from config import Settings
+from .errors import (
+    CircuitOpen,
+    RobotBusy,
+    RobotInputError,
+    RobotRateLimited,
+    ScriptureUnavailable,
+)
+from .rate_limit import InboundRateLimiter
+from .renderer import render_scripture
+from .service import ScriptureService
+from .utils import safe_delete_command, send_typing
+
+LOGGER = logging.getLogger(__name__)
+
+SETTINGS_KEY = "settings"
+SERVICE_KEY = "scripture_service"
+LIMITER_KEY = "inbound_rate_limiter"
 
 
-# handle unknown command
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return None
+def _components(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> tuple[Settings, ScriptureService, InboundRateLimiter]:
+    data = context.application.bot_data
+    return data[SETTINGS_KEY], data[SERVICE_KEY], data[LIMITER_KEY]
 
 
-# entry command
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings, _, _ = _components(context)
+    if update.effective_chat is None:
+        return
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text=WELCOME_MESSAGE
+        text=settings.welcome_message,
+    )
+    await safe_delete_command(
+        update,
+        context,
+        enabled=settings.delete_command_messages,
     )
 
-    await context.bot.delete_message(
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings, _, _ = _components(context)
+    if update.effective_chat is None:
+        return
+    await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        message_id=update.message.message_id
+        text=settings.help_message,
+        disable_web_page_preview=True,
+    )
+    await safe_delete_command(
+        update,
+        context,
+        enabled=settings.delete_command_messages,
     )
 
 
-# send a typing indicator in the chat
-@send_typing_action
-# handle the getting of the Bible text
-async def get(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Return the referenced scripture, shortened if it's too long."""
-    scripture = bible(update.message.text)
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings, _, _ = _components(context)
+    if update.effective_chat is None:
+        return
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"Search the Scriptures at {settings.web_base_url}/search",
+        disable_web_page_preview=True,
+    )
+    await safe_delete_command(
+        update,
+        context,
+        enabled=settings.delete_command_messages,
+    )
 
-    # Check if scripture length exceeds the maximum allowed message length
-    if len(scripture) > MessageLimit.MAX_TEXT_LENGTH:
-        notice = "...\n\n..._response was shortened due to Telegram message length limitation_"
-        # Shorten scripture to fit within limits with space for notice
-        text_to_send = scripture[:MessageLimit.MAX_TEXT_LENGTH - len(notice)] + notice
+
+async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+    settings, service, limiter = _components(context)
+    user_id = (
+        update.effective_user.id
+        if update.effective_user is not None
+        else update.effective_chat.id
+    )
+    request_id = secrets.token_hex(4)
+
+    try:
+        await limiter.acquire(
+            user_id=user_id,
+            chat_id=update.effective_chat.id,
+        )
+        await send_typing(update, context)
+        query = await service.resolve_query(context.args)
+        result = await service.select(query)
+        chunks = render_scripture(result, settings.web_base_url)
+    except Exception as error:
+        message, expected = _safe_error_message(error, request_id)
+        if expected:
+            LOGGER.info(
+                "Request %s rejected safely (%s)",
+                request_id,
+                type(error).__name__,
+            )
+        else:
+            LOGGER.exception("Request %s failed unexpectedly", request_id)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=message,
+        )
     else:
-        text_to_send = scripture
+        for chunk in chunks:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=chunk,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+    finally:
+        await safe_delete_command(
+            update,
+            context,
+            enabled=settings.delete_command_messages,
+        )
 
+
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None:
+        return
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text=text_to_send,
-        parse_mode=ParseMode.MARKDOWN,
-        disable_web_page_preview=True
-    )
-
-    await context.bot.delete_message(
-        chat_id=update.effective_chat.id,
-        message_id=update.message.message_id
+        text="Unknown command. Use /help to see the available commands.",
     )
 
 
-# send a typing indicator in the chat
-@send_typing_action
-# handle search command
-async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logging.info(f"Searching for: {update.message.text}")
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=("The search function for Telegram is not yet finished.\n\n"
-              "You can search the Scriptures at https://getBible.life/search")
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Last-resort boundary; raw exceptions are never reflected to Telegram."""
+    incident_id = secrets.token_hex(4)
+    error = context.error
+    LOGGER.error(
+        "Unhandled update failure %s (%s)",
+        incident_id,
+        type(error).__name__ if error is not None else "unknown",
+        exc_info=error,
     )
-    await context.bot.delete_message(
-        chat_id=update.effective_chat.id,
-        message_id=update.message.id
-    )
+    if isinstance(error, TelegramError):
+        return
+    effective_chat = getattr(update, "effective_chat", None)
+    if effective_chat is None:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=effective_chat.id,
+            text=(
+                "Something went wrong safely. Please try again later. "
+                f"Reference: {incident_id}"
+            ),
+        )
+    except TelegramError:
+        LOGGER.warning("Unable to report incident %s to Telegram", incident_id)
 
 
-# help command
-async def bot_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        parse_mode=ParseMode.MARKDOWN,
-        text=HELP_MESSAGE
-    )
-    await context.bot.delete_message(
-        chat_id=update.effective_chat.id,
-        message_id=update.message.id
+def _safe_error_message(error: Exception, request_id: str) -> tuple[str, bool]:
+    if isinstance(error, RobotRateLimited):
+        return (
+            f"Too many requests. Please try again in about {error.retry_after} seconds.",
+            True,
+        )
+    if isinstance(error, RequestLimitError):
+        return (
+            "That request exceeds the bot's safety limits. "
+            "Please request fewer verses or references.",
+            True,
+        )
+    if isinstance(error, (ReferenceValidationError, RobotInputError)):
+        return (
+            "I could not understand that Scripture reference. "
+            "Try /bible John 3:16.",
+            True,
+        )
+    if isinstance(error, TranslationNotFoundError):
+        return (
+            "That Bible translation is not available. "
+            "Try the default translation or another abbreviation.",
+            True,
+        )
+    if isinstance(error, RobotBusy):
+        return (
+            "The bot is handling its safe workload limit. Please try again shortly.",
+            True,
+        )
+    if isinstance(error, (CircuitOpen, ScriptureUnavailable)):
+        return (
+            "The Scripture service is temporarily unavailable. "
+            f"Please try again later. Reference: {request_id}",
+            True,
+        )
+    return (
+        "Something went wrong safely. "
+        f"Please try again later. Reference: {request_id}",
+        False,
     )
