@@ -37,16 +37,39 @@ jobs:
           cache-dependency-path: requirements.txt
 
       - name: Install exact runtime
-        run: python -m pip install --require-hashes -r requirements.txt
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pip install --require-hashes -r requirements.txt \
+            2>&1 | tee "${RUNNER_TEMP}/runtime-install.log"
 
       - name: Verify installed dependencies
-        run: python -m pip check
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pip check 2>&1 | tee "${RUNNER_TEMP}/pip-check.log"
 
       - name: Compile source
-        run: python -m compileall -q bot.py config.py modules tests
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m compileall -q bot.py config.py modules tests \
+            2>&1 | tee "${RUNNER_TEMP}/compile.log"
 
       - name: Run deterministic test suite
-        run: python -m unittest discover -s tests -v
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tests -v \
+            2>&1 | tee "${RUNNER_TEMP}/tests.log"
+
+      - name: Upload test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: test-failure-python-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/*.log
+          if-no-files-found: warn
 
   quality:
     name: Quality and security
@@ -65,28 +88,49 @@ jobs:
           cache-dependency-path: requirements-dev.txt
 
       - name: Install exact development environment
-        run: python -m pip install --require-hashes -r requirements-dev.txt
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pip install --require-hashes -r requirements-dev.txt \
+            2>&1 | tee "${RUNNER_TEMP}/development-install.log"
 
       - name: Lint
-        run: ruff check .
+        shell: bash
+        run: |
+          set -o pipefail
+          ruff check . 2>&1 | tee "${RUNNER_TEMP}/ruff.log"
 
       - name: Type check
-        run: mypy
+        shell: bash
+        run: |
+          set -o pipefail
+          mypy 2>&1 | tee "${RUNNER_TEMP}/mypy.log"
 
       - name: Static security scan
-        run: bandit -q -r bot.py config.py modules -ll
+        shell: bash
+        run: |
+          set -o pipefail
+          bandit -q -r bot.py config.py modules -ll \
+            2>&1 | tee "${RUNNER_TEMP}/bandit.log"
 
       - name: Dependency vulnerability scan
-        run: pip-audit --strict -r requirements.txt
+        shell: bash
+        run: |
+          set -o pipefail
+          pip-audit --strict -r requirements.txt \
+            2>&1 | tee "${RUNNER_TEMP}/pip-audit.log"
 
       - name: Secret scan
+        shell: bash
         run: |
+          set -o pipefail
           detect-secrets scan \
             --all-files \
             --exclude-files '(^|/)\.env\.template$' \
             --exclude-files '(^|/)requirements(-dev)?\.txt$' \
             > "${RUNNER_TEMP}/secrets.json"
-          python - "${RUNNER_TEMP}/secrets.json" <<'PY'
+          python - "${RUNNER_TEMP}/secrets.json" <<'PY' \
+            2>&1 | tee "${RUNNER_TEMP}/detect-secrets.log"
           import json
           import pathlib
           import sys
@@ -99,12 +143,23 @@ jobs:
           PY
 
       - name: Verify systemd unit
+        shell: bash
         run: |
+          set -o pipefail
           sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin getbible-robot
           sudo install -d /opt/getbible-robot/venv/bin /var/cache/getbible-robot
           sudo ln -s "$(command -v python)" /opt/getbible-robot/venv/bin/python
           sudo touch /etc/getbible-robot.env
-          systemd-analyze verify deploy/getbible-robot.service
+          systemd-analyze verify deploy/getbible-robot.service \
+            2>&1 | tee "${RUNNER_TEMP}/systemd.log"
+
+      - name: Upload quality diagnostics
+        if: failure()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: quality-failure
+          path: ${{ runner.temp }}/*
+          if-no-files-found: warn
 
   gate:
     name: Security gate status
