@@ -68,7 +68,11 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: test-failure-python-${{ matrix.python-version }}
-          path: ${{ runner.temp }}/*.log
+          path: |
+            ${{ runner.temp }}/runtime-install.log
+            ${{ runner.temp }}/pip-check.log
+            ${{ runner.temp }}/compile.log
+            ${{ runner.temp }}/tests.log
           if-no-files-found: warn
 
   quality:
@@ -169,7 +173,13 @@ jobs:
         with:
           name: quality-failure
           path: |
-            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/development-install.log
+            ${{ runner.temp }}/ruff.log
+            ${{ runner.temp }}/mypy.log
+            ${{ runner.temp }}/bandit.log
+            ${{ runner.temp }}/pip-audit.log
+            ${{ runner.temp }}/detect-secrets.log
+            ${{ runner.temp }}/systemd.log
             ${{ runner.temp }}/secrets.json
           if-no-files-found: warn
 
