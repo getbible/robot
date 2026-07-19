@@ -7,7 +7,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 
-from telegram import BotCommand, Update
+from telegram import BotCommand
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -59,6 +59,7 @@ def configure_logging(level: int) -> None:
     root.addHandler(handler)
     root.setLevel(level)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
 
 
 def build_application(settings: Settings) -> Application:
@@ -103,7 +104,6 @@ def build_application(settings: Settings) -> Application:
 
 async def _post_init(application: Application) -> None:
     health: HealthServer = application.bot_data[HEALTH_KEY]
-    await health.start()
     await application.bot.set_my_commands(
         [
             BotCommand("bible", "Retrieve Scripture by reference"),
@@ -111,6 +111,8 @@ async def _post_init(application: Application) -> None:
             BotCommand("help", "Show available commands"),
         ]
     )
+    # Readiness must not become true until Telegram initialization has succeeded.
+    await health.start()
     LOGGER.info("GetBible Robot initialized")
 
 
@@ -133,7 +135,7 @@ def main() -> int:
     configure_logging(settings.log_level)
     application = build_application(settings)
     application.run_polling(
-        allowed_updates=Update.ALL_TYPES,
+        allowed_updates=["message"],
         drop_pending_updates=settings.drop_pending_updates,
     )
     return 0
