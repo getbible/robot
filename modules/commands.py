@@ -31,9 +31,9 @@ from modules.utils import safe_delete_command, send_typing
 
 LOGGER = logging.getLogger(__name__)
 
-SETTINGS_KEY = "settings"
-SERVICE_KEY = "scripture_service"
-LIMITER_KEY = "inbound_rate_limiter"
+SETTINGS_SLOT = "settings"
+SERVICE_SLOT = "scripture_service"
+LIMITER_SLOT = "inbound_rate_limiter"
 
 
 def _components(
@@ -41,9 +41,9 @@ def _components(
 ) -> tuple[Settings, ScriptureService, InboundRateLimiter]:
     data = context.application.bot_data
     return (
-        cast(Settings, data[SETTINGS_KEY]),
-        cast(ScriptureService, data[SERVICE_KEY]),
-        cast(InboundRateLimiter, data[LIMITER_KEY]),
+        cast(Settings, data[SETTINGS_SLOT]),
+        cast(ScriptureService, data[SERVICE_SLOT]),
+        cast(InboundRateLimiter, data[LIMITER_SLOT]),
     )
 
 
