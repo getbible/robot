@@ -114,6 +114,19 @@ jobs:
             python -m unittest discover -s tests -v
           } 2>&1 | tee repair.log
 
+      - name: Commit repair diagnostics
+        if: failure()
+        run: |
+          tail -n 180 repair.log > /tmp/repair-failure.txt
+          git reset --hard HEAD
+          git clean -fd
+          cp /tmp/repair-failure.txt repair-failure.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add repair-failure.txt
+          git commit -m "Report universal lock repair failure [skip ci]"
+          git push origin HEAD:master
+
       - name: Commit validated repair
         run: |
           rm -f repair.log .github/workflows/repair-universal-lock.yml
