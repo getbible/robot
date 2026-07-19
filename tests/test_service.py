@@ -7,7 +7,7 @@ from unittest.mock import patch
 from getbible import RequestLimitError
 
 from config import Settings
-from modules.errors import CircuitOpen, ScriptureUnavailable
+from modules.errors import CircuitOpen, RobotBusy, RobotInputError, ScriptureUnavailable
 from modules.service import ScriptureQuery, ScriptureService
 
 
@@ -69,6 +69,15 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(query, ScriptureQuery("Gen 1:1", "aov"))
         self.assertEqual(client.translation_calls, ["aov"])
 
+    async def test_invalid_explicit_reference_never_probes_translation(self) -> None:
+        client = _Client()
+        service = ScriptureService(_settings(), client=client)
+        self.addAsyncCleanup(service.close)
+
+        with self.assertRaises(RobotInputError):
+            await service.resolve_query(["John", "1:16!", "aov"])
+        self.assertEqual(client.translation_calls, [])
+
     async def test_unbounded_range_is_rejected_before_repository_access(self) -> None:
         client = _Client()
         service = ScriptureService(_settings(), client=client)
@@ -93,6 +102,24 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ScriptureUnavailable):
             await service.select(query)
         with self.assertRaises(CircuitOpen):
+            await service.select(query)
+
+    async def test_timed_out_worker_keeps_capacity_until_thread_finishes(self) -> None:
+        client = _Client(delay=0.1)
+        settings = replace(
+            _settings(),
+            lookup_timeout=0.01,
+            queue_timeout=0.01,
+            max_concurrent_lookups=1,
+            circuit_failure_threshold=5,
+        )
+        service = ScriptureService(settings, client=client)
+        self.addAsyncCleanup(service.close)
+        query = ScriptureQuery("John 3:16", "kjv")
+
+        with self.assertRaises(ScriptureUnavailable):
+            await service.select(query)
+        with self.assertRaises(RobotBusy):
             await service.select(query)
 
 
