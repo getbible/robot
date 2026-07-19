@@ -36,7 +36,7 @@ jobs:
         run: |
           set +e
           {
-            python -m pip install --disable-pip-version-check pip-tools==7.4.1 &&
+            python -m pip install --disable-pip-version-check pip==24.3.1 pip-tools==7.4.1 &&
             python -m piptools compile \
               --resolver=backtracking \
               --generate-hashes \
@@ -59,7 +59,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ "$status" -eq 0 ]; then
             rm -f lock-generation.log lock-failure.txt
-            git add requirements.txt requirements-dev.txt
+            git add -A requirements.txt requirements-dev.txt lock-failure.txt
             git commit -m "Lock runtime and development dependencies [skip ci]"
           else
             tail -n 80 lock-generation.log > lock-failure.txt
