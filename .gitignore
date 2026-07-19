@@ -13,6 +13,8 @@ venv/
 .venv/
 env/
 ENV/
+.lock-venv/
+.lock-verify-venv/
 
 # Build and test output
 build/
