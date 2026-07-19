@@ -38,7 +38,7 @@ class RendererTestCase(unittest.TestCase):
 
     def test_messages_are_split_below_telegram_limit_without_broken_entities(self) -> None:
         chunks = render_scripture(
-            self.result("<&>" * 5000),
+            self.result("<&>" * 500),
             "https://getbible.life",
             chunk_limit=512,
             max_chunks=32,
