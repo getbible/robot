@@ -5,8 +5,16 @@ updates:
     schedule:
       interval: weekly
     target-branch: master
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
+    rebase-strategy: auto
     labels: [dependencies, security]
+    commit-message:
+      prefix: dependencies
+    groups:
+      python-production:
+        dependency-type: production
+      python-development:
+        dependency-type: development
 
   - package-ecosystem: github-actions
     directory: /
@@ -14,4 +22,10 @@ updates:
       interval: weekly
     target-branch: master
     open-pull-requests-limit: 5
+    rebase-strategy: auto
     labels: [dependencies, security]
+    commit-message:
+      prefix: actions
+    groups:
+      github-actions:
+        patterns: ["*"]
