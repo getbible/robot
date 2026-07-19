@@ -22,7 +22,7 @@ rm -rf "$TOOL_VENV" "$VERIFY_VENV"
 "$PYTHON" -m venv "$TOOL_VENV"
 "$TOOL_VENV/bin/python" -m pip install \
   pip==24.3.1 \
-  pip-tools==7.4.1
+  pip-tools==7.6.0
 
 "$TOOL_VENV/bin/python" -m piptools compile \
   --resolver=backtracking \
