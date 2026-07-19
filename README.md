@@ -1,17 +1,19 @@
 # GetBible Robot
 
-GetBible Robot is the Telegram interface for retrieving Scripture from GetBible. The bot is designed as a bounded public service: hostile input, stalled upstream requests, malformed repository data, and Telegram permission failures must not take down the process or expose internal errors.
+GetBible Robot is a hardened Telegram interface for retrieving Scripture from GetBible. It is designed as a bounded public service: hostile input, stalled upstream requests, malformed repository data, Telegram permission failures, and identifier churn must not take down the process or expose internal errors.
 
 ## Service boundaries
 
-These two URLs have intentionally different purposes:
+These URLs have intentionally different purposes:
 
-- `https://api.getbible.net` is the machine-readable Scripture data source.
-- `https://getbible.life` is the public website used by every clickable Scripture and search link sent to Telegram.
+```text
+Scripture data source: https://api.getbible.net
+Telegram web links:   https://getbible.life
+```
 
-They are configured independently as `GETBIBLE_API_BASE_URL` and `GETBIBLE_WEB_BASE_URL`.
+They are configured independently as `GETBIBLE_API_BASE_URL` and `GETBIBLE_WEB_BASE_URL`. Scripture JSON is retrieved from the API. Every clickable Scripture and search link sent to Telegram uses the public website.
 
-## Telegram commands
+## Commands
 
 ```text
 /bible 1 John 3:16
@@ -22,76 +24,103 @@ They are configured independently as `GETBIBLE_API_BASE_URL` and `GETBIBLE_WEB_B
 /help
 ```
 
-`/get` and `/getbible` remain aliases of `/bible`. Telegram's parsed command arguments are used, so `/bible@getBibleRobot John 3:16` works in groups without leaking the bot mention into the reference parser.
+`/get` and `/getbible` remain aliases of `/bible`. Telegram-parsed command arguments are used, so `/bible@getBibleRobot John 3:16` works in groups without leaking the bot mention into the reference parser.
 
 ## Security and reliability controls
 
-The robot enforces all of the following before or around repository work:
+The robot provides layered controls at both the Telegram and Librarian boundaries:
 
 - complete, bounded reference parsing with no silent fallback to a different verse;
-- at most 8 references and 100 total verses per command by default;
-- per-user and per-chat token buckets with bounded in-memory state;
-- a global lookup semaphore and bounded queue wait;
-- explicit connect, read, overall lookup, retry, and response-size limits;
-- synchronous Librarian work isolated in a bounded thread pool;
-- an upstream circuit breaker;
-- typed user-safe errors with correlation IDs instead of raw exceptions;
-- HTML escaping, URL encoding, and verse-boundary Telegram message chunking;
-- optional command deletion that never makes a successful request fail;
-- aggregate-only metrics and structured logs that do not record message content;
-- loopback health and readiness endpoints;
-- deterministic tests, fuzz regressions, linting, type checking, Bandit, dependency auditing, secret scanning, and CodeQL.
+- bounded input length, reference count, verses per reference, and total verses;
+- bounded Telegram message count and UTF-16-aware message sizing;
+- per-user and per-chat token buckets applied to every command;
+- bounded rate-limit state under arbitrary identifier churn;
+- a fixed worker pool and global lookup semaphore;
+- queue, connect, read, overall lookup, retry, and response-byte limits;
+- timed-out workers retain capacity until their underlying threads actually exit;
+- an upstream circuit breaker with one half-open recovery probe;
+- typed user-safe errors and correlation IDs instead of raw exception text;
+- escaped Telegram HTML, percent-encoded URL segments, and safe chunk boundaries;
+- optional command deletion that cannot fail a successful lookup;
+- validated startup configuration and narrow Telegram update subscriptions;
+- structured logs without message content and aggregate-only metrics;
+- loopback-only health and readiness endpoints;
+- a restartable, capability-free, filesystem-protected `systemd` service;
+- deterministic tests, fuzz regressions, Ruff, mypy, Bandit, dependency auditing, secret scanning, and CodeQL.
 
-See [the architecture](docs/ARCHITECTURE.md), [operations guide](docs/OPERATIONS.md), and [release gate](docs/RELEASE_GATE.md).
+See [Architecture](docs/ARCHITECTURE.md) and [the release gate](docs/RELEASE_GATE.md) for the complete model.
 
-## Requirements
+## Supported runtime
 
-- Linux is recommended for production.
-- Python 3.10 through 3.12.
+- Python 3.10, 3.11, or 3.12.
+- Linux with `systemd` for the supplied production unit.
 - A Telegram bot token from `@BotFather`.
-- `git` and a Python virtual environment.
+- Outbound HTTPS access to Telegram and `https://api.getbible.net`.
 
-Runtime dependencies are locked with hashes. The GetBible Librarian dependency is pinned to the reviewed hardening commit used by this release.
+## Dependency policy
 
-## Installation
+Human-maintained intent lives in `requirements.in` and `requirements-dev.in`. Production and CI install the exact hashed locks in `requirements.txt` and `requirements-dev.txt`.
+
+The hardened Librarian source commit is temporarily pinned because the robot depends on APIs in the forthcoming Librarian 1.2 line. After the corresponding package release is published and verified, the input changes to:
+
+```text
+getbible>=1.2,<2
+```
+
+Dependabot will then propose the newest compatible release and regenerate the exact lock for review. Production never resolves an unreviewed “latest” dependency during startup. See [Dependency policy](docs/DEPENDENCIES.md).
+
+## Quick local test
+
+No Telegram token or live API access is required for deterministic tests:
 
 ```bash
-git clone https://github.com/getbible/robot.git /opt/getbible-robot
-cd /opt/getbible-robot
-
+git clone https://github.com/getbible/robot.git
+cd robot
 python3 -m venv venv
 venv/bin/python -m pip install --upgrade pip
-venv/bin/python -m pip install --require-hashes -r requirements.txt
-
-cp .env.template /etc/getbible-robot.env
-sudo chmod 600 /etc/getbible-robot.env
-sudo editor /etc/getbible-robot.env
+venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
+bash scripts/run-checks.sh
 ```
 
-At minimum, replace `TELEGRAM_API_TOKEN`. The configuration loader fails before polling if required values, URLs, limits, or token aliases conflict.
-
-Run interactively:
+Run only the unit suite while iterating:
 
 ```bash
-set -a
-. /etc/getbible-robot.env
-set +a
-venv/bin/python bot.py
+venv/bin/python -m unittest discover -s tests -v
 ```
 
-## systemd
+## Production installation summary
 
-Create a dedicated account and writable cache directory, then install the supplied hardened unit:
+Deploy an exact reviewed robot commit:
 
 ```bash
-sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin getbible-robot
+sudo git clone https://github.com/getbible/robot.git /opt/getbible-robot
+cd /opt/getbible-robot
+sudo git checkout --detach <reviewed-commit-sha>
+
+sudo python3 -m venv venv
+sudo venv/bin/python -m pip install --upgrade pip
+sudo venv/bin/python -m pip install --require-hashes -r requirements.txt
+sudo venv/bin/python -m pip check
+```
+
+Create the service account and cache, install `/etc/getbible-robot.env` with mode `0600`, and install the supplied unit:
+
+```bash
+if ! id getbible-robot >/dev/null 2>&1; then
+  sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin getbible-robot
+fi
 sudo install -d -o getbible-robot -g getbible-robot -m 0700 /var/cache/getbible-robot
-sudo cp deploy/getbible-robot.service /etc/systemd/system/
+sudo install -o root -g root -m 0600 .env.template /etc/getbible-robot.env
+sudo editor /etc/getbible-robot.env
+sudo install -o root -g root -m 0644 \
+  deploy/getbible-robot.service \
+  /etc/systemd/system/getbible-robot.service
+sudo systemd-analyze verify /etc/systemd/system/getbible-robot.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now getbible-robot.service
 ```
 
-The unit validates configuration before startup, restarts failed processes, runs without capabilities, protects the host filesystem, and applies task and memory limits.
+At minimum, replace `TELEGRAM_API_TOKEN` before startup. Follow [Installation](docs/INSTALLATION.md) rather than relying on this summary for production.
 
 ## Health and metrics
 
@@ -103,21 +132,28 @@ curl --fail http://127.0.0.1:8081/readyz
 curl --fail http://127.0.0.1:8081/metrics
 ```
 
-Set `HEALTH_PORT=0` to disable it. Do not expose this endpoint publicly without an authenticated reverse proxy.
+Set `HEALTH_PORT=0` to disable it. Do not expose the endpoint publicly without an authenticated, access-controlled proxy.
 
-## Development checks
+## Documentation
 
-```bash
-venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
-venv/bin/python -m compileall -q bot.py config.py modules tests
-venv/bin/python -m unittest discover -s tests -v
-venv/bin/ruff check .
-venv/bin/mypy
-venv/bin/bandit -q -r bot.py config.py modules
-venv/bin/pip-audit -r requirements.txt
-```
+- [Documentation index](docs/README.md)
+- [Installation](docs/INSTALLATION.md)
+- [Configuration reference](docs/CONFIGURATION.md)
+- [Testing and live smoke checks](docs/TESTING.md)
+- [Upgrading and rollback](docs/UPGRADING.md)
+- [Uninstalling](docs/UNINSTALL.md)
+- [Dependency and Librarian release policy](docs/DEPENDENCIES.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Operations](docs/OPERATIONS.md)
+- [Security and reliability release gate](docs/RELEASE_GATE.md)
+- [Security policy](SECURITY.md)
 
-Live Telegram and GetBible API credentials are not required by the deterministic test suite.
+## Contributing safely
+
+Keep handlers thin, preserve typed failure boundaries, add a deterministic regression test before fixing a defect, and run `bash scripts/run-checks.sh`. Do not suppress a failing check, loosen a hard bound, remove a supported Python version, or reflect raw errors merely to make a change pass.
+
+Security reports must use the private process in [`SECURITY.md`](SECURITY.md).
 
 ## License
 
