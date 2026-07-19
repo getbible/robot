@@ -60,7 +60,11 @@ EXPECTED_TEMPLATE_KEYS = {
 
 class DocumentationContractTestCase(unittest.TestCase):
     def test_required_operator_documents_exist(self) -> None:
-        missing = sorted(str(path.relative_to(ROOT)) for path in REQUIRED_DOCUMENTS if not path.is_file())
+        missing = sorted(
+            str(path.relative_to(ROOT))
+            for path in REQUIRED_DOCUMENTS
+            if not path.is_file()
+        )
         self.assertEqual(missing, [])
 
     def test_relative_markdown_links_resolve(self) -> None:
@@ -76,9 +80,7 @@ class DocumentationContractTestCase(unittest.TestCase):
                     continue
                 resolved = (document.parent / relative).resolve()
                 if not resolved.exists():
-                    failures.append(
-                        f"{document.relative_to(ROOT)} -> {target}"
-                    )
+                    failures.append(f"{document.relative_to(ROOT)} -> {target}")
         self.assertEqual(failures, [])
 
     def test_environment_template_covers_every_runtime_setting(self) -> None:
