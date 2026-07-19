@@ -35,8 +35,7 @@ jobs:
             requirements-dev.in
 
       - name: Repair source, regenerate locks, and validate
-        id: repair
-        continue-on-error: true
+        id: validation
         shell: bash
         run: |
           set -o pipefail
@@ -116,7 +115,6 @@ jobs:
           } 2>&1 | tee repair.log
 
       - name: Commit validated repair
-        if: steps.repair.outcome == 'success'
         run: |
           rm -f repair.log .github/workflows/repair-universal-lock.yml
           git config user.name "github-actions[bot]"
@@ -126,18 +124,18 @@ jobs:
           git push origin HEAD:master
 
       - name: Upload repair diagnostics
-        if: steps.repair.outcome != 'success'
+        if: failure()
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: universal-lock-repair-failure
           path: repair.log
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Publish repair status
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          REPAIR_OUTCOME: ${{ steps.repair.outcome }}
+          REPAIR_OUTCOME: ${{ steps.validation.outcome }}
         run: |
           state=failure
           description="Universal lock or lint repair failed"
@@ -165,7 +163,3 @@ jobs:
             --header "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
             --data "$payload"
-
-      - name: Fail when repair failed
-        if: steps.repair.outcome != 'success'
-        run: exit 1
