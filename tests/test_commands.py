@@ -3,9 +3,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from modules.commands import (
-    LIMITER_KEY,
-    SERVICE_KEY,
-    SETTINGS_KEY,
+    LIMITER_SLOT,
+    SERVICE_SLOT,
+    SETTINGS_SLOT,
     help_command,
     search_command,
     start_command,
@@ -35,9 +35,9 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         )
         application = SimpleNamespace(
             bot_data={
-                SETTINGS_KEY: settings,
-                SERVICE_KEY: object(),
-                LIMITER_KEY: limiter,
+                SETTINGS_SLOT: settings,
+                SERVICE_SLOT: object(),
+                LIMITER_SLOT: limiter,
             }
         )
         return SimpleNamespace(
