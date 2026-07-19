@@ -10,12 +10,22 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 "$PYTHON" -m pip check
-"$PYTHON" -m compileall -q bot.py config.py modules tests
+"$PYTHON" -m compileall -q bot.py config.py modules scripts tests
 "$PYTHON" -m unittest discover -s tests -v
 "$VENV/bin/ruff" check .
 "$VENV/bin/mypy"
-"$VENV/bin/bandit" -q -r bot.py config.py modules -ll
-"$VENV/bin/pip-audit" --strict -r requirements.txt
+
+librarian_path=$(
+  "$PYTHON" - <<'PY'
+from pathlib import Path
+
+import getbible
+
+print(Path(getbible.__file__).resolve().parent)
+PY
+)
+"$VENV/bin/bandit" -q -r bot.py config.py modules scripts "$librarian_path" -ll
+"$PYTHON" scripts/audit_runtime.py
 
 report=$(mktemp)
 trap 'rm -f "$report"' EXIT
