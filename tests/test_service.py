@@ -8,6 +8,7 @@ from getbible import ReferenceValidationError, RequestLimitError
 
 from config import Settings
 from modules.errors import CircuitOpen, RobotBusy, ScriptureUnavailable
+from modules.interactions import SearchOptions
 from modules.service import CircuitBreaker, ScriptureQuery, ScriptureService
 
 
@@ -16,6 +17,7 @@ class _Client:
         self.delay = delay
         self.fail = fail
         self.translation_calls: list[str] = []
+        self.search_calls: list[tuple[str, str, object]] = []
         self.closed = False
 
     def valid_translation(self, code: str) -> bool:
@@ -36,6 +38,33 @@ class _Client:
             }
         }
 
+    def search(self, query: str, translation: str, criteria: object) -> dict:
+        self.search_calls.append((query, translation, criteria))
+        return {
+            "query": {"total": 1},
+            "results": {
+                f"{translation}_43_3": {
+                    "book_nr": 43,
+                    "book_name": "John",
+                    "chapter": 3,
+                    "verses": [
+                        {
+                            "verse": 16,
+                            "text": "For God so loved the world.",
+                        }
+                    ],
+                }
+            },
+            "matches": [
+                {
+                    "reference": "John 3:16",
+                    "book_nr": 43,
+                    "chapter": 3,
+                    "verse": 16,
+                }
+            ],
+        }
+
     def cache_info(self) -> dict:
         return {"test": True}
 
@@ -44,7 +73,10 @@ class _Client:
 
 
 def _settings(**environment: str) -> Settings:
-    values = {"TELEGRAM_API_TOKEN": "test-token", "HEALTH_PORT": "0"}
+    values = {
+        "TELEGRAM_API_TOKEN": "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+        "HEALTH_PORT": "0",
+    }
     values.update(environment)
     with patch.dict(os.environ, values, clear=True):
         return Settings.from_env(load_environment_file=False)
@@ -76,6 +108,14 @@ class CircuitBreakerTestCase(unittest.IsolatedAsyncioTestCase):
 
 
 class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_reference_is_never_replaced_with_a_default(self) -> None:
+        service = ScriptureService(_settings(), client=_Client())
+        self.addAsyncCleanup(service.close)
+
+        with self.assertRaises(Exception) as raised:
+            await service.resolve_query([])
+        self.assertEqual(type(raised.exception).__name__, "RobotInputError")
+
     async def test_ordinary_reference_does_not_probe_translation_repository(self) -> None:
         client = _Client()
         service = ScriptureService(_settings(), client=client)
@@ -111,6 +151,18 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RequestLimitError):
             await service.resolve_query(["John", "1:1-999999999"])
         self.assertEqual(client.translation_calls, [])
+
+    async def test_search_uses_librarian_and_validates_result_contract(self) -> None:
+        client = _Client()
+        service = ScriptureService(_settings(), client=client)
+        self.addAsyncCleanup(service.close)
+
+        page = await service.search("loved", SearchOptions(translation="kjv"))
+
+        self.assertEqual(page.total, 1)
+        self.assertEqual(page.items[0].reference, "John 3:16")
+        self.assertEqual(page.items[0].text, "For God so loved the world.")
+        self.assertEqual(len(client.search_calls), 1)
 
     async def test_timeout_opens_circuit_and_followup_fails_fast(self) -> None:
         client = _Client(delay=0.05)

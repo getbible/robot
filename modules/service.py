@@ -24,11 +24,16 @@ from getbible import (
     RepositoryError,
     RequestLimitError,
     RequestLimits,
+    SearchBible,
+    SearchLimits,
+    SearchValidationError,
     TranslationNotFoundError,
 )
 
 from config import Settings
+from modules.catalog import BookOption, CatalogClient, ChapterOption, TranslationOption
 from modules.errors import CircuitOpen, RobotBusy, RobotInputError, ScriptureUnavailable
+from modules.interactions import SearchOptions, SearchResult
 
 LOGGER = logging.getLogger(__name__)
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
@@ -39,6 +44,16 @@ _T = TypeVar("_T")
 class ScriptureQuery:
     references: str
     translation: str
+
+
+@dataclass(frozen=True, slots=True)
+class SearchPage:
+    """Validated, presentation-ready search results."""
+
+    query: str
+    translation: str
+    total: int
+    items: tuple[SearchResult, ...]
 
 
 class Metrics:
@@ -150,6 +165,12 @@ class ScriptureService:
             request_timeout=(settings.connect_timeout, settings.read_timeout),
             request_retries=settings.request_retries,
             request_limits=limits,
+            search_limits=SearchLimits(
+                max_response_bytes=settings.max_response_bytes,
+                max_query_length=settings.max_input_length,
+                max_limit=settings.search_result_limit,
+                deadline_seconds=settings.search_deadline_seconds,
+            ),
             negative_translation_cache_limit=64,
             negative_translation_ttl=300.0,
             max_response_bytes=settings.max_response_bytes,
@@ -158,6 +179,13 @@ class ScriptureService:
             chapter_cache_limit=1024,
             search_corpus_limit=1,
             translation_cache_limit=2,
+        )
+        self._catalog = CatalogClient(
+            base_url=settings.api_base_url,
+            timeout=(settings.connect_timeout, settings.read_timeout),
+            request_retries=settings.request_retries,
+            max_response_bytes=settings.max_response_bytes,
+            cache_ttl_seconds=settings.catalog_cache_ttl_seconds,
         )
         self._parser = parser or GetBibleReference(
             cache_limit=5000,
@@ -179,7 +207,9 @@ class ScriptureService:
 
     async def resolve_query(self, arguments: Sequence[str]) -> ScriptureQuery:
         """Resolve command arguments without probing the network for ordinary references."""
-        raw = " ".join(arguments).strip() or self.settings.default_verse
+        raw = " ".join(arguments).strip()
+        if not raw:
+            raise RobotInputError("A Scripture reference is required.")
         if len(raw) > self.settings.max_input_length:
             raise RequestLimitError(
                 f"Reference input cannot exceed {self.settings.max_input_length} characters."
@@ -225,6 +255,59 @@ class ScriptureService:
             query.references,
             query.translation,
         )
+
+    async def translations(self) -> tuple[TranslationOption, ...]:
+        return await self._repository_call(
+            "catalog_translation_lookups",
+            self._catalog.translations,
+        )
+
+    async def books(self, translation: str) -> tuple[BookOption, ...]:
+        return await self._repository_call(
+            "catalog_book_lookups",
+            self._catalog.books,
+            translation,
+        )
+
+    async def chapters(
+        self,
+        translation: str,
+        book: BookOption,
+    ) -> tuple[ChapterOption, ...]:
+        return await self._repository_call(
+            "catalog_chapter_lookups",
+            self._catalog.chapters,
+            translation,
+            book,
+        )
+
+    async def search(
+        self,
+        query: str,
+        options: SearchOptions,
+    ) -> SearchPage:
+        """Run one bounded Librarian 1.2 search and validate its public contract."""
+        criteria = SearchBible(
+            words=options.words,
+            match=options.match,
+            case_sensitive=options.case_sensitive,
+            scope=options.scope,
+            books=options.books,
+            diacritics=options.diacritics,
+            exclude=options.exclude,
+            proximity=options.proximity,
+            sort=options.sort,
+            limit=self.settings.search_result_limit,
+            offset=0,
+        )
+        response = await self._repository_call(
+            "scripture_searches",
+            self._client.search,
+            query,
+            options.translation,
+            criteria,
+        )
+        return self._search_page(response, query, options.translation)
 
     async def ready(self) -> bool:
         state = await self._circuit.snapshot()
@@ -309,7 +392,12 @@ class ScriptureService:
         except CircuitOpen:
             self.metrics.increment("circuit_rejections")
             raise
-        except (ReferenceValidationError, RequestLimitError, TranslationNotFoundError):
+        except (
+            ReferenceValidationError,
+            RequestLimitError,
+            SearchValidationError,
+            TranslationNotFoundError,
+        ):
             await self._circuit.success()
             raise
         except (TimeoutError, asyncio.TimeoutError) as error:
@@ -344,6 +432,136 @@ class ScriptureService:
             # ThreadPoolExecutor's internal unbounded queue from becoming an attack queue.
             if not submitted:
                 self._semaphore.release()
+
+    def _search_page(
+        self,
+        response: object,
+        query: str,
+        translation: str,
+    ) -> SearchPage:
+        if not isinstance(response, dict):
+            raise ScriptureUnavailable("Librarian returned a malformed search response.")
+        metadata = response.get("query")
+        grouped = response.get("results")
+        matches = response.get("matches")
+        if (
+            not isinstance(metadata, dict)
+            or not isinstance(grouped, dict)
+            or not isinstance(matches, list)
+        ):
+            raise ScriptureUnavailable("Librarian returned a malformed search response.")
+        total = metadata.get("total")
+        if (
+            not isinstance(total, int)
+            or isinstance(total, bool)
+            or total < 0
+            or len(matches) > self.settings.search_result_limit
+            or total < len(matches)
+            or len(grouped) > self.settings.search_result_limit
+        ):
+            raise ScriptureUnavailable("Librarian returned invalid search pagination.")
+
+        verses: dict[tuple[int, int, int], tuple[str, str]] = {}
+        verse_count = 0
+        for chapter in grouped.values():
+            if not isinstance(chapter, dict):
+                raise ScriptureUnavailable("Librarian returned malformed search results.")
+            book_number = chapter.get("book_nr")
+            book_name = chapter.get("book_name")
+            chapter_number = chapter.get("chapter")
+            chapter_verses = chapter.get("verses")
+            if (
+                not isinstance(book_number, int)
+                or isinstance(book_number, bool)
+                or not 1 <= book_number <= 1000
+                or not isinstance(book_name, str)
+                or not 1 <= len(book_name.strip()) <= 128
+                or not isinstance(chapter_number, int)
+                or isinstance(chapter_number, bool)
+                or not 1 <= chapter_number <= 1000
+                or not isinstance(chapter_verses, list)
+            ):
+                raise ScriptureUnavailable("Librarian returned malformed search results.")
+            for verse in chapter_verses:
+                verse_number = verse.get("verse") if isinstance(verse, dict) else None
+                text = verse.get("text") if isinstance(verse, dict) else None
+                if (
+                    not isinstance(verse_number, int)
+                    or isinstance(verse_number, bool)
+                    or not 1 <= verse_number <= 2000
+                    or not isinstance(text, str)
+                    or not text.strip()
+                ):
+                    raise ScriptureUnavailable(
+                        "Librarian returned malformed search verse data."
+                    )
+                key = (book_number, chapter_number, verse_number)
+                if key in verses:
+                    raise ScriptureUnavailable(
+                        "Librarian returned duplicate search verse data."
+                    )
+                verse_count += 1
+                if verse_count > self.settings.search_result_limit:
+                    raise ScriptureUnavailable(
+                        "Librarian returned too many search verse records."
+                    )
+                verses[key] = (
+                    book_name.strip(),
+                    text.strip(),
+                )
+
+        items: list[SearchResult] = []
+        seen_matches: set[tuple[int, int, int]] = set()
+        for match in matches:
+            if not isinstance(match, dict):
+                raise ScriptureUnavailable("Librarian returned malformed match metadata.")
+            reference = match.get("reference")
+            book_number = match.get("book_nr")
+            chapter_number = match.get("chapter")
+            verse_number = match.get("verse")
+            if (
+                not isinstance(reference, str)
+                or not 1 <= len(reference.strip()) <= self.settings.max_input_length
+                or not isinstance(book_number, int)
+                or isinstance(book_number, bool)
+                or not 1 <= book_number <= 1000
+                or not isinstance(chapter_number, int)
+                or isinstance(chapter_number, bool)
+                or not 1 <= chapter_number <= 1000
+                or not isinstance(verse_number, int)
+                or isinstance(verse_number, bool)
+                or not 1 <= verse_number <= 2000
+            ):
+                raise ScriptureUnavailable("Librarian returned malformed match metadata.")
+            key = (book_number, chapter_number, verse_number)
+            if key in seen_matches:
+                raise ScriptureUnavailable(
+                    "Librarian returned duplicate search match metadata."
+                )
+            seen_matches.add(key)
+            verse_data = verses.get(key)
+            if verse_data is None:
+                raise ScriptureUnavailable(
+                    "Librarian search metadata did not match its result set."
+                )
+            book_name, text = verse_data
+            items.append(
+                SearchResult(
+                    reference=reference.strip(),
+                    book_number=book_number,
+                    book_name=book_name,
+                    chapter=chapter_number,
+                    verse=verse_number,
+                    text=text,
+                )
+            )
+
+        return SearchPage(
+            query=query,
+            translation=translation,
+            total=total,
+            items=tuple(items),
+        )
 
 
 def _consume_background_result(future: asyncio.Future[Any]) -> None:

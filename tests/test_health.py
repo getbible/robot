@@ -3,6 +3,7 @@ import socket
 import unittest
 
 from modules.health import HealthServer
+from modules.interactions import InteractionStore
 
 
 class _Service:
@@ -46,6 +47,10 @@ class HealthServerTestCase(unittest.IsolatedAsyncioTestCase):
             port=self.port,
             service=self.service,
             limiter=_Limiter(),
+            interactions=InteractionStore(
+                max_sessions=10,
+                ttl_seconds=60,
+            ),
         )
         await self.health.start()
 
@@ -75,6 +80,7 @@ class HealthServerTestCase(unittest.IsolatedAsyncioTestCase):
         metrics = await self.request("/metrics")
         self.assertIn(b"getbible_robot_scripture_lookups 2", metrics)
         self.assertIn(b"getbible_robot_rate_limit_rejected 1", metrics)
+        self.assertIn(b"getbible_robot_interaction_sessions 0", metrics)
 
         rejected = await self.request("/healthz", method="POST")
         self.assertIn(b"405 Method Not Allowed", rejected)

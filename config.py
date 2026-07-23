@@ -16,6 +16,7 @@ class ConfigurationError(RuntimeError):
 
 
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
+_TELEGRAM_TOKEN_RE = re.compile(r"[0-9]{6,12}:[A-Za-z0-9_-]{30,64}\Z")
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
@@ -85,7 +86,6 @@ class Settings:
 
     telegram_api_token: str
     default_translation: str
-    default_verse: str
     api_base_url: str
     web_base_url: str
     welcome_message: str
@@ -101,6 +101,8 @@ class Settings:
     max_verses_per_reference: int
     max_total_verses: int
     max_output_chunks: int
+    search_result_limit: int
+    search_deadline_seconds: float
     max_concurrent_lookups: int
     max_concurrent_updates: int
     user_rate_capacity: int
@@ -108,6 +110,10 @@ class Settings:
     chat_rate_capacity: int
     chat_rate_refill_per_second: float
     rate_limit_cache_size: int
+    rate_limit_notice_cooldown: float
+    interaction_session_limit: int
+    interaction_ttl_seconds: float
+    catalog_cache_ttl_seconds: float
     circuit_failure_threshold: int
     circuit_recovery_seconds: float
     delete_command_messages: bool
@@ -128,18 +134,14 @@ class Settings:
                 "TELEGRAM_API_TOKEN and deprecated TELEGRAM_TOKEN disagree; keep only one value."
             )
         token = primary_token or legacy_token
-        if not token or token.startswith("xxxxxxxx"):
+        if not token or token == "replace-with-a-real-bot-token":
             raise ConfigurationError("TELEGRAM_API_TOKEN is required.")
-        if any(character.isspace() for character in token) or len(token) > 256:
+        if _TELEGRAM_TOKEN_RE.fullmatch(token) is None:
             raise ConfigurationError("TELEGRAM_API_TOKEN has an invalid format.")
 
         translation = (_env("TRANSLATION", "kjv") or "").casefold()
         if _TRANSLATION_RE.fullmatch(translation) is None:
             raise ConfigurationError("TRANSLATION must be a valid GetBible abbreviation.")
-
-        default_verse = _env("DEFAULT_VERSE", "1 John 3:16") or ""
-        if not default_verse or len(default_verse) > 256:
-            raise ConfigurationError("DEFAULT_VERSE must contain between 1 and 256 characters.")
 
         log_name = (_env("LOG_LEVEL", "INFO") or "").upper()
         log_level = getattr(logging, log_name, None)
@@ -162,7 +164,6 @@ class Settings:
         return cls(
             telegram_api_token=token,
             default_translation=translation,
-            default_verse=default_verse,
             api_base_url=_base_url("GETBIBLE_API_BASE_URL", "https://api.getbible.net"),
             web_base_url=_base_url("GETBIBLE_WEB_BASE_URL", "https://getbible.life"),
             welcome_message=_message(
@@ -175,8 +176,10 @@ class Settings:
                 "/bible 1 John 3:16\n"
                 "/bible John 3:16-19;1 John 3:10-17\n"
                 "/bible Gen 1:1-5 codex\n"
-                "/bible Ps 1:1-5 aov\n\n"
-                "/search — open Scripture search\n"
+                "/bible Ps 1:1-5 aov\n"
+                "/bible — guided reference picker\n\n"
+                "/search grace — search with safe defaults\n"
+                "/search — configure an interactive search\n"
                 "/help — show this message",
             ),
             connect_timeout=_number("GETBIBLE_CONNECT_TIMEOUT", 3.05, 0.1, 30.0),
@@ -192,6 +195,10 @@ class Settings:
             max_verses_per_reference=max_verses_per_reference,
             max_total_verses=max_total_verses,
             max_output_chunks=_integer("MAX_OUTPUT_CHUNKS", 8, 1, 32),
+            search_result_limit=_integer("SEARCH_RESULT_LIMIT", 50, 1, 200),
+            search_deadline_seconds=_number(
+                "SEARCH_DEADLINE_SECONDS", 5.0, 0.1, 30.0
+            ),
             max_concurrent_lookups=_integer("MAX_CONCURRENT_LOOKUPS", 4, 1, 32),
             max_concurrent_updates=_integer("MAX_CONCURRENT_UPDATES", 16, 1, 64),
             user_rate_capacity=_integer("USER_RATE_CAPACITY", 4, 1, 100),
@@ -203,6 +210,18 @@ class Settings:
                 "CHAT_RATE_REFILL_PER_SECOND", 1.0, 0.01, 500.0
             ),
             rate_limit_cache_size=_integer("RATE_LIMIT_CACHE_SIZE", 20_000, 100, 100_000),
+            rate_limit_notice_cooldown=_number(
+                "RATE_LIMIT_NOTICE_COOLDOWN", 10.0, 1.0, 300.0
+            ),
+            interaction_session_limit=_integer(
+                "INTERACTION_SESSION_LIMIT", 2000, 10, 20_000
+            ),
+            interaction_ttl_seconds=_number(
+                "INTERACTION_TTL_SECONDS", 600.0, 60.0, 3600.0
+            ),
+            catalog_cache_ttl_seconds=_number(
+                "CATALOG_CACHE_TTL_SECONDS", 3600.0, 60.0, 86_400.0
+            ),
             circuit_failure_threshold=_integer("CIRCUIT_FAILURE_THRESHOLD", 5, 1, 50),
             circuit_recovery_seconds=_number(
                 "CIRCUIT_RECOVERY_SECONDS", 30.0, 1.0, 3600.0

@@ -20,11 +20,17 @@ They are configured independently as `GETBIBLE_API_BASE_URL` and `GETBIBLE_WEB_B
 /bible John 3:16-19;1 John 3:10-17
 /bible Gen 1:1-5 codex
 /bible Ps 1:1-5 aov
+/bible
+/search grace
 /search
 /help
 ```
 
 `/get` and `/getbible` remain aliases of `/bible`. Telegram-parsed command arguments are used, so `/bible@getBibleRobot John 3:16` works in groups without leaking the bot mention into the reference parser.
+
+An explicit `/bible` reference preserves the legacy fast path and posts the complete selection immediately. An empty `/bible` opens a Telegram-native picker with the configured translation preselected, then guides the user through testament, book, chapter, first verse, last verse, and confirmation.
+
+`/search grace` runs Librarian 1.2 search defaults and opens a paginated result panel. Results are never posted automatically: the user selects one or more verses and presses **Post selected**. An empty `/search` first opens the complete search-filter dashboard for translation, word mode, match mode, scope, case, diacritics, ordering, books, exclusions, and proximity. See [Interactive Bible and search workflows](docs/INTERACTIONS.md).
 
 ## Security and reliability controls
 
@@ -35,11 +41,14 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
 - bounded Telegram message count and UTF-16-aware message sizing;
 - per-user and per-chat token buckets applied to every command;
 - bounded rate-limit state under arbitrary identifier churn;
+- rejection-notification cooldowns that prevent Telegram API amplification;
+- owner-scoped, TTL/LRU-bounded interactive sessions and opaque callback tokens;
 - a fixed worker pool and global lookup semaphore;
 - queue, connect, read, overall lookup, retry, and response-byte limits;
 - timed-out workers retain capacity until their underlying threads actually exit;
 - an upstream circuit breaker with one half-open recovery probe;
 - typed user-safe errors and correlation IDs instead of raw exception text;
+- checksum-verified book navigation and structurally validated catalog metadata;
 - escaped Telegram HTML, percent-encoded URL segments, and safe chunk boundaries;
 - optional command deletion that cannot fail a successful lookup;
 - validated startup configuration and narrow Telegram update subscriptions;
@@ -61,13 +70,13 @@ See [Architecture](docs/ARCHITECTURE.md) and [the release gate](docs/RELEASE_GAT
 
 Human-maintained intent lives in `requirements.in` and `requirements-dev.in`. Production and CI install the exact hashed locks in `requirements.txt` and `requirements-dev.txt`.
 
-The hardened Librarian source commit is temporarily pinned because the robot depends on APIs in the forthcoming Librarian 1.2 line. After the corresponding package release is published and verified, the input changes to:
+The robot accepts compatible Librarian 1.x releases beginning with 1.2:
 
 ```text
 getbible>=1.2,<2
 ```
 
-Dependabot will then propose the newest compatible release and regenerate the exact lock for review. Production never resolves an unreviewed “latest” dependency during startup. See [Dependency policy](docs/DEPENDENCIES.md).
+The generated runtime lock currently selects and hashes `getbible==1.2.0`. Dependabot proposes newer compatible releases by regenerating the exact lock for review. Production never resolves an unreviewed “latest” dependency during startup. See [Dependency policy](docs/DEPENDENCIES.md).
 
 ## Quick local test
 
@@ -139,6 +148,7 @@ Set `HEALTH_PORT=0` to disable it. Do not expose the endpoint publicly without a
 - [Documentation index](docs/README.md)
 - [Installation](docs/INSTALLATION.md)
 - [Configuration reference](docs/CONFIGURATION.md)
+- [Interactive Bible and search workflows](docs/INTERACTIONS.md)
 - [Testing and live smoke checks](docs/TESTING.md)
 - [Upgrading and rollback](docs/UPGRADING.md)
 - [Uninstalling](docs/UNINSTALL.md)

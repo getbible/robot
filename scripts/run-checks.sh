@@ -29,13 +29,35 @@ PY
 
 report=$(mktemp)
 trap 'rm -f "$report"' EXIT
-"$VENV/bin/detect-secrets" scan \
-  --all-files \
-  --exclude-files '(^|/)\.git/' \
-  --exclude-files '(^|/)\.(mypy|ruff)_cache/' \
-  --exclude-files '(^|/)\.env\.template$' \
-  --exclude-files '(^|/)requirements(-dev)?\.txt$' \
-  > "$report"
+venv_exclude=$(
+  "$PYTHON" - "$VENV" <<'PY'
+import pathlib
+import re
+import sys
+
+repository = pathlib.Path.cwd().resolve()
+environment = pathlib.Path(sys.argv[1]).resolve()
+try:
+    relative = environment.relative_to(repository)
+except ValueError:
+    print("")
+else:
+    print(rf"(^|/){re.escape(relative.as_posix())}/")
+PY
+)
+
+secret_args=(
+  --all-files
+  --exclude-files '(^|/)\.git/'
+  --exclude-files '(^|/)\.(mypy|ruff)_cache/'
+  --exclude-files '(^|/)(venv|\.venv|env|ENV|\.lock-venv|\.lock-verify-venv)/'
+  --exclude-files '(^|/)\.env\.template$'
+  --exclude-files '(^|/)requirements(-dev)?\.txt$'
+)
+if [[ -n "$venv_exclude" ]]; then
+  secret_args+=(--exclude-files "$venv_exclude")
+fi
+"$VENV/bin/detect-secrets" scan "${secret_args[@]}" > "$report"
 
 "$PYTHON" - "$report" <<'PY'
 import json

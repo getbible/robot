@@ -1,7 +1,7 @@
 # Direct runtime dependencies. Compile with hashes before deployment.
-# Temporary until the hardened Librarian 1.2 release is published; see docs/DEPENDENCIES.md.
-getbible @ https://github.com/getbible/librarian/archive/95cdcafb6588d60eb2b1b000b4aa59f889c0f772.tar.gz
+getbible>=1.2,<2
 # Keep this explicit so a lock compiled on Python 3.12 also installs on Python 3.10.
 exceptiongroup==1.3.1
 python-dotenv==1.2.2
 python-telegram-bot==22.8
+requests==2.32.5

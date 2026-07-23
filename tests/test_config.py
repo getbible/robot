@@ -7,7 +7,9 @@ from config import ConfigurationError, Settings
 
 class SettingsTestCase(unittest.TestCase):
     def environment(self, **overrides: str) -> dict[str, str]:
-        values = {"TELEGRAM_API_TOKEN": "test-token"}
+        values = {
+            "TELEGRAM_API_TOKEN": "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+        }
         values.update(overrides)
         return values
 
@@ -27,6 +29,23 @@ class SettingsTestCase(unittest.TestCase):
             self.assertRaises(ConfigurationError),
         ):
             Settings.from_env(load_environment_file=False)
+
+    def test_template_and_malformed_tokens_fail_closed(self) -> None:
+        for token in (
+            "replace-with-a-real-bot-token",
+            "test-token",
+            "123456:short",
+        ):
+            with (
+                self.subTest(token=token),
+                patch.dict(
+                    os.environ,
+                    {"TELEGRAM_API_TOKEN": token},
+                    clear=True,
+                ),
+                self.assertRaises(ConfigurationError),
+            ):
+                Settings.from_env(load_environment_file=False)
 
     def test_urls_reject_credentials_paths_and_nonlocal_http(self) -> None:
         invalid = (

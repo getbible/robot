@@ -144,6 +144,16 @@ Every command consumes both a user and chat token, including `/help`, `/start`, 
 
 Review `USER_RATE_*`, `CHAT_RATE_*`, and `getbible_robot_rate_limit_*` metrics. Increase values cautiously and keep `RATE_LIMIT_CACHE_SIZE` bounded.
 
+Only the first rejection for a user/chat cooldown sends a Telegram warning. Later rejected requests are intentionally silent until `RATE_LIMIT_NOTICE_COOLDOWN` has elapsed without another warning attempt.
+
+## An interactive panel expired or does not respond
+
+Run `/bible` or `/search` again. Panels are intentionally process-local and expire after `INTERACTION_TTL_SECONDS`; a service restart invalidates every old callback token.
+
+In a group, reply directly to the bot's selective search prompt from the same user who opened the panel. Unrelated messages, another user's reply, and replies to an older prompt are ignored.
+
+Review `getbible_robot_interaction_*` metrics for active, expired, and evicted sessions. Do not remove ownership checks or make sessions unbounded to avoid an expiry.
+
 ## Health port is unavailable
 
 Confirm the configured loopback port and identify the listener:

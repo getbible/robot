@@ -3,10 +3,10 @@
 ## Request path
 
 ```text
-Telegram message update
-  → registered or unknown command handler
+Telegram message, reply, or callback update
+  → registered command or interactive handler
   → per-user and per-chat token buckets
-  → strict local reference/translation parser
+  → strict reference, search, session, and callback validation
   → bounded ScriptureService capacity wait
   → upstream circuit breaker
   → fixed-size worker pool
@@ -25,6 +25,8 @@ Telegram command arguments are untrusted. The robot reconstructs them only from 
 
 Repository JSON is also untrusted. Librarian caps response bytes and validates JSON and checksums. The renderer validates the minimum chapter and verse shape again before formatting.
 
+The guided reference picker additionally reads the v2 translation and books catalogs through a bounded navigation client. Catalog responses are size-limited and structurally validated. A selected full-book navigation response must match the SHA-1 published by its books index before chapter or verse controls are built.
+
 Telegram output is generated only by `modules.renderer`:
 
 - repository text is HTML escaped;
@@ -41,7 +43,7 @@ Machine-readable data: https://api.getbible.net
 Human-facing links:    https://getbible.life
 ```
 
-`GETBIBLE_API_BASE_URL` is passed to Librarian as its repository source. `GETBIBLE_WEB_BASE_URL` is passed only to the renderer and `/search` response. These roles must not be conflated.
+`GETBIBLE_API_BASE_URL` is passed to Librarian and the bounded navigation catalog client as their repository source. `GETBIBLE_WEB_BASE_URL` is passed only to the Scripture renderer. These roles must not be conflated.
 
 ## Translation resolution
 
@@ -49,9 +51,25 @@ An ordinary reference is parsed locally with the configured default translation 
 
 Only when the complete input is not a valid reference does the robot consider the final whitespace-delimited token as a translation abbreviation. The candidate must match the complete abbreviation grammar. The preceding reference is validated locally before the candidate is repository-checked. Explicit `kjv` remains supported.
 
+An empty `/bible` does not enter the reference parser and never falls back to a configured verse. It creates an owner-scoped interactive session and opens the guided translation, testament, book, chapter, first-verse, and last-verse flow.
+
+## Search and confirmation flow
+
+`/search <words>` constructs Librarian's default `SearchBible` criteria. An empty `/search` creates the same criteria in a filter dashboard and allows the user to change every exposed Librarian filter before replying with query text.
+
+Librarian returns exact totals, grouped verse data, and ordered match metadata. The robot validates that every match points to a verse in the grouped results, retains only the configured bounded result set, and renders short previews as inline buttons. No verse is posted from search until the owner presses **Post selected**.
+
+Selected match metadata is converted back into compressed canonical references. The final post performs a normal Librarian `select()` call and passes through the existing renderer. Search preview text is therefore never the authoritative post payload.
+
+## Interactive session model
+
+Callbacks contain an opaque random token rather than references, queries, or verse text. The in-memory session store validates token, chat, and user together, refreshes an inactivity TTL, and enforces an LRU size limit. Replies are accepted only when they target the exact bot prompt recorded for that session.
+
+Local pagination, filter toggles, and checkmarks do not consume worker capacity. Every accepted callback still consumes the normal per-user and per-chat inbound rate budget. Catalog reads, searches, and final posts additionally use the service semaphore, executor, timeout, and circuit breaker.
+
 ## Concurrency and timeout model
 
-Telegram updates may run concurrently, but all commands first consume user and chat rate-limit tokens. Scripture repository work additionally requires a `ScriptureService` semaphore permit.
+Telegram updates may run concurrently, but all commands and session-owned callbacks or replies first consume user and chat rate-limit tokens. Scripture repository work additionally requires a `ScriptureService` semaphore permit.
 
 The synchronous Librarian call runs in a fixed `ThreadPoolExecutor`. The asynchronous caller has an overall timeout, but Python cannot safely kill a running thread. Consequently:
 
@@ -76,7 +94,7 @@ After the threshold:
 
 ## Caches and rate-limit state
 
-Librarian reference, chapter, book, translation, and search caches are bounded. The negative translation cache has a TTL and size limit. The robot's user/chat token bucket registry also has bounded least-recently-used retention.
+Librarian reference, chapter, book, translation, and search caches are bounded. The negative translation cache has a TTL and size limit. Navigation-catalog caches, interactive sessions, user/chat token buckets, and rejection-notification cooldown state all have bounded least-recently-used retention.
 
 Arbitrary reference strings, translation names, user IDs, and chat IDs therefore cannot create permanent process growth without limit.
 
@@ -88,7 +106,7 @@ Startup order:
 2. construct bounded service objects;
 3. initialize Telegram and register bot commands;
 4. start the loopback health listener;
-5. begin polling only message updates.
+5. begin polling only message and callback-query updates required by the robot.
 
 Shutdown order:
 
@@ -108,6 +126,6 @@ Structured logs contain event names, exception class names, and correlation IDs,
 
 ## Privacy
 
-The robot does not persist update text, references, favorites, profiles, or chat history. Telegram and the configured GetBible API are independent external services with their own data practices.
+The robot does not persist update text, references, searches, favorites, profiles, or chat history. Short-lived query and selection state exists only in bounded process memory and expires on inactivity or restart. Telegram and the configured GetBible API are independent external services with their own data practices.
 
 Any future persistence feature requires a separate design for consent, access control, retention, export, deletion, encryption, and incident response before implementation.
