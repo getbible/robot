@@ -6,7 +6,12 @@ class ReferenceValidationError(ValueError, GetBibleError): ...
 class RequestLimitError(ReferenceValidationError): ...
 class TranslationNotFoundError(FileNotFoundError, GetBibleError): ...
 class RepositoryError(GetBibleError): ...
+class RepositoryResponseError(RepositoryError): ...
+class RepositoryResponseTooLarge(RepositoryResponseError): ...
 class CacheIntegrityError(GetBibleError): ...
+class SearchValidationError(ValueError, GetBibleError): ...
+class SearchLimitError(SearchValidationError, RequestLimitError): ...
+class SearchDeadlineExceeded(SearchLimitError, TimeoutError): ...
 
 class BookReference:
     book: int
@@ -25,6 +30,41 @@ class RequestLimits:
         max_search_offset: int = ...,
         max_search_books: int = ...,
         max_search_exclusions: int = ...,
+    ) -> None: ...
+
+class SearchLimits:
+    def __init__(
+        self,
+        *,
+        max_work_units: int = ...,
+        max_response_bytes: int = ...,
+        max_query_length: int = ...,
+        max_query_terms: int = ...,
+        min_substring_length: int = ...,
+        max_books: int = ...,
+        max_exclusions: int = ...,
+        max_exclusion_terms: int = ...,
+        max_offset: int = ...,
+        max_limit: int = ...,
+        deadline_seconds: float = ...,
+        deadline_check_interval: int = ...,
+    ) -> None: ...
+
+class SearchBible:
+    def __init__(
+        self,
+        *,
+        words: str = ...,
+        match: str = ...,
+        case_sensitive: bool = ...,
+        scope: str = ...,
+        books: tuple[int | str, ...] = ...,
+        diacritics: str = ...,
+        exclude: tuple[str, ...] = ...,
+        proximity: int | None = ...,
+        sort: str = ...,
+        limit: int = ...,
+        offset: int = ...,
     ) -> None: ...
 
 class GetBibleReference:
@@ -64,6 +104,7 @@ class GetBible:
         chapter_cache_limit: int | None = ...,
         search_corpus_limit: int | None = ...,
         translation_cache_limit: int | None = ...,
+        search_limits: SearchLimits | None = ...,
         **kwargs: Any,
     ) -> None: ...
     def valid_translation(self, abbreviation: str) -> bool: ...
@@ -71,6 +112,12 @@ class GetBible:
         self,
         reference: str,
         abbreviation: str | None = ...,
+    ) -> dict[str, Any]: ...
+    def search(
+        self,
+        query: str,
+        abbreviation: str | None = ...,
+        criteria: SearchBible | dict[str, Any] | str | None = ...,
     ) -> dict[str, Any]: ...
     def cache_info(self) -> dict[str, Any]: ...
     def close(self) -> None: ...

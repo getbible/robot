@@ -62,6 +62,8 @@ Alert on:
 - `getbible_robot_circuit_open == 1`;
 - growth in `lookup_timeouts`, `repository_failures`, `unexpected_failures`, or `queue_rejections`;
 - sustained user/chat rate-limit rejection;
+- sustained `getbible_robot_interaction_evictions` growth or sessions remaining at the configured limit;
+- unusual growth in expired interactive sessions without completed posts;
 - repeated service restarts;
 - memory approaching `MemoryMax`;
 - file-descriptor or task pressure;
@@ -177,7 +179,9 @@ Do not reuse a lockfile from a different commit.
 
 Increase limits only after a test reproduces the expected workload and measures memory, worker occupancy, Telegram message count, repository latency, and circuit behavior.
 
-Hard complexity limits should never be disabled for administrators. Scaling process count multiplies per-process cache and worker memory. Increasing `MAX_CONCURRENT_LOOKUPS` without increasing API capacity can worsen an outage. A timed-out lookup intentionally retains its worker permit until the actual thread exits.
+Hard complexity limits should never be disabled for administrators. Scaling process count multiplies per-process cache, interaction state, and worker memory. Increasing `MAX_CONCURRENT_LOOKUPS` without increasing API capacity can worsen an outage. A timed-out lookup intentionally retains its worker permit until the actual thread exits.
+
+Interactive Bible and search state is deliberately ephemeral. Restarting the process, reaching the bounded LRU capacity, or exceeding `INTERACTION_TTL_SECONDS` expires an unfinished panel; the user can safely start the command again. Do not persist query text or selected verses in logs or metrics.
 
 ## Planned retirement
 

@@ -30,6 +30,9 @@ Run one module while developing:
 
 ```bash
 venv/bin/python -m unittest tests.test_service -v
+venv/bin/python -m unittest tests.test_catalog -v
+venv/bin/python -m unittest tests.test_interactions -v
+venv/bin/python -m unittest tests.test_commands -v
 venv/bin/python -m unittest tests.test_renderer -v
 venv/bin/python -m unittest tests.test_security -v
 venv/bin/python -m unittest tests.test_audit_runtime -v
@@ -59,11 +62,9 @@ venv/bin/detect-secrets scan \
   --exclude-files '(^|/)requirements(-dev)?\.txt$'
 ```
 
-While Librarian is installed from the temporary reviewed source URL, `pip-audit --strict` cannot resolve a PyPI advisory record for that unpublished 1.2.0 package. `scripts/audit_runtime.py` therefore fails closed unless it finds exactly the declared GetBible URL and a SHA-256 lock entry, removes only that logical direct requirement, and runs strict registry auditing against every remaining locked dependency. Bandit separately scans the exact installed Librarian source. After the input changes to the released package range, the helper automatically audits the complete lock without filtering.
+Librarian 1.2.0 is installed as a released, hashed package, so `scripts/audit_runtime.py` submits the complete lock to `pip-audit --strict` without filtering a dependency. The helper retains fail-closed validation for any future direct source declaration. A malformed source declaration, missing hash, audit error, or vulnerable dependency fails the check.
 
-This is not a vulnerability suppression. A different URL, a missing hash, multiple direct sources, or any vulnerable registry dependency fails the check.
-
-Review secret-scan output rather than blindly suppressing it. The `.env.template` contains a deliberate placeholder and is excluded; real tokens are never acceptable.
+Review secret-scan output rather than blindly suppressing it. The `.env.template` contains a deliberate placeholder and is excluded; real tokens are never acceptable. `scripts/run-checks.sh` also excludes the configured in-repository virtual environment and standard environment directory names so following the documented `venv` workflow does not scan installed dependency metadata.
 
 Verify the production unit on a Linux host:
 
@@ -80,6 +81,13 @@ The tests cover at least these invariants:
 - huge verse numbers and ranges are rejected before list materialization or repository access;
 - malformed references never silently become verse 1;
 - ordinary references do not trigger speculative translation lookups;
+- an empty `/bible` never substitutes a hidden default verse;
+- explicit `/bible <reference>` commands still post immediately;
+- `/search <words>` returns selectable previews and never posts before confirmation;
+- empty `/search` exposes Librarian 1.2 filters through a bounded dashboard;
+- callback sessions require the originating user and chat and expire under TTL/LRU bounds;
+- guided navigation rejects malformed catalogs, oversized responses, redirects, and book checksum mismatches;
+- selected search verses are compressed and revalidated before Librarian retrieval;
 - malformed explicit-translation commands do not trigger repository lookups;
 - request, response-message, queue, timeout, cache, and rate-limit state is bounded;
 - a timed-out worker retains its capacity permit until the actual thread exits;
@@ -90,7 +98,7 @@ The tests cover at least these invariants:
 - Telegram limits are measured in UTF-16 code units, including emoji and other astral text;
 - user-facing errors never echo raw exceptions, paths, URLs, tokens, or hostile input;
 - deletion permission failures do not turn a successful lookup into a failed command;
-- the temporary direct Librarian requirement cannot bypass an exact URL/hash check;
+- the complete released Librarian lock is included in strict dependency auditing;
 - all required operator documents and relative links remain valid;
 - all public links use `https://getbible.life` and data access uses `https://api.getbible.net`.
 
@@ -169,19 +177,26 @@ Use a separate test bot token and a private test chat. Stop any other polling pr
    ```text
    /start
    /help
+   /bible
    /bible John 3:16
    /bible John 3:16-19;1 John 3:10-17
    /bible Gen 1:1 aov
    /bible John 3:16 kjv
    /bible John 1:1-999999999
    /bible John 1:16!
+   /search grace
+   /search
    /unknown
    ```
 
-7. In a test group, verify `/bible@TestBotName John 3:16` and permission-safe command deletion.
-8. Open a returned Scripture link and confirm its host is exactly `getbible.life`.
-9. Send a short burst and confirm rate-limit responses occur without a crash or memory growth.
-10. Stop with `Ctrl+C` and confirm the health listener, worker pool, and Librarian sessions close cleanly.
+7. In the empty `/bible` panel, continue with KJV, choose John 3, select 16 as both first and last verse, review, and post.
+8. Confirm `/search grace` shows selectable results but posts nothing until **Post selected** is pressed.
+9. In empty `/search`, change word, match, scope, book, exclusion, and proximity controls; run a search; page, select, deselect, and post multiple results.
+10. In a test group, verify `/bible@TestBotName John 3:16`, empty `/bible@TestBotName`, selective search replies, ownership isolation between two users, and permission-safe command deletion.
+11. Open a returned Scripture link and confirm its host is exactly `getbible.life`.
+12. Leave a panel idle beyond `INTERACTION_TTL_SECONDS` and confirm its buttons expire safely.
+13. Send a sustained rejected burst and confirm only one cooldown warning is sent, with no crash or memory growth.
+14. Stop with `Ctrl+C` and confirm the health listener, worker pool, and Librarian sessions close cleanly.
 
 Do not paste tokens or private chat content into issues, CI logs, screenshots, or test artifacts.
 

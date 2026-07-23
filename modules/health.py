@@ -8,6 +8,7 @@ import logging
 from contextlib import suppress
 from typing import Any
 
+from .interactions import InteractionStore
 from .rate_limit import InboundRateLimiter
 from .service import ScriptureService
 
@@ -22,11 +23,13 @@ class HealthServer:
         port: int,
         service: ScriptureService,
         limiter: InboundRateLimiter,
+        interactions: InteractionStore,
     ) -> None:
         self._host = host
         self._port = port
         self._service = service
         self._limiter = limiter
+        self._interactions = interactions
         self._server: asyncio.AbstractServer | None = None
 
     async def start(self) -> None:
@@ -89,6 +92,7 @@ class HealthServer:
     async def _write_metrics(self, writer: asyncio.StreamWriter) -> None:
         service = await self._service.snapshot()
         limiter = self._limiter.snapshot()
+        interactions = self._interactions.snapshot()
         lines = [
             "# TYPE getbible_robot_ready gauge",
             f"getbible_robot_ready {1 if await self._service.ready() else 0}",
@@ -97,6 +101,8 @@ class HealthServer:
             lines.append(f"getbible_robot_{_metric_name(name)} {int(value)}")
         for name, value in sorted(limiter.items()):
             lines.append(f"getbible_robot_rate_limit_{_metric_name(name)} {int(value)}")
+        for name, value in sorted(interactions.items()):
+            lines.append(f"getbible_robot_interaction_{_metric_name(name)} {int(value)}")
         circuit = service["circuit"]
         lines.append(
             "getbible_robot_circuit_open "

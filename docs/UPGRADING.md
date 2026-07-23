@@ -156,17 +156,17 @@ python3.12 -m venv /tmp/robot-py312
 
 Then run the full release gate. Dependabot PRs follow the same rules; multiple lock-changing PRs should be rebased and merged sequentially so the final lock contains every accepted update.
 
-## Librarian release transition
+## Librarian upgrades
 
-The current source commit is temporary because the robot requires the hardened Librarian 1.2 API before its package release is available. After that release is published and verified, replace the source URL with:
+The completed Librarian release transition uses:
 
 ```text
 getbible>=1.2,<2
 ```
 
-Regenerate locks and run the complete matrix. Thereafter, Dependabot proposes the newest compatible 1.x Librarian release. Production still installs the exact tested version and hashes from the merged lock; it does not resolve “latest” during service startup.
+The current lock selects `getbible==1.2.0`. Dependabot proposes the newest compatible 1.x Librarian release. Regenerate both locks and run the complete matrix for every proposal. Production always installs the exact tested version and hashes from the merged lock; it does not resolve “latest” during service startup.
 
-See [Dependency policy](DEPENDENCIES.md) for the rationale and exact transition checklist.
+See [Dependency policy](DEPENDENCIES.md) for the compatibility and reproducibility rationale.
 
 ## Configuration migrations
 

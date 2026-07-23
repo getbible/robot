@@ -162,14 +162,19 @@ Use a private conversation with the test bot:
 
 ```text
 /help
+/bible
 /bible John 3:16
 /bible John 3:16-18 kjv
 /bible Gen 1:1 aov
+/search grace
+/search
 ```
 
 Confirm that:
 
 - verse text is correct;
+- `/bible John 3:16` posts immediately using KJV while empty `/bible` waits for guided selection and confirmation;
+- both search forms show selectable results and post nothing until **Post selected** is pressed;
 - links use `https://getbible.life`;
 - data retrieval succeeds through `https://api.getbible.net`;
 - invalid and oversized input returns a generic safe response;

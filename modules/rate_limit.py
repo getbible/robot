@@ -28,6 +28,7 @@ class InboundRateLimiter:
         chat_capacity: int,
         chat_refill_per_second: float,
         max_entries: int,
+        notification_cooldown: float = 10.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._user_capacity = float(user_capacity)
@@ -35,8 +36,10 @@ class InboundRateLimiter:
         self._chat_capacity = float(chat_capacity)
         self._chat_refill = float(chat_refill_per_second)
         self._max_entries = max_entries
+        self._notification_cooldown = notification_cooldown
         self._clock = clock
         self._buckets: OrderedDict[tuple[str, int], _Bucket] = OrderedDict()
+        self._notifications: OrderedDict[tuple[int, int], float] = OrderedDict()
         self._lock = asyncio.Lock()
         self._allowed = 0
         self._rejected = 0
@@ -79,10 +82,23 @@ class InboundRateLimiter:
             self._touch(chat_key)
             self._trim()
 
+    async def should_notify_rejection(self, *, user_id: int, chat_id: int) -> bool:
+        """Allow at most one Telegram rejection message per identity/cooldown."""
+        now = self._clock()
+        key = (user_id, chat_id)
+        async with self._lock:
+            previous = self._notifications.get(key)
+            self._notifications[key] = now
+            self._notifications.move_to_end(key)
+            while len(self._notifications) > self._max_entries:
+                self._notifications.popitem(last=False)
+            return previous is None or now - previous >= self._notification_cooldown
+
     def snapshot(self) -> dict[str, int]:
         return {
             "entries": len(self._buckets),
             "max_entries": self._max_entries,
+            "notification_entries": len(self._notifications),
             "allowed": self._allowed,
             "rejected": self._rejected,
             "evictions": self._evictions,

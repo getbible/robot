@@ -20,7 +20,7 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - Ruff passes without new suppressions added solely for the release.
 - mypy passes with the configured strictness.
 - Bandit reports no medium/high finding in the robot, maintenance scripts, or exact installed Librarian source.
-- `scripts/audit_runtime.py` verifies the temporary Librarian URL/hash and runs `pip-audit --strict` against every registry dependency; after the package release it audits the complete lock.
+- `scripts/audit_runtime.py` runs `pip-audit --strict` against the complete released Librarian 1.2.0 lock.
 - Secret scanning reports no real secret.
 - The hardened systemd unit passes `systemd-analyze verify`.
 - CodeQL succeeds.
@@ -34,9 +34,8 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - GitHub Actions remain pinned to reviewed immutable commit SHAs.
 - The runtime does not resolve or upgrade dependencies during service startup.
 - Python 3.10 conditional requirements remain represented in the universal lock.
-- Until the Librarian 1.2 package release exists, the temporary reviewed source commit remains explicit, exactly URL-matched, and SHA-256 locked.
 - The direct-source audit contract test fails for a URL mismatch, missing hash, duplicate source, or unfiltered source requirement.
-- After the Librarian release, the robot uses the documented compatible package range and an exact hashed resolved version.
+- The robot uses `getbible>=1.2,<2` as compatible intent and an exact hashed resolved version.
 
 ## Parser and work budgets
 
@@ -48,6 +47,8 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - An invalid explicit-translation reference is rejected before translation repository access.
 - Per-user and per-chat state remains bounded under identifier churn.
 - Every command, including `/start`, `/help`, `/search`, and unknown commands, consumes both rate-limit budgets.
+- Repeated rejected commands produce one cooldown warning rather than one Telegram API call per rejection.
+- Interactive sessions remain owner-scoped and TTL/LRU bounded under user, chat, and callback churn.
 
 ## Upstream and concurrency behavior
 
@@ -73,7 +74,13 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - Raw exceptions, user input, tokens, paths, and internal URLs are absent from user-facing errors.
 - Missing message-deletion permission does not fail an otherwise successful command.
 - `/bible@BotName John 3:16` works in a test group.
-- Only required Telegram update types are subscribed.
+- Empty `/bible` exposes translation, testament, book, chapter, first-verse, last-verse, and confirmation controls.
+- `/search <words>` exposes selectable results without posting automatically.
+- Empty `/search` exposes the documented Librarian filter dashboard.
+- Search result selection persists across pages and only **Post selected** sends Scripture.
+- Group replies are accepted only for the exact session owner and bot prompt.
+- Expired, foreign, malformed, and stale callbacks fail safely.
+- Only required Telegram message and callback-query update types are subscribed.
 
 ## Startup, health, and observability
 
@@ -104,6 +111,10 @@ Using a dedicated test bot first, and then a private production-bot chat before 
 
 - `/start`, `/help`, `/search`, and an unknown command behave safely.
 - A single verse, range, multiple references, default translation, and explicit translation return correct text.
+- The empty `/bible` flow posts a single verse and a range in private chat and a group.
+- Default and filtered searches page, select, deselect, and post one or multiple results.
+- Search never posts before explicit confirmation.
+- A right-to-left translation and a non-66-book translation navigate correctly.
 - Huge and malformed references fail safely.
 - A short burst exercises rate limiting without a crash.
 - A group mention command parses correctly.

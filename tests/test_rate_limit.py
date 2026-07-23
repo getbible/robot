@@ -47,6 +47,36 @@ class InboundRateLimiterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(state["entries"], 4)
         self.assertGreater(state["evictions"], 0)
 
+    async def test_rejection_notifications_have_a_bounded_cooldown(self) -> None:
+        clock = _Clock()
+        limiter = InboundRateLimiter(
+            user_capacity=1,
+            user_refill_per_second=1.0,
+            chat_capacity=1,
+            chat_refill_per_second=1.0,
+            max_entries=2,
+            notification_cooldown=10.0,
+            clock=clock,
+        )
+
+        self.assertTrue(
+            await limiter.should_notify_rejection(user_id=1, chat_id=10)
+        )
+        self.assertFalse(
+            await limiter.should_notify_rejection(user_id=1, chat_id=10)
+        )
+        clock.value = 10.0
+        self.assertTrue(
+            await limiter.should_notify_rejection(user_id=1, chat_id=10)
+        )
+
+        for identifier in range(20):
+            await limiter.should_notify_rejection(
+                user_id=identifier,
+                chat_id=identifier + 100,
+            )
+        self.assertLessEqual(limiter.snapshot()["notification_entries"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

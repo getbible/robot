@@ -11,6 +11,7 @@ from telegram import BotCommand
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -18,17 +19,21 @@ from telegram.ext import (
 
 from config import ConfigurationError, Settings
 from modules.commands import (
+    INTERACTIONS_SLOT,
     LIMITER_SLOT,
     SERVICE_SLOT,
     SETTINGS_SLOT,
     bible_command,
     error_handler,
     help_command,
+    interaction_callback,
+    interaction_reply,
     search_command,
     start_command,
     unknown_command,
 )
 from modules.health import HealthServer
+from modules.interactions import InteractionStore
 from modules.rate_limit import InboundRateLimiter
 from modules.service import ScriptureService
 
@@ -70,12 +75,18 @@ def build_application(settings: Settings) -> Application:
         chat_capacity=settings.chat_rate_capacity,
         chat_refill_per_second=settings.chat_rate_refill_per_second,
         max_entries=settings.rate_limit_cache_size,
+        notification_cooldown=settings.rate_limit_notice_cooldown,
+    )
+    interactions = InteractionStore(
+        max_sessions=settings.interaction_session_limit,
+        ttl_seconds=settings.interaction_ttl_seconds,
     )
     health = HealthServer(
         host=settings.health_host,
         port=settings.health_port,
         service=service,
         limiter=limiter,
+        interactions=interactions,
     )
 
     application = (
@@ -89,6 +100,7 @@ def build_application(settings: Settings) -> Application:
     application.bot_data[SETTINGS_SLOT] = settings
     application.bot_data[SERVICE_SLOT] = service
     application.bot_data[LIMITER_SLOT] = limiter
+    application.bot_data[INTERACTIONS_SLOT] = interactions
     application.bot_data[HEALTH_SLOT] = health
 
     application.add_handler(CommandHandler("start", start_command))
@@ -97,6 +109,10 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("bible", bible_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CallbackQueryHandler(interaction_callback, pattern=r"^gb:"))
+    application.add_handler(
+        MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, interaction_reply)
+    )
     application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
     application.add_error_handler(error_handler)
     return application
@@ -135,7 +151,7 @@ def main() -> int:
     configure_logging(settings.log_level)
     application = build_application(settings)
     application.run_polling(
-        allowed_updates=["message"],
+        allowed_updates=["message", "callback_query"],
         drop_pending_updates=settings.drop_pending_updates,
     )
     return 0

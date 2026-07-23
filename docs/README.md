@@ -4,6 +4,7 @@ Use this index as the starting point for development and production operation.
 
 - [Installation](INSTALLATION.md) — clean-host installation, permissions, systemd, and first validation.
 - [Configuration](CONFIGURATION.md) — every environment variable, default, range, and trust boundary.
+- [Interactive workflows](INTERACTIONS.md) — direct commands, guided Bible selection, search filters, result confirmation, and rollout roadmap.
 - [Testing](TESTING.md) — deterministic checks, security checks, failure injection, and live smoke testing.
 - [Upgrading and rollback](UPGRADING.md) — safe code and dependency upgrades with rollback steps.
 - [Uninstalling](UNINSTALL.md) — partial or complete removal, token handling, and verification.

@@ -26,35 +26,25 @@ Production installs only `requirements.txt` with `--require-hashes`. CI installs
 
 Using an unbounded `pip install --upgrade` during service startup would allow an upstream release to change production without code review, tests, rollback metadata, or a stable software bill of materials. The robot therefore updates quickly through reviewed automation, not unpredictably at runtime.
 
-## Current Librarian transition
+## Current Librarian policy
 
-The robot currently uses the reviewed hardened Librarian source commit because the robot relies on APIs introduced in the forthcoming Librarian 1.2 line, while that release has not yet been confirmed as available from the package index.
+Librarian 1.2.0 is published and contains the hardened reference parser, request limits, typed repository failures, checksum-validated translation cache, and Unicode-aware search contract required by the robot.
 
-The temporary entry is intentionally visible in `requirements.in`:
+The compatible input policy is:
 
 ```text
-getbible @ https://github.com/getbible/librarian/archive/95cdcafb6588d60eb2b1b000b4aa59f889c0f772.tar.gz
+getbible>=1.2,<2
 ```
 
-This is a transition mechanism, not the long-term policy. Do not replace it with a moving `master` or `staging` branch: moving branch installs are neither reproducible nor safely auditable.
+The exact runtime and development locks currently select:
 
-## Switch after the Librarian release
+```text
+getbible==1.2.0
+```
 
-After a tested Librarian release containing `RequestLimits`, typed repository failures, bounded response handling, and the hardened parser is published as version 1.2.0 or newer:
+The lock also records both published artifact hashes. Production therefore installs the reviewed 1.2.0 artifact exactly; it does not resolve a moving branch or an unreviewed later 1.x release.
 
-1. Confirm the release artifacts and Librarian CI are valid.
-2. Replace the source URL in `requirements.in` with:
-
-   ```text
-   getbible>=1.2,<2
-   ```
-
-3. Regenerate both locks using Python 3.12 and the pinned lock tooling.
-4. Install the runtime lock on Python 3.10, 3.11, and 3.12 with `--require-hashes`.
-5. Run the complete robot release gate.
-6. Merge only after all checks pass.
-
-After this one-time transition, Dependabot will propose newer compatible Librarian releases within the 1.x series. A future 2.x release requires an intentional compatibility review and range change.
+Dependabot proposes newer compatible Librarian releases within the 1.x series. Each proposal must regenerate both locks, pass the complete robot gate, and demonstrate unchanged command/search contracts before merge. A future 2.x release requires an intentional compatibility review and input-range change.
 
 The exact lock may resolve, for example, `getbible==1.2.0` even though the input allows later 1.x versions. That is expected: the next Dependabot lock PR moves the deployed version after testing.
 
@@ -105,28 +95,15 @@ python3.12 -m venv /tmp/robot-py312
 
 Then run tests, Ruff, mypy, Bandit, strict source-aware dependency auditing, secret scanning, systemd verification, and CodeQL. Review release notes and the actual diff; a green dependency bot PR is evidence, not a substitute for review.
 
-## Auditing the temporary source archive
+## Auditing the complete released environment
 
-`pip-audit --strict` resolves advisory metadata through package registries. Before the Librarian 1.2.0 package is published there, it correctly refuses to claim that the direct source build was audited as a registry package.
-
-The robot handles that limitation without an ignore rule:
+Librarian is now a normal released registry package, so the audit helper submits the complete locked environment to strict advisory auditing:
 
 ```bash
 venv/bin/python scripts/audit_runtime.py
 ```
 
-The helper:
-
-1. permits at most one direct GetBible requirement in `requirements.in`;
-2. requires exactly the same public URL in `requirements.txt`;
-3. requires a locked SHA-256 archive hash;
-4. removes only that one logical requirement from a temporary audit file;
-5. runs `pip-audit --strict` against every remaining registry dependency;
-6. fails for a URL mismatch, missing hash, duplicate source, audit error, or vulnerability.
-
-Bandit separately scans the exact installed Librarian source directory in both CI and `scripts/run-checks.sh`. The Librarian dependencies remain in the robot lock and are included in strict registry auditing.
-
-When `requirements.in` changes to the normal released range, `scripts/audit_runtime.py` detects that there is no direct source and submits the complete lock to `pip-audit --strict`. No audit exception or script change is needed at that transition.
+`scripts/audit_runtime.py` still contains fail-closed handling for a deliberately reviewed direct source should an emergency ever require one, but no requirement is currently filtered. Any vulnerability, audit error, malformed direct-source declaration, or unhashed lock fails the check. Bandit separately scans the exact installed Librarian package source in CI and `scripts/run-checks.sh`.
 
 ## GitHub Actions dependencies
 
