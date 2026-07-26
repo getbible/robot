@@ -37,6 +37,7 @@ class SetupScriptTestCase(unittest.TestCase):
             "logs",
             "follow",
             "doctor",
+            "repair",
             "config",
             "upgrade",
             "rollback",
@@ -90,6 +91,19 @@ class SetupScriptTestCase(unittest.TestCase):
         self.assertNotIn("--token ", script)
         self.assertIn('read -r -s -p "Telegram Bot API token: "', script)
         self.assertIn("ensure_unique_token", script)
+
+    def test_real_service_account_access_is_a_release_contract(self) -> None:
+        script = SETUP.read_text(encoding="utf-8")
+        self.assertIn('chown -R "root:${service_user}" "$app_dir"', script)
+        self.assertIn('chmod -R u=rwX,g=rX,o= "$app_dir"', script)
+        self.assertIn(
+            'runuser --user "$service_user" -- /bin/sh -c',
+            script,
+        )
+        self.assertIn(
+            'verify_service_account_access "$destination" "$service_user"',
+            script,
+        )
 
 
 if __name__ == "__main__":
