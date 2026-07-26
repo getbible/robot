@@ -96,12 +96,28 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         await bot._post_init(application)
-        application.bot.set_my_commands.assert_awaited_once()
-        commands = application.bot.set_my_commands.await_args.args[0]
+        self.assertEqual(application.bot.set_my_commands.await_count, 2)
+        private_call, group_call = (
+            application.bot.set_my_commands.await_args_list
+        )
+        private_commands = private_call.args[0]
+        self.assertEqual(
+            private_call.kwargs["scope"].to_dict()["type"],
+            "all_private_chats",
+        )
+        self.assertNotIn("is_ephemeral", private_commands[1].api_kwargs)
+        commands = group_call.args[0]
+        self.assertEqual(
+            group_call.kwargs["scope"].to_dict()["type"],
+            "all_group_chats",
+        )
         self.assertEqual(
             [command.command for command in commands],
             ["bible", "search", "help"],
         )
+        self.assertEqual(commands[1].api_kwargs["is_ephemeral"], True)
+        self.assertEqual(commands[1].to_dict()["is_ephemeral"], True)
+        self.assertNotIn("is_ephemeral", commands[0].api_kwargs)
         application.bot.set_my_name.assert_awaited_once_with(settings.bot_name)
         application.bot.set_my_description.assert_awaited_once_with(
             settings.bot_description

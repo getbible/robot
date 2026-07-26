@@ -8,7 +8,7 @@ import re
 import secrets
 import unicodedata
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import TypeVar, cast
 
@@ -31,6 +31,13 @@ from telegram.ext import ContextTypes
 from config import Settings
 from modules.audit import audit_event
 from modules.catalog import BookOption, ChapterOption, TranslationOption
+from modules.ephemeral import (
+    TELEGRAM_TEXT_LIMIT,
+    delete_ephemeral_text,
+    edit_ephemeral_text,
+    send_ephemeral_text,
+    telegram_text_length,
+)
 from modules.errors import (
     CircuitOpen,
     RobotBusy,
@@ -45,7 +52,7 @@ from modules.interactions import (
     SearchResult,
 )
 from modules.rate_limit import InboundRateLimiter
-from modules.renderer import pack_html_blocks, render_scripture
+from modules.renderer import render_scripture
 from modules.service import ScriptureQuery, ScriptureService
 from modules.utils import safe_delete_command, safe_delete_messages, send_typing
 
@@ -61,7 +68,8 @@ TRANSLATION_PAGE_SIZE = 6
 BOOK_PAGE_SIZE = 10
 CHAPTER_PAGE_SIZE = 20
 VERSE_PAGE_SIZE = 25
-SEARCH_SELECTOR_RESULTS_PER_MESSAGE = 96
+SEARCH_PAGE_SIZE = 30
+SEARCH_PAGE_STATE_RESERVE = 16
 MAX_EXCLUSIONS = 32
 BUTTON_LABEL_LIMIT = 60
 _CALLBACK_RE = re.compile(r"gb:([A-Za-z0-9_-]{8,16}):([a-z]{1,8}):([A-Za-z0-9_-]{0,32})\Z")
@@ -94,6 +102,7 @@ CALLBACK_ACTIONS = frozenset(
         "so",
         "spost",
         "spr",
+        "srp",
         "spv",
         "sq",
         "sreset",
@@ -143,6 +152,9 @@ async def _allow_command(
     limiter: InboundRateLimiter,
     *,
     session: InteractionSession | None = None,
+    ephemeral_receiver_user_id: int | None = None,
+    reply_to_ephemeral_message_id: int | None = None,
+    message_thread_id: int | None = None,
 ) -> bool:
     """Apply budgets and suppress repeated Telegram rejection notifications."""
     identity = _identity(update)
@@ -153,15 +165,39 @@ async def _allow_command(
         await limiter.acquire(user_id=user_id, chat_id=chat_id)
     except RobotRateLimited as error:
         if await limiter.should_notify_rejection(user_id=user_id, chat_id=chat_id):
-            message = await context.bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    "Too many requests. Please try again in about "
-                    f"{error.retry_after} seconds."
-                ),
+            text = (
+                "Too many requests. Please try again in about "
+                f"{error.retry_after} seconds."
             )
-            if session is not None:
-                session.remember_message(message.message_id)
+            if session is not None and session.ephemeral:
+                callback = getattr(update, "callback_query", None)
+                if callback is not None:
+                    await callback.answer(text, show_alert=True)
+                else:
+                    await _send_ephemeral_notice(session, context, text)
+            elif ephemeral_receiver_user_id is not None:
+                try:
+                    await send_ephemeral_text(
+                        context.bot,
+                        chat_id=chat_id,
+                        receiver_user_id=ephemeral_receiver_user_id,
+                        text=text,
+                        reply_to_ephemeral_message_id=(
+                            reply_to_ephemeral_message_id
+                        ),
+                        message_thread_id=message_thread_id,
+                    )
+                except TelegramError:
+                    LOGGER.warning(
+                        "Unable to deliver an ephemeral rate-limit notice"
+                    )
+            else:
+                message = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                )
+                if session is not None:
+                    session.remember_message(message.message_id)
         return False
     return True
 
@@ -215,8 +251,19 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     chat_id, user_id = identity
     request_id = secrets.token_hex(4)
+    ephemeral = _uses_ephemeral_search(update)
+    source_ephemeral_message_id = _update_ephemeral_message_id(update)
+    source_ephemeral_receiver_user_id = _update_ephemeral_receiver_user_id(update)
+    message_thread_id = _update_message_thread_id(update)
     try:
-        if not await _allow_command(update, context, limiter):
+        if not await _allow_command(
+            update,
+            context,
+            limiter,
+            ephemeral_receiver_user_id=user_id if ephemeral else None,
+            reply_to_ephemeral_message_id=source_ephemeral_message_id,
+            message_thread_id=message_thread_id,
+        ):
             return
         session = interactions.create(
             chat_id=chat_id,
@@ -225,25 +272,39 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             stage="search_dashboard",
             translation=settings.default_translation,
         )
+        session.ephemeral = ephemeral
+        session.message_thread_id = message_thread_id
+        session.source_ephemeral_message_id = source_ephemeral_message_id
+        session.source_ephemeral_receiver_user_id = (
+            source_ephemeral_receiver_user_id
+        )
         session.remember_message(_update_message_id(update))
         query = " ".join(context.args or ()).strip()
         if query:
-            await send_typing(update, context)
+            if not session.ephemeral:
+                await send_typing(update, context)
             await _run_search(session, query, service, settings)
             await _send_search_results(session, context, settings)
         else:
-            message = await context.bot.send_message(
-                chat_id=chat_id,
+            await _send_interaction_message(
+                session,
+                context,
                 text=_search_dashboard_text(session),
                 reply_markup=_search_dashboard_keyboard(session),
-                disable_web_page_preview=True,
             )
-            session.message_id = message.message_id
-            session.remember_message(message.message_id)
     except Exception as error:
         if "session" in locals():
             interactions.remove(session.token)
-        await _report_command_error(error, request_id, chat_id, context)
+        await _report_command_error(
+            error,
+            request_id,
+            chat_id,
+            context,
+            session=session if "session" in locals() else None,
+            ephemeral_receiver_user_id=user_id if ephemeral else None,
+            reply_to_ephemeral_message_id=source_ephemeral_message_id,
+            message_thread_id=message_thread_id,
+        )
 
 
 async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -290,6 +351,7 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             stage="reference_translation",
             translation=settings.default_translation,
         )
+        session.message_thread_id = _update_message_thread_id(update)
         session.remember_message(_update_message_id(update))
         session.translations = translations
         message = await context.bot.send_message(
@@ -342,6 +404,17 @@ async def interaction_callback(
     ):
         return
 
+    if (
+        session.ephemeral
+        and session.stage in {"search_exclude", "search_query"}
+        and action != "cancel"
+    ):
+        await callback.answer(
+            "Reply to the current private prompt first.",
+            show_alert=True,
+        )
+        return
+
     if action == "srt":
         generation, separator, raw_index = value.partition("-")
         if (
@@ -378,9 +451,20 @@ async def interaction_callback(
         )
         return
 
-    if action == "spost" and not session.selected:
-        await callback.answer("Select at least one verse first.", show_alert=True)
-        return
+    if action == "spost":
+        if (
+            session.stage != "search_results"
+            or not value.isdigit()
+            or int(value) != session.search_generation
+        ):
+            await callback.answer(
+                "Those search results are no longer active.",
+                show_alert=True,
+            )
+            return
+        if not session.selected:
+            await callback.answer("Select at least one verse first.", show_alert=True)
+            return
 
     await callback.answer()
     request_id = secrets.token_hex(4)
@@ -400,6 +484,7 @@ async def interaction_callback(
             request_id,
             chat_id,
             context,
+            session=session,
         )
         session.remember_message(message_id)
 
@@ -409,22 +494,26 @@ async def interaction_reply(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     """Accept only replies to a bot-created prompt owned by this user/session."""
-    if (
-        update.effective_message is None
-        or update.effective_message.reply_to_message is None
-        or update.effective_message.text is None
-    ):
+    if update.effective_message is None or update.effective_message.text is None:
         return
     identity = _identity(update)
     if identity is None:
         return
     settings, service, limiter, interactions = _components(context)
     chat_id, user_id = identity
-    session = interactions.find_prompt(
-        chat_id=chat_id,
-        user_id=user_id,
-        prompt_message_id=update.effective_message.reply_to_message.message_id,
-    )
+    reply_to = getattr(update.effective_message, "reply_to_message", None)
+    session = None
+    if reply_to is not None:
+        session = interactions.find_prompt(
+            chat_id=chat_id,
+            user_id=user_id,
+            prompt_message_id=reply_to.message_id,
+        )
+    if session is None and _update_ephemeral_message_id(update) is not None:
+        session = interactions.find_pending_input(
+            chat_id=chat_id,
+            user_id=user_id,
+        )
     if session is None:
         return
 
@@ -447,24 +536,42 @@ async def interaction_reply(
             )
             session.stage = "search_dashboard"
             session.prompt_message_id = None
+            await _clear_ephemeral_prompt(
+                session,
+                context,
+                reply_ephemeral_message_id=_update_ephemeral_message_id(update),
+                reply_ephemeral_receiver_user_id=(
+                    _update_ephemeral_receiver_user_id(update)
+                ),
+            )
             await _edit(
                 session,
                 context,
                 _search_dashboard_text(session),
                 _search_dashboard_keyboard(session),
             )
-            message = await context.bot.send_message(
-                chat_id=chat_id,
-                text="Search exclusions updated.",
-            )
-            session.remember_message(message.message_id)
+            if not session.ephemeral:
+                message = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="Search exclusions updated.",
+                )
+                session.remember_message(message.message_id)
             return
 
         if session.stage != "search_query":
             return
-        await send_typing(update, context)
+        if not session.ephemeral:
+            await send_typing(update, context)
         await _run_search(session, text, service, settings)
         session.prompt_message_id = None
+        await _clear_ephemeral_prompt(
+            session,
+            context,
+            reply_ephemeral_message_id=_update_ephemeral_message_id(update),
+            reply_ephemeral_receiver_user_id=(
+                _update_ephemeral_receiver_user_id(update)
+            ),
+        )
         await _send_search_results(session, context, settings)
     except Exception as error:
         message_id = await _report_command_error(
@@ -472,6 +579,7 @@ async def interaction_reply(
             request_id,
             chat_id,
             context,
+            session=session,
         )
         session.remember_message(message_id)
 
@@ -880,10 +988,42 @@ async def _dispatch_callback(
         session.translation = settings.default_translation
         session.books = ()
         session.search_results = ()
+        session.search_page = 0
+        session.search_page_ranges = ()
         session.selected.clear()
         await _show_search_dashboard(session, context)
         return
+    if action == "srp":
+        _require_kind(session, "search")
+        generation, separator, raw_page = value.partition("-")
+        if (
+            session.stage != "search_results"
+            or not separator
+            or not generation.isdigit()
+            or int(generation) != session.search_generation
+            or not raw_page.isdigit()
+        ):
+            raise RobotInputError("Search page selection is invalid.")
+        session.search_page = _bounded_integer(
+            raw_page,
+            0,
+            max(0, len(session.search_page_ranges) - 1),
+        )
+        await _edit(
+            session,
+            context,
+            _search_results_text(session),
+            _search_results_keyboard(session),
+            parse_mode=ParseMode.HTML,
+        )
+        return
     if action == "spost":
+        if (
+            session.stage != "search_results"
+            or not value.isdigit()
+            or int(value) != session.search_generation
+        ):
+            raise RobotInputError("Search selection is no longer active.")
         reference = _selected_search_reference(session)
         query = ScriptureQuery(reference, session.search_options.translation)
         await _edit(
@@ -895,14 +1035,30 @@ async def _dispatch_callback(
             ),
             None,
         )
-        await _post_scripture(
-            session.chat_id,
-            query,
-            settings,
-            service,
-            context,
-            source="search_selection",
-        )
+        try:
+            await _post_scripture(
+                session.chat_id,
+                query,
+                settings,
+                service,
+                context,
+                source="search_selection",
+                message_thread_id=session.message_thread_id,
+            )
+        except Exception:
+            try:
+                await _edit(
+                    session,
+                    context,
+                    _search_results_text(session),
+                    _search_results_keyboard(session),
+                    parse_mode=ParseMode.HTML,
+                )
+            except TelegramError:
+                LOGGER.warning(
+                    "Unable to restore private search controls after posting failure"
+                )
+            raise
         interactions.remove(session.token)
         await _cleanup_interaction(session, context)
         return
@@ -1001,9 +1157,11 @@ async def _run_search(
     session.search_total = page.total
     session.search_results = page.items
     session.search_generation = (session.search_generation % 999_999) + 1
-    session.search_selector_ranges.clear()
+    session.search_page = 0
+    session.search_page_ranges = ()
     session.selected.clear()
     session.stage = "search_results"
+    session.search_page_ranges = _search_page_ranges(session)
     options = session.search_options
     audit_event(
         LOGGER,
@@ -1032,57 +1190,26 @@ async def _send_search_results(
     context: ContextTypes.DEFAULT_TYPE,
     settings: Settings,
 ) -> None:
-    """Send complete searchable verses followed by bounded selection controls."""
-    if session.search_results:
-        chunks = pack_html_blocks(
-            (
-                _search_result_block(session, index, result)
-                for index, result in enumerate(session.search_results)
-            ),
-            max_chunks=settings.max_output_chunks,
+    """Render only the current complete-result page in one private panel."""
+    del settings
+    text = _search_results_text(session)
+    keyboard = _search_results_keyboard(session)
+    if session.ephemeral_message_id is not None or session.message_id is not None:
+        await _edit(
+            session,
+            context,
+            text,
+            keyboard,
+            parse_mode=ParseMode.HTML,
         )
-        for chunk in chunks:
-            message = await context.bot.send_message(
-                chat_id=session.chat_id,
-                text=chunk,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-            session.remember_message(message.message_id)
-
-    session.remember_message(session.message_id)
-    session.search_selector_ranges.clear()
-    ranges = [
-        (
-            start,
-            min(
-                start + SEARCH_SELECTOR_RESULTS_PER_MESSAGE,
-                len(session.search_results),
-            ),
-        )
-        for start in range(
-            0,
-            len(session.search_results),
-            SEARCH_SELECTOR_RESULTS_PER_MESSAGE,
-        )
-    ] or [(0, 0)]
-    for start, end in ranges:
-        include_controls = end == len(session.search_results)
-        controls = await context.bot.send_message(
-            chat_id=session.chat_id,
-            text=_search_results_text(session, start=start, end=end),
-            reply_markup=_search_results_keyboard(
-                session,
-                start=start,
-                end=end,
-                include_controls=include_controls,
-            ),
-            disable_web_page_preview=True,
-        )
-        session.search_selector_ranges[controls.message_id] = (start, end)
-        session.remember_message(controls.message_id)
-        if include_controls:
-            session.message_id = controls.message_id
+        return
+    await _send_interaction_message(
+        session,
+        context,
+        text=text,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def _post_scripture(
@@ -1093,6 +1220,7 @@ async def _post_scripture(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     source: str,
+    message_thread_id: int | None = None,
 ) -> None:
     result = await service.select(query)
     verse_count = sum(
@@ -1111,6 +1239,7 @@ async def _post_scripture(
             text=chunk,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
+            message_thread_id=message_thread_id,
         )
     audit_event(
         LOGGER,
@@ -1132,6 +1261,11 @@ async def _report_command_error(
     request_id: str,
     chat_id: int,
     context: ContextTypes.DEFAULT_TYPE,
+    *,
+    session: InteractionSession | None = None,
+    ephemeral_receiver_user_id: int | None = None,
+    reply_to_ephemeral_message_id: int | None = None,
+    message_thread_id: int | None = None,
 ) -> int | None:
     message, expected = _safe_error_message(error, request_id)
     log = LOGGER.info if expected else LOGGER.error
@@ -1143,7 +1277,38 @@ async def _report_command_error(
         type(error).__name__,
         f"; causes={','.join(causes)}" if causes else "",
     )
-    sent = await context.bot.send_message(chat_id=chat_id, text=message)
+    if session is not None and session.ephemeral:
+        try:
+            await _send_ephemeral_notice(session, context, message)
+        except TelegramError:
+            LOGGER.warning(
+                "Unable to deliver ephemeral error for request %s",
+                request_id,
+            )
+        return None
+    if ephemeral_receiver_user_id is not None:
+        try:
+            await send_ephemeral_text(
+                context.bot,
+                chat_id=chat_id,
+                receiver_user_id=ephemeral_receiver_user_id,
+                text=message,
+                reply_to_ephemeral_message_id=reply_to_ephemeral_message_id,
+                message_thread_id=message_thread_id,
+            )
+        except TelegramError:
+            LOGGER.warning(
+                "Unable to deliver ephemeral error for request %s",
+                request_id,
+            )
+        return None
+    sent = await context.bot.send_message(
+        chat_id=chat_id,
+        text=message,
+        message_thread_id=(
+            session.message_thread_id if session is not None else message_thread_id
+        ),
+    )
     message_id = getattr(sent, "message_id", None)
     if (
         not isinstance(message_id, int)
@@ -1159,6 +1324,29 @@ async def _cleanup_interaction(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     """Remove only the messages recorded for a completed bot workflow."""
+    if session.ephemeral:
+        targets = {
+            (session.user_id, session.ephemeral_message_id),
+            (session.user_id, session.prompt_ephemeral_message_id),
+            (
+                session.source_ephemeral_receiver_user_id,
+                session.source_ephemeral_message_id,
+            ),
+        }
+        for receiver_user_id, ephemeral_message_id in targets:
+            if receiver_user_id is None or ephemeral_message_id is None:
+                continue
+            try:
+                await delete_ephemeral_text(
+                    context.bot,
+                    chat_id=session.chat_id,
+                    receiver_user_id=receiver_user_id,
+                    ephemeral_message_id=ephemeral_message_id,
+                )
+            except TelegramError:
+                LOGGER.warning(
+                    "Unable to delete ephemeral workflow message safely"
+                )
     await safe_delete_messages(
         context,
         chat_id=session.chat_id,
@@ -1176,6 +1364,56 @@ def _update_message_id(update: Update) -> int | None:
     ):
         return None
     return message_id
+
+
+def _update_ephemeral_message_id(update: Update) -> int | None:
+    message = getattr(update, "effective_message", None)
+    value = getattr(message, "ephemeral_message_id", None)
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    api_kwargs = getattr(message, "api_kwargs", None)
+    value = (
+        api_kwargs.get("ephemeral_message_id")
+        if isinstance(api_kwargs, Mapping)
+        else None
+    )
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return value
+
+
+def _update_ephemeral_receiver_user_id(update: Update) -> int | None:
+    message = getattr(update, "effective_message", None)
+    receiver_user = getattr(message, "receiver_user", None)
+    value = getattr(receiver_user, "id", None)
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    api_kwargs = getattr(message, "api_kwargs", None)
+    raw_receiver = (
+        api_kwargs.get("receiver_user")
+        if isinstance(api_kwargs, Mapping)
+        else None
+    )
+    value = (
+        raw_receiver.get("id")
+        if isinstance(raw_receiver, Mapping)
+        else None
+    )
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return value
+
+
+def _update_message_thread_id(update: Update) -> int | None:
+    value = getattr(getattr(update, "effective_message", None), "message_thread_id", None)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return value
+
+
+def _uses_ephemeral_search(update: Update) -> bool:
+    chat_type = getattr(getattr(update, "effective_chat", None), "type", None)
+    return chat_type in {"group", "supergroup"} and update.effective_user is not None
 
 
 def _error_cause_types(error: Exception) -> tuple[str, ...]:
@@ -1198,7 +1436,22 @@ async def _edit(
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
     keyboard: InlineKeyboardMarkup | None,
+    *,
+    parse_mode: str | None = None,
 ) -> None:
+    if session.ephemeral:
+        if session.ephemeral_message_id is None:
+            raise RobotInputError("Ephemeral interactive message is unavailable.")
+        await edit_ephemeral_text(
+            context.bot,
+            chat_id=session.chat_id,
+            receiver_user_id=session.user_id,
+            ephemeral_message_id=session.ephemeral_message_id,
+            text=text,
+            reply_markup=keyboard,
+            parse_mode=parse_mode,
+        )
+        return
     if session.message_id is None:
         raise RobotInputError("Interactive message is unavailable.")
     await context.bot.edit_message_text(
@@ -1207,6 +1460,7 @@ async def _edit(
         text=text,
         reply_markup=keyboard,
         disable_web_page_preview=True,
+        parse_mode=parse_mode,
     )
 
 
@@ -1216,47 +1470,15 @@ async def _edit_search_selection(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Refresh the selected range and final controls without result paging."""
-    clicked_message = getattr(getattr(update, "callback_query", None), "message", None)
-    clicked_id = getattr(clicked_message, "message_id", None)
-    if not isinstance(clicked_id, int) or isinstance(clicked_id, bool):
-        clicked_id = next(
-            (
-                message_id
-                for message_id, (start, end) in session.search_selector_ranges.items()
-                if start <= index < end
-            ),
-            session.message_id,
-        )
-
-    message_ids = {
-        message_id
-        for message_id in (clicked_id, session.message_id)
-        if isinstance(message_id, int)
-        and not isinstance(message_id, bool)
-        and message_id > 0
-    }
-    if not message_ids:
-        raise RobotInputError("Search selection controls are unavailable.")
-
-    for message_id in message_ids:
-        start, end = session.search_selector_ranges.get(
-            message_id,
-            (0, len(session.search_results)),
-        )
-        include_controls = message_id == session.message_id
-        await context.bot.edit_message_text(
-            chat_id=session.chat_id,
-            message_id=message_id,
-            text=_search_results_text(session, start=start, end=end),
-            reply_markup=_search_results_keyboard(
-                session,
-                start=start,
-                end=end,
-                include_controls=include_controls,
-            ),
-            disable_web_page_preview=True,
-        )
+    """Refresh the current private result page after one selection changes."""
+    del index, update
+    await _edit(
+        session,
+        context,
+        _search_results_text(session),
+        _search_results_keyboard(session),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def _show_search_dashboard(
@@ -1280,6 +1502,33 @@ async def _prompt_for_reply(
     stage: str,
     text: str,
 ) -> None:
+    if session.ephemeral:
+        if session.stage in {"search_exclude", "search_query"}:
+            raise RobotInputError("Reply to the current search prompt first.")
+        pending = _components(context)[3].find_pending_input(
+            chat_id=session.chat_id,
+            user_id=session.user_id,
+        )
+        if pending is not None and pending.token != session.token:
+            raise RobotInputError(
+                "Another private search prompt is already waiting for your reply."
+            )
+        callback = getattr(update, "callback_query", None)
+        callback_query_id = getattr(callback, "id", None)
+        ephemeral_message_id = await send_ephemeral_text(
+            context.bot,
+            chat_id=session.chat_id,
+            receiver_user_id=session.user_id,
+            text=text,
+            reply_markup=ForceReply(input_field_placeholder="Type your reply"),
+            callback_query_id=(
+                callback_query_id if isinstance(callback_query_id, str) else None
+            ),
+            message_thread_id=session.message_thread_id,
+        )
+        session.stage = stage
+        session.prompt_ephemeral_message_id = ephemeral_message_id
+        return
     user = update.effective_user
     target = user.mention_html() if user is not None else "Please"
     message = await context.bot.send_message(
@@ -1290,10 +1539,87 @@ async def _prompt_for_reply(
             selective=user is not None,
             input_field_placeholder="Type your reply",
         ),
+        message_thread_id=session.message_thread_id,
     )
     session.stage = stage
     session.prompt_message_id = message.message_id
     session.remember_message(message.message_id)
+
+
+async def _send_interaction_message(
+    session: InteractionSession,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | ForceReply | None = None,
+    parse_mode: str | None = None,
+) -> None:
+    """Send an interactive panel without exposing group workflow content."""
+    if session.ephemeral:
+        ephemeral_message_id = await send_ephemeral_text(
+            context.bot,
+            chat_id=session.chat_id,
+            receiver_user_id=session.user_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            reply_to_ephemeral_message_id=session.source_ephemeral_message_id,
+            message_thread_id=session.message_thread_id,
+        )
+        session.ephemeral_message_id = ephemeral_message_id
+        return
+    message = await context.bot.send_message(
+        chat_id=session.chat_id,
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+        disable_web_page_preview=True,
+        message_thread_id=session.message_thread_id,
+    )
+    session.message_id = message.message_id
+    session.remember_message(message.message_id)
+
+
+async def _send_ephemeral_notice(
+    session: InteractionSession,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+) -> None:
+    await send_ephemeral_text(
+        context.bot,
+        chat_id=session.chat_id,
+        receiver_user_id=session.user_id,
+        text=text,
+        reply_to_ephemeral_message_id=session.source_ephemeral_message_id,
+        message_thread_id=session.message_thread_id,
+    )
+
+
+async def _clear_ephemeral_prompt(
+    session: InteractionSession,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    reply_ephemeral_message_id: int | None,
+    reply_ephemeral_receiver_user_id: int | None,
+) -> None:
+    if not session.ephemeral:
+        return
+    for receiver_user_id, ephemeral_message_id in (
+        (session.user_id, session.prompt_ephemeral_message_id),
+        (reply_ephemeral_receiver_user_id, reply_ephemeral_message_id),
+    ):
+        if receiver_user_id is None or ephemeral_message_id is None:
+            continue
+        try:
+            await delete_ephemeral_text(
+                context.bot,
+                chat_id=session.chat_id,
+                receiver_user_id=receiver_user_id,
+                ephemeral_message_id=ephemeral_message_id,
+            )
+        except TelegramError:
+            LOGGER.warning("Unable to clear ephemeral search prompt safely")
+    session.prompt_ephemeral_message_id = None
 
 
 def _translation_text(session: InteractionSession, page: int) -> str:
@@ -1643,52 +1969,103 @@ def _search_proximity_keyboard(session: InteractionSession) -> InlineKeyboardMar
     return InlineKeyboardMarkup(rows)
 
 
-def _search_results_text(
+def _search_page_ranges(
+    session: InteractionSession,
+) -> tuple[tuple[int, int], ...]:
+    """Build stable complete-verse pages within Telegram's text limit."""
+    returned = len(session.search_results)
+    if returned == 0:
+        return ((0, 0),)
+
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    while start < returned:
+        end = start
+        while end < returned and end - start < SEARCH_PAGE_SIZE:
+            candidate = end + 1
+            text = _search_results_page_text(
+                session,
+                start=start,
+                end=candidate,
+                page=len(ranges),
+                page_count=returned,
+            )
+            if (
+                telegram_text_length(text) + SEARCH_PAGE_STATE_RESERVE
+                > TELEGRAM_TEXT_LIMIT
+            ):
+                break
+            end = candidate
+        if end == start:
+            raise RequestLimitError(
+                "One complete search result exceeds Telegram's message limit."
+            )
+        ranges.append((start, end))
+        start = end
+    return tuple(ranges)
+
+
+def _search_results_text(session: InteractionSession) -> str:
+    ranges = session.search_page_ranges or _search_page_ranges(session)
+    page = min(max(0, session.search_page), len(ranges) - 1)
+    start, end = ranges[page]
+    text = _search_results_page_text(
+        session,
+        start=start,
+        end=end,
+        page=page,
+        page_count=len(ranges),
+    )
+    if telegram_text_length(text) > TELEGRAM_TEXT_LIMIT:
+        raise RequestLimitError("The complete search page exceeds Telegram's limit.")
+    return text
+
+
+def _search_results_page_text(
     session: InteractionSession,
     *,
-    start: int = 0,
-    end: int | None = None,
+    start: int,
+    end: int,
+    page: int,
+    page_count: int,
 ) -> str:
     returned = len(session.search_results)
-    end = returned if end is None else end
     coverage = (
-        f"Showing {returned} of {session.search_total} matches"
+        f"{returned} returned of {session.search_total} matches"
         if session.search_total > returned
         else f"{session.search_total} matches"
     )
-    empty = "\n\nNo verses matched. Change the filters or search words." if returned == 0 else ""
-    selectable = (
-        f"\nReferences {start + 1}–{end} are selectable below."
-        if returned > SEARCH_SELECTOR_RESULTS_PER_MESSAGE
-        else ""
+    header = (
+        f"<b>Search:</b> {html.escape(session.search_query)}\n"
+        f"<b>Translation:</b> "
+        f"{html.escape(session.search_options.translation.upper())}\n"
+        f"<b>Results:</b> {coverage}\n"
+        f"<b>Page:</b> {page + 1} of {max(1, page_count)}\n"
+        f"<b>Selected:</b> {len(session.selected)}"
+    )
+    if returned == 0:
+        return (
+            f"{header}\n\n"
+            "No verses matched. Change the filters or search words."
+        )
+    blocks = "\n\n".join(
+        _search_result_block(session, index, session.search_results[index])
+        for index in range(start, end)
     )
     return (
-        f"Search: {session.search_query}\n"
-        f"Translation: {session.search_options.translation.upper()}\n"
-        f"{coverage}\n"
-        f"Selected: {len(session.selected)}\n\n"
-        "The complete matching verses are shown above. "
-        "Select one or more references below, then choose Post selected."
-        f"{selectable}"
-        f"{empty}"
+        f"{header}\n\n"
+        f"{blocks}\n\n"
+        "Select one or more references below, then choose "
+        "<b>Post selected</b>."
     )
 
 
 def _search_results_keyboard(
     session: InteractionSession,
-    *,
-    start: int = 0,
-    end: int | None = None,
-    include_controls: bool = True,
 ) -> InlineKeyboardMarkup:
-    end = (
-        min(
-            len(session.search_results),
-            start + SEARCH_SELECTOR_RESULTS_PER_MESSAGE,
-        )
-        if end is None
-        else end
-    )
+    ranges = session.search_page_ranges or _search_page_ranges(session)
+    page = min(max(0, session.search_page), len(ranges) - 1)
+    start, end = ranges[page]
     rows: list[list[InlineKeyboardButton]] = []
     choices: list[InlineKeyboardButton] = []
     for index in range(start, end):
@@ -1709,31 +2086,59 @@ def _search_results_keyboard(
         rows.append(
             choices[index : index + 2]
         )
-    if include_controls and session.search_results:
+    navigation: list[InlineKeyboardButton] = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                "‹ Previous",
+                callback_data=_callback(
+                    session,
+                    "srp",
+                    f"{session.search_generation}-{page - 1}",
+                ),
+            )
+        )
+    if page + 1 < len(ranges):
+        navigation.append(
+            InlineKeyboardButton(
+                "Next ›",
+                callback_data=_callback(
+                    session,
+                    "srp",
+                    f"{session.search_generation}-{page + 1}",
+                ),
+            )
+        )
+    if navigation:
+        rows.append(navigation)
+    if session.search_results:
         rows.append(
             [
                 InlineKeyboardButton(
                     f"Post selected ({len(session.selected)})",
-                    callback_data=_callback(session, "spost"),
+                    callback_data=_callback(
+                        session,
+                        "spost",
+                        str(session.search_generation),
+                    ),
                 )
             ]
         )
-    if include_controls:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "New search",
-                    callback_data=_callback(session, "snew"),
-                ),
-                InlineKeyboardButton(
-                    "Filters",
-                    callback_data=_callback(session, "sdash"),
-                ),
-            ]
-        )
-        rows.append(
-            [InlineKeyboardButton("Cancel", callback_data=_callback(session, "cancel"))]
-        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "New search",
+                callback_data=_callback(session, "snew"),
+            ),
+            InlineKeyboardButton(
+                "Filters",
+                callback_data=_callback(session, "sdash"),
+            ),
+        ]
+    )
+    rows.append(
+        [InlineKeyboardButton("Cancel", callback_data=_callback(session, "cancel"))]
+    )
     return InlineKeyboardMarkup([row for row in rows if row])
 
 

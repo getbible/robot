@@ -29,9 +29,12 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   initiating command, bot panels, prompts, acknowledgements, and prompt replies
   after all Scripture chunks are delivered; final Scripture remains, failures
   preserve recovery context, and Telegram deletion failures are non-fatal.
-- Replaced truncated, five-at-a-time search previews with complete scrollable
-  verse text, bolded search matches, and bounded reference selectors without
-  result paging.
+- Replaced public search-result messages with Telegram Bot API 10.2 ephemeral
+  commands and per-user group panels. Complete highlighted verses now use
+  bounded Previous/Next pages of at most 30 results, automatically reducing a
+  page rather than truncating a verse when Telegram's text limit requires it.
+  Only **Post selected** sends an ordinary group message, and failed ephemeral
+  delivery never falls back to exposing results publicly.
 - Restored the original default welcome/help copy with only the completed search
   guidance updated. The original Telegram `/start` entry handler remains
   available but is no longer duplicated in the visible command menu.

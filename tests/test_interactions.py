@@ -127,6 +127,34 @@ class InteractionStoreTestCase(unittest.TestCase):
             (30, 20, 10),
         )
 
+    def test_ephemeral_pending_input_is_owner_scoped(self) -> None:
+        store = InteractionStore(max_sessions=10, ttl_seconds=60)
+        session = store.create(
+            chat_id=-100,
+            user_id=200,
+            kind="search",
+            stage="search_query",
+            translation="kjv",
+        )
+        session.ephemeral = True
+        session.source_ephemeral_message_id = 700
+        session.source_ephemeral_receiver_user_id = 999
+
+        self.assertIs(
+            store.find_pending_input(chat_id=-100, user_id=200),
+            session,
+        )
+        self.assertIsNone(
+            store.find_pending_input(chat_id=-100, user_id=201)
+        )
+        self.assertEqual(session.source_ephemeral_message_id, 700)
+        self.assertEqual(session.source_ephemeral_receiver_user_id, 999)
+
+        session.stage = "search_results"
+        self.assertIsNone(
+            store.find_pending_input(chat_id=-100, user_id=200)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

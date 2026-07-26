@@ -71,8 +71,15 @@ class InteractionSession:
     search_total: int = 0
     search_results: tuple[SearchResult, ...] = ()
     search_generation: int = 0
-    search_selector_ranges: dict[int, tuple[int, int]] = field(default_factory=dict)
+    search_page: int = 0
+    search_page_ranges: tuple[tuple[int, int], ...] = ()
     selected: set[int] = field(default_factory=set)
+    ephemeral: bool = False
+    ephemeral_message_id: int | None = None
+    prompt_ephemeral_message_id: int | None = None
+    source_ephemeral_message_id: int | None = None
+    source_ephemeral_receiver_user_id: int | None = None
+    message_thread_id: int | None = None
     workflow_message_ids: set[int] = field(default_factory=set)
 
     def remember_message(self, message_id: int | None) -> None:
@@ -95,7 +102,6 @@ class InteractionSession:
         if self.prompt_message_id is not None:
             message_ids.add(self.prompt_message_id)
         return tuple(sorted(message_ids, reverse=True))
-
 
 class InteractionStore:
     """A TTL/LRU store that prevents arbitrary callback-state growth."""
@@ -187,6 +193,28 @@ class InteractionStore:
                     session.chat_id == chat_id
                     and session.user_id == user_id
                     and session.prompt_message_id == prompt_message_id
+                ):
+                    session.touched_at = self._clock()
+                    self._sessions.move_to_end(token)
+                    return session
+            return None
+
+    def find_pending_input(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+    ) -> InteractionSession | None:
+        """Find the newest ephemeral workflow waiting for text from one user."""
+        with self._guard:
+            self._purge_expired()
+            for token in reversed(self._sessions):
+                session = self._sessions[token]
+                if (
+                    session.chat_id == chat_id
+                    and session.user_id == user_id
+                    and session.ephemeral
+                    and session.stage in {"search_exclude", "search_query"}
                 ):
                     session.touched_at = self._clock()
                     self._sessions.move_to_end(token)
