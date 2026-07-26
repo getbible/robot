@@ -49,6 +49,7 @@ EXPECTED_CALLBACK_ACTIONS = frozenset(
         "spv",
         "sq",
         "sreset",
+        "srs",
         "srt",
         "ss",
         "st",
@@ -377,6 +378,16 @@ class InteractiveFeatureTestCase(unittest.IsolatedAsyncioTestCase):
         self.service.search.assert_awaited()
         self.assertEqual(session.stage, "search_results")
         self.assertEqual(len(session.search_results), 7)
+
+        await self.dispatch(
+            session,
+            "srs",
+            f"{session.search_generation}-nt",
+        )
+        self.assertEqual(session.search_options.scope, "new_testament")
+        self.assertEqual(session.search_options.books, ())
+        self.assertEqual(session.stage, "search_results")
+        self.assertEqual(session.search_page, 0)
 
         await self.dispatch(session, "snew")
         self.assertEqual(session.stage, "search_query")

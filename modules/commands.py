@@ -69,7 +69,6 @@ BOOK_PAGE_SIZE = 10
 CHAPTER_PAGE_SIZE = 20
 VERSE_PAGE_SIZE = 25
 SEARCH_PAGE_SIZE = 30
-SEARCH_PAGE_STATE_RESERVE = 16
 MAX_EXCLUSIONS = 32
 BUTTON_LABEL_LIMIT = 60
 _CALLBACK_RE = re.compile(r"gb:([A-Za-z0-9_-]{8,16}):([a-z]{1,8}):([A-Za-z0-9_-]{0,32})\Z")
@@ -106,6 +105,7 @@ CALLBACK_ACTIONS = frozenset(
         "spv",
         "sq",
         "sreset",
+        "srs",
         "srt",
         "ss",
         "st",
@@ -484,6 +484,28 @@ async def interaction_callback(
             return
         if not session.selected:
             await callback.answer("Select at least one verse first.", show_alert=True)
+            return
+
+    if action == "srs":
+        generation, separator, raw_scope = value.partition("-")
+        if (
+            session.stage != "search_results"
+            or not separator
+            or not generation.isdigit()
+            or int(generation) != session.search_generation
+        ):
+            await callback.answer(
+                "Those search results are no longer active.",
+                show_alert=True,
+            )
+            return
+        try:
+            _search_result_scope(raw_scope)
+        except RobotInputError:
+            await callback.answer(
+                "That Scripture section is invalid.",
+                show_alert=True,
+            )
             return
 
     await callback.answer()
@@ -1027,6 +1049,42 @@ async def _dispatch_callback(
         session.search_page_ranges = ()
         session.selected.clear()
         await _show_search_dashboard(session, context)
+        return
+    if action == "srs":
+        _require_kind(session, "search")
+        generation, separator, raw_scope = value.partition("-")
+        if (
+            session.stage != "search_results"
+            or not separator
+            or not generation.isdigit()
+            or int(generation) != session.search_generation
+        ):
+            raise RobotInputError("Search scope selection is no longer active.")
+        scope = _search_result_scope(raw_scope)
+        if scope != session.search_options.scope or session.search_options.books:
+            previous_options = session.search_options
+            session.search_options = replace(
+                previous_options,
+                scope=scope,
+                books=(),
+            )
+            try:
+                await _run_search(
+                    session,
+                    session.search_query,
+                    service,
+                    settings,
+                )
+            except Exception:
+                session.search_options = previous_options
+                raise
+        await _edit(
+            session,
+            context,
+            _search_results_text(session),
+            _search_results_keyboard(session),
+            parse_mode=ParseMode.HTML,
+        )
         return
     if action == "srp":
         _require_kind(session, "search")
@@ -2035,37 +2093,14 @@ def _search_proximity_keyboard(session: InteractionSession) -> InlineKeyboardMar
 def _search_page_ranges(
     session: InteractionSession,
 ) -> tuple[tuple[int, int], ...]:
-    """Build stable complete-verse pages within Telegram's text limit."""
+    """Build stable pages containing at most thirty result buttons."""
     returned = len(session.search_results)
     if returned == 0:
         return ((0, 0),)
-
-    ranges: list[tuple[int, int]] = []
-    start = 0
-    while start < returned:
-        end = start
-        while end < returned and end - start < SEARCH_PAGE_SIZE:
-            candidate = end + 1
-            text = _search_results_page_text(
-                session,
-                start=start,
-                end=candidate,
-                page=len(ranges),
-                page_count=returned,
-            )
-            if (
-                telegram_text_length(text) + SEARCH_PAGE_STATE_RESERVE
-                > TELEGRAM_TEXT_LIMIT
-            ):
-                break
-            end = candidate
-        if end == start:
-            raise RequestLimitError(
-                "One complete search result exceeds Telegram's message limit."
-            )
-        ranges.append((start, end))
-        start = end
-    return tuple(ranges)
+    return tuple(
+        (start, min(start + SEARCH_PAGE_SIZE, returned))
+        for start in range(0, returned, SEARCH_PAGE_SIZE)
+    )
 
 
 def _search_results_text(session: InteractionSession) -> str:
@@ -2102,6 +2137,7 @@ def _search_results_page_text(
         f"<b>Search:</b> {html.escape(session.search_query)}\n"
         f"<b>Translation:</b> "
         f"{html.escape(session.search_options.translation.upper())}\n"
+        f"<b>Section:</b> {_search_scope_label(session.search_options.scope)}\n"
         f"<b>Results:</b> {coverage}\n"
         f"<b>Page:</b> {page + 1} of {max(1, page_count)}\n"
         f"<b>Selected:</b> {len(session.selected)}"
@@ -2111,14 +2147,12 @@ def _search_results_page_text(
             f"{header}\n\n"
             "No verses matched. Change the filters or search words."
         )
-    blocks = "\n\n".join(
-        _search_result_block(session, index, session.search_results[index])
-        for index in range(start, end)
-    )
+    visible = end - start
     return (
         f"{header}\n\n"
-        f"{blocks}\n\n"
-        "Select one or more references below, then choose "
+        f"Showing {visible} complete verse"
+        f"{'' if visible == 1 else 's'} in the menu below.\n"
+        "Tap a verse block to select it, then choose "
         "<b>Post selected</b>."
     )
 
@@ -2129,25 +2163,37 @@ def _search_results_keyboard(
     ranges = session.search_page_ranges or _search_page_ranges(session)
     page = min(max(0, session.search_page), len(ranges) - 1)
     start, end = ranges[page]
-    rows: list[list[InlineKeyboardButton]] = []
-    choices: list[InlineKeyboardButton] = []
-    for index in range(start, end):
-        item = session.search_results[index]
-        marker = "☑" if index in session.selected else "☐"
-        label = _button_label(f"{marker} {index + 1}. {item.reference}")
-        choices.append(
+    rows: list[list[InlineKeyboardButton]] = [
+        [
             InlineKeyboardButton(
-                label,
+                f"{_search_scope_marker(session, scope)}{label}",
                 callback_data=_callback(
                     session,
-                    "srt",
-                    f"{session.search_generation}-{index}",
+                    "srs",
+                    f"{session.search_generation}-{value}",
                 ),
             )
-        )
-    for index in range(0, len(choices), 2):
+            for value, scope, label in (
+                ("all", "bible", "All"),
+                ("ot", "old_testament", "Old"),
+                ("nt", "new_testament", "New"),
+                ("dc", "deuterocanon", "Other"),
+            )
+        ]
+    ]
+    for index in range(start, end):
+        item = session.search_results[index]
         rows.append(
-            choices[index : index + 2]
+            [
+                InlineKeyboardButton(
+                    _search_result_button_label(session, index, item),
+                    callback_data=_callback(
+                        session,
+                        "srt",
+                        f"{session.search_generation}-{index}",
+                    ),
+                )
+            ]
         )
     navigation: list[InlineKeyboardButton] = []
     if page > 0:
@@ -2338,6 +2384,35 @@ def _testament(value: str) -> str:
 
 def _testament_label(value: str) -> str:
     return {"ot": "Old Testament", "nt": "New Testament", "dc": "Other books"}[value]
+
+
+def _search_result_scope(value: str) -> str:
+    scopes = {
+        "all": "bible",
+        "ot": "old_testament",
+        "nt": "new_testament",
+        "dc": "deuterocanon",
+    }
+    try:
+        return scopes[value]
+    except KeyError as error:
+        raise RobotInputError("Invalid search scope selection.") from error
+
+
+def _search_scope_label(value: str) -> str:
+    labels = {
+        "bible": "All Scripture",
+        "old_testament": "Old Testament",
+        "new_testament": "New Testament",
+        "deuterocanon": "Other books",
+    }
+    return labels.get(value, _display(value))
+
+
+def _search_scope_marker(session: InteractionSession, scope: str) -> str:
+    if session.search_options.books:
+        return ""
+    return "✓ " if session.search_options.scope == scope else ""
 
 
 def _default_testament(books: tuple[BookOption, ...]) -> str:
@@ -2552,14 +2627,19 @@ def _button_label(value: str) -> str:
     return value if len(value) <= BUTTON_LABEL_LIMIT else value[: BUTTON_LABEL_LIMIT - 1] + "…"
 
 
-def _search_result_block(
+def _search_result_button_label(
     session: InteractionSession,
     index: int,
     result: SearchResult,
 ) -> str:
     terms = result.terms or _search_query_terms(session.search_query)
-    verse = _highlight_search_terms(result.text, terms, session.search_options)
-    return f"<b>{index + 1}. {html.escape(result.reference)}</b>\n{verse}"
+    verse = _highlight_search_terms_plain(
+        result.text,
+        terms,
+        session.search_options,
+    )
+    marker = "☑" if index in session.selected else "☐"
+    return f"{marker} {index + 1}. {result.reference}\n{verse}"
 
 
 def _search_query_terms(query: str) -> tuple[str, ...]:
@@ -2577,9 +2657,49 @@ def _highlight_search_terms(
     options: SearchOptions,
 ) -> str:
     """Escape one verse and bold every matching word without changing its text."""
+    spans = _search_match_spans(text, terms, options)
+    if not spans:
+        return html.escape(text)
+
+    parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        parts.append(html.escape(text[cursor:start]))
+        parts.append(f"<b>{html.escape(text[start:end])}</b>")
+        cursor = end
+    parts.append(html.escape(text[cursor:]))
+    return "".join(parts)
+
+
+def _highlight_search_terms_plain(
+    text: str,
+    terms: Sequence[str],
+    options: SearchOptions,
+) -> str:
+    """Mark search matches visibly inside an unformatted Telegram button label."""
+    spans = _search_match_spans(text, terms, options)
+    if not spans:
+        return text
+
+    parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        parts.append(text[cursor:start])
+        parts.append(f"【{text[start:end]}】")
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def _search_match_spans(
+    text: str,
+    terms: Sequence[str],
+    options: SearchOptions,
+) -> tuple[tuple[int, int], ...]:
+    """Locate merged match spans while retaining original Unicode positions."""
     normalized, positions = _normalized_search_value(text, options)
     if not normalized or not positions:
-        return html.escape(text)
+        return ()
 
     spans: list[tuple[int, int]] = []
     for term in terms[:64]:
@@ -2612,22 +2732,14 @@ def _highlight_search_terms(
             spans.append((original_start, original_end))
 
     if not spans:
-        return html.escape(text)
+        return ()
     merged: list[tuple[int, int]] = []
     for start, end in sorted(spans):
         if merged and start <= merged[-1][1]:
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
             merged.append((start, end))
-
-    parts: list[str] = []
-    cursor = 0
-    for start, end in merged:
-        parts.append(html.escape(text[cursor:start]))
-        parts.append(f"<b>{html.escape(text[start:end])}</b>")
-        cursor = end
-    parts.append(html.escape(text[cursor:]))
-    return "".join(parts)
+    return tuple(merged)
 
 
 def _normalized_search_value(
