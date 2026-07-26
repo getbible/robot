@@ -22,6 +22,8 @@ class _Client:
         fail: bool = False,
         search_delay: float = 0.0,
         search_fail: bool = False,
+        select_started: threading.Event | None = None,
+        select_release: threading.Event | None = None,
         search_started: threading.Event | None = None,
         search_release: threading.Event | None = None,
     ) -> None:
@@ -29,6 +31,8 @@ class _Client:
         self.fail = fail
         self.search_delay = search_delay
         self.search_fail = search_fail
+        self.select_started = select_started
+        self.select_release = select_release
         self.search_started = search_started
         self.search_release = search_release
         self.translation_calls: list[str] = []
@@ -41,6 +45,10 @@ class _Client:
         return code in {"kjv", "aov", "codex"}
 
     def select(self, references: str, translation: str) -> dict:
+        if self.select_started is not None:
+            self.select_started.set()
+        if self.select_release is not None:
+            self.select_release.wait(timeout=1)
         if self.delay:
             time.sleep(self.delay)
         if self.fail:
@@ -292,7 +300,12 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
             await service.select(query)
 
     async def test_timed_out_worker_keeps_capacity_until_thread_finishes(self) -> None:
-        client = _Client(delay=0.1)
+        select_started = threading.Event()
+        select_release = threading.Event()
+        client = _Client(
+            select_started=select_started,
+            select_release=select_release,
+        )
         settings = replace(
             _settings(),
             lookup_timeout=0.01,
@@ -304,10 +317,14 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(service.close)
         query = ScriptureQuery("John 3:16", "kjv")
 
-        with self.assertRaises(ScriptureUnavailable):
-            await service.select(query)
-        with self.assertRaises(RobotBusy):
-            await service.select(query)
+        try:
+            with self.assertRaises(ScriptureUnavailable):
+                await service.select(query)
+            self.assertTrue(select_started.is_set())
+            with self.assertRaises(RobotBusy):
+                await service.select(query)
+        finally:
+            select_release.set()
 
 
 if __name__ == "__main__":
