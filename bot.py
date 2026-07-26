@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import sys
+from collections.abc import Awaitable
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
@@ -104,6 +106,28 @@ def configure_logging(
     logging.getLogger("telegram").setLevel(logging.WARNING)
 
 
+def _build_preference_store(settings: Settings) -> UserPreferenceStore:
+    """Keep the core bot available when optional durable preferences cannot open."""
+    try:
+        return UserPreferenceStore(
+            path=settings.user_preferences_file,
+            default_translation=settings.default_translation,
+            max_users=settings.user_preference_limit,
+        )
+    except (OSError, sqlite3.Error) as error:
+        LOGGER.error(
+            "Persistent user preferences are unavailable; using memory-only "
+            "preferences for this process (%s)",
+            type(error).__name__,
+            exc_info=True,
+        )
+        return UserPreferenceStore(
+            path=None,
+            default_translation=settings.default_translation,
+            max_users=settings.user_preference_limit,
+        )
+
+
 def build_application(settings: Settings) -> Application:
     service = ScriptureService(settings)
     limiter = InboundRateLimiter(
@@ -118,11 +142,7 @@ def build_application(settings: Settings) -> Application:
         max_sessions=settings.interaction_session_limit,
         ttl_seconds=settings.interaction_ttl_seconds,
     )
-    preferences = UserPreferenceStore(
-        path=settings.user_preferences_file,
-        default_translation=settings.default_translation,
-        max_users=settings.user_preference_limit,
-    )
+    preferences = _build_preference_store(settings)
     health = HealthServer(
         host=settings.health_host,
         port=settings.health_port,
@@ -161,38 +181,93 @@ def build_application(settings: Settings) -> Application:
     return application
 
 
-async def _post_init(application: Application) -> None:
-    health: HealthServer = application.bot_data[HEALTH_SLOT]
-    service: ScriptureService = application.bot_data[SERVICE_SLOT]
-    settings: Settings = application.bot_data[SETTINGS_SLOT]
+async def _optional_telegram_call(
+    label: str,
+    operation: Awaitable[object],
+) -> bool:
+    """Run non-essential Telegram metadata synchronization without killing polling."""
+    try:
+        await operation
+    except Exception as error:
+        LOGGER.warning(
+            "Telegram %s synchronization failed; the robot will continue (%s)",
+            label,
+            type(error).__name__,
+            exc_info=True,
+        )
+        return False
+    return True
+
+
+async def _synchronize_telegram_profile(
+    application: Application,
+    settings: Settings,
+) -> None:
+    """Synchronize optional command/profile metadata with a functional fallback."""
     ordinary_commands = [
         BotCommand("bible", "Retrieve Scripture by reference"),
         BotCommand("search", "Search and select Scripture"),
         BotCommand("help", "Show detailed usage guidance"),
     ]
-    await application.bot.set_my_commands(
-        ordinary_commands,
-        scope=BotCommandScopeAllPrivateChats(),
+    await _optional_telegram_call(
+        "private command",
+        application.bot.set_my_commands(
+            ordinary_commands,
+            scope=BotCommandScopeAllPrivateChats(),
+        ),
     )
-    await application.bot.set_my_commands(
-        [
-            BotCommand(
-                "bible",
-                "Retrieve Scripture by reference",
-                api_kwargs={"is_ephemeral": True},
-            ),
-            BotCommand(
-                "search",
-                "Search and select Scripture",
-                api_kwargs={"is_ephemeral": True},
-            ),
-            ordinary_commands[2],
-        ],
-        scope=BotCommandScopeAllGroupChats(),
+
+    ephemeral_registered = await _optional_telegram_call(
+        "ephemeral group command",
+        application.bot.set_my_commands(
+            [
+                BotCommand(
+                    "bible",
+                    "Retrieve Scripture by reference",
+                    api_kwargs={"is_ephemeral": True},
+                ),
+                BotCommand(
+                    "search",
+                    "Search and select Scripture",
+                    api_kwargs={"is_ephemeral": True},
+                ),
+                ordinary_commands[2],
+            ],
+            scope=BotCommandScopeAllGroupChats(),
+        ),
     )
-    await application.bot.set_my_name(settings.bot_name)
-    await application.bot.set_my_description(settings.bot_description)
-    await application.bot.set_my_short_description(settings.bot_short_description)
+    if not ephemeral_registered:
+        LOGGER.warning(
+            "Ephemeral group commands are unavailable; registering ordinary "
+            "group commands so the robot remains usable"
+        )
+        await _optional_telegram_call(
+            "ordinary group command fallback",
+            application.bot.set_my_commands(
+                ordinary_commands,
+                scope=BotCommandScopeAllGroupChats(),
+            ),
+        )
+
+    await _optional_telegram_call(
+        "display name",
+        application.bot.set_my_name(settings.bot_name),
+    )
+    await _optional_telegram_call(
+        "description",
+        application.bot.set_my_description(settings.bot_description),
+    )
+    await _optional_telegram_call(
+        "short description",
+        application.bot.set_my_short_description(settings.bot_short_description),
+    )
+
+
+async def _post_init(application: Application) -> None:
+    health: HealthServer = application.bot_data[HEALTH_SLOT]
+    service: ScriptureService = application.bot_data[SERVICE_SLOT]
+    settings: Settings = application.bot_data[SETTINGS_SLOT]
+    await _synchronize_telegram_profile(application, settings)
     if settings.prewarm_default_translation:
         try:
             metadata = await service.warm_default_translation()
@@ -267,8 +342,16 @@ def main() -> int:
             type(error).__name__,
         )
         return 2
-    application = build_application(settings)
-    run_application(application, settings)
+
+    try:
+        application = build_application(settings)
+        run_application(application, settings)
+    except Exception:
+        LOGGER.critical(
+            "GetBible Robot terminated because of an unhandled startup or runtime failure",
+            exc_info=True,
+        )
+        return 1
     return 75 if application.bot_data.get(DUPLICATE_POLLER_SLOT) else 0
 
 
