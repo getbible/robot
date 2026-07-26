@@ -129,10 +129,20 @@ Forward it to:
 http://127.0.0.1:9201
 ```
 
-When Traefik runs in a container, container loopback is not host loopback.
-Configure an explicit, private host-gateway route and firewall it from public
-networks. Do not solve container reachability by changing
-`MINI_APP_LISTEN` to `0.0.0.0`.
+When Traefik runs in a container, container loopback is not host loopback. On
+Linux, run only the Traefik proxy with host networking so its
+`127.0.0.1:9201` target is the host's loopback listener. Use Traefik's file
+provider when practical; it does not require mounting the Docker control
+socket. A bridge-network `host-gateway` address cannot reach a service bound
+only to host loopback.
+
+Do not solve that mismatch by changing `MINI_APP_LISTEN` to `0.0.0.0`.
+A fully containerized Robot is a separate deployment profile: place Traefik
+and the Robot on a private internal network, publish ports only from Traefik,
+use container secrets and a read-only/rootless Robot, and explicitly validate
+the non-loopback container bind. The supplied manager intentionally implements
+the narrower host-systemd/loopback boundary; it does not silently weaken that
+boundary when Docker is detected.
 
 The application emits its own restrictive security headers. A reverse proxy
 must not weaken or overwrite its content-security policy, frame policy,
