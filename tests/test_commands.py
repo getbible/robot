@@ -325,6 +325,79 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             str(context.bot.send_message.await_args.kwargs["reply_markup"]),
         )
 
+    async def test_group_bible_picker_is_ephemeral_until_post(self) -> None:
+        context = self.context(_Limiter())
+        context.bot.do_api_request.return_value = {
+            "message_id": 0,
+            "ephemeral_message_id": 901,
+        }
+        service = SimpleNamespace(
+            translations=AsyncMock(
+                return_value=(
+                    TranslationOption("kjv", "King James Version", "English"),
+                )
+            ),
+            resolve_query=AsyncMock(),
+            select=AsyncMock(),
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        update = self.update()
+        update.effective_chat.type = "supergroup"
+        update.effective_message = SimpleNamespace(
+            message_id=0,
+            message_thread_id=12,
+            api_kwargs={
+                "ephemeral_message_id": 250,
+                "receiver_user": {"id": 999},
+            },
+        )
+
+        await bible_command(update, context)
+
+        context.bot.send_message.assert_not_awaited()
+        context.bot.send_chat_action.assert_not_awaited()
+        service.translations.assert_awaited_once()
+        service.resolve_query.assert_not_awaited()
+        call = context.bot.do_api_request.await_args
+        self.assertEqual(call.args[0], "sendMessage")
+        payload = call.kwargs["api_kwargs"]
+        self.assertEqual(payload["chat_id"], 100)
+        self.assertEqual(payload["receiver_user_id"], 200)
+        self.assertEqual(payload["message_thread_id"], 12)
+        self.assertEqual(
+            payload["reply_parameters"],
+            {"ephemeral_message_id": 250},
+        )
+        self.assertIn("Skip — use KJV", str(payload["reply_markup"]))
+
+    async def test_bible_catalog_failure_never_leaks_into_group(self) -> None:
+        context = self.context(_Limiter())
+        context.bot.do_api_request.return_value = {
+            "message_id": 0,
+            "ephemeral_message_id": 901,
+        }
+        context.application.bot_data[SERVICE_SLOT] = SimpleNamespace(
+            translations=AsyncMock(
+                side_effect=ScriptureUnavailable("unavailable")
+            ),
+        )
+        update = self.update()
+        update.effective_chat.type = "group"
+        update.effective_message = SimpleNamespace(
+            message_id=0,
+            message_thread_id=None,
+            api_kwargs={"ephemeral_message_id": 250},
+        )
+
+        await bible_command(update, context)
+
+        context.bot.send_message.assert_not_awaited()
+        call = context.bot.do_api_request.await_args
+        self.assertEqual(call.args[0], "sendMessage")
+        payload = call.kwargs["api_kwargs"]
+        self.assertEqual(payload["receiver_user_id"], 200)
+        self.assertIn("temporarily unavailable", payload["text"])
+
     async def test_safe_error_log_correlates_reference_with_cause_types(self) -> None:
         context = self.context(_Limiter())
         repository_error = RepositoryError("controlled repository failure")
@@ -439,6 +512,59 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             message_id=250,
         )
 
+    async def test_group_direct_bible_posts_only_scripture_publicly(self) -> None:
+        context = self.context(_Limiter())
+        context.bot.do_api_request.return_value = True
+        service = SimpleNamespace(
+            resolve_query=AsyncMock(
+                return_value=ScriptureQuery("John 3:16", "kjv")
+            ),
+            select=AsyncMock(
+                return_value={
+                    "kjv_43_3": {
+                        "book_name": "John",
+                        "abbreviation": "kjv",
+                        "chapter": 3,
+                        "verses": [
+                            {
+                                "verse": 16,
+                                "text": "For God so loved the world.",
+                            }
+                        ],
+                    }
+                }
+            ),
+            translations=AsyncMock(),
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        context.args = ["John", "3:16"]
+        update = self.update()
+        update.effective_chat.type = "supergroup"
+        update.effective_message = SimpleNamespace(
+            message_id=0,
+            message_thread_id=12,
+            api_kwargs={
+                "ephemeral_message_id": 250,
+                "receiver_user": {"id": 999},
+            },
+        )
+
+        await bible_command(update, context)
+
+        context.bot.send_message.assert_awaited_once()
+        sent = context.bot.send_message.await_args.kwargs
+        self.assertEqual(sent["chat_id"], 100)
+        self.assertEqual(sent["message_thread_id"], 12)
+        self.assertIn("For God so loved", sent["text"])
+        context.bot.send_chat_action.assert_not_awaited()
+        context.bot.delete_message.assert_not_awaited()
+        call = context.bot.do_api_request.await_args
+        self.assertEqual(call.args[0], "deleteEphemeralMessage")
+        self.assertEqual(
+            call.kwargs["api_kwargs"]["receiver_user_id"],
+            999,
+        )
+
     async def test_failed_direct_bible_post_preserves_command_for_retry(self) -> None:
         context = self.context(_Limiter())
         service = SimpleNamespace(
@@ -531,6 +657,146 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             },
             {250, 300, 301, 302},
         )
+
+    async def test_ephemeral_bible_picker_posts_only_final_scripture_publicly(
+        self,
+    ) -> None:
+        context = self.context(_Limiter())
+        context.bot.do_api_request.return_value = True
+        service = SimpleNamespace(
+            books=AsyncMock(
+                return_value=(BookOption(43, "John", "a" * 40),)
+            ),
+            chapters=AsyncMock(
+                return_value=(ChapterOption(3, (16, 17, 18)),)
+            ),
+            select=AsyncMock(
+                return_value={
+                    "kjv_43_3": {
+                        "book_name": "John",
+                        "abbreviation": "kjv",
+                        "chapter": 3,
+                        "verses": [
+                            {"verse": 16, "text": "Verse sixteen."},
+                            {"verse": 17, "text": "Verse seventeen."},
+                            {"verse": 18, "text": "Verse eighteen."},
+                        ],
+                    }
+                }
+            ),
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        store = context.application.bot_data[INTERACTIONS_SLOT]
+        session = store.create(
+            chat_id=100,
+            user_id=200,
+            kind="reference",
+            stage="reference_translation",
+            translation="kjv",
+        )
+        session.ephemeral = True
+        session.ephemeral_message_id = 701
+        session.source_ephemeral_message_id = 700
+        session.source_ephemeral_receiver_user_id = 999
+        session.message_thread_id = 12
+        session.translations = (
+            TranslationOption("kjv", "King James Version", "English"),
+        )
+
+        for action, value in (
+            ("tc", ""),
+            ("bs", "43"),
+            ("cs", "3"),
+            ("vs", "16"),
+            ("ve", "18"),
+        ):
+            await interaction_callback(
+                self.callback_update(session.token, action, value),
+                context,
+            )
+            context.bot.send_message.assert_not_awaited()
+            service.select.assert_not_awaited()
+
+        await interaction_callback(
+            self.callback_update(session.token, "rpost"),
+            context,
+        )
+
+        context.bot.send_message.assert_awaited_once()
+        sent = context.bot.send_message.await_args.kwargs
+        self.assertEqual(sent["chat_id"], 100)
+        self.assertEqual(sent["message_thread_id"], 12)
+        self.assertIn("Verse sixteen.", sent["text"])
+        self.assertNotIn(
+            "sendMessage",
+            [
+                call.args[0]
+                for call in context.bot.do_api_request.await_args_list
+            ],
+        )
+        self.assertEqual(
+            [
+                call.args[0]
+                for call in context.bot.do_api_request.await_args_list[-2:]
+            ],
+            ["deleteEphemeralMessage", "deleteEphemeralMessage"],
+        )
+        self.assertIsNone(
+            store.get(session.token, chat_id=100, user_id=200)
+        )
+
+    async def test_failed_ephemeral_bible_post_restores_private_controls(
+        self,
+    ) -> None:
+        context = self.context(_Limiter())
+        context.bot.do_api_request.side_effect = [
+            True,
+            True,
+            {"message_id": 0, "ephemeral_message_id": 702},
+        ]
+        context.application.bot_data[SERVICE_SLOT] = SimpleNamespace(
+            select=AsyncMock(side_effect=ScriptureUnavailable("unavailable"))
+        )
+        store = context.application.bot_data[INTERACTIONS_SLOT]
+        session = store.create(
+            chat_id=100,
+            user_id=200,
+            kind="reference",
+            stage="reference_review",
+            translation="kjv",
+        )
+        session.ephemeral = True
+        session.ephemeral_message_id = 701
+        session.book = BookOption(43, "John", "a" * 40)
+        session.chapter = ChapterOption(3, (16,))
+        session.start_verse = 16
+        session.end_verse = 16
+
+        await interaction_callback(
+            self.callback_update(session.token, "rpost"),
+            context,
+        )
+
+        context.bot.send_message.assert_not_awaited()
+        self.assertIs(
+            store.get(session.token, chat_id=100, user_id=200),
+            session,
+        )
+        self.assertEqual(
+            [
+                call.args[0]
+                for call in context.bot.do_api_request.await_args_list
+            ],
+            [
+                "editEphemeralMessageText",
+                "editEphemeralMessageText",
+                "sendMessage",
+            ],
+        )
+        restored = context.bot.do_api_request.await_args_list[1]
+        payload = restored.kwargs["api_kwargs"]
+        self.assertIn("John 3:16", payload["text"])
+        self.assertIn("inline_keyboard", payload["reply_markup"])
 
     async def test_search_results_toggle_then_post_selected(self) -> None:
         limiter = _Limiter()

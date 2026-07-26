@@ -33,7 +33,7 @@ command when a user first opens a bot or follows a start link. It is intentional
 not duplicated in the synchronized command menu; its editable welcome text
 simply points to `/help`.
 
-An explicit `/bible` reference preserves the legacy fast path and posts the complete selection immediately. An empty `/bible` opens a Telegram-native picker with the configured translation preselected, then guides the user through testament, book, chapter, first verse, last verse, and confirmation.
+An explicit `/bible` reference preserves the legacy fast path and posts the complete selection immediately. An empty `/bible` opens a Telegram-native picker with the configured translation preselected, then guides the user through testament, book, chapter, first verse, last verse, and confirmation. In groups and supergroups, both the command and the complete picker are ephemeral and visible only to the requesting user and the bot; only the final Scripture is posted normally.
 
 `/search grace` runs Librarian 1.2 search defaults and displays complete matching
 verses with the matched words bolded. In groups and supergroups, the command,
@@ -58,8 +58,8 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
 - bounded rate-limit state under arbitrary identifier churn;
 - rejection-notification cooldowns that prevent Telegram API amplification;
 - owner-scoped, TTL/LRU-bounded interactive sessions and opaque callback tokens;
-- Bot API 10.2 ephemeral group search commands and panels, with no public-result
-  fallback when private delivery fails;
+- Bot API 10.2 ephemeral group Bible/search commands and panels, with no public
+  workflow fallback when private delivery fails;
 - a fixed worker pool and global lookup semaphore;
 - separate reference/search worker pools and circuit breakers, so expensive
   corpus work cannot occupy every direct-reference worker;

@@ -101,6 +101,9 @@ The tests cover at least these invariants:
 - ordinary references do not trigger speculative translation lookups;
 - an empty `/bible` never substitutes a hidden default verse;
 - explicit `/bible <reference>` commands still post immediately;
+- group `/bible` commands, translation/book/chapter/verse pages, progress, and
+  recoverable errors remain per-user ephemeral, with no ordinary group message
+  before confirmed Scripture delivery;
 - `/search <words>` returns complete, highlighted verses in per-user ephemeral
   group pages of at most 30 results, with every returned reference selectable
   and no ordinary group post before confirmation;
@@ -197,10 +200,14 @@ paths:
 2. empty `/bible`, complete the picker, then press **Post Scripture**;
 3. `/search grace`, select a result, then press **Post selected**.
 
-For each path, the initiating command and every picker/search prompt and reply
-must remain visible while the workflow is active, then disappear after the
-final Scripture message is delivered. Only the Scripture must remain. Also
-verify that **Cancel** removes the recorded conversation without posting.
+For `/bible` and `/search` in a group, confirm the initiating registered command
+and every picker/search panel, prompt, reply, progress state, and recoverable
+notice are visible only to the initiating user. No ordinary group message may
+be sent before the final confirmation action. If a command or legacy alias
+arrives visibly from an older client, it may remain while the workflow is
+active, but it must disappear after final Scripture delivery. Only Scripture
+must remain. Also verify that **Cancel** removes the private workflow without
+posting.
 
 Repeat in a group where the bot lacks deletion permission. Scripture must still
 be delivered; the workflow must not raise a user-facing failure merely because
@@ -254,7 +261,10 @@ Use a separate test bot token and a private test chat. Stop any other polling pr
    /unknown
    ```
 
-7. In the empty `/bible` panel, continue with KJV, choose John 3, select 16 as both first and last verse, review, and post.
+7. In a group, confirm empty `/bible` is invisible to other members; continue
+   with KJV, choose John 3, select 16 as both first and last verse, review, and
+   confirm that only **Post Scripture** creates an ordinary message in the
+   originating topic.
 8. Confirm `/search grace` is invisible to other group members, shows every
    returned verse in full, bolds each matching word, pages at up to 30 complete
    results, and posts nothing publicly until **Post selected** is pressed.

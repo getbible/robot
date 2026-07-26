@@ -35,6 +35,11 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   page rather than truncating a verse when Telegram's text limit requires it.
   Only **Post selected** sends an ordinary group message, and failed ephemeral
   delivery never falls back to exposing results publicly.
+- Extended the same per-user ephemeral group transport to `/bible`. Empty
+  `/bible` now keeps translation, book, chapter, verse-range, review, progress,
+  and recoverable-error interactions private; direct `/bible <reference>` keeps
+  its command private and posts only Scripture. Both paths preserve forum-topic
+  routing, and a failed guided post restores the private confirmation controls.
 - Restored the original default welcome/help copy with only the completed search
   guidance updated. The original Telegram `/start` entry handler remains
   available but is no longer duplicated in the visible command menu.
