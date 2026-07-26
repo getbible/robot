@@ -348,6 +348,7 @@ install_instance() {
             "" \
             "" \
             "" \
+            "n" \
             "0" \
             "" \
             "" \
@@ -497,6 +498,22 @@ n
 EOF
 assert_contains "$(environment_file_for alpha)" 'TRANSLATION="asv"'
 
+cmd_miniapp alpha <<EOF
+y
+https://bot.example.com/getbible/alpha
+9201
+y
+EOF
+assert_contains "$(environment_file_for alpha)" 'MINI_APP_ENABLED="true"'
+assert_contains "$(environment_file_for alpha)" \
+    'MINI_APP_PUBLIC_URL="https://bot.example.com/getbible/alpha"'
+assert_contains "$(environment_file_for alpha)" 'MINI_APP_PORT="9201"'
+
+cmd_miniapp alpha <<EOF
+n
+EOF
+assert_contains "$(environment_file_for alpha)" 'MINI_APP_ENABLED="false"'
+
 CONTENT_EDITOR="${TEST_ROOT}/content-editor"
 cat >"$CONTENT_EDITOR" <<'EOF'
 #!/usr/bin/env bash
@@ -541,6 +558,14 @@ polling
 EOF
 assert_contains "$(environment_file_for alpha)" \
     'TELEGRAM_DELIVERY_MODE="polling"'
+assert_contains "$(environment_file_for alpha)" 'MINI_APP_ENABLED="false"'
+assert_contains "$(environment_file_for alpha)" \
+    'MINI_APP_LISTEN="127.0.0.1"'
+assert_contains "$(environment_file_for alpha)" 'MINI_APP_PORT="9201"'
+assert_contains "$(environment_file_for alpha)" \
+    'MINI_APP_INIT_DATA_MAX_AGE_SECONDS="300"'
+assert_contains "$(environment_file_for alpha)" \
+    'MINI_APP_LAUNCH_TTL_SECONDS="300"'
 
 SECOND_SHA=$(commit_fixture_version v2)
 cmd_upgrade alpha --source "$SOURCE_DIR" <<EOF

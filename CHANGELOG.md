@@ -4,6 +4,23 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Mini App
+
+- Added a production Telegram Mini App for contained Scripture search, filtering,
+  Bible navigation, full-text verse-card selection, basket review/reordering,
+  and one final server-resolved post. Direct `/bible <reference>` commands keep
+  their immediate native path.
+- Added the `getBible.Life` mobile interface with Telegram light/dark themes,
+  safe-area and viewport integration, an ocean-light startup treatment, and
+  translation-driven language and right-to-left direction metadata.
+- Added signed Telegram `initData` validation, one-time owner-bound launch
+  tokens, bounded sessions and baskets, same-origin APIs, replay rejection,
+  idempotent posting, a loopback-only web listener, and strict browser security
+  headers. The public shell remains inert without Telegram authorization.
+- Added transactional setup-manager support, reverse-proxy and BotFather
+  instructions, diagnostics, configuration validation, API documentation, and
+  Python/JavaScript regression coverage for the complete Mini App lifecycle.
+
 ### Security
 
 - Added a transactional multi-instance setup manager with hidden token entry, duplicate-token prevention, exact-commit deployment, isolated locked accounts, root-only configuration, and instantiated unit verification.

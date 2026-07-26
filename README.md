@@ -33,27 +33,23 @@ command when a user first opens a bot or follows a start link. It is intentional
 not duplicated in the synchronized command menu; its editable welcome text
 simply points to `/help`.
 
-An explicit `/bible` reference preserves the legacy fast path and posts the
-complete selection immediately. An empty `/bible` opens a Telegram-native
-picker with the user's saved translation preselected, then builds a reviewable
-basket containing one verse, a range, or several separate verses/ranges across
-chapters and books. Choosing a translation saves it as that Telegram user's
-default; KJV remains the application fallback. In groups and supergroups, both
-the command and the complete picker are ephemeral and visible only to the
-requesting user and the bot; only the final Scripture is posted normally.
+An explicit `/bible` reference preserves the fast path and posts the complete
+selection immediately. Commands that require browsing open the authenticated
+Telegram Mini App: an empty `/bible` opens Bible navigation, `/search grace`
+opens contained results for that query, and an empty `/search` opens the search
+form and filters. Full wrapping verse cards are themselves selectable, and a
+bounded basket can contain one verse, ranges, or separate references across
+pages before one final post. Translation choices persist per Telegram user,
+with KJV as the application fallback. Intermediate browsing never floods the
+chat.
 
-`/search grace` runs Librarian 1.2 search defaults and displays each complete
-matching verse directly in one full-width selectable menu block. Matches are
-marked as `【matched text】` inside the button label. In groups and supergroups,
-the command, dashboard, prompts, results, paging, selections, and notices use
-Telegram Bot API 10.2 ephemeral interactions visible only to the requesting
-user and the bot. Each page contains up to 30 verse blocks, with **All**,
-**Old**, **New**, and **Other** scope filters directly above the results.
-Results are never posted automatically: the user selects one or more verse
-blocks and presses **Post selected**. An empty `/search` first opens the
-complete search-filter dashboard for translation, word mode, match mode, scope,
-case, diacritics, ordering, books, exclusions, and proximity. See
-[Interactive Bible and search workflows](docs/INTERACTIONS.md).
+The browser never supplies authoritative verse text. Every protected Mini App
+request requires fresh Telegram-signed `initData` plus a short-lived,
+user-bound launch token; the server resolves selected identifiers again before
+posting. Telegram light/dark theme values drive the interface without becoming
+an authorization input. See
+[Interactive Bible and search workflows](docs/INTERACTIONS.md) and
+[Mini App deployment](docs/MINI_APP.md).
 
 ## Security and reliability controls
 
@@ -65,13 +61,13 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
 - per-user and per-chat token buckets applied to commands and free-text inputs;
 - bounded rate-limit state under arbitrary identifier churn;
 - rejection-notification cooldowns that prevent Telegram API amplification;
-- owner-scoped, TTL/LRU-bounded interactive sessions and opaque callback tokens;
-- per-session callback serialization so rapid menu actions cannot race, while
-  ordinary menu navigation does not exhaust the command rate limit;
+- owner-scoped, TTL/LRU-bounded interactive and Mini App sessions;
+- fresh Telegram Mini App signature validation plus user-bound, short-lived
+  launch authorization for every data/action API;
+- loopback-only Mini App serving behind HTTPS, with no bot token or
+  authoritative Scripture text in browser state;
 - a bounded per-instance preference database containing only Telegram user IDs,
-  selected translation codes, and update times;
-- Bot API 10.2 ephemeral group Bible/search commands and panels, with no public
-  workflow fallback when private delivery fails;
+  selected translation codes, non-content search defaults, and update times;
 - a fixed worker pool and global lookup semaphore;
 - separate reference/search worker pools and circuit breakers, so expensive
   corpus work cannot occupy every direct-reference worker;
@@ -83,9 +79,8 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
 - typed user-safe errors and correlation IDs instead of raw exception text;
 - checksum-verified book navigation and structurally validated catalog metadata;
 - escaped Telegram HTML, percent-encoded URL segments, and safe chunk boundaries;
-- success-aware `/bible` and `/search` cleanup that removes only the recorded
-  command, picker/search panel, prompts, and replies after Scripture is posted,
-  while deletion failures cannot invalidate delivery;
+- success-aware command cleanup that never removes the final Scripture, while
+  deletion failures cannot invalidate delivery;
 - validated startup configuration and narrow Telegram update subscriptions;
 - selectable long polling or reverse-proxied HTTPS webhook delivery, with
   duplicate pollers stopped instead of restarted;
@@ -104,6 +99,8 @@ See [Architecture](docs/ARCHITECTURE.md) and [the release gate](docs/RELEASE_GAT
 - Linux with `systemd` for the supplied production unit.
 - A Telegram bot token from `@BotFather`.
 - Outbound HTTPS access to Telegram and `https://api.getbible.net`.
+- A public HTTPS reverse-proxy route when the Mini App is enabled; Telegram
+  update delivery may still use polling.
 
 ## Dependency policy
 
@@ -134,6 +131,7 @@ Run only the unit suite while iterating:
 
 ```bash
 venv/bin/python -m unittest discover -s tests -v
+(cd miniapp && npm run check)
 ```
 
 ## Production installation summary
@@ -147,7 +145,13 @@ git checkout --detach <reviewed-commit-sha>
 sudo ./setup.sh install
 ```
 
-The manager creates a separate locked Linux account, exact hashed environment, root-only token and editable content files, cache, state, JSONL log, rotation policy, health port, and hardened systemd service for every named instance. Tokens are entered with terminal echo disabled and are never accepted as command-line arguments. The questionnaire lets each instance choose polling or an HTTPS webhook and configures its Telegram command menu and profile text.
+The manager creates a separate locked Linux account, exact hashed environment,
+root-only token and editable content files, cache, state, JSONL log, rotation
+policy, health port, and hardened systemd service for every named instance.
+Tokens are entered with terminal echo disabled and are never accepted as
+command-line arguments. The questionnaire lets each instance choose polling or
+an HTTPS webhook, configures the optional same-instance Mini App on a separate
+loopback port, and synchronizes its Telegram command menu and profile text.
 
 ```bash
 sudo getbible-robot list
@@ -155,6 +159,7 @@ sudo getbible-robot status production
 sudo getbible-robot logs production
 sudo getbible-robot doctor production
 sudo getbible-robot delivery production
+sudo getbible-robot miniapp production
 sudo EDITOR=nano getbible-robot content production help
 ```
 
@@ -178,6 +183,7 @@ Use `sudo getbible-robot runtime <instance>` to resolve and query the correct po
 - [Installation](docs/INSTALLATION.md)
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Interactive Bible and search workflows](docs/INTERACTIONS.md)
+- [Telegram Mini App deployment](docs/MINI_APP.md)
 - [Polling and webhook delivery](docs/WEBHOOKS.md)
 - [Testing and live smoke checks](docs/TESTING.md)
 - [Upgrading and rollback](docs/UPGRADING.md)

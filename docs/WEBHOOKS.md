@@ -11,6 +11,11 @@ Telegram does not provide a WebSocket stream for Bot API updates. Long polling
 and webhooks are mutually exclusive for one bot token. Starting polling removes
 an existing webhook; starting webhook mode registers the configured webhook.
 
+Telegram Mini App HTTPS serving is independent of this choice. A polling
+instance may—and normally will—serve the Mini App through a separate loopback
+port and public HTTPS route. Do not forward the Mini App prefix to the Telegram
+webhook port. See [Mini App deployment](MINI_APP.md).
+
 ## What BotFather does
 
 Use `@BotFather` to create the bot and obtain or revoke its token:
@@ -114,6 +119,13 @@ http://127.0.0.1:9001
 
 Confirm the actual Traefik-to-host network path before starting the instance;
 do not replace loopback binding with an unrestricted public Python listener.
+
+If the Mini App uses the same hostname, give it a distinct prefix and route it
+to its separately assigned listener:
+
+```text
+https://bot.example.com/getbible/production -> http://127.0.0.1:9201
+```
 
 ## Switch an existing instance
 

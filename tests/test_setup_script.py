@@ -39,6 +39,7 @@ class SetupScriptTestCase(unittest.TestCase):
             "doctor",
             "repair",
             "delivery",
+            "miniapp",
             "content",
             "config",
             "upgrade",
@@ -83,7 +84,10 @@ class SetupScriptTestCase(unittest.TestCase):
             "/var/lib/getbible-robot/%i "
             "/var/log/getbible-robot/%i.jsonl",
             "NoNewPrivileges=true",
+            "PrivateIPC=true",
             "ProtectSystem=strict",
+            "ProcSubset=pid",
+            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
             "CapabilityBoundingSet=",
         }
         for directive in required:
@@ -95,6 +99,15 @@ class SetupScriptTestCase(unittest.TestCase):
         self.assertNotIn("--token ", script)
         self.assertIn('read -r -s -p "Telegram Bot API token: "', script)
         self.assertIn("ensure_unique_token", script)
+
+    def test_mini_app_manager_enforces_https_and_loopback(self) -> None:
+        script = SETUP.read_text(encoding="utf-8")
+        self.assertIn("validate_mini_app_url", script)
+        self.assertIn('"MINI_APP_LISTEN" "127.0.0.1"', script)
+        self.assertIn("MINI_APP_INIT_DATA_MAX_AGE_SECONDS", script)
+        self.assertIn("MINI_APP_LAUNCH_TTL_SECONDS", script)
+        self.assertIn("The Mini App and webhook listeners require different ports.", script)
+        self.assertIn("The Mini App and health listeners require different ports.", script)
 
     def test_real_service_account_access_is_a_release_contract(self) -> None:
         script = SETUP.read_text(encoding="utf-8")

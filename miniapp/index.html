@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src 'self'; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
+    >
+    <meta name="referrer" content="no-referrer">
+    <meta name="robots" content="noindex, nofollow, noarchive">
+    <title>getBible.Life</title>
+    <link rel="icon" href="./assets/favicon.png" type="image/png">
+    <link rel="stylesheet" href="./styles.css">
+    <script src="https://telegram.org/js/telegram-web-app.js?63"></script>
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <div id="boot-screen" class="gate-screen" aria-live="polite">
+      <img
+        class="gate-screen__mark"
+        src="./assets/getbible-mark.png"
+        width="82"
+        height="71"
+        alt=""
+      >
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="boot-message" data-i18n="gate.opening">Opening getBible.Life…</p>
+    </div>
+
+    <main id="access-denied" class="gate-screen" hidden>
+      <img
+        class="gate-screen__book"
+        src="./assets/getbible-book.png"
+        width="192"
+        height="192"
+        alt="getBible.Life"
+      >
+      <div class="gate-screen__copy">
+        <p class="eyebrow" data-i18n="gate.protected">Protected Mini App</p>
+        <h1 data-i18n="gate.title">Open getBible.Life from Telegram</h1>
+        <p id="access-message" data-i18n="gate.body">
+          This scripture experience is available only through the getBible.Life bot.
+        </p>
+      </div>
+      <button id="access-retry" class="button button--primary" type="button">
+        <span data-i18n="gate.retry">Try again</span>
+      </button>
+    </main>
+
+    <div id="app" class="app-shell" hidden>
+      <header class="topbar">
+        <div class="brand" aria-label="getBible.Life">
+          <img src="./assets/getbible-mark.png" width="41" height="36" alt="">
+          <span class="brand__copy">
+            <span class="brand__name">getBible<span>.Life</span></span>
+            <span class="brand__tagline">The words of eternal life</span>
+          </span>
+        </div>
+        <button
+          id="translation-shortcut"
+          class="translation-chip"
+          type="button"
+          aria-label="Change default translation"
+        >
+          KJV
+        </button>
+      </header>
+
+      <div id="offline-banner" class="connection-banner" role="status" hidden>
+        <span data-i18n="connection.offline">You’re offline. Reconnect to continue.</span>
+      </div>
+
+      <div class="workspace">
+        <section
+          id="home-view"
+          class="view view--home"
+          data-view="home"
+          aria-labelledby="home-title"
+        >
+          <div id="home-hero" class="home-hero">
+            <div class="home-hero__light" aria-hidden="true"></div>
+            <div class="home-hero__brand">
+              <img src="./assets/getbible-mark.png" width="55" height="48" alt="">
+              <span>
+                <strong>getBible<span>.Life</span></strong>
+                <small>The words of eternal life</small>
+              </span>
+            </div>
+            <div class="home-hero__copy">
+              <p class="eyebrow" data-i18n="home.eyebrow">Scripture, beautifully close</p>
+              <h1 id="home-title" data-i18n="home.title">Read, find, and share the Word.</h1>
+              <p data-i18n="home.body">
+                Move quietly through Scripture, gather the verses you need,
+                then post them together.
+              </p>
+            </div>
+          </div>
+
+          <div class="home-actions">
+            <button class="home-action" type="button" data-home-route="search">
+              <span class="home-action__icon" aria-hidden="true">⌕</span>
+              <span>
+                <strong data-i18n="home.search">Search Scripture</strong>
+                <small data-i18n="home.search_hint">Find words, phrases, and themes</small>
+              </span>
+              <span aria-hidden="true">›</span>
+            </button>
+            <button class="home-action" type="button" data-home-route="bible">
+              <span class="home-action__icon" aria-hidden="true">▤</span>
+              <span>
+                <strong data-i18n="home.browse">Browse the Bible</strong>
+                <small data-i18n="home.browse_hint">Choose a book, chapter, and verses</small>
+              </span>
+              <span aria-hidden="true">›</span>
+            </button>
+          </div>
+
+          <div id="home-selection" class="home-selection" hidden>
+            <div>
+              <strong id="home-selection-title">Selection ready</strong>
+              <span id="home-selection-meta"></span>
+            </div>
+            <button type="button" data-home-route="selection" data-i18n="home.review">Review</button>
+          </div>
+        </section>
+
+        <section
+          id="search-view"
+          class="view"
+          data-view="search"
+          aria-labelledby="search-title"
+          hidden
+        >
+          <div class="view__intro">
+            <p class="eyebrow" data-i18n="search.eyebrow">Find Scripture</p>
+            <h1 id="search-title" data-i18n="search.title">Search the Word</h1>
+            <p data-i18n="search.body">Find a verse, select it where you read it, and build one clean post.</p>
+          </div>
+
+          <form
+            id="search-form"
+            class="search-form"
+            role="search"
+            aria-label="Search Scripture"
+            data-i18n-aria-label="search.label"
+          >
+            <label class="search-box" for="search-query">
+              <span class="search-box__icon" aria-hidden="true">⌕</span>
+              <input
+                id="search-query"
+                name="query"
+                type="search"
+                maxlength="240"
+                enterkeyhint="search"
+                autocomplete="off"
+                autocapitalize="none"
+                spellcheck="false"
+                placeholder="Search words or a phrase"
+                data-i18n-placeholder="search.placeholder"
+                required
+              >
+            </label>
+            <button class="button button--primary search-form__submit" type="submit">
+              <span data-i18n="search.submit">Search</span>
+            </button>
+          </form>
+
+          <div
+            class="toolbar"
+            aria-label="Search options"
+            data-i18n-aria-label="search.options"
+          >
+            <button id="open-filters" class="filter-button" type="button">
+              <span aria-hidden="true">☷</span>
+              <span data-i18n="search.filters">Filters</span>
+              <span id="filter-count" class="filter-button__count" hidden>0</span>
+            </button>
+            <label class="select-control select-control--compact">
+              <span class="sr-only" data-i18n="search.sort_label">Sort results</span>
+              <select id="search-sort" name="sort">
+                <option value="canonical" data-i18n="search.sort_canonical">Bible order</option>
+                <option value="relevance" data-i18n="search.sort_relevance">Relevance</option>
+              </select>
+            </label>
+          </div>
+
+          <div id="search-summary" class="result-summary" hidden>
+            <div>
+              <strong id="search-summary-title">Results</strong>
+              <span id="search-summary-meta"></span>
+            </div>
+            <button id="clear-search" class="text-button" type="button" data-i18n="search.clear">Clear</button>
+          </div>
+
+          <div id="search-state" class="state-panel" hidden></div>
+          <div
+            id="search-results"
+            class="verse-list"
+            aria-label="Scripture search results"
+            data-i18n-aria-label="search.results_label"
+          ></div>
+          <button
+            id="load-more"
+            class="button button--secondary load-more"
+            type="button"
+            hidden
+          >
+            <span data-i18n="search.load_more">Load more</span>
+          </button>
+        </section>
+
+        <section
+          id="bible-view"
+          class="view"
+          data-view="bible"
+          aria-labelledby="bible-title"
+          hidden
+        >
+          <div class="view__intro view__intro--compact">
+            <p class="eyebrow" data-i18n="bible.eyebrow">Browse Scripture</p>
+            <h1 id="bible-title" data-i18n="bible.title">Choose a passage</h1>
+            <p data-i18n="bible.body">Open a chapter, then tap every verse you want to include.</p>
+          </div>
+
+          <div
+            class="bible-picker"
+            aria-label="Bible navigation"
+            data-i18n-aria-label="bible.navigation"
+          >
+            <label class="select-control">
+              <span data-i18n="bible.translation">Translation</span>
+              <select id="bible-translation"></select>
+            </label>
+            <label class="select-control">
+              <span data-i18n="bible.book">Book</span>
+              <select id="bible-book" disabled>
+                <option value="" data-i18n="bible.choose_book">Choose a book</option>
+              </select>
+            </label>
+            <label class="select-control">
+              <span data-i18n="bible.chapter">Chapter</span>
+              <select id="bible-chapter" disabled>
+                <option value="" data-i18n="bible.choose_chapter">Choose a chapter</option>
+              </select>
+            </label>
+          </div>
+
+          <div id="bible-heading" class="chapter-heading" hidden>
+            <div>
+              <p id="bible-translation-label"></p>
+              <h2 id="bible-reference"></h2>
+            </div>
+            <span id="bible-verse-count"></span>
+          </div>
+
+          <div id="bible-state" class="state-panel"></div>
+          <div
+            id="bible-verses"
+            class="verse-list"
+            aria-label="Chapter verses"
+            data-i18n-aria-label="bible.verses_label"
+          ></div>
+        </section>
+
+        <section
+          id="selection-view"
+          class="view"
+          data-view="selection"
+          aria-labelledby="selection-title"
+          hidden
+        >
+          <div class="selection-heading">
+            <div>
+              <p class="eyebrow" data-i18n="selection.eyebrow">Your selection</p>
+              <h1 id="selection-title" data-i18n="selection.title">Ready to post</h1>
+              <p id="selection-summary" data-i18n="selection.none">No verses selected yet.</p>
+            </div>
+            <button id="clear-selection" class="text-button text-button--danger" type="button">
+              <span data-i18n="selection.clear">Clear</span>
+            </button>
+          </div>
+
+          <div id="selection-empty" class="empty-selection">
+            <div class="empty-selection__icon" aria-hidden="true">✓</div>
+            <h2 data-i18n="selection.empty_title">Your selected verses will appear here</h2>
+            <p data-i18n="selection.empty_body">Browse or search, then tap the full verse card to add it.</p>
+            <button id="empty-browse" class="button button--primary" type="button">
+              <span data-i18n="selection.browse">Browse the Bible</span>
+            </button>
+          </div>
+
+          <ol
+            id="selection-list"
+            class="selection-list"
+            aria-label="Selected verses in posting order"
+            data-i18n-aria-label="selection.order_label"
+          ></ol>
+
+          <div id="post-state" class="state-panel" hidden></div>
+          <button id="post-selection" class="button button--primary post-button" type="button">
+            <span data-i18n="selection.post">Post selected verses</span>
+          </button>
+        </section>
+      </div>
+
+      <nav class="bottom-nav" aria-label="getBible.Life" data-i18n-aria-label="nav.label">
+        <button class="bottom-nav__item is-active" type="button" data-route="home">
+          <span class="bottom-nav__icon" aria-hidden="true">⌂</span>
+          <span data-i18n="nav.home">Home</span>
+        </button>
+        <button class="bottom-nav__item" type="button" data-route="search">
+          <span class="bottom-nav__icon" aria-hidden="true">⌕</span>
+          <span data-i18n="nav.search">Search</span>
+        </button>
+        <button class="bottom-nav__item" type="button" data-route="bible">
+          <span class="bottom-nav__icon bottom-nav__book" aria-hidden="true">▤</span>
+          <span data-i18n="nav.bible">Bible</span>
+        </button>
+        <button class="bottom-nav__item" type="button" data-route="selection">
+          <span class="bottom-nav__icon" aria-hidden="true">✓</span>
+          <span data-i18n="nav.selected">Selected</span>
+          <span id="nav-selection-count" class="bottom-nav__badge" hidden>0</span>
+        </button>
+      </nav>
+    </div>
+
+    <dialog id="filters-dialog" class="sheet">
+      <form id="filters-form" class="sheet__surface">
+        <header class="sheet__header">
+          <div>
+            <p class="eyebrow" data-i18n="filters.eyebrow">Search settings</p>
+            <h2 data-i18n="filters.title">Filter results</h2>
+          </div>
+          <button
+            class="icon-button"
+            type="button"
+            data-close-dialog
+            aria-label="Close filters"
+            data-i18n-aria-label="filters.close"
+          >
+            ×
+          </button>
+        </header>
+
+        <div class="sheet__content">
+          <label class="select-control">
+            <span data-i18n="bible.translation">Translation</span>
+            <select id="filter-translation" name="translation"></select>
+          </label>
+
+          <fieldset class="choice-group">
+            <legend data-i18n="filters.words">Words</legend>
+            <label><input type="radio" name="words" value="all" checked><span data-i18n="filters.all">All</span></label>
+            <label><input type="radio" name="words" value="any"><span data-i18n="filters.any">Any</span></label>
+            <label><input type="radio" name="words" value="phrase"><span data-i18n="filters.phrase">Phrase</span></label>
+          </fieldset>
+
+          <fieldset class="choice-group">
+            <legend data-i18n="filters.match">Match</legend>
+            <label>
+              <input type="radio" name="match" value="whole_word" checked>
+              <span data-i18n="filters.whole_word">Whole word</span>
+            </label>
+            <label>
+              <input type="radio" name="match" value="substring">
+              <span data-i18n="filters.substring">Substring</span>
+            </label>
+          </fieldset>
+
+          <fieldset class="choice-group">
+            <legend data-i18n="filters.scope">Scope</legend>
+            <label><input type="radio" name="scope" value="bible" checked><span data-i18n="filters.all">All</span></label>
+            <label>
+              <input type="radio" name="scope" value="old_testament">
+              <span data-i18n="filters.old">Old</span>
+            </label>
+            <label>
+              <input type="radio" name="scope" value="new_testament">
+              <span data-i18n="filters.new">New</span>
+            </label>
+            <label>
+              <input type="radio" name="scope" value="deuterocanon">
+              <span data-i18n="filters.other">Other</span>
+            </label>
+          </fieldset>
+
+          <fieldset class="book-filter">
+            <legend>
+              <span data-i18n="filters.books">Books</span>
+              <button id="clear-book-filters" class="text-button" type="button">
+                <span data-i18n="filters.select_all">Select all</span>
+              </button>
+            </legend>
+            <p id="book-filter-help" data-i18n="filters.books_help">Leave every book unchecked to search all books.</p>
+            <div
+              id="filter-books"
+              class="book-filter__list"
+              aria-describedby="book-filter-help"
+            ></div>
+          </fieldset>
+
+          <div class="toggle-grid">
+            <label class="toggle-control">
+              <span>
+                <strong data-i18n="filters.case">Case sensitive</strong>
+                <small data-i18n="filters.case_hint">Match upper and lowercase exactly</small>
+              </span>
+              <input id="filter-case" name="case_sensitive" type="checkbox">
+            </label>
+            <label class="toggle-control">
+              <span>
+                <strong data-i18n="filters.diacritics">Ignore diacritics</strong>
+                <small data-i18n="filters.diacritics_hint">Treat accented characters as equal</small>
+              </span>
+              <input id="filter-diacritics" name="ignore_diacritics" type="checkbox">
+            </label>
+          </div>
+
+          <label class="field-control">
+            <span data-i18n="filters.exclude">Exclude words</span>
+            <input
+              id="filter-exclude"
+              name="exclude"
+              type="text"
+              maxlength="240"
+              autocomplete="off"
+              placeholder="Optional, separated by spaces"
+              data-i18n-placeholder="filters.exclude_placeholder"
+            >
+          </label>
+
+          <label class="field-control">
+            <span data-i18n="filters.proximity">Maximum words apart</span>
+            <input
+              id="filter-proximity"
+              name="proximity"
+              type="number"
+              min="0"
+              max="100"
+              inputmode="numeric"
+              placeholder="No limit"
+              data-i18n-placeholder="filters.proximity_placeholder"
+            >
+            <small data-i18n="filters.proximity_hint">Available when matching all words.</small>
+          </label>
+        </div>
+
+        <footer class="sheet__footer">
+          <button id="reset-filters" class="button button--secondary" type="button">
+            <span data-i18n="filters.reset">Reset</span>
+          </button>
+          <button class="button button--primary" type="submit">
+            <span data-i18n="filters.apply">Show results</span>
+          </button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <div id="announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  </body>
+</html>

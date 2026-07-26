@@ -23,6 +23,8 @@ Common causes:
 - derived `gb-<instance>` account already exists unmanaged;
 - token shape is invalid or token belongs to another local instance;
 - webhook public URL, loopback port, fixed IP, or secret is invalid;
+- Mini App public URL or loopback port is invalid, already used, or matches the
+  webhook port;
 - health port is already listening;
 - hashed dependency installation or `pip check` fails;
 - target configuration fails validation;
@@ -45,6 +47,7 @@ Typical causes:
 - Telegram rejected or revoked the token;
 - another host/process is polling with the same token;
 - the configured webhook URL does not reach the exact loopback path;
+- the enabled Mini App listener cannot bind its assigned loopback port;
 - outbound DNS, TCP 443, system time, or CA trust is broken;
 - selected health port became occupied;
 - file ownership was changed after setup;
@@ -87,6 +90,27 @@ the exact path printed by the manager. The local webhook port must remain bound
 to `127.0.0.1`; Telegram connects to the reverse proxy, not that port directly.
 See [Telegram delivery](WEBHOOKS.md).
 
+## Mini App does not open or authorize
+
+```bash
+sudo getbible-robot status production
+sudo getbible-robot doctor production
+sudo getbible-robot logs production 200
+sudo ss -ltnp | grep ':9201'
+```
+
+The assigned port must listen only on `127.0.0.1`. Confirm the reverse proxy
+preserves the complete `MINI_APP_PUBLIC_URL` prefix and does not route it to the
+health or webhook port.
+
+An ordinary browser may retrieve the application shell; that is not a security
+failure. Protected data and action APIs must reject missing, expired,
+malformed, replayed, or user-mismatched Telegram authorization. Launch the app
+again from the bot, verify the server clock, and check that the configured bot
+token belongs to the bot that opened the app. For group launch failures,
+confirm the Main Mini App URL in `@BotFather`. See
+[Mini App deployment](MINI_APP.md).
+
 ## Service fails with `status=200/CHDIR`
 
 This status means systemd could not enter the configured application directory
@@ -119,6 +143,8 @@ If validation fails, the manager restores the prior file automatically. Common i
 - invalid `INSTANCE_NAME`, relative `LOG_FILE`, or audit mode;
 - public/non-loopback health host;
 - invalid URL, limit, timeout, port, boolean, translation, or log level;
+- an enabled Mini App without an HTTPS public URL, a non-loopback Mini App
+  listener, or a Mini App/webhook port collision;
 - total verse budget smaller than the per-reference budget.
 
 Do not source the environment file or print it. The manager parses it through `python-dotenv` and validates it with the deployed application.

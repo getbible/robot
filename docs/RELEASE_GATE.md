@@ -50,7 +50,8 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - Every command, including `/start`, `/help`, `/search`, and unknown commands, consumes both rate-limit budgets.
 - Every public command alias and implemented callback action is present in the enforced feature inventory.
 - Repeated rejected commands produce one cooldown warning rather than one Telegram API call per rejection.
-- Interactive sessions remain owner-scoped and TTL/LRU bounded under user, chat, and callback churn.
+- Mini App launches and sessions remain owner-scoped and TTL/LRU bounded under
+  user, chat, and request churn.
 
 ## Upstream and concurrency behavior
 
@@ -82,12 +83,18 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - Raw exceptions, user input, tokens, paths, and internal URLs are absent from user-facing errors.
 - Missing message-deletion permission does not fail an otherwise successful command.
 - `/bible@BotName John 3:16` works in a test group.
-- Empty `/bible` exposes translation, testament, book, chapter, first-verse, last-verse, and confirmation controls.
-- `/search <words>` exposes selectable results without posting automatically.
-- Empty `/search` exposes the documented Librarian filter dashboard.
+- Empty `/bible` opens the Mini App with translation, testament, book, chapter,
+  first-verse, last-verse, basket, and confirmation controls.
+- `/search <words>` opens complete wrapping selectable Mini App results without
+  posting automatically.
+- Empty `/search` opens the documented Mini App filter dashboard.
 - Search result selection persists across pages and only **Post selected** sends Scripture.
-- Group replies are accepted only for the exact session owner and bot prompt.
-- Expired, foreign, malformed, and stale callbacks fail safely.
+- Protected Mini App APIs require fresh signature-verified Telegram `initData`
+  plus a short-lived launch token tied to the same user and workflow.
+- Missing, expired, replayed, foreign, malformed, and stale authorization fails
+  before repository work or posting.
+- Browser-supplied verse text is never authoritative; final posting re-resolves
+  validated selected identifiers server-side.
 - Only required Telegram message and callback-query update types are subscribed.
 - Polling and webhook modes each start with only the validated transport
   arguments and never run together.
@@ -95,6 +102,10 @@ A robot commit is deployable only when every applicable item below is satisfied.
   with status 75, and is not restarted by systemd.
 - Webhook requests require the generated secret and reach only a loopback
   listener behind public HTTPS.
+- The Mini App uses a separate loopback-only listener behind public HTTPS, and
+  polling remains supported while it is enabled.
+- The public browser shell exposes no data or action capability without
+  successful Telegram and launch authorization.
 
 ## Startup, health, and observability
 
@@ -118,8 +129,8 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - The hermetic setup lifecycle passes transactional failure cleanup, two-instance isolation, all manager command paths, configuration restoration, upgrade failure restoration, rollback, and isolated uninstall.
 - Two test instances demonstrate distinct accounts, applications, environments, tokens, caches, ports, logs, processes, and state.
 - Instance selection resolves the intended target for list, start, stop,
-  restart, status, runtime, logs, follow, doctor, delivery, content, config,
-  upgrade, rollback, and uninstall.
+  restart, status, runtime, logs, follow, doctor, delivery, Mini App, content,
+  config, upgrade, rollback, and uninstall.
 - Setup rejects duplicate instance names, unmanaged account collisions, reused tokens, dirty source, unsupported Python, invalid ports, and malformed secrets.
 - Every current environment variable appears in the configuration reference and `.env.template`.
 - Required operator documents exist and every relative Markdown link resolves.
@@ -136,9 +147,15 @@ Using a dedicated test bot first, and then a private production-bot chat before 
 
 - `/start`, `/help`, `/search`, and an unknown command behave safely.
 - A single verse, range, multiple references, default translation, and explicit translation return correct text.
-- The empty `/bible` flow posts a single verse and a range in private chat and a group.
-- Default and filtered searches page, select, deselect, and post one or multiple results.
+- The empty `/bible` Mini App flow posts a single verse and a range in private
+  chat and a group.
+- Default and filtered Mini App searches page, select, deselect, and post one
+  or multiple results.
 - Search never posts before explicit confirmation.
+- Light/dark themes, wrapping verse cards, safe-area layout, selected states,
+  and accessible focus/contrast are verified in Telegram clients.
+- Ordinary-browser access and expired/mismatched launch attempts cannot read
+  protected data or trigger a post.
 - A right-to-left translation and a non-66-book translation navigate correctly.
 - Huge and malformed references fail safely.
 - A short burst exercises rate limiting without a crash.

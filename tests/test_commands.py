@@ -10,6 +10,7 @@ from modules.catalog import BookOption, ChapterOption, TranslationOption
 from modules.commands import (
     INTERACTIONS_SLOT,
     LIMITER_SLOT,
+    MINI_APP_SLOT,
     PREFERENCES_SLOT,
     SERVICE_SLOT,
     SETTINGS_SLOT,
@@ -40,6 +41,7 @@ from modules.interactions import (
     SearchOptions,
     SearchResult,
 )
+from modules.miniapp_tornado import MiniAppServer
 from modules.preferences import UserPreferenceStore
 from modules.service import ScriptureQuery, SearchPage
 
@@ -180,6 +182,42 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.kwargs["parse_mode"], "HTML")
         self.assertIn("Tap a verse block", result.kwargs["text"])
         self.assertIsNotNone(result.kwargs["reply_markup"])
+
+    async def test_search_with_words_opens_owner_bound_mini_app_when_enabled(
+        self,
+    ) -> None:
+        context = self.context(_Limiter())
+        service = SimpleNamespace(search=AsyncMock())
+        context.application.bot_data[SERVICE_SLOT] = service
+        mini_app = Mock(spec=MiniAppServer)
+        mini_app.create_launch.return_value = SimpleNamespace(token="opaque")
+        mini_app.web_url.return_value = (
+            "https://bot.example/getbible/?launch=opaque"
+        )
+        context.application.bot_data[MINI_APP_SLOT] = mini_app
+        context.args = ["grace", "and", "truth"]
+        update = self.update()
+        update.effective_chat.type = "private"
+
+        await search_command(update, context)
+
+        service.search.assert_not_awaited()
+        mini_app.create_launch.assert_called_once_with(
+            user_id=200,
+            target_chat_id=100,
+            message_thread_id=None,
+            initial_route="search",
+            initial_query="grace and truth",
+        )
+        button = (
+            context.bot.send_message.await_args.kwargs["reply_markup"]
+            .inline_keyboard[0][0]
+        )
+        self.assertEqual(
+            button.web_app.url,
+            "https://bot.example/getbible/?launch=opaque",
+        )
+        self.assertNotIn("grace", button.web_app.url)
 
     async def test_group_search_results_are_ephemeral_until_post(self) -> None:
         limiter = _Limiter()
@@ -345,6 +383,37 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "Continue with KJV",
             str(context.bot.send_message.await_args.kwargs["reply_markup"]),
+        )
+
+    async def test_bible_without_reference_opens_full_text_mini_app_picker(
+        self,
+    ) -> None:
+        context = self.context(_Limiter())
+        service = SimpleNamespace(translations=AsyncMock())
+        context.application.bot_data[SERVICE_SLOT] = service
+        mini_app = Mock(spec=MiniAppServer)
+        mini_app.create_launch.return_value = SimpleNamespace(token="opaque")
+        mini_app.web_url.return_value = (
+            "https://bot.example/getbible/?launch=opaque"
+        )
+        context.application.bot_data[MINI_APP_SLOT] = mini_app
+        update = self.update()
+        update.effective_chat.type = "private"
+        update.effective_message = SimpleNamespace(chat_id=100)
+
+        await bible_command(update, context)
+
+        service.translations.assert_not_awaited()
+        mini_app.create_launch.assert_called_once_with(
+            user_id=200,
+            target_chat_id=100,
+            message_thread_id=None,
+            initial_route="bible",
+            initial_query="",
+        )
+        self.assertIn(
+            "full-text verse",
+            context.bot.send_message.await_args.kwargs["text"],
         )
 
     async def test_group_bible_picker_is_ephemeral_until_post(self) -> None:
@@ -519,6 +588,8 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             translations=AsyncMock(),
         )
         context.application.bot_data[SERVICE_SLOT] = service
+        mini_app = Mock(spec=MiniAppServer)
+        context.application.bot_data[MINI_APP_SLOT] = mini_app
         preferences = UserPreferenceStore(
             path=None,
             default_translation="kjv",
@@ -538,6 +609,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         )
         service.select.assert_awaited_once()
         service.translations.assert_not_awaited()
+        mini_app.create_launch.assert_not_called()
         self.assertIn("For God so loved", context.bot.send_message.await_args.kwargs["text"])
         context.bot.delete_message.assert_awaited_once_with(
             chat_id=100,

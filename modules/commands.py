@@ -23,6 +23,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
+    WebAppInfo,
 )
 from telegram.constants import ParseMode
 from telegram.error import Conflict, TelegramError
@@ -52,9 +53,11 @@ from modules.interactions import (
     SearchOptions,
     SearchResult,
 )
+from modules.miniapp_sessions import MiniAppRoute
+from modules.miniapp_tornado import MiniAppServer
+from modules.posting import post_scripture
 from modules.preferences import UserPreferenceStore
 from modules.rate_limit import InboundRateLimiter
-from modules.renderer import render_scripture
 from modules.service import ScriptureQuery, ScriptureService
 from modules.utils import safe_delete_command, safe_delete_messages, send_typing
 
@@ -65,6 +68,7 @@ SERVICE_SLOT = "scripture_service"
 LIMITER_SLOT = "inbound_rate_limiter"
 INTERACTIONS_SLOT = "interaction_store"
 PREFERENCES_SLOT = "user_preference_store"
+MINI_APP_SLOT = "mini_app_server"
 DUPLICATE_POLLER_SLOT = "duplicate_poller_detected"
 
 TRANSLATION_PAGE_SIZE = 6
@@ -158,6 +162,67 @@ def _preference_store(
 ) -> UserPreferenceStore | None:
     value = context.application.bot_data.get(PREFERENCES_SLOT)
     return value if isinstance(value, UserPreferenceStore) else None
+
+
+def _mini_app(context: ContextTypes.DEFAULT_TYPE) -> MiniAppServer | None:
+    value = context.application.bot_data.get(MINI_APP_SLOT)
+    return value if isinstance(value, MiniAppServer) else None
+
+
+async def _send_mini_app_launch(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    mini_app: MiniAppServer,
+    *,
+    route: MiniAppRoute,
+    query: str,
+    text: str,
+) -> None:
+    """Open an owner-bound Mini App route without exposing content in its URL."""
+    identity = _identity(update)
+    if identity is None or update.effective_chat is None:
+        return
+    chat_id, user_id = identity
+    launch = mini_app.create_launch(
+        user_id=user_id,
+        target_chat_id=chat_id,
+        message_thread_id=_update_message_thread_id(update),
+        initial_route=route,
+        initial_query=query,
+    )
+    if update.effective_chat.type == "private":
+        url = mini_app.web_url(launch)
+    else:
+        raw_username = context.bot.username
+        if not isinstance(raw_username, str) or not raw_username:
+            remote_username = (await context.bot.get_me()).username
+            raw_username = remote_username if isinstance(remote_username, str) else ""
+        username = raw_username
+        if not isinstance(username, str) or not username:
+            raise TelegramError("Telegram did not provide the bot username.")
+        url = mini_app.direct_url(username, launch)
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Open getBible.Life", web_app=WebAppInfo(url=url))]]
+        if update.effective_chat.type == "private"
+        else [[InlineKeyboardButton("Open getBible.Life", url=url)]]
+    )
+    if _uses_ephemeral_interaction(update):
+        await send_ephemeral_text(
+            context.bot,
+            chat_id=chat_id,
+            receiver_user_id=user_id,
+            text=text,
+            reply_markup=keyboard,
+            reply_to_ephemeral_message_id=_update_ephemeral_message_id(update),
+            message_thread_id=_update_message_thread_id(update),
+        )
+        return
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=keyboard,
+        message_thread_id=_update_message_thread_id(update),
+    )
 
 
 def _preferred_translation(
@@ -309,6 +374,23 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             message_thread_id=message_thread_id,
         ):
             return
+        query = " ".join(context.args or ()).strip()
+        mini_app = _mini_app(context)
+        if mini_app is not None:
+            await _send_mini_app_launch(
+                update,
+                context,
+                mini_app,
+                route="search",
+                query=query,
+                text=(
+                    f'Explore contained search results for “{query}”.'
+                    if query
+                    else "Search and filter Scripture in getBible.Life."
+                ),
+            )
+            await _cleanup_command_source(update, context, chat_id=chat_id)
+            return
         session = interactions.create(
             chat_id=chat_id,
             user_id=user_id,
@@ -323,7 +405,6 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             source_ephemeral_receiver_user_id
         )
         session.remember_message(_update_message_id(update))
-        query = " ".join(context.args or ()).strip()
         if query:
             if not session.ephemeral:
                 await send_typing(update, context)
@@ -397,6 +478,19 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 context,
                 source="bible_direct",
                 message_thread_id=message_thread_id,
+            )
+            await _cleanup_command_source(update, context, chat_id=chat_id)
+            return
+
+        mini_app = _mini_app(context)
+        if mini_app is not None:
+            await _send_mini_app_launch(
+                update,
+                context,
+                mini_app,
+                route="bible",
+                query="",
+                text="Choose a translation, chapter, and full-text verse.",
             )
             await _cleanup_command_source(update, context, chat_id=chat_id)
             return
@@ -1492,37 +1586,14 @@ async def _post_scripture(
     source: str,
     message_thread_id: int | None = None,
 ) -> None:
-    result = await service.select(query)
-    verse_count = sum(
-        len(chapter["verses"])
-        for chapter in result.values()
-        if isinstance(chapter, dict) and isinstance(chapter.get("verses"), list)
-    )
-    chunks = render_scripture(
-        result,
-        settings.web_base_url,
-        max_chunks=settings.max_output_chunks,
-    )
-    for chunk in chunks:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=chunk,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-            message_thread_id=message_thread_id,
-        )
-    audit_event(
-        LOGGER,
-        settings,
-        "scripture_posted",
-        metadata={
-            "source": source,
-            "translation": query.translation,
-            "reference_group_count": query.references.count(";") + 1,
-            "verse_count": verse_count,
-            "message_count": len(chunks),
-        },
-        content={"reference": query.references},
+    await post_scripture(
+        bot=context.bot,
+        chat_id=chat_id,
+        query=query,
+        settings=settings,
+        service=service,
+        source=source,
+        message_thread_id=message_thread_id,
     )
 
 
