@@ -67,6 +67,7 @@ The non-destructive diagnostic checks:
 
 - service account existence;
 - application and virtual environment;
+- real service-account traversal, Python execution, and application import;
 - root-only environment permissions;
 - per-instance log ownership;
 - complete configuration validation;
@@ -77,6 +78,21 @@ The non-destructive diagnostic checks:
 - health and readiness when running.
 
 Use `runtime` for operational counters and `doctor` for an evidence-backed pass/fail deployment check.
+
+## Repair application access
+
+If `doctor` reports that the service account cannot enter or read the
+application directory, run the repair command from the exact reviewed checkout:
+
+```bash
+sudo ./setup.sh repair production
+```
+
+The command stops only the selected instance, restores `root:gb-<instance>`
+ownership and group-only read/traverse access on the active and retained
+rollback trees, runs the import preflight as the actual locked account, clears
+the systemd failure limit, and restarts the service when it is enabled. It does
+not expose or modify the Telegram token.
 
 ## Configuration changes
 
