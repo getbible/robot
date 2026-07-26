@@ -251,7 +251,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     chat_id, user_id = identity
     request_id = secrets.token_hex(4)
-    ephemeral = _uses_ephemeral_search(update)
+    ephemeral = _uses_ephemeral_interaction(update)
     source_ephemeral_message_id = _update_ephemeral_message_id(update)
     source_ephemeral_receiver_user_id = _update_ephemeral_receiver_user_id(update)
     message_thread_id = _update_message_thread_id(update)
@@ -318,12 +318,24 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat_id, user_id = identity
     request_id = secrets.token_hex(4)
     session: InteractionSession | None = None
+    ephemeral = _uses_ephemeral_interaction(update)
+    source_ephemeral_message_id = _update_ephemeral_message_id(update)
+    source_ephemeral_receiver_user_id = _update_ephemeral_receiver_user_id(update)
+    message_thread_id = _update_message_thread_id(update)
 
     try:
-        if not await _allow_command(update, context, limiter):
+        if not await _allow_command(
+            update,
+            context,
+            limiter,
+            ephemeral_receiver_user_id=user_id if ephemeral else None,
+            reply_to_ephemeral_message_id=source_ephemeral_message_id,
+            message_thread_id=message_thread_id,
+        ):
             return
         if context.args:
-            await send_typing(update, context)
+            if not ephemeral:
+                await send_typing(update, context)
             query = await service.resolve_query(context.args)
             await _post_scripture(
                 chat_id,
@@ -332,17 +344,13 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 service,
                 context,
                 source="bible_direct",
+                message_thread_id=message_thread_id,
             )
-            message_id = _update_message_id(update)
-            if message_id is not None:
-                await safe_delete_messages(
-                    context,
-                    chat_id=chat_id,
-                    message_ids=(message_id,),
-                )
+            await _cleanup_command_source(update, context, chat_id=chat_id)
             return
 
-        await send_typing(update, context)
+        if not ephemeral:
+            await send_typing(update, context)
         translations = await service.translations()
         session = interactions.create(
             chat_id=chat_id,
@@ -351,21 +359,33 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             stage="reference_translation",
             translation=settings.default_translation,
         )
-        session.message_thread_id = _update_message_thread_id(update)
+        session.ephemeral = ephemeral
+        session.message_thread_id = message_thread_id
+        session.source_ephemeral_message_id = source_ephemeral_message_id
+        session.source_ephemeral_receiver_user_id = (
+            source_ephemeral_receiver_user_id
+        )
         session.remember_message(_update_message_id(update))
         session.translations = translations
-        message = await context.bot.send_message(
-            chat_id=chat_id,
+        await _send_interaction_message(
+            session,
+            context,
             text=_translation_text(session, 0),
             reply_markup=_translation_keyboard(session, 0),
-            disable_web_page_preview=True,
         )
-        session.message_id = message.message_id
-        session.remember_message(message.message_id)
     except Exception as error:
         if session is not None:
             interactions.remove(session.token)
-        await _report_command_error(error, request_id, chat_id, context)
+        await _report_command_error(
+            error,
+            request_id,
+            chat_id,
+            context,
+            session=session,
+            ephemeral_receiver_user_id=user_id if ephemeral else None,
+            reply_to_ephemeral_message_id=source_ephemeral_message_id,
+            message_thread_id=message_thread_id,
+        )
 
 
 async def interaction_callback(
@@ -782,14 +802,29 @@ async def _dispatch_callback(
             f"Posting {reference} ({session.translation})…",
             None,
         )
-        await _post_scripture(
-            session.chat_id,
-            query,
-            settings,
-            service,
-            context,
-            source="bible_guided",
-        )
+        try:
+            await _post_scripture(
+                session.chat_id,
+                query,
+                settings,
+                service,
+                context,
+                source="bible_guided",
+                message_thread_id=session.message_thread_id,
+            )
+        except Exception:
+            try:
+                await _edit(
+                    session,
+                    context,
+                    _reference_review_text(session),
+                    _reference_review_keyboard(session),
+                )
+            except TelegramError:
+                LOGGER.warning(
+                    "Unable to restore private Bible controls after posting failure"
+                )
+            raise
         interactions.remove(session.token)
         await _cleanup_interaction(session, context)
         return
@@ -1354,6 +1389,34 @@ async def _cleanup_interaction(
     )
 
 
+async def _cleanup_command_source(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+) -> None:
+    """Remove one successfully completed direct command without risking delivery."""
+    receiver_user_id = _update_ephemeral_receiver_user_id(update)
+    ephemeral_message_id = _update_ephemeral_message_id(update)
+    if receiver_user_id is not None and ephemeral_message_id is not None:
+        try:
+            await delete_ephemeral_text(
+                context.bot,
+                chat_id=chat_id,
+                receiver_user_id=receiver_user_id,
+                ephemeral_message_id=ephemeral_message_id,
+            )
+        except TelegramError:
+            LOGGER.warning("Unable to delete ephemeral command safely")
+    message_id = _update_message_id(update)
+    if message_id is not None:
+        await safe_delete_messages(
+            context,
+            chat_id=chat_id,
+            message_ids=(message_id,),
+        )
+
+
 def _update_message_id(update: Update) -> int | None:
     message = getattr(update, "effective_message", None)
     message_id = getattr(message, "message_id", None)
@@ -1411,7 +1474,7 @@ def _update_message_thread_id(update: Update) -> int | None:
     return value
 
 
-def _uses_ephemeral_search(update: Update) -> bool:
+def _uses_ephemeral_interaction(update: Update) -> bool:
     chat_type = getattr(getattr(update, "effective_chat", None), "type", None)
     return chat_type in {"group", "supergroup"} and update.effective_user is not None
 

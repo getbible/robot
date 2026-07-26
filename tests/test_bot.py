@@ -117,7 +117,8 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(commands[1].api_kwargs["is_ephemeral"], True)
         self.assertEqual(commands[1].to_dict()["is_ephemeral"], True)
-        self.assertNotIn("is_ephemeral", commands[0].api_kwargs)
+        self.assertEqual(commands[0].api_kwargs["is_ephemeral"], True)
+        self.assertEqual(commands[0].to_dict()["is_ephemeral"], True)
         application.bot.set_my_name.assert_awaited_once_with(settings.bot_name)
         application.bot.set_my_description.assert_awaited_once_with(
             settings.bot_description

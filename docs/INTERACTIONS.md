@@ -5,11 +5,12 @@ The robot has two intentionally different command paths:
 - an explicit command remains fast and compatible with the legacy bot;
 - an empty command opens a Telegram-native selection panel.
 
-The Bible picker uses inline-keyboard pagination. Search uses Telegram Bot API
-10.2 ephemeral commands and messages in groups and supergroups, so the
-requesting user and bot are the only participants that see the dashboard,
-prompts, complete results, selections, navigation, and notices. No separately
-hosted Telegram Mini App or other web application is required.
+The Bible picker and search dashboard use inline-keyboard pagination. Both use
+Telegram Bot API 10.2 ephemeral commands and messages in groups and supergroups,
+so the requesting user and bot are the only participants that see translation,
+book, chapter, verse, filter, result, selection, navigation, progress, and
+notice interactions. No separately hosted Telegram Mini App or other web
+application is required.
 
 ## Bible reference behavior
 
@@ -22,6 +23,12 @@ hosted Telegram Mini App or other web application is required.
 ```
 
 The reference is validated and posted immediately. The configured `TRANSLATION`—`kjv` by default—is used when no trailing translation abbreviation is supplied. `/get` and `/getbible` are aliases and follow the same behavior.
+
+In a group or supergroup, the registered `/bible` command is ephemeral. The
+command stays private to its sender while the resulting Scripture is posted
+normally to the originating chat and forum topic. A manually typed legacy alias
+that arrives as an ordinary message is deleted only after every Scripture chunk
+has been delivered successfully.
 
 ### Empty command
 
@@ -40,6 +47,12 @@ The robot never substitutes a hidden default verse. It opens this short sequence
 7. review and **Post Scripture**.
 
 Translation and book lists come from the configured GetBible v2 repository. The selected full-book navigation document must match the SHA-1 published in that translation's books index before chapter or verse buttons are constructed.
+
+In a group or supergroup, this entire sequence remains inside one per-user
+ephemeral panel. Page changes edit that panel rather than sending ordinary chat
+messages. **Post Scripture** is the only action that publishes a normal group
+message. If final retrieval fails, the private review controls are restored for
+retrying; errors never fall back to a public message.
 
 ## Scripture search behavior
 
@@ -125,12 +138,13 @@ paragraphs.
 ## Chat cleanup contract
 
 In private chats, the workflow is visible only to that user. In groups and
-supergroups, `/search` is registered as an ephemeral command and all bot search
-messages are addressed only to the requesting user. A manually typed command
-from a client that does not send it ephemerally can still appear temporarily,
-but no search result is ever sent as an ordinary group message. Only after every
-final Scripture message has been delivered successfully does the robot remove
-the recorded workflow conversation:
+supergroups, `/bible` and `/search` are registered as ephemeral commands and all
+guided Bible/search messages are addressed only to the requesting user. A
+manually typed command or legacy alias from a client that does not send it
+ephemerally can still appear temporarily, but no picker, result, prompt,
+progress message, or recoverable error is ever sent as an ordinary group
+message. Only after every final Scripture message has been delivered
+successfully does the robot remove the recorded workflow conversation:
 
 - the user's initiating `/bible`, `/get`, `/getbible`, or `/search` command;
 - the bot's picker, dashboard, or result panel;
@@ -156,11 +170,11 @@ the server and never falls back to public result messages. Literal Telegram
 channels do not support per-user ephemeral panels; the current command bot does
 not subscribe to `channel_post` updates.
 
-For reliable group delivery after a cold or long-running search, keep the bot
-as a group administrator. Telegram permits any bot to respond ephemerally
-within the short incoming-action window, while an administrator may send the
-per-user response later. The existing **Delete messages** permission remains
-required to remove manually visible commands and legacy picker messages.
+For reliable group delivery after a cold catalog lookup or long-running search,
+keep the bot as a group administrator. Telegram permits any bot to respond
+ephemerally within the short incoming-action window, while an administrator may
+send the per-user response later. The existing **Delete messages** permission
+remains required to remove manually visible commands and legacy alias messages.
 
 ## Session and callback safety
 

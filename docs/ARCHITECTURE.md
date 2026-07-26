@@ -55,7 +55,14 @@ An ordinary reference is parsed locally with the configured default translation 
 
 Only when the complete input is not a valid reference does the robot consider the final whitespace-delimited token as a translation abbreviation. The candidate must match the complete abbreviation grammar. The preceding reference is validated locally before the candidate is repository-checked. Explicit `kjv` remains supported.
 
-An empty `/bible` does not enter the reference parser and never falls back to a configured verse. It creates an owner-scoped interactive session and opens the guided translation, testament, book, chapter, first-verse, and last-verse flow.
+An empty `/bible` does not enter the reference parser and never falls back to a
+configured verse. It creates an owner-scoped interactive session and opens the
+guided translation, testament, book, chapter, first-verse, and last-verse flow.
+In groups and supergroups, Bot API 10.2 keeps the command and complete picker
+ephemeral to the requesting user. Paging edits the same panel, and only **Post
+Scripture** creates an ordinary message in the originating chat and forum
+topic. Ephemeral delivery failures fail closed instead of publishing the picker
+or an error to the group.
 
 ## Search and confirmation flow
 

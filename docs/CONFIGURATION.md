@@ -177,6 +177,12 @@ lookups preserve the workflow messages for diagnosis and retry, while Telegram
 permission or deletion failures are logged and cannot turn a successful
 Scripture delivery into an error.
 
+In groups and supergroups, the registered `/bible` and `/search` commands and
+their intermediate panels use Bot API 10.2 per-user ephemeral delivery. This is
+independent of `DELETE_COMMAND_MESSAGES`: no ordinary group fallback is used if
+the private panel cannot be delivered. Private chats continue to use ordinary
+messages because the conversation is already private.
+
 ## Environment-file example
 
 ```dotenv

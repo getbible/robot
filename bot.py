@@ -168,7 +168,11 @@ async def _post_init(application: Application) -> None:
     )
     await application.bot.set_my_commands(
         [
-            ordinary_commands[0],
+            BotCommand(
+                "bible",
+                "Retrieve Scripture by reference",
+                api_kwargs={"is_ephemeral": True},
+            ),
             BotCommand(
                 "search",
                 "Search and select Scripture",
