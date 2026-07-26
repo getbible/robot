@@ -24,17 +24,22 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Reliability
 
+- Moved complete search verses into full-width selectable result buttons instead
+  of duplicating them in the panel text above compact reference buttons. Match
+  text is visibly bracketed inside each untruncated button, pages contain up to
+  30 blocks, and **All**, **Old**, **New**, and **Other** can rerun the current
+  query from the result panel. Selection, private delivery, and explicit final
+  posting are unchanged.
 - Restored the legacy clean-chat contract for every Scripture-producing path.
   Direct `/bible`, guided `/bible`, and `/search` now remove only their recorded
   initiating command, bot panels, prompts, acknowledgements, and prompt replies
   after all Scripture chunks are delivered; final Scripture remains, failures
   preserve recovery context, and Telegram deletion failures are non-fatal.
 - Replaced public search-result messages with Telegram Bot API 10.2 ephemeral
-  commands and per-user group panels. Complete highlighted verses now use
-  bounded Previous/Next pages of at most 30 results, automatically reducing a
-  page rather than truncating a verse when Telegram's text limit requires it.
-  Only **Post selected** sends an ordinary group message, and failed ephemeral
-  delivery never falls back to exposing results publicly.
+  commands and per-user group panels. Complete selectable verse blocks now use
+  bounded Previous/Next pages of at most 30 results. Only **Post selected**
+  sends an ordinary group message, and failed ephemeral delivery never falls
+  back to exposing results publicly.
 - Extended the same per-user ephemeral group transport to `/bible`. Empty
   `/bible` now keeps translation, book, chapter, verse-range, review, progress,
   and recoverable-error interactions private; direct `/bible <reference>` keeps

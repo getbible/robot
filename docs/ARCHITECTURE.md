@@ -70,13 +70,14 @@ or an error to the group.
 
 Librarian returns exact totals, grouped verse data, and ordered match metadata.
 The robot validates that every match points to a verse in the grouped results,
-retains only the configured bounded result set, and renders complete escaped
-verses with matched words bolded. In groups and supergroups, Bot API 10.2 keeps
-the command and result panel ephemeral to the requesting user. Each page holds
-at most 30 complete results and dynamically ends earlier when needed to stay
-inside Telegram's 4,096-character limit. Previous/Next edits the same ephemeral
-panel. No ordinary group message is sent from search until the owner presses
-**Post selected**.
+retains only the configured bounded result set, and renders every complete verse
+inside one full-width selectable button. Match spans are preserved in original
+Unicode positions and marked with `【】` because inline-button labels do not
+support partial HTML entities. In groups and supergroups, Bot API 10.2 keeps the
+command and result panel ephemeral to the requesting user. Each page holds at
+most 30 complete result blocks; Previous/Next and All/Old/New/Other scope
+changes edit the same ephemeral panel. No ordinary group message is sent from
+search until the owner presses **Post selected**.
 
 Selected match metadata is converted back into compressed canonical references.
 The final post performs a normal Librarian `select()` call and passes through the

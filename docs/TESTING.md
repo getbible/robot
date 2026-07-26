@@ -104,9 +104,10 @@ The tests cover at least these invariants:
 - group `/bible` commands, translation/book/chapter/verse pages, progress, and
   recoverable errors remain per-user ephemeral, with no ordinary group message
   before confirmed Scripture delivery;
-- `/search <words>` returns complete, highlighted verses in per-user ephemeral
-  group pages of at most 30 results, with every returned reference selectable
-  and no ordinary group post before confirmation;
+- `/search <words>` returns complete, visibly marked verses directly inside
+  full-width selectable buttons in per-user ephemeral group pages of at most 30
+  results, with no duplicate verse body and no ordinary group post before
+  confirmation;
 - full corpus downloads and constructed search output enforce independent byte
   ceilings;
 - slow searches use independent capacity and circuit state, leaving direct
@@ -266,9 +267,13 @@ Use a separate test bot token and a private test chat. Stop any other polling pr
    confirm that only **Post Scripture** creates an ordinary message in the
    originating topic.
 8. Confirm `/search grace` is invisible to other group members, shows every
-   returned verse in full, bolds each matching word, pages at up to 30 complete
-   results, and posts nothing publicly until **Post selected** is pressed.
-9. In empty `/search`, change word, match, scope, book, exclusion, and proximity controls; run a search; page, select, deselect, and post multiple results.
+   returned verse in one full-width menu block, marks each matching word with
+   `【】`, pages at up to 30 complete results, and posts nothing publicly until
+   **Post selected** is pressed.
+9. In empty `/search`, change word, match, scope, book, exclusion, and proximity
+   controls; run a search; switch between **All**, **Old**, **New**, and
+   **Other** on the result panel; page, select, deselect, and post multiple
+   results.
 10. In a test group, verify `/bible@TestBotName John 3:16`, empty `/bible@TestBotName`, selective search replies, ownership isolation between two users, and permission-safe command deletion.
 11. Open a returned Scripture link and confirm its host is exactly `getbible.life`.
 12. Leave a panel idle beyond `INTERACTION_TTL_SECONDS` and confirm its buttons expire safely.

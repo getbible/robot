@@ -74,10 +74,12 @@ The command text is passed to Librarian 1.2 with its safe defaults:
 - no book restriction, exclusions, or proximity;
 - configured default translation.
 
-The robot displays every returned verse in full with the words reported by
-Librarian bolded. In a group or supergroup, the result panel is ephemeral and
+The robot displays every returned verse in full inside its own full-width
+selectable button. The words reported by Librarian are visibly marked as
+`【matched text】` because Telegram button labels do not support partial HTML
+formatting. In a group or supergroup, the result panel is ephemeral and
 addressed to the requesting user; other members cannot see it. Scripture is not
-posted until the user selects one or more references and presses **Post
+posted until the user selects one or more verse blocks and presses **Post
 selected**.
 
 ### Configurable search
@@ -110,18 +112,26 @@ the workflow.
 
 ## Result selection
 
-Search matches are displayed as complete, HTML-escaped verses. Matching words
-are bolded according to the active case, diacritic, and whole-word/substring
-settings. No verse is shortened. A compact selector beneath the text lists the
-current page's canonical references, two buttons per row, with unchecked or
-checked markers. A page contains at most 30 results. If 30 complete verses would
-exceed Telegram's 4,096-character limit, the page ends earlier and the remaining
-complete verses move to the next page. **Previous** and **Next** edit the same
-per-user panel, and selections persist across pages.
+The panel text contains only the query, translation, scope, result count, page,
+and selection count. Every match is displayed once: one full-width button
+contains its canonical reference and complete verse, with an unchecked or
+checked marker. Matching words are enclosed in `【】` according to the active
+case, diacritic, and whole-word/substring settings. No verse is shortened.
+A page contains at most 30 result blocks. **Previous** and **Next** edit the
+same per-user panel, and selections persist across pages.
 
-The result set remains bounded by `SEARCH_RESULT_LIMIT`,
-`SEARCH_MAX_RESPONSE_BYTES`, and Telegram's per-message limit. The exact
-Librarian total is displayed when it is larger than the returned set.
+The **All**, **Old**, **New**, and **Other** controls rerun the current query in
+the selected Scripture scope without requiring another text reply. Choosing one
+of these broad scopes clears a previous per-book restriction so the selected
+section is not accidentally hidden by an incompatible book filter. A successful
+scope change starts a new result generation and clears the old selection; a
+failed rerun preserves the prior results and filters.
+
+The result set remains bounded by `SEARCH_RESULT_LIMIT` and
+`SEARCH_MAX_RESPONSE_BYTES`. The panel header remains within Telegram's message
+limit, while the complete verse text is carried by the corresponding button
+label. The exact Librarian total is displayed when it is larger than the
+returned set.
 
 The robot groups selected verses by book and chapter, compresses contiguous
 verse numbers into ranges, revalidates the resulting reference against

@@ -35,16 +35,17 @@ simply points to `/help`.
 
 An explicit `/bible` reference preserves the legacy fast path and posts the complete selection immediately. An empty `/bible` opens a Telegram-native picker with the configured translation preselected, then guides the user through testament, book, chapter, first verse, last verse, and confirmation. In groups and supergroups, both the command and the complete picker are ephemeral and visible only to the requesting user and the bot; only the final Scripture is posted normally.
 
-`/search grace` runs Librarian 1.2 search defaults and displays complete matching
-verses with the matched words bolded. In groups and supergroups, the command,
-dashboard, prompts, results, paging, selections, and notices use Telegram Bot
-API 10.2 ephemeral interactions visible only to the requesting user and the bot.
-Each page contains up to 30 complete verses, automatically using fewer when
-needed to remain within Telegram's message limit. Results are never posted
-automatically: the user selects one or more references and presses **Post
-selected**. An empty `/search` first opens the complete search-filter dashboard
-for translation, word mode, match mode, scope, case, diacritics, ordering,
-books, exclusions, and proximity. See
+`/search grace` runs Librarian 1.2 search defaults and displays each complete
+matching verse directly in one full-width selectable menu block. Matches are
+marked as `【matched text】` inside the button label. In groups and supergroups,
+the command, dashboard, prompts, results, paging, selections, and notices use
+Telegram Bot API 10.2 ephemeral interactions visible only to the requesting
+user and the bot. Each page contains up to 30 verse blocks, with **All**,
+**Old**, **New**, and **Other** scope filters directly above the results.
+Results are never posted automatically: the user selects one or more verse
+blocks and presses **Post selected**. An empty `/search` first opens the
+complete search-filter dashboard for translation, word mode, match mode, scope,
+case, diacritics, ordering, books, exclusions, and proximity. See
 [Interactive Bible and search workflows](docs/INTERACTIONS.md).
 
 ## Security and reliability controls

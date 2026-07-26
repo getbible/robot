@@ -13,6 +13,7 @@ from modules.commands import (
     SERVICE_SLOT,
     SETTINGS_SLOT,
     _highlight_search_terms,
+    _highlight_search_terms_plain,
     _reference_selection,
     _report_command_error,
     _search_page_ranges,
@@ -158,14 +159,21 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         service.search.assert_awaited_once()
         service.select.assert_not_awaited()
         result = context.bot.send_message.await_args
+        self.assertNotIn("And of his fulness", result.kwargs["text"])
+        labels = [
+            button.text
+            for row in result.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
         self.assertIn(
+            "☐ 1. John 1:16\n"
             "And of his fulness have all we received, and "
-            "<b>grace</b> for <b>grace</b>.",
-            result.kwargs["text"],
+            "【grace】 for 【grace】.",
+            labels,
         )
-        self.assertNotIn("…", result.kwargs["text"])
+        self.assertFalse(any("…" in label for label in labels))
         self.assertEqual(result.kwargs["parse_mode"], "HTML")
-        self.assertIn("Select one or more references", result.kwargs["text"])
+        self.assertIn("Tap a verse block", result.kwargs["text"])
         self.assertIsNotNone(result.kwargs["reply_markup"])
 
     async def test_group_search_results_are_ephemeral_until_post(self) -> None:
@@ -223,8 +231,17 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             payload["reply_parameters"],
             {"ephemeral_message_id": 250},
         )
-        self.assertIn("<b>Grace</b> for <b>grace</b>.", payload["text"])
         self.assertIn("inline_keyboard", payload["reply_markup"])
+        labels = [
+            button["text"]
+            for row in payload["reply_markup"]["inline_keyboard"]
+            for button in row
+        ]
+        self.assertIn(
+            "☐ 1. John 1:16\n【Grace】 for 【grace】.",
+            labels,
+        )
+        self.assertNotIn("Grace for grace.", payload["text"])
 
     async def test_pre_session_search_failure_remains_ephemeral(self) -> None:
         context = self.context(_Limiter())
@@ -1021,8 +1038,17 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             ],
         )
         restored = calls[1].kwargs["api_kwargs"]
-        self.assertIn("<b>1. John 1:16</b>", restored["text"])
+        self.assertIn("Showing 1 complete verse", restored["text"])
         self.assertIn("inline_keyboard", restored["reply_markup"])
+        restored_labels = [
+            button["text"]
+            for row in restored["reply_markup"]["inline_keyboard"]
+            for button in row
+        ]
+        self.assertIn(
+            "☑ 1. John 1:16\n【Grace】 for 【grace】.",
+            restored_labels,
+        )
 
     async def test_stale_search_navigation_and_post_fail_closed(self) -> None:
         context = self.context(_Limiter())
@@ -1064,6 +1090,98 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             show_alert=True,
         )
         context.bot.do_api_request.assert_not_awaited()
+
+        session.stage = "search_results"
+        stale_scope = self.callback_update(session.token, "srs", "4-nt")
+        await interaction_callback(stale_scope, context)
+        stale_scope.callback_query.answer.assert_awaited_once_with(
+            "Those search results are no longer active.",
+            show_alert=True,
+        )
+        context.bot.do_api_request.assert_not_awaited()
+
+    async def test_ephemeral_result_scope_reruns_inside_the_same_panel(
+        self,
+    ) -> None:
+        context = self.context(_Limiter())
+        context.bot.do_api_request.return_value = True
+        result = SearchResult(
+            "Matthew 1:1",
+            40,
+            "Matthew",
+            1,
+            1,
+            "The book of grace.",
+            ("grace",),
+        )
+        service = SimpleNamespace(
+            search=AsyncMock(
+                return_value=SearchPage(
+                    query="grace",
+                    translation="kjv",
+                    total=1,
+                    items=(result,),
+                )
+            )
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        store = context.application.bot_data[INTERACTIONS_SLOT]
+        session = store.create(
+            chat_id=100,
+            user_id=200,
+            kind="search",
+            stage="search_results",
+            translation="kjv",
+        )
+        session.ephemeral = True
+        session.ephemeral_message_id = 701
+        session.search_query = "grace"
+        session.search_generation = 4
+        session.search_total = 1
+        session.search_options = SearchOptions(
+            scope="bible",
+            books=(1,),
+        )
+        session.search_results = (
+            SearchResult(
+                "Genesis 1:1",
+                1,
+                "Genesis",
+                1,
+                1,
+                "Grace in the beginning.",
+                ("grace",),
+            ),
+        )
+        session.search_page_ranges = _search_page_ranges(session)
+        session.selected = {0}
+
+        await interaction_callback(
+            self.callback_update(session.token, "srs", "4-nt"),
+            context,
+        )
+
+        service.search.assert_awaited_once_with(
+            "grace",
+            SearchOptions(scope="new_testament"),
+        )
+        self.assertEqual(session.search_options.scope, "new_testament")
+        self.assertEqual(session.search_options.books, ())
+        self.assertEqual(session.search_generation, 5)
+        self.assertEqual(session.selected, set())
+        self.assertEqual(session.search_results, (result,))
+        context.bot.send_message.assert_not_awaited()
+        call = context.bot.do_api_request.await_args
+        self.assertEqual(call.args[0], "editEphemeralMessageText")
+        labels = [
+            button["text"]
+            for row in call.kwargs["api_kwargs"]["reply_markup"]["inline_keyboard"]
+            for button in row
+        ]
+        self.assertIn(
+            "☐ 1. Matthew 1:1\nThe book of 【grace】.",
+            labels,
+        )
 
     async def test_ephemeral_search_paging_edits_the_same_private_panel(
         self,
@@ -1108,8 +1226,18 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.args[0], "editEphemeralMessageText")
         payload = call.kwargs["api_kwargs"]
         self.assertEqual(payload["ephemeral_message_id"], 701)
-        self.assertIn("<b>31. John 1:31</b>", payload["text"])
-        self.assertNotIn("<b>1. John 1:1</b>", payload["text"])
+        self.assertIn("<b>Page:</b> 2 of 2", payload["text"])
+        self.assertNotIn("Grace result", payload["text"])
+        labels = [
+            button["text"]
+            for row in payload["reply_markup"]["inline_keyboard"]
+            for button in row
+        ]
+        self.assertIn(
+            "☐ 31. John 1:31\n【Grace】 result 31.",
+            labels,
+        )
+        self.assertFalse(any("John 1:1\n" in label for label in labels))
 
     async def test_group_search_prompt_selectively_mentions_owner(self) -> None:
         limiter = _Limiter()
@@ -1281,7 +1409,24 @@ class SelectionFormattingTestCase(unittest.TestCase):
             "<b>Grâce</b> &amp; truth; <b>beloved</b>.",
         )
 
-    def test_search_result_keyboard_lists_every_reference_without_paging(self) -> None:
+    def test_search_button_highlight_preserves_full_unescaped_verse_text(self) -> None:
+        rendered = _highlight_search_terms_plain(
+            "Grâce & truth; beloved.",
+            ("grace", "love"),
+            SearchOptions(
+                match="substring",
+                diacritics="insensitive",
+            ),
+        )
+
+        self.assertEqual(
+            rendered,
+            "【Grâce】 & truth; 【beloved】.",
+        )
+
+    def test_search_result_keyboard_uses_one_complete_verse_block_per_row(
+        self,
+    ) -> None:
         session = InteractionSession(
             token="abcdefgh",
             chat_id=1,
@@ -1306,17 +1451,25 @@ class SelectionFormattingTestCase(unittest.TestCase):
         session.search_page_ranges = _search_page_ranges(session)
 
         keyboard = _search_results_keyboard(session)
-        buttons = [
-            button
+        result_rows = [
+            row
             for row in keyboard.inline_keyboard
-            for button in row
+            if row
+            and row[0].callback_data is not None
+            and ":srt:" in row[0].callback_data
         ]
-        labels = [button.text for button in buttons]
+        labels = [row[0].text for row in result_rows]
 
+        self.assertEqual(len(result_rows), 7)
+        self.assertTrue(all(len(row) == 1 for row in result_rows))
         self.assertTrue(
-            all(f"John 1:{index}" in labels[index - 1] for index in range(1, 8))
+            all(
+                f"John 1:{index}\nComplete verse {index}" in labels[index - 1]
+                for index in range(1, 8)
+            )
         )
         self.assertFalse(any("Next" in label or "Previous" in label for label in labels))
+        self.assertNotIn("Complete verse", _search_results_text(session))
 
     def test_large_result_set_uses_complete_thirty_result_pages(self) -> None:
         session = InteractionSession(
@@ -1369,7 +1522,7 @@ class SelectionFormattingTestCase(unittest.TestCase):
         self.assertEqual(len(callbacks), 200)
         self.assertIn("gb:abcdefgh:srt:3-199", callbacks)
 
-    def test_long_results_reduce_page_size_without_truncating_verses(self) -> None:
+    def test_long_results_remain_complete_inside_button_blocks(self) -> None:
         results = tuple(
             SearchResult(
                 f"Psalm 119:{index}",
@@ -1395,25 +1548,24 @@ class SelectionFormattingTestCase(unittest.TestCase):
         )
         session.search_page_ranges = _search_page_ranges(session)
 
-        self.assertGreater(len(session.search_page_ranges), 1)
-        self.assertTrue(
-            all(
-                end - start <= 30
-                for start, end in session.search_page_ranges
-            )
-        )
-        rendered = []
-        for page in range(len(session.search_page_ranges)):
-            session.search_page = page
-            text = _search_results_text(session)
-            self.assertLessEqual(
-                telegram_text_length(text),
-                TELEGRAM_TEXT_LIMIT,
-            )
-            rendered.append(text)
-        combined = "\n".join(rendered)
+        self.assertEqual(session.search_page_ranges, ((0, 30),))
+        result_buttons = [
+            row[0]
+            for row in _search_results_keyboard(session).inline_keyboard
+            if row
+            and row[0].callback_data is not None
+            and ":srt:" in row[0].callback_data
+        ]
+        self.assertEqual(len(result_buttons), 30)
         for index in range(1, 31):
-            self.assertIn(f"Complete verse {index}:", combined)
+            expected = (
+                f"Complete verse {index}: "
+                + ("【grace】 " * 64)
+                + "【grace】"
+            )
+            self.assertIn(expected, result_buttons[index - 1].text)
+            self.assertNotIn("…", result_buttons[index - 1].text)
+        self.assertNotIn("Complete verse", _search_results_text(session))
 
     def test_selected_count_growth_stays_within_page_budget(self) -> None:
         session = InteractionSession(
