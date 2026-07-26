@@ -173,6 +173,7 @@ jobs:
           set -o pipefail
           sudo useradd \
             --system \
+            --user-group \
             --home-dir /var/lib/getbible-robot/ci \
             --shell /usr/sbin/nologin \
             gb-ci
@@ -183,13 +184,21 @@ jobs:
             /etc/getbible-robot
           sudo ln -s "$(command -v python)" \
             /opt/getbible-robot/ci/app/venv/bin/python
+          sudo install -o root -g root -m 0600 \
+            config.py \
+            /opt/getbible-robot/ci/app/config.py
           sudo touch \
-            /opt/getbible-robot/ci/app/bot.py \
             /etc/getbible-robot/ci.env \
             /var/log/getbible-robot/ci.jsonl
+          sudo chmod 0700 /opt/getbible-robot/ci/app
           sudo chown gb-ci:gb-ci \
             /var/cache/getbible-robot/ci \
             /var/log/getbible-robot/ci.jsonl
+          sudo bash -c '
+            source setup.sh
+            secure_application_tree /opt/getbible-robot/ci/app gb-ci
+            verify_service_account_access /opt/getbible-robot/ci/app gb-ci
+          '
           sudo install -o root -g root -m 0644 \
             deploy/getbible-robot@.service \
             /etc/systemd/system/getbible-robot@.service
