@@ -26,6 +26,7 @@ USERS_FILE="${TEST_ROOT}/users"
 SERVICES_DIR="${TEST_ROOT}/services"
 SOURCE_DIR="${TEST_ROOT}/source"
 FOLLOW_MARKER="${TEST_ROOT}/follow"
+RUNUSER_LOG="${TEST_ROOT}/runuser"
 SYSTEM_PYTHON=$(command -v python3)
 mkdir -p \
     "$METADATA_ROOT" \
@@ -61,6 +62,15 @@ assert_contains() {
 
 assert_equal() {
     [[ "$1" == "$2" ]] || fail "expected '$2', got '$1'"
+}
+
+assert_mode() {
+    local path=$1
+    local expected=$2
+    local actual
+    actual=$(command stat -c '%a' "$path")
+    [[ "$actual" == "$expected" ]] ||
+        fail "expected mode ${expected} for ${path}, got ${actual}"
 }
 
 service_state_file() {
@@ -107,25 +117,15 @@ dotenv_value() {
         "$env_file" | head -n 1
 }
 
-prepare_application() {
-    local source_dir=$1
-    local source_url=$2
-    local sha=$3
-    local destination=$4
-    local python_bin=$5
-    local env_file=${6:-}
+install_python_environment() {
+    local app_dir=$1
+    local python_bin=$2
     if [[ ${FAIL_PREPARE:-0} == "1" ]]; then
         die "Fixture application preparation failed."
     fi
-    : "$source_url"
     : "$python_bin"
-    git clone --quiet --no-hardlinks "$source_dir" "$destination"
-    git -C "$destination" checkout --quiet --detach "$sha"
-    mkdir -p "$destination/venv/bin"
-    ln -s "$SYSTEM_PYTHON" "$destination/venv/bin/python"
-    if [[ -n "$env_file" ]]; then
-        validate_environment "$destination" "$env_file"
-    fi
+    mkdir -p "$app_dir/venv/bin"
+    ln -s "$SYSTEM_PYTHON" "$app_dir/venv/bin/python"
 }
 
 id() {
@@ -156,6 +156,17 @@ passwd() {
 
 chown() {
     :
+}
+
+runuser() {
+    [[ ${1:-} == "--user" && -n ${2:-} ]] ||
+        fail "unexpected runuser arguments: $*"
+    local user=$2
+    shift 2
+    [[ ${1:-} == "--" ]] || fail "runuser command separator is missing"
+    shift
+    printf '%s\n' "$user" >>"$RUNUSER_LOG"
+    "$@"
 }
 
 install() {
@@ -298,6 +309,7 @@ create_source_fixture() {
         "$SOURCE_DIR/deploy/getbible-robot@.service"
     cp -- "$ROOT/.env.template" "$SOURCE_DIR/.env.template"
     printf 'print("fixture")\n' >"$SOURCE_DIR/bot.py"
+    printf 'class Settings:\n    pass\n' >"$SOURCE_DIR/config.py"
     : >"$SOURCE_DIR/requirements.txt"
     git -C "$SOURCE_DIR" init --quiet
     git -C "$SOURCE_DIR" config user.name "Setup Lifecycle Test"
@@ -353,6 +365,11 @@ assert_file "$UNIT_PATH"
 assert_file "$LOGROTATE_PATH"
 assert_dir "$(application_dir_for alpha)"
 assert_dir "$(application_dir_for beta)"
+assert_mode "$(application_dir_for alpha)" "750"
+assert_mode "$(application_dir_for alpha)/bot.py" "640"
+assert_mode "$(application_dir_for alpha)/venv" "750"
+assert_contains "$RUNUSER_LOG" "gb-alpha"
+assert_contains "$RUNUSER_LOG" "gb-beta"
 assert_contains "$(environment_file_for alpha)" 'INSTANCE_NAME="alpha"'
 assert_contains "$(environment_file_for beta)" 'INSTANCE_NAME="beta"'
 assert_contains "$(environment_file_for alpha)" 'AUDIT_LOG_MODE="metadata"'
@@ -395,6 +412,10 @@ assert_equal "$(cmd_logs alpha 1)" '{"event":"fixture"}'
 cmd_follow alpha
 assert_equal "$(<"$FOLLOW_MARKER")" "$(log_file_for alpha)"
 cmd_doctor alpha
+chmod 0700 "$(application_dir_for alpha)"
+cmd_repair alpha
+assert_mode "$(application_dir_for alpha)" "750"
+assert_equal "$(<"$(service_state_file "$(service_name_for alpha)")")" "active"
 cmd_stop alpha
 assert_equal "$(<"$(service_state_file "$(service_name_for alpha)")")" "inactive"
 cmd_start alpha
