@@ -34,6 +34,7 @@ Running `sudo getbible-robot` without a command opens the operations menu.
 - Outbound HTTPS to Telegram, PyPI during installation, GitHub when cloning, and `https://api.getbible.net` at runtime.
 - `git`, `curl`, `tar`, `logrotate`, `iproute2`, and the matching Python `venv` package.
 - A dedicated Telegram Bot API token from `@BotFather` for each running instance.
+- A public HTTPS URL and reverse proxy when the Telegram Mini App is enabled.
 - Administrator access for the bot in every group where private Bible/search
   workflows and clean-chat deletion are required. Bot API 10.2 permits an
   administrator to deliver per-user ephemeral panels even when a catalog or
@@ -53,17 +54,25 @@ On Debian, Ubuntu, Fedora, or another `dnf` host, the manager offers to install 
 6. polling or HTTPS webhook delivery;
 7. for webhook mode, the public URL, local loopback port, optional fixed public
    IP, and confirmation that the reverse proxy is ready;
-8. a unique loopback health/metrics port;
-9. metadata-only or content audit logging;
-10. whether handled Telegram command messages should be deleted;
-11. whether the service should be enabled and started;
-12. optional live token verification through Telegram.
+8. whether to enable the Telegram Mini App and, when enabled, its public HTTPS
+   URL plus unique loopback port;
+9. a unique loopback health/metrics port;
+10. metadata-only or content audit logging;
+11. whether handled Telegram command messages should be deleted;
+12. confirmation that every configured HTTPS reverse-proxy route is ready;
+13. whether the service should be enabled and started;
+14. optional live token verification through Telegram.
 
 The token is never accepted as a command-line argument, printed, added to setup logs, or copied into instance metadata. Setup also rejects a token already assigned to another local instance. One token represents one bot and must not be active in multiple local instances, regardless of whether it uses polling or a webhook.
 
 Polling requires only outbound HTTPS. Webhook mode requires public HTTPS through
 a reverse proxy; the application listener remains on loopback. See
 [Telegram delivery](WEBHOOKS.md) before choosing webhook mode.
+
+The Mini App also requires public HTTPS but is independent of update delivery:
+polling plus a Mini App is a normal production configuration. The Mini App uses
+a separate loopback listener, and its route must preserve the configured path
+prefix. See [Mini App deployment](MINI_APP.md).
 
 ## Instance and account names
 
@@ -100,7 +109,9 @@ For an instance named `production`:
 | Structured application log | `/var/log/getbible-robot/production.jsonl` | `gb-production`, mode `0640` |
 | Service | `getbible-robot@production.service` | hardened template |
 
-Every instance receives an independent account, token, environment, cache, health port, log, process, memory/task limit, and deployment record.
+Every instance receives an independent account, token, environment, cache,
+health port, optional Mini App port, log, process, memory/task limit, and
+deployment record.
 
 ## Logging choice
 
@@ -140,6 +151,8 @@ Before enabling a service, setup:
 - synchronizes the Bot API command list and configured profile metadata;
 - verifies that Telegram's registered webhook state matches the selected
   polling/webhook mode;
+- validates a Mini App URL as HTTPS, fixes its listener to IPv4 loopback, and
+  prevents it from sharing a webhook port;
 - waits for `/readyz` when health checks are enabled.
 
 Partial installation failures before unit verification are cleaned up transactionally. A service that starts but does not become ready is retained for diagnosis through `getbible-robot doctor` and `getbible-robot logs`.
@@ -152,7 +165,8 @@ sudo getbible-robot doctor production
 sudo getbible-robot logs production 100
 ```
 
-For webhook mode, also validate the public route and Telegram registration:
+For webhook or Mini App mode, also validate the public route and Telegram
+registration:
 
 ```bash
 sudo getbible-robot status production
@@ -173,9 +187,12 @@ Then use a private conversation with the dedicated bot:
 Confirm:
 
 - an explicit reference posts immediately;
-- guided Bible and search workflows post only after confirmation;
-- in a group, `/bible` and `/search` commands and intermediate workflows are
-  visible only to their initiating user;
+- guided Bible and search workflows open the contained Mini App and post only
+  after confirmation;
+- the Mini App follows Telegram's light and dark themes;
+- opening its public shell outside Telegram provides no data or action access;
+- in a group, browsing remains private to the initiating user and only the
+  final Scripture is posted;
 - links use `https://getbible.life`;
 - data comes from `https://api.getbible.net`;
 - invalid or oversized input returns a safe generic response;
@@ -194,7 +211,8 @@ sudo ./setup.sh install
 sudo getbible-robot list
 ```
 
-The selector automatically offers unused health ports and prevents instance, account, and token collisions.
+The selector automatically offers unused health and Mini App ports and prevents
+instance, account, token, and listener collisions.
 
 ## Development-only installation
 

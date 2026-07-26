@@ -25,6 +25,7 @@ _AUDIT_LOG_MODES = frozenset({"metadata", "content"})
 _DELIVERY_MODES = frozenset({"polling", "webhook"})
 _WEBHOOK_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
 _WEBHOOK_PATH_RE = re.compile(r"/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\Z")
+_MINI_APP_PATH_RE = re.compile(r"(?:/[A-Za-z0-9_-]+)*\Z")
 _TELEGRAM_WEBHOOK_PORTS = frozenset({80, 88, 443, 8443})
 
 
@@ -191,6 +192,48 @@ def _webhook_secret(delivery_mode: str) -> str | None:
     return value
 
 
+def _mini_app_public_url(enabled: bool) -> str | None:
+    raw = _env("MINI_APP_PUBLIC_URL", "") or ""
+    if not raw:
+        if enabled:
+            raise ConfigurationError(
+                "MINI_APP_PUBLIC_URL is required when MINI_APP_ENABLED is true."
+            )
+        return None
+    parts = urlsplit(raw)
+    if (
+        parts.scheme != "https"
+        or not parts.hostname
+        or parts.username
+        or parts.password
+        or parts.query
+        or parts.fragment
+        or _MINI_APP_PATH_RE.fullmatch(parts.path.rstrip("/")) is None
+        or "//" in parts.path
+    ):
+        raise ConfigurationError(
+            "MINI_APP_PUBLIC_URL must be an HTTPS URL with an optional "
+            "alphanumeric path and without credentials, query, or fragment."
+        )
+    try:
+        _ = parts.port
+    except ValueError as error:
+        raise ConfigurationError("MINI_APP_PUBLIC_URL has an invalid port.") from error
+    hostname = parts.hostname.casefold()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise ConfigurationError("MINI_APP_PUBLIC_URL must use a publicly reachable host.")
+    try:
+        address = ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        if not address.is_global:
+            raise ConfigurationError(
+                "MINI_APP_PUBLIC_URL must use a publicly routable address."
+            )
+    return raw.rstrip("/")
+
+
 def _instance_name() -> str:
     value = _env("INSTANCE_NAME", "local") or ""
     if _INSTANCE_RE.fullmatch(value) is None or "--" in value:
@@ -285,6 +328,15 @@ class Settings:
     log_file: str | None
     audit_log_mode: str
     log_level: int
+    mini_app_enabled: bool = False
+    mini_app_public_url: str | None = None
+    mini_app_listen: str = "127.0.0.1"
+    mini_app_port: int = 9201
+    mini_app_init_data_max_age_seconds: int = 300
+    mini_app_launch_ttl_seconds: int = 300
+    mini_app_session_ttl_seconds: int = 900
+    mini_app_session_limit: int = 2000
+    mini_app_max_selections: int = 100
 
     @classmethod
     def from_env(cls, *, load_environment_file: bool = True) -> Settings:
@@ -337,12 +389,32 @@ class Settings:
         if health_host not in _LOCAL_HOSTS:
             raise ConfigurationError("HEALTH_HOST must be localhost or a loopback address.")
 
+        mini_app_enabled = _boolean("MINI_APP_ENABLED", False)
+        mini_app_listen = _env("MINI_APP_LISTEN", "127.0.0.1") or ""
+        if mini_app_listen not in _LOCAL_HOSTS:
+            raise ConfigurationError(
+                "MINI_APP_LISTEN must be localhost or a loopback address. "
+                "Terminate public HTTPS at a reverse proxy."
+            )
+        webhook_port = _integer("TELEGRAM_WEBHOOK_PORT", 9001, 1024, 65_535)
+        health_port = _integer("HEALTH_PORT", 8081, 0, 65_535)
+        mini_app_port = _integer("MINI_APP_PORT", 9201, 1024, 65_535)
+        if mini_app_enabled:
+            occupied = {port for port in (health_port,) if port != 0}
+            if delivery_mode == "webhook":
+                occupied.add(webhook_port)
+            if mini_app_port in occupied:
+                raise ConfigurationError(
+                    "MINI_APP_PORT must differ from the enabled health and "
+                    "Telegram webhook listener ports."
+                )
+
         return cls(
             telegram_api_token=token,
             telegram_delivery_mode=delivery_mode,
             webhook_public_url=_webhook_public_url(delivery_mode),
             webhook_listen=webhook_listen,
-            webhook_port=_integer("TELEGRAM_WEBHOOK_PORT", 9001, 1024, 65_535),
+            webhook_port=webhook_port,
             webhook_secret_token=_webhook_secret(delivery_mode),
             webhook_ip_address=_webhook_ip_address(),
             webhook_max_connections=_integer(
@@ -444,9 +516,28 @@ class Settings:
             drop_pending_updates=_boolean("DROP_PENDING_UPDATES", True),
             prewarm_default_translation=_boolean("PREWARM_DEFAULT_TRANSLATION", True),
             health_host=health_host,
-            health_port=_integer("HEALTH_PORT", 8081, 0, 65_535),
+            health_port=health_port,
             instance_name=_instance_name(),
             log_file=_log_file(),
             audit_log_mode=audit_log_mode,
             log_level=log_level,
+            mini_app_enabled=mini_app_enabled,
+            mini_app_public_url=_mini_app_public_url(mini_app_enabled),
+            mini_app_listen=mini_app_listen,
+            mini_app_port=mini_app_port,
+            mini_app_init_data_max_age_seconds=_integer(
+                "MINI_APP_INIT_DATA_MAX_AGE_SECONDS", 300, 30, 900
+            ),
+            mini_app_launch_ttl_seconds=_integer(
+                "MINI_APP_LAUNCH_TTL_SECONDS", 300, 30, 900
+            ),
+            mini_app_session_ttl_seconds=_integer(
+                "MINI_APP_SESSION_TTL_SECONDS", 900, 60, 3600
+            ),
+            mini_app_session_limit=_integer(
+                "MINI_APP_SESSION_LIMIT", 2000, 10, 20_000
+            ),
+            mini_app_max_selections=_integer(
+                "MINI_APP_MAX_SELECTIONS", 100, 1, 200
+            ),
         )

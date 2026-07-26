@@ -4,7 +4,7 @@ IFS=$'\n\t'
 umask 077
 
 PROGRAM="getbible-robot"
-VERSION="3"
+VERSION="4"
 SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
 SCRIPT_DIR=$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)
 
@@ -101,6 +101,7 @@ Commands:
   repair      Restore secure application access for the service account
   config      Safely edit, validate, and optionally restart configuration
   delivery    Switch safely between polling and HTTPS webhook delivery
+  miniapp     Configure the authenticated Telegram Mini App HTTPS route
   content     Edit the welcome or detailed help text
   upgrade     Deploy the exact commit from a reviewed source checkout
   rollback    Return to the immediately previous deployed application
@@ -152,6 +153,21 @@ validate_delivery_mode() {
 validate_webhook_url() {
     local value=${1:-}
     [[ "$value" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$ ]]
+}
+
+validate_mini_app_url() {
+    local value=${1:-}
+    local authority
+    local host
+    [[ "$value" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9_-]+)*/?$ ]] ||
+        return 1
+    authority=${value#https://}
+    authority=${authority%%/*}
+    host=${authority%%:*}
+    [[ "$host" != "localhost" && "$host" != *.localhost ]] || return 1
+    [[ "$host" != "0.0.0.0" && "$host" != 127.* && "$host" != 10.* &&
+        "$host" != 192.168.* && "$host" != 169.254.* &&
+        ! "$host" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]] || return 1
 }
 
 validate_plain_text() {
@@ -428,6 +444,52 @@ next_webhook_port() {
     die "No unused automatic webhook port was found between 9001 and 9101."
 }
 
+next_mini_app_port() {
+    local port
+    local used
+    local existing
+    local app_dir
+    local env_file
+    local configured
+    local configured_enabled
+    local configured_delivery
+    local configured_health
+    local configured_webhook
+    for ((port = 9201; port <= 9301; port++)); do
+        used=0
+        while IFS= read -r existing; do
+            app_dir=$(application_dir_for "$existing")
+            env_file=$(environment_file_for "$existing")
+            if [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]]; then
+                configured=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
+                configured_enabled=$(
+                    dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED"
+                )
+                configured_health=$(dotenv_value "$app_dir" "$env_file" "HEALTH_PORT")
+                configured_delivery=$(
+                    dotenv_value "$app_dir" "$env_file" "TELEGRAM_DELIVERY_MODE"
+                )
+                configured_webhook=$(
+                    dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT"
+                )
+                if [[ "$configured_enabled" == "true" && "$configured" == "$port" ]] ||
+                    [[ "$configured_health" != "0" && "$configured_health" == "$port" ]] ||
+                    [[ "$configured_delivery" == "webhook" &&
+                        "$configured_webhook" == "$port" ]]; then
+                    used=1
+                    break
+                fi
+            fi
+        done < <(instance_names)
+        if ((used == 0)) && ! ss -ltnH 2>/dev/null | awk '{print $4}' |
+            grep -Eq "(^|:)$port$"; then
+            printf '%s\n' "$port"
+            return
+        fi
+    done
+    die "No unused automatic Mini App port was found between 9201 and 9301."
+}
+
 generate_webhook_secret() {
     "$1" - <<'PY'
 import secrets
@@ -557,6 +619,18 @@ migrate_instance_configuration() {
         "BOT_DESCRIPTION" "Read and search Scripture in Telegram with GetBible."
     ensure_env_value "$python_bin" "$env_file" \
         "BOT_SHORT_DESCRIPTION" "Read and search Scripture with GetBible."
+    ensure_env_value "$python_bin" "$env_file" "MINI_APP_ENABLED" "false"
+    ensure_env_value "$python_bin" "$env_file" "MINI_APP_PUBLIC_URL" ""
+    ensure_env_value "$python_bin" "$env_file" "MINI_APP_LISTEN" "127.0.0.1"
+    ensure_env_value "$python_bin" "$env_file" "MINI_APP_PORT" "9201"
+    ensure_env_value "$python_bin" "$env_file" \
+        "MINI_APP_INIT_DATA_MAX_AGE_SECONDS" "300"
+    ensure_env_value "$python_bin" "$env_file" \
+        "MINI_APP_LAUNCH_TTL_SECONDS" "300"
+    ensure_env_value "$python_bin" "$env_file" \
+        "MINI_APP_SESSION_TTL_SECONDS" "900"
+    ensure_env_value "$python_bin" "$env_file" "MINI_APP_SESSION_LIMIT" "2000"
+    ensure_env_value "$python_bin" "$env_file" "MINI_APP_MAX_SELECTIONS" "100"
     chown root:root "$env_file"
     chmod 0600 "$env_file"
     verify_content_access "$service_user" "$instance"
@@ -1018,6 +1092,33 @@ cmd_install() {
         webhook_secret=$(generate_webhook_secret "$python_bin")
     fi
 
+    local mini_app_enabled="false"
+    local mini_app_public_url=""
+    local mini_app_port="9201"
+    if confirm "Enable the authenticated Telegram Mini App?" yes; then
+        mini_app_enabled="true"
+        printf '\nThe Mini App needs a public HTTPS URL. Your reverse proxy forwards\n'
+        printf 'that URL prefix to a separate loopback-only listener for this instance.\n'
+        while true; do
+            mini_app_public_url=$(
+                prompt "Public HTTPS Mini App URL" \
+                    "https://bot.example.com/getbible/${instance}"
+            )
+            validate_mini_app_url "$mini_app_public_url" && break
+            warn "Use a complete HTTPS URL without credentials, query, or fragment."
+        done
+        mini_app_port=$(next_mini_app_port)
+        mini_app_port=$(prompt "Loopback Mini App listener port" "$mini_app_port")
+        validate_port "$mini_app_port" && ((mini_app_port >= 1024)) ||
+            die "Mini App port must be an integer between 1024 and 65535."
+        if ss -ltnH 2>/dev/null | awk '{print $4}' |
+            grep -Eq "(^|:)$mini_app_port$"; then
+            die "Mini App port ${mini_app_port} is already listening."
+        fi
+        [[ "$mini_app_port" != "$webhook_port" || "$delivery_mode" != "webhook" ]] ||
+            die "The Mini App and webhook listeners require different ports."
+    fi
+
     local suggested_port
     local health_port
     suggested_port=$(next_health_port)
@@ -1030,6 +1131,10 @@ cmd_install() {
         if [[ "$health_port" != "0" ]] &&
             ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$health_port$"; then
             warn "Port ${health_port} is already listening."
+            continue
+        fi
+        if [[ "$mini_app_enabled" == "true" && "$health_port" == "$mini_app_port" ]]; then
+            warn "The health and Mini App listeners require different ports."
             continue
         fi
         break
@@ -1047,11 +1152,13 @@ cmd_install() {
     fi
 
     local start_now="yes"
-    if [[ "$delivery_mode" == "webhook" ]] &&
-        ! confirm "Is the public HTTPS reverse-proxy route already configured?" no; then
-        warn "The instance will be installed but not started. Configure HTTPS, then run '${PROGRAM} start ${instance}'."
-        start_now="no"
-    else
+    if [[ "$delivery_mode" == "webhook" || "$mini_app_enabled" == "true" ]]; then
+        if ! confirm "Are all configured public HTTPS reverse-proxy routes ready?" no; then
+            warn "The instance will be installed but not started. Configure HTTPS, then run '${PROGRAM} start ${instance}'."
+            start_now="no"
+        fi
+    fi
+    if [[ "$start_now" == "yes" ]]; then
         confirm "Enable and start this instance after validation?" yes || start_now="no"
     fi
 
@@ -1069,6 +1176,11 @@ cmd_install() {
         printf '  Public webhook: %s\n' "$webhook_public_url"
         printf '  Proxy target:   http://127.0.0.1:%s%s\n' \
             "$webhook_port" "$(printf '%s' "$webhook_public_url" | sed -E 's#^https://[^/]+##')"
+    fi
+    printf '  Mini App:       %s\n' "$mini_app_enabled"
+    if [[ "$mini_app_enabled" == "true" ]]; then
+        printf '  Mini App URL:   %s\n' "$mini_app_public_url"
+        printf '  Mini App local: http://127.0.0.1:%s\n' "$mini_app_port"
     fi
     printf '  Health:         127.0.0.1:%s\n\n' "$health_port"
     confirm "Create this instance?" yes || die "Installation cancelled."
@@ -1124,6 +1236,10 @@ cmd_install() {
     replace_env_value "$python_bin" "$env_file" "BOT_NAME" "$bot_name"
     replace_env_value "$python_bin" "$env_file" "BOT_DESCRIPTION" "$bot_description"
     replace_env_value "$python_bin" "$env_file" "BOT_SHORT_DESCRIPTION" "$bot_short_description"
+    replace_env_value "$python_bin" "$env_file" "MINI_APP_ENABLED" "$mini_app_enabled"
+    replace_env_value "$python_bin" "$env_file" "MINI_APP_PUBLIC_URL" "$mini_app_public_url"
+    replace_env_value "$python_bin" "$env_file" "MINI_APP_LISTEN" "127.0.0.1"
+    replace_env_value "$python_bin" "$env_file" "MINI_APP_PORT" "$mini_app_port"
     replace_env_value "$python_bin" "$env_file" "TRANSLATION" "$translation"
     replace_env_value "$python_bin" "$env_file" \
         "USER_PREFERENCES_FILE" "${state_dir}/preferences.sqlite3"
@@ -1171,6 +1287,9 @@ cmd_install() {
     printf '  sudo %s status %s\n' "$PROGRAM" "$instance"
     printf '  sudo %s logs %s\n' "$PROGRAM" "$instance"
     printf '  sudo %s doctor %s\n' "$PROGRAM" "$instance"
+    if [[ "$mini_app_enabled" == "true" ]]; then
+        printf '  sudo %s miniapp %s\n' "$PROGRAM" "$instance"
+    fi
 }
 
 cmd_list() {
@@ -1237,6 +1356,10 @@ cmd_status() {
     local delivery_mode
     local webhook_public_url
     local webhook_port
+    local mini_app_enabled
+    local mini_app_public_url
+    local mini_app_listen
+    local mini_app_port
     local active
     local enabled
     service=$(service_name_for "$ACTIVE_INSTANCE")
@@ -1267,6 +1390,21 @@ cmd_status() {
             )
             printf 'Webhook URL:   %s\n' "$webhook_public_url"
             printf 'Webhook local: 127.0.0.1:%s\n' "$webhook_port"
+        fi
+        mini_app_enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
+        printf 'Mini App:      %s\n' "${mini_app_enabled:-false}"
+        if [[ "$mini_app_enabled" == "true" ]]; then
+            mini_app_public_url=$(
+                dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL"
+            )
+            mini_app_listen=$(
+                dotenv_value "$app_dir" "$env_file" "MINI_APP_LISTEN"
+            )
+            mini_app_port=$(
+                dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT"
+            )
+            printf 'Mini App URL:  %s\n' "$mini_app_public_url"
+            printf 'Mini App local: %s:%s\n' "$mini_app_listen" "$mini_app_port"
         fi
     fi
     printf 'JSON log:      %s\n' "$log_file"
@@ -1338,6 +1476,9 @@ cmd_doctor() {
     local welcome_file
     local help_file
     local content_file
+    local mini_app_enabled
+    local mini_app_listen
+    local mini_app_port
     service=$(service_name_for "$ACTIVE_INSTANCE")
     app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
     env_file=$(environment_file_for "$ACTIVE_INSTANCE")
@@ -1410,6 +1551,19 @@ cmd_doctor() {
             warn "Telegram delivery mode does not match the registered webhook state."
             ((failures += 1))
         }
+        mini_app_enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
+        if [[ "$mini_app_enabled" == "true" ]]; then
+            mini_app_listen=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_LISTEN")
+            mini_app_port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
+            if [[ "$mini_app_listen" != "127.0.0.1" ]]; then
+                warn "The Mini App listener is not restricted to IPv4 loopback."
+                ((failures += 1))
+            elif ! ss -ltnH 2>/dev/null | awk '{print $4}' |
+                grep -Eq "^127\\.0\\.0\\.1:${mini_app_port}$"; then
+                warn "The configured loopback Mini App listener is not active."
+                ((failures += 1))
+            fi
+        fi
     fi
     if ((failures > 0)); then
         record_operation doctor "$ACTIVE_INSTANCE" "failed-${failures}"
@@ -1507,6 +1661,11 @@ cmd_delivery() {
             rm -f "$backup"
             die "Webhook port must be an integer between 1 and 65535."
         }
+        if [[ "$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")" == "true" &&
+            "$webhook_port" == "$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")" ]]; then
+            rm -f "$backup"
+            die "The webhook and Mini App listeners require different ports."
+        fi
         webhook_ip_address=$(
             dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_IP_ADDRESS"
         )
@@ -1563,6 +1722,111 @@ cmd_delivery() {
     fi
     rm -f "$backup"
     record_operation delivery "$ACTIVE_INSTANCE" "$requested_mode"
+    cmd_status "$ACTIVE_INSTANCE"
+}
+
+cmd_miniapp() {
+    require_root
+    require_tty
+    select_instance "${1:-}"
+    local env_file
+    local app_dir
+    local backup
+    local service
+    local current_enabled
+    local current_url
+    local current_port
+    local requested_enabled="false"
+    local public_url
+    local port
+    local webhook_port
+    local default_choice="no"
+    local was_active
+    env_file=$(environment_file_for "$ACTIVE_INSTANCE")
+    app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
+    service=$(service_name_for "$ACTIVE_INSTANCE")
+    current_enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
+    current_enabled=${current_enabled:-false}
+    current_url=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")
+    current_port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
+    [[ "$current_enabled" == "true" ]] && default_choice="yes"
+
+    if confirm "Enable the authenticated Telegram Mini App?" "$default_choice"; then
+        requested_enabled="true"
+    fi
+
+    backup=$(mktemp "${ETC_ROOT}/.${ACTIVE_INSTANCE}.env.XXXXXX")
+    cp -a "$env_file" "$backup"
+    if [[ "$requested_enabled" == "true" ]]; then
+        while true; do
+            public_url=$(
+                prompt "Public HTTPS Mini App URL" \
+                    "${current_url:-https://bot.example.com/getbible/${ACTIVE_INSTANCE}}"
+            )
+            validate_mini_app_url "$public_url" && break
+            warn "Use a complete HTTPS URL without credentials, query, or fragment."
+        done
+        if [[ "$current_enabled" != "true" || -z "$current_port" || "$current_port" == "0" ]]; then
+            current_port=$(next_mini_app_port)
+        fi
+        port=$(prompt "Loopback Mini App listener port" "$current_port")
+        validate_port "$port" && ((port >= 1024)) || {
+            rm -f "$backup"
+            die "Mini App port must be an integer between 1024 and 65535."
+        }
+        webhook_port=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT")
+        if [[ "$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_DELIVERY_MODE")" == "webhook" &&
+            "$port" == "$webhook_port" ]]; then
+            rm -f "$backup"
+            die "The Mini App and webhook listeners require different ports."
+        fi
+        if [[ "$ACTIVE_PORT" != "0" && "$port" == "$ACTIVE_PORT" ]]; then
+            rm -f "$backup"
+            die "The Mini App and health listeners require different ports."
+        fi
+        if [[ "$port" != "$current_port" ]] &&
+            ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$port$"; then
+            rm -f "$backup"
+            die "Mini App port ${port} is already listening."
+        fi
+        replace_env_value "$app_dir/venv/bin/python" "$env_file" \
+            "MINI_APP_PUBLIC_URL" "$public_url"
+        replace_env_value "$app_dir/venv/bin/python" "$env_file" \
+            "MINI_APP_LISTEN" "127.0.0.1"
+        replace_env_value "$app_dir/venv/bin/python" "$env_file" \
+            "MINI_APP_PORT" "$port"
+        printf 'Configure this public HTTPS prefix before restarting:\n'
+        printf '  %s -> http://127.0.0.1:%s\n' "$public_url" "$port"
+        if ! confirm "Is that HTTPS reverse-proxy route ready?" no; then
+            cp -a "$backup" "$env_file"
+            rm -f "$backup"
+            die "Mini App configuration was not changed."
+        fi
+    fi
+
+    replace_env_value "$app_dir/venv/bin/python" "$env_file" \
+        "MINI_APP_ENABLED" "$requested_enabled"
+    chown root:root "$env_file"
+    chmod 0600 "$env_file"
+    if ! validate_environment "$app_dir" "$env_file"; then
+        cp -a "$backup" "$env_file"
+        rm -f "$backup"
+        die "Mini App configuration was invalid; the previous file was restored."
+    fi
+
+    was_active=$(systemctl is-active "$service" 2>/dev/null || true)
+    if [[ "$was_active" == "active" ]]; then
+        if ! systemctl restart "$service" || ! wait_for_readiness "$ACTIVE_PORT"; then
+            warn "New Mini App configuration failed; restoring the previous configuration."
+            cp -a "$backup" "$env_file"
+            systemctl restart "$service" || true
+            wait_for_readiness "$ACTIVE_PORT" || true
+            rm -f "$backup"
+            die "Mini App change was rolled back."
+        fi
+    fi
+    rm -f "$backup"
+    record_operation miniapp "$ACTIVE_INSTANCE" "$requested_enabled"
     cmd_status "$ACTIVE_INSTANCE"
 }
 
@@ -1640,20 +1904,35 @@ cmd_config() {
     local edited_token
     local edited_welcome_file
     local edited_help_file
+    local edited_mini_app_listen
+    local edited_mini_app_port
+    local edited_webhook_port
+    local edited_delivery_mode
     edited_instance=$(dotenv_value "$app_dir" "$env_file" "INSTANCE_NAME")
     edited_log_file=$(dotenv_value "$app_dir" "$env_file" "LOG_FILE")
     edited_port=$(dotenv_value "$app_dir" "$env_file" "HEALTH_PORT")
     edited_token=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_API_TOKEN")
     edited_welcome_file=$(dotenv_value "$app_dir" "$env_file" "WELCOME_MESSAGE_FILE")
     edited_help_file=$(dotenv_value "$app_dir" "$env_file" "HELP_MESSAGE_FILE")
+    edited_mini_app_listen=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_LISTEN")
+    edited_mini_app_port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
+    edited_webhook_port=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT")
+    edited_delivery_mode=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_DELIVERY_MODE")
     if [[ "$edited_instance" != "$ACTIVE_INSTANCE" ||
         "$edited_log_file" != "$(log_file_for "$ACTIVE_INSTANCE")" ||
         "$edited_port" != "$ACTIVE_PORT" ||
         "$edited_welcome_file" != "$(welcome_file_for "$ACTIVE_INSTANCE")" ||
-        "$edited_help_file" != "$(help_file_for "$ACTIVE_INSTANCE")" ]]; then
+        "$edited_help_file" != "$(help_file_for "$ACTIVE_INSTANCE")" ||
+        "$edited_mini_app_listen" != "127.0.0.1" ]]; then
         cp -a "$backup" "$env_file"
         rm -f "$backup"
-        die "INSTANCE_NAME, LOG_FILE, HEALTH_PORT, and content-file paths are manager-owned; the previous file was restored."
+        die "INSTANCE_NAME, LOG_FILE, HEALTH_PORT, MINI_APP_LISTEN, and content-file paths are manager-owned; the previous file was restored."
+    fi
+    if [[ "$edited_delivery_mode" == "webhook" &&
+        "$edited_mini_app_port" == "$edited_webhook_port" ]]; then
+        cp -a "$backup" "$env_file"
+        rm -f "$backup"
+        die "The Mini App and webhook listeners require different ports; the previous file was restored."
     fi
     if [[ -n "$edited_token" ]] &&
         ! ensure_unique_token "$edited_token" "$ACTIVE_INSTANCE"; then
@@ -1876,6 +2155,20 @@ cmd_self_test() {
         ((failed += 1))
     ! validate_webhook_url "https://bot.example.com/.*" ||
         ((failed += 1))
+    validate_mini_app_url "https://bot.example.com/getbible/production" ||
+        ((failed += 1))
+    validate_mini_app_url "https://bot.example.com:8443/getbible/" ||
+        ((failed += 1))
+    ! validate_mini_app_url "http://bot.example.com/getbible" ||
+        ((failed += 1))
+    ! validate_mini_app_url "https://user@bot.example.com/getbible" ||
+        ((failed += 1))
+    ! validate_mini_app_url "https://bot.example.com/getbible?token=secret" ||
+        ((failed += 1))
+    ! validate_mini_app_url "https://127.0.0.1/getbible" ||
+        ((failed += 1))
+    ! validate_mini_app_url "https://bot.example.com/a/../b" ||
+        ((failed += 1))
     validate_token_shape "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi" ||
         ((failed += 1))
     ! validate_token_shape "replace-with-a-real-bot-token" || ((failed += 1))
@@ -1909,10 +2202,11 @@ GetBible Robot operations
  11) Repair application access
  12) Edit configuration
  13) Switch polling/webhook delivery
- 14) Edit welcome/help content
- 15) Upgrade
- 16) Roll back
- 17) Uninstall
+ 14) Configure Telegram Mini App
+ 15) Edit welcome/help content
+ 16) Upgrade
+ 17) Roll back
+ 18) Uninstall
   0) Exit
 EOF
         read -r -p "Selection: " selection
@@ -1930,10 +2224,11 @@ EOF
             11) cmd_repair ;;
             12) cmd_config ;;
             13) cmd_delivery ;;
-            14) cmd_content ;;
-            15) cmd_upgrade ;;
-            16) cmd_rollback ;;
-            17) cmd_uninstall ;;
+            14) cmd_miniapp ;;
+            15) cmd_content ;;
+            16) cmd_upgrade ;;
+            17) cmd_rollback ;;
+            18) cmd_uninstall ;;
             0) return ;;
             *) warn "Unknown selection." ;;
         esac
@@ -1957,6 +2252,7 @@ main() {
         repair) cmd_repair "$@" ;;
         config) cmd_config "$@" ;;
         delivery) cmd_delivery "$@" ;;
+        miniapp) cmd_miniapp "$@" ;;
         content) cmd_content "$@" ;;
         upgrade) cmd_upgrade "$@" ;;
         rollback) cmd_rollback "$@" ;;

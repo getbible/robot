@@ -3,11 +3,10 @@
 ## Request path
 
 ```text
-Telegram long poll or authenticated HTTPS webhook
-  → Telegram message, reply, or callback update
-  → registered command or interactive handler
-  → command/input token buckets or serialized owner callback
-  → strict reference, search, session, and callback validation
+Telegram update → command → direct-reference fast path or signed Mini App launch
+Mini App HTTPS → verified initData + user-bound launch token
+  → command/API rate limit and owner/session validation
+  → strict reference, search, and selection validation
   → bounded ScriptureService capacity wait
   → upstream circuit breaker
   → fixed-size worker pool
@@ -59,35 +58,27 @@ translation named `3:16`.
 Only when the complete input is not a valid reference does the robot consider the final whitespace-delimited token as a translation abbreviation. The candidate must match the complete abbreviation grammar. The preceding reference is validated locally before the candidate is repository-checked. Explicit `kjv` remains supported.
 
 An empty `/bible` does not enter the reference parser and never falls back to a
-configured verse. It creates an owner-scoped interactive session and opens the
-guided translation, testament, book, chapter, verse/range, and selection-basket
-flow. The basket can combine separate verses and ranges across chapters/books,
-and compacts overlapping or adjacent intervals before final validation.
-In groups and supergroups, Bot API 10.2 keeps the command and complete picker
-ephemeral to the requesting user. Paging edits the same panel, and only **Post
-Scripture** creates an ordinary message in the originating chat and forum
-topic. Ephemeral delivery failures fail closed instead of publishing the picker
-or an error to the group.
+configured verse. It creates a short-lived, owner-bound launch and opens the
+Mini App at translation, testament, book, chapter, and verse/range navigation.
+The basket can combine separate verses and ranges across chapters/books and
+compacts overlapping or adjacent intervals before final validation. Only the
+final server-resolved Scripture is posted into the originating chat and forum
+topic.
 
 ## Search and confirmation flow
 
-`/search <words>` constructs Librarian's default `SearchBible` criteria with the
-user's saved translation. For detected CJK scripts, default whole-word matching
-is adapted to substring matching because those scripts do not depend on
-whitespace word boundaries. An empty `/search` creates the criteria in a filter
-dashboard and allows the user to change every exposed Librarian filter before
-replying with query text.
+`/search <words>` launches the Mini App directly into results constructed with
+Librarian's defaults and the user's saved translation. An empty `/search`
+launches the full search and filter screen. For detected CJK scripts, default
+whole-word matching is adapted to substring matching because those scripts do
+not depend on whitespace word boundaries.
 
 Librarian returns exact totals, grouped verse data, and ordered match metadata.
-The robot validates that every match points to a verse in the grouped results,
-retains only the configured bounded result set, and renders every complete verse
-inside one full-width selectable button. Match spans are preserved in original
-Unicode positions and marked with `【】` because inline-button labels do not
-support partial HTML entities. In groups and supergroups, Bot API 10.2 keeps the
-command and result panel ephemeral to the requesting user. Each page holds at
-most 30 complete result blocks; Previous/Next and All/Old/New/Other scope
-changes edit the same ephemeral panel. No ordinary group message is sent from
-search until the owner presses **Post selected**.
+The server validates that every match points to a verse in the grouped results,
+retains only the configured bounded result set, and returns complete wrapping
+verse cards. Search filters, paging, selection, and review remain inside the
+Mini App; they do not produce chat messages. No ordinary message is sent until
+the owner presses **Post selected**.
 
 Selected match metadata is converted back into compressed canonical references.
 The final post performs a normal Librarian `select()` call and passes through the
@@ -96,14 +87,24 @@ post payload.
 
 ## Interactive session model
 
-Callbacks contain an opaque random token rather than references, queries, or verse text. The in-memory session store validates token, chat, and user together, refreshes an inactivity TTL, and enforces an LRU size limit. Replies are accepted only when they target the exact bot prompt recorded for that session.
+The bot issues an opaque, high-entropy launch token rather than placing
+references, queries, chat identifiers, or verse text in the URL. The Mini App
+server accepts it only together with fresh Telegram-signed `initData`, verifies
+the signature using the bot token, validates the authentication time, and binds
+the session to the same Telegram user and originating workflow. Launch tokens
+and authenticated sessions have separate short expirations and bounded stores.
 
-Local pagination, filter toggles, and checkmarks do not consume worker capacity
-or command-rate tokens. Callbacks for one session are serialized to prevent
-rapid taps from racing state transitions. New commands and free-text replies
-still consume normal per-user and per-chat inbound budgets. Catalog reads and
-final posts use the reference pool. Searches use their own smaller pool and
-circuit so CPU-heavy corpus work cannot consume every direct-reference permit.
+Pagination, filter toggles, and local checkmarks do not create Telegram
+messages. API mutations for one session are serialized to prevent rapid taps
+from racing state transitions. Commands still consume normal per-user and
+per-chat inbound budgets. Catalog reads and final posts use the reference pool.
+Searches use their own smaller pool and circuit so CPU-heavy corpus work cannot
+consume every direct-reference permit.
+
+The public HTML shell is not an authentication boundary. Protected data and
+action routes fail closed unless both authorization layers validate. Browser
+verse text and selections are treated as untrusted identifiers; final posting
+retrieves and renders authoritative Scripture server-side.
 
 ## Concurrency and timeout model
 
@@ -156,18 +157,21 @@ Startup order:
 3. initialize Telegram and synchronize the command menu and profile metadata;
 4. optionally load/index the default search translation;
 5. start the loopback health listener;
-6. start exactly one configured transport:
+6. when enabled, start the Mini App on its distinct loopback port and
+   synchronize bot-owned launch controls;
+7. start exactly one configured transport:
    - polling, which removes any registered webhook; or
    - an authenticated webhook on loopback behind public HTTPS.
 
 Shutdown order:
 
-1. stop the health listener;
-2. mark the Scripture service closed;
-3. stop accepting work and wait for real worker threads;
-4. close Librarian HTTP sessions;
-5. close the per-instance preference database;
-6. complete Telegram shutdown.
+1. stop accepting Mini App launches and requests;
+2. stop the Mini App and health listeners;
+3. mark the Scripture service closed;
+4. stop accepting work and wait for real worker threads;
+5. close Librarian HTTP sessions;
+6. close the per-instance preference database;
+7. complete Telegram shutdown.
 
 The Bot API does not offer a WebSocket update transport. Polling and webhooks
 are mutually exclusive. A polling `Conflict` stops the instance with a
@@ -178,7 +182,8 @@ The supplied `systemd` template gives every named instance its own locked
 writable cache/state/JSONL paths, restart behavior, filesystem protection, no
 capabilities, limited address families, task/file limits, and `MemoryMax`.
 Instances do not share a token, process, cache, preference database, health
-port, log file, interaction state, or virtual environment.
+port, Mini App port/session state, log file, interaction state, or virtual
+environment.
 
 ## Errors and observability
 
@@ -193,7 +198,8 @@ searches, names, usernames, profiles, or chat history. The restricted
 per-instance preference database stores only Telegram user ID, translation
 code, and update time. In explicitly enabled content audit mode, final
 references and search terms are also persisted to the restricted per-instance
-log for its configured retention period. Short-lived query and selection state
-otherwise exists only in bounded process memory and expires on inactivity or
-restart. Telegram and the configured GetBible API remain independent external
-services.
+log for its configured retention period. Short-lived launch, query, and
+selection state otherwise exists only in bounded process memory and expires on
+inactivity or restart. Telegram `initData` is used only for request
+authentication and is not written to application logs. Telegram and the
+configured GetBible API remain independent external services.

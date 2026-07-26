@@ -16,6 +16,11 @@ bash setup.sh self-test
 "$PYTHON" -m unittest discover -s tests -v
 "$VENV/bin/ruff" check .
 "$VENV/bin/mypy"
+if ! command -v npm >/dev/null 2>&1; then
+  echo "Missing npm. Node.js is required for Mini App quality checks." >&2
+  exit 2
+fi
+npm --prefix miniapp run check
 
 librarian_path=$(
   "$PYTHON" - <<'PY'

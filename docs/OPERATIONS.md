@@ -10,7 +10,11 @@ sudo getbible-robot status production
 sudo getbible-robot runtime production
 ```
 
-`list` reports instance, isolated service account, service state, health port, and abbreviated deployed commit. `status` adds the exact commit, Python version, creation date, JSON log path, enablement, and readiness. `runtime` adds `pip check`, systemd memory/task/restart counters, and aggregate application metrics.
+`list` reports instance, isolated service account, service state, health port,
+and abbreviated deployed commit. `status` adds the exact commit, Python
+version, creation date, JSON log path, Telegram delivery, Mini App public/local
+addresses, enablement, and readiness. `runtime` adds `pip check`, systemd
+memory/task/restart counters, and aggregate application metrics.
 
 No command prints the secret environment file or Telegram token.
 
@@ -56,6 +60,21 @@ sudo EDITOR=nano getbible-robot content production help
 Use `config` for `BOT_NAME`, `BOT_DESCRIPTION`, and
 `BOT_SHORT_DESCRIPTION`. Restarting synchronizes those values and the command
 menu through Telegram's Bot API. See [Telegram delivery](WEBHOOKS.md).
+
+## Telegram Mini App
+
+Configure or disable the same-instance Mini App transactionally:
+
+```bash
+sudo getbible-robot miniapp production
+sudo getbible-robot status production
+sudo getbible-robot doctor production
+```
+
+The Mini App listener remains on `127.0.0.1` and uses a port separate from the
+health and webhook listeners. Its public HTTPS route is required even when
+Telegram updates use polling. See [Mini App deployment](MINI_APP.md) for secure
+reverse-proxy, BotFather, authentication, and verification requirements.
 
 ## Logs
 
@@ -108,6 +127,7 @@ The non-destructive diagnostic checks:
 - instantiated unit verification;
 - systemd status;
 - Telegram webhook registration matching the configured delivery mode;
+- enabled Mini App listener presence on its exact IPv4 loopback address;
 - health and readiness when running.
 
 Use `runtime` for operational counters and `doctor` for an evidence-backed pass/fail deployment check.
@@ -154,6 +174,8 @@ Alert on:
 - lookup timeouts, repository failures, queue rejections, or unexpected failures;
 - sustained rate-limit rejection;
 - a duplicate-poller exit or webhook pending/error growth;
+- Mini App listener loss, authorization failures, expired-launch growth, or
+  unexpected public API access without Telegram authorization;
 - interactive session evictions or saturation;
 - memory approaching `MemoryMax`;
 - task or file-descriptor pressure;
@@ -179,6 +201,8 @@ The code and exact dependency locks are recoverable from Git. Cache data is reco
 
 - the exact deployed and prior commits;
 - an encrypted copy of `/etc/getbible-robot/<instance>.env` when policy requires it;
+- durable preference data when required by policy; Mini App launch/session
+  state is intentionally short-lived and should not be restored;
 - deployment and smoke-test records;
 - content logs only for the minimum approved retention period.
 

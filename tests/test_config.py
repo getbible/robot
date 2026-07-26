@@ -29,6 +29,103 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.max_concurrent_searches, 1)
         self.assertTrue(settings.prewarm_default_translation)
         self.assertEqual(settings.telegram_delivery_mode, "polling")
+        self.assertFalse(settings.mini_app_enabled)
+        self.assertIsNone(settings.mini_app_public_url)
+
+    def test_mini_app_configuration_is_explicit_and_loopback_only(self) -> None:
+        with patch.dict(
+            os.environ,
+            self.environment(
+                MINI_APP_ENABLED="true",
+                MINI_APP_PUBLIC_URL="https://bot.example.com/getbible/app/",
+                MINI_APP_PORT="9250",
+            ),
+            clear=True,
+        ):
+            settings = Settings.from_env(load_environment_file=False)
+
+        self.assertTrue(settings.mini_app_enabled)
+        self.assertEqual(
+            settings.mini_app_public_url,
+            "https://bot.example.com/getbible/app",
+        )
+        self.assertEqual(settings.mini_app_listen, "127.0.0.1")
+        self.assertEqual(settings.mini_app_port, 9250)
+        self.assertEqual(settings.mini_app_init_data_max_age_seconds, 300)
+        self.assertEqual(settings.mini_app_launch_ttl_seconds, 300)
+        self.assertEqual(settings.mini_app_session_ttl_seconds, 900)
+        self.assertEqual(settings.mini_app_session_limit, 2000)
+        self.assertEqual(settings.mini_app_max_selections, 100)
+
+    def test_mini_app_configuration_fails_closed(self) -> None:
+        invalid = (
+            {"MINI_APP_ENABLED": "true"},
+            {
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "http://bot.example.com/app",
+            },
+            {
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://127.0.0.1/app",
+            },
+            {
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://user@bot.example.com/app",
+            },
+            {
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://bot.example.com/app?token=secret",
+            },
+            {
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://bot.example.com/a/../b",
+            },
+            {
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://bot.example.com/app",
+                "MINI_APP_LISTEN": "0.0.0.0",
+            },
+            {
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://bot.example.com/app",
+                "MINI_APP_PORT": "8081",
+            },
+            {
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://bot.example.com/app",
+                "MINI_APP_INIT_DATA_MAX_AGE_SECONDS": "901",
+            },
+        )
+        for overrides in invalid:
+            with (
+                self.subTest(overrides=overrides),
+                patch.dict(
+                    os.environ,
+                    self.environment(**overrides),
+                    clear=True,
+                ),
+                self.assertRaises(ConfigurationError),
+            ):
+                Settings.from_env(load_environment_file=False)
+
+    def test_mini_app_port_cannot_overlap_enabled_webhook(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                self.environment(
+                    TELEGRAM_DELIVERY_MODE="webhook",
+                    TELEGRAM_WEBHOOK_PUBLIC_URL="https://bot.example.com/telegram/live",
+                    TELEGRAM_WEBHOOK_SECRET_TOKEN="A" * 32,
+                    TELEGRAM_WEBHOOK_PORT="9250",
+                    MINI_APP_ENABLED="true",
+                    MINI_APP_PUBLIC_URL="https://bot.example.com/getbible/app",
+                    MINI_APP_PORT="9250",
+                ),
+                clear=True,
+            ),
+            self.assertRaises(ConfigurationError),
+        ):
+            Settings.from_env(load_environment_file=False)
 
     def test_webhook_mode_requires_https_path_and_secret(self) -> None:
         invalid_webhook_value = "short"

@@ -30,16 +30,18 @@ sudo getbible-robot upgrade production --source /path/to/robot-upgrade
 The manager:
 
 1. confirms the current and target exact commits;
-2. clones the target into `app.next`;
-3. builds a fresh virtual environment;
-4. installs the target lock with `--require-hashes`;
-5. runs `pip check`;
-6. validates the existing instance environment with the target code;
-7. installs and verifies the target manager/unit;
-8. stops only the selected instance;
-9. atomically replaces `app` and retains `app.previous`;
-10. starts the service and waits for readiness;
-11. automatically restores the prior application if readiness fails.
+2. adds missing backwards-compatible configuration defaults, including disabled
+   Mini App settings, without printing or replacing existing secrets;
+3. clones the target into `app.next`;
+4. builds a fresh virtual environment;
+5. installs the target lock with `--require-hashes`;
+6. runs `pip check`;
+7. validates the existing instance environment with the target code;
+8. installs and verifies the target manager/unit;
+9. stops only the selected instance;
+10. atomically replaces `app` and retains `app.previous`;
+11. starts the service and waits for readiness;
+12. automatically restores the prior application if readiness fails.
 
 Source, virtual environment, and lock are always moved as one application tree. The service never combines code from one commit with a lock from another.
 
@@ -64,6 +66,15 @@ It displays both commit SHAs, requires explicit confirmation, swaps the complete
 
 Rollback does not silently replace the environment file. If a target release required a configuration migration, use `getbible-robot config` to restore compatible values from the restricted operational backup before retrying.
 
+The Mini App migration is rollback-compatible: existing instances receive
+`MINI_APP_ENABLED=false` plus bounded defaults. The upgrade does not publish a
+new URL or require inbound access. After the upgraded bot is healthy, configure
+the HTTPS route and enable it with:
+
+```bash
+sudo getbible-robot miniapp production
+```
+
 ## Configuration migrations
 
 1. Compare `.env.template` with `/etc/getbible-robot/<instance>.env` without printing secret values.
@@ -73,7 +84,8 @@ Rollback does not silently replace the environment file. If a target release req
 5. Restart and verify readiness.
 6. Retain the prior secret file only according to the approved secret-retention policy.
 
-`INSTANCE_NAME`, `LOG_FILE`, and `HEALTH_PORT` must remain unique to the selected instance.
+`INSTANCE_NAME`, `LOG_FILE`, `HEALTH_PORT`, and `MINI_APP_LISTEN` remain
+manager-owned. Mini App and webhook ports must be unique and must not match.
 
 ## Dependency updates
 

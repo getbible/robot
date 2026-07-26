@@ -13,7 +13,10 @@ venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
 venv/bin/python -m pip check
 ```
 
-A clean environment matters. A globally installed package can hide a missing lock entry or incompatible dependency.
+A clean environment matters. A globally installed package can hide a missing
+lock entry or incompatible dependency. Contributors also need a current Node.js
+release with `npm` for the dependency-free Mini App syntax and unit checks;
+Node.js is not required by the production service.
 
 ## Fast deterministic test cycle
 
@@ -22,6 +25,7 @@ venv/bin/python -m compileall -q bot.py config.py modules scripts tests
 venv/bin/python -m unittest discover -s tests -v
 venv/bin/ruff check .
 venv/bin/mypy
+(cd miniapp && npm run check)
 ```
 
 The suite does not contact Telegram or the live GetBible API. It uses fakes and local fixtures for reproducibility.
@@ -86,6 +90,7 @@ temporary root and substitutes only host boundaries such as systemd, Telegram,
 and account management. It executes the real questionnaire and manager logic
 for two instances, including transactional cleanup, duplicate-token rejection,
 content-file permissions/editing, polling-to-webhook-to-polling switching,
+Mini App enable/disable and listener configuration,
 selectors, lifecycle commands, diagnostics, configuration restoration,
 upgrades, automatic failed-upgrade restoration, manual rollback, and isolated
 uninstall. It never contacts Telegram or changes the host.
@@ -101,24 +106,27 @@ The tests cover at least these invariants:
 - ordinary references do not trigger speculative translation lookups;
 - an empty `/bible` never substitutes a hidden default verse;
 - explicit `/bible <reference>` commands still post immediately;
-- group `/bible` commands, translation/book/chapter/verse pages, progress, and
-  recoverable errors remain per-user ephemeral, with no ordinary group message
-  before confirmed Scripture delivery;
-- `/search <words>` returns complete, visibly marked verses directly inside
-  full-width selectable buttons in per-user ephemeral group pages of at most 30
-  results, with no duplicate verse body and no ordinary group post before
-  confirmation;
+- incomplete `/bible` and `/search` commands create short-lived, user-bound
+  Mini App launches without exposing chat/user identifiers or queries in URLs;
+- every protected Mini App data/action route requires fresh signed Telegram
+  `initData` plus the matching launch token;
+- expired, replayed, malformed, missing, and user-mismatched Mini App
+  authorization fails before repository access or posting;
+- `/search <words>` produces complete wrapping selectable verse cards in a
+  contained, bounded result set without posting automatically;
 - full corpus downloads and constructed search output enforce independent byte
   ceilings;
 - slow searches use independent capacity and circuit state, leaving direct
   references available;
 - default-translation prewarming builds the initial search index;
 - empty `/search` exposes Librarian 1.2 filters through a bounded dashboard;
-- every registered command alias and every implemented callback action appears in an explicit test inventory;
+- every registered command alias and every implemented Mini App action appears
+  in an explicit test inventory;
 - every translation, testament, book, chapter, verse, navigation, back, reset,
   cancel, filter, exclusion, proximity, selection, and confirmation control
-  executes through the interaction state machine;
-- callback sessions require the originating user and chat and expire under TTL/LRU bounds;
+  executes through the server-side Mini App state machine;
+- launch and authenticated sessions require the originating user and workflow
+  and expire under separate TTL/size bounds;
 - guided navigation rejects malformed catalogs, oversized responses, redirects, and book checksum mismatches;
 - selected search verses are compressed and revalidated before Librarian retrieval;
 - malformed explicit-translation commands do not trigger repository lookups;
@@ -146,8 +154,8 @@ The tests cover at least these invariants:
 - the setup questionnaire installs two isolated instances in a temporary host fixture;
 - failed installation is cleaned transactionally without retaining an account, secret, cache, state, or application;
 - list, selection, start, stop, restart, status, runtime, logs, follow, doctor,
-  delivery, content, configuration, upgrade, rollback, menu, and uninstall
-  manager paths execute;
+  delivery, Mini App, content, configuration, upgrade, rollback, menu, and
+  uninstall manager paths execute;
 - invalid configuration is restored, a failed upgrade restores the active application, and uninstalling one instance leaves the other intact;
 - metadata audit mode omits query/reference content;
 - content audit mode includes only the deliberately permitted normalized fields;
@@ -198,17 +206,13 @@ In a group where the bot can delete messages, exercise all three completion
 paths:
 
 1. `/bible John 3:16`;
-2. empty `/bible`, complete the picker, then press **Post Scripture**;
-3. `/search grace`, select a result, then press **Post selected**.
+2. empty `/bible`, complete the Mini App basket, then press **Post Scripture**;
+3. `/search grace`, select results in the Mini App, then press **Post selected**.
 
-For `/bible` and `/search` in a group, confirm the initiating registered command
-and every picker/search panel, prompt, reply, progress state, and recoverable
-notice are visible only to the initiating user. No ordinary group message may
-be sent before the final confirmation action. If a command or legacy alias
-arrives visibly from an older client, it may remain while the workflow is
-active, but it must disappear after final Scripture delivery. Only Scripture
-must remain. Also verify that **Cancel** removes the private workflow without
-posting.
+For `/bible` and `/search` in a group, confirm all browsing, filtering, paging,
+and selection remains inside the initiating user's Mini App. No ordinary group
+message may be sent before the final confirmation action. Only final Scripture
+must remain. Also verify that **Cancel** closes the workflow without posting.
 
 Repeat in a group where the bot lacks deletion permission. Scripture must still
 be delivered; the workflow must not raise a user-facing failure merely because
@@ -224,20 +228,22 @@ Use a separate test bot token and a private test chat. Stop any other polling pr
 
 1. Copy `.env.template` to `.env`.
 2. Set the test token and an unused loopback `HEALTH_PORT`.
-3. Keep the production API/web boundaries:
+3. For Mini App tests, set a dedicated HTTPS test URL, enable
+   `MINI_APP_ENABLED`, and route it to an unused loopback `MINI_APP_PORT`.
+4. Keep the production API/web boundaries:
 
    ```text
    GETBIBLE_API_BASE_URL=https://api.getbible.net
    GETBIBLE_WEB_BASE_URL=https://getbible.life
    ```
 
-4. Start the bot:
+5. Start the bot:
 
    ```bash
    venv/bin/python bot.py
    ```
 
-5. Verify health and readiness:
+6. Verify health and readiness:
 
    ```bash
    curl --fail http://127.0.0.1:8081/healthz
@@ -245,7 +251,7 @@ Use a separate test bot token and a private test chat. Stop any other polling pr
    curl --fail http://127.0.0.1:8081/metrics
    ```
 
-6. Exercise Telegram:
+7. Exercise Telegram:
 
    ```text
    /start
@@ -262,38 +268,44 @@ Use a separate test bot token and a private test chat. Stop any other polling pr
    /unknown
    ```
 
-7. In a group, confirm empty `/bible` is invisible to other members; choose
-   John 3:16 as one verse, add 17–18 as a range, add a separate verse or another
-   chapter, remove one basket entry, review, and confirm that only **Post
+8. In a group, open empty `/bible`; choose John 3:16 as one verse, add 17–18 as
+   a range, add a separate verse or another chapter, remove one basket entry,
+   review, and confirm that browsing stays in the Mini App and only **Post
    selection** creates an ordinary message in the originating topic.
-8. Confirm `/search grace` is invisible to other group members, shows every
-   returned verse in one full-width menu block, marks each matching word with
-   `【】`, pages at up to 30 complete results, and posts nothing publicly until
-   **Post selected** is pressed.
-9. In empty `/search`, change word, match, scope, book, exclusion, and proximity
-   controls; run a search; switch between **All**, **Old**, **New**, and
-   **Other** on the result panel; page, select, deselect, and post multiple
-   results.
-10. Choose a non-KJV translation, finish or cancel the workflow, restart the
+9. Confirm `/search grace` opens contained Mini App results with every complete
+   verse wrapping inside its selectable card, pages without chat messages, and
+   posts nothing until **Post selected** is pressed.
+10. In empty `/search`, change word, match, scope, book, exclusion, and
+    proximity controls; run a search; switch between **All**, **Old**, **New**,
+    and **Other**; page, select, deselect, and post multiple results.
+11. Switch Telegram between light and dark themes, increase text size when the
+    client supports it, and confirm cards, filters, focus states, selected
+    states, safe areas, and the final action remain readable and usable.
+12. Open the public Mini App URL in an ordinary browser and call protected API
+    routes without valid Telegram authorization; no Scripture data, selection,
+    launch context, or posting action may be available.
+13. Reuse an expired launch and mismatched user authorization; both must fail
+    closed before lookup or posting and provide a safe fresh-launch path.
+14. Choose a non-KJV translation, finish or cancel the workflow, restart the
     bot, and confirm the same Telegram user receives that translation by
     default in both `/bible` and `/search`; a different user must still receive
     the application default.
-11. Search a Mandarin translation with an unspaced Han query such as `爱` and
+15. Search a Mandarin translation with an unspaced Han query such as `爱` and
     confirm substring mode is selected automatically, complete matching verses
-    remain readable in the private result blocks, and selection/posting works.
-12. Navigate a Bible picker quickly through more than four buttons and confirm
-    there is no self-inflicted “Too many requests” response or state race.
-13. In a test group, verify `/bible@TestBotName John 3:16`, empty
-    `/bible@TestBotName`, selective search replies, ownership isolation between
-    two users, and permission-safe command deletion.
-14. Open a returned Scripture link and confirm its host is exactly
+    remain readable in their cards, and selection/posting works.
+16. Navigate and select rapidly and confirm there is no self-inflicted “Too
+    many requests” response, duplicate post, or state race.
+17. In a test group, verify `/bible@TestBotName John 3:16`, empty
+    `/bible@TestBotName`, `/search@TestBotName grace`, ownership isolation
+    between two users, and permission-safe command deletion.
+18. Open a returned Scripture link and confirm its host is exactly
     `getbible.life`.
-15. Leave a panel idle beyond `INTERACTION_TTL_SECONDS` and confirm its buttons
-    expire safely.
-16. Send a sustained rejected command burst and confirm only one cooldown
-    warning is sent, with no crash or memory growth.
-17. Stop with `Ctrl+C` and confirm the health listener, worker pool, Librarian
-    sessions, and preference database close cleanly.
+19. Leave the Mini App idle beyond `MINI_APP_SESSION_TTL_SECONDS` and confirm it
+    expires safely without losing the user's durable translation preference.
+20. Send a sustained rejected command/API burst and confirm bounded rejection
+    behavior, with no crash or memory growth.
+21. Stop with `Ctrl+C` and confirm the Mini App and health listeners, worker
+    pool, Librarian sessions, and preference database close cleanly.
 
 Do not paste tokens or private chat content into issues, CI logs, screenshots, or test artifacts. Use metadata audit mode for normal production smoke testing. If content mode is being tested, use synthetic references/search terms and remove the test log according to policy.
 

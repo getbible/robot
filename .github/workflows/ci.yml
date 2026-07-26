@@ -121,6 +121,13 @@ jobs:
           set -o pipefail
           mypy 2>&1 | tee "${RUNNER_TEMP}/mypy.log"
 
+      - name: Validate Mini App
+        shell: bash
+        working-directory: miniapp
+        run: |
+          set -o pipefail
+          npm run check 2>&1 | tee "${RUNNER_TEMP}/miniapp.log"
+
       - name: Static security scan
         shell: bash
         run: |
@@ -215,6 +222,7 @@ jobs:
             ${{ runner.temp }}/development-install.log
             ${{ runner.temp }}/ruff.log
             ${{ runner.temp }}/mypy.log
+            ${{ runner.temp }}/miniapp.log
             ${{ runner.temp }}/bandit.log
             ${{ runner.temp }}/pip-audit.log
             ${{ runner.temp }}/detect-secrets.log

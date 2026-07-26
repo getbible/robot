@@ -100,6 +100,20 @@ class CatalogClientTestCase(unittest.TestCase):
                     "abbreviation": "mal1910",
                     "translation": "Malayalam Bible",
                 },
+                "zhs": {
+                    "abbreviation": "zhs",
+                    "translation": "Chinese Simplified",
+                    "lang": "zh-hans",
+                    "language": "Chinese",
+                    "direction": "RTL",
+                },
+                "ptbr": {
+                    "abbreviation": "ptbr",
+                    "translation": "Portuguese Brazil",
+                    "lang": "pt_br",
+                    "language": "Portuguese",
+                    "direction": "sideways",
+                },
             }
         ).encode()
         with patch(
@@ -109,10 +123,17 @@ class CatalogClientTestCase(unittest.TestCase):
             options = _client().translations()
 
         by_code = {option.code: option for option in options}
-        self.assertEqual(set(by_code), {"kjv", "klv", "mal1910"})
+        self.assertEqual(set(by_code), {"kjv", "klv", "mal1910", "zhs", "ptbr"})
         self.assertEqual(by_code["kjv"].language, "English")
+        self.assertEqual(by_code["kjv"].lang, "en")
         self.assertEqual(by_code["klv"].language, "tlh")
+        self.assertEqual(by_code["klv"].lang, "tlh")
         self.assertEqual(by_code["mal1910"].language, "Unspecified")
+        self.assertEqual(by_code["mal1910"].lang, "und")
+        self.assertEqual(by_code["zhs"].lang, "zh-Hans")
+        self.assertEqual(by_code["zhs"].direction, "rtl")
+        self.assertEqual(by_code["ptbr"].lang, "pt-BR")
+        self.assertEqual(by_code["ptbr"].direction, "ltr")
 
     def test_one_malformed_translation_does_not_disable_valid_picker_entries(
         self,

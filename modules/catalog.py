@@ -23,10 +23,32 @@ from getbible import (
 )
 
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
+_LANG_RE = re.compile(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,7}\Z")
 _SHA1_RE = re.compile(r"[0-9a-f]{40}\Z")
 _T = TypeVar("_T")
 _K = TypeVar("_K")
 LOGGER = logging.getLogger(__name__)
+
+
+def _normalize_lang(value: object) -> str:
+    """Return safe canonical casing for a bounded BCP-47 language tag."""
+    if not isinstance(value, str):
+        return "und"
+    candidate = value.strip().replace("_", "-")
+    if _LANG_RE.fullmatch(candidate) is None:
+        return "und"
+    parts = candidate.split("-")
+    normalized = [parts[0].lower()]
+    for part in parts[1:]:
+        if len(part) == 4 and part.isalpha():
+            normalized.append(part.title())
+        elif (len(part) == 2 and part.isalpha()) or (
+            len(part) == 3 and part.isdecimal()
+        ):
+            normalized.append(part.upper())
+        else:
+            normalized.append(part.lower())
+    return "-".join(normalized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +58,8 @@ class TranslationOption:
     code: str
     name: str
     language: str
+    lang: str = "und"
+    direction: str = "ltr"
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,7 +345,24 @@ class CatalogClient:
             if not isinstance(language, str) or not 1 <= len(language.strip()) <= 128:
                 rejected += 1
                 continue
-            result.append(TranslationOption(code, name.strip(), language.strip()))
+            lang = _normalize_lang(metadata.get("lang"))
+            direction_value = metadata.get("direction")
+            direction = (
+                direction_value.strip().lower()
+                if isinstance(direction_value, str)
+                else "ltr"
+            )
+            if direction not in {"ltr", "rtl"}:
+                direction = "ltr"
+            result.append(
+                TranslationOption(
+                    code,
+                    name.strip(),
+                    language.strip(),
+                    lang,
+                    direction,
+                )
+            )
 
         if not result:
             raise RepositoryResponseError(

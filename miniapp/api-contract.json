@@ -1,0 +1,1113 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "getBible.Life Telegram Mini App API",
+    "version": "1.0.0",
+    "description": "Same-origin API contract for the getBible.Life Telegram Mini App. Telegram initData is revalidated on every authenticated request. Verse text is never accepted as authoritative input for basket or post operations."
+  },
+  "servers": [
+    {
+      "url": "api/v1",
+      "description": "Relative to the Mini App document base"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": [],
+      "telegramInitData": []
+    }
+  ],
+  "paths": {
+    "/session": {
+      "post": {
+        "summary": "Create a short-lived Mini App session",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["init_data"],
+                "properties": {
+                  "init_data": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 8192
+                  },
+                  "launch_token": {
+                    "type": ["string", "null"],
+                    "pattern": "^[A-Za-z0-9_-]{1,256}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Validated Telegram session and initial application state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NewSession"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "description": "The signed Telegram launch data has already been exchanged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      },
+      "get": {
+        "summary": "Resume and hydrate an existing WebView-tab session",
+        "responses": {
+          "200": {
+            "description": "Current session state without issuing a new bearer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionState"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/translations": {
+      "get": {
+        "summary": "List available Bible translations",
+        "responses": {
+          "200": {
+            "description": "Translation catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["selected", "items"],
+                  "properties": {
+                    "selected": {
+                      "$ref": "#/components/schemas/TranslationCode"
+                    },
+                    "items": {
+                      "type": "array",
+                      "maxItems": 500,
+                      "items": {
+                        "$ref": "#/components/schemas/Translation"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/preferences": {
+      "put": {
+        "summary": "Persist validated preferences for the Telegram user",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Preferences"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Canonical persisted preferences",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["preferences"],
+                  "properties": {
+                    "preferences": {
+                      "$ref": "#/components/schemas/Preferences"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/books": {
+      "get": {
+        "summary": "List books available for a translation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TranslationQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Canonical book order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["translation", "items"],
+                  "properties": {
+                    "translation": {
+                      "$ref": "#/components/schemas/TranslationCode"
+                    },
+                    "items": {
+                      "type": "array",
+                      "maxItems": 200,
+                      "items": {
+                        "$ref": "#/components/schemas/Book"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/chapters": {
+      "get": {
+        "summary": "List chapters available for a book",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TranslationQuery"
+          },
+          {
+            "name": "book",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Available chapters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["translation", "book", "items"],
+                  "properties": {
+                    "translation": {
+                      "$ref": "#/components/schemas/TranslationCode"
+                    },
+                    "book": {
+                      "$ref": "#/components/schemas/Book"
+                    },
+                    "items": {
+                      "type": "array",
+                      "maxItems": 250,
+                      "items": {
+                        "$ref": "#/components/schemas/Chapter"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/scripture": {
+      "post": {
+        "summary": "Load one canonical chapter for selection",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["translation", "book", "chapter"],
+                "properties": {
+                  "translation": {
+                    "$ref": "#/components/schemas/TranslationCode"
+                  },
+                  "book": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200
+                  },
+                  "chapter": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 250
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chapter verses with server-issued selection identifiers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["translation", "book", "chapter", "items"],
+                  "properties": {
+                    "translation": {
+                      "$ref": "#/components/schemas/TranslationCode"
+                    },
+                    "book": {
+                      "$ref": "#/components/schemas/Book"
+                    },
+                    "chapter": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 250
+                    },
+                    "items": {
+                      "type": "array",
+                      "maxItems": 500,
+                      "items": {
+                        "$ref": "#/components/schemas/Verse"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/search": {
+      "post": {
+        "summary": "Start a bounded Scripture search",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["query", "options"],
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 240
+                  },
+                  "options": {
+                    "$ref": "#/components/schemas/SearchFilters"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SearchPage"
+          },
+          "422": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/search/{search_id}": {
+      "get": {
+        "summary": "Read a page from an authenticated search result set",
+        "parameters": [
+          {
+            "name": "search_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{8,256}$"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SearchPage"
+          },
+          "404": {
+            "$ref": "#/components/responses/InvalidRequest"
+          }
+        }
+      }
+    },
+    "/basket": {
+      "get": {
+        "summary": "Read the server-held selection basket",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Basket"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Clear the server-held selection basket",
+        "responses": {
+          "204": {
+            "description": "Basket cleared"
+          }
+        }
+      }
+    },
+    "/basket/items": {
+      "post": {
+        "summary": "Add one server-issued verse selection",
+        "description": "The server resolves selection_id to canonical repository data. The client cannot supply verse text.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["selection_id"],
+                "properties": {
+                  "selection_id": {
+                    "$ref": "#/components/schemas/SelectionId"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Basket"
+          },
+          "409": {
+            "$ref": "#/components/responses/InvalidRequest"
+          }
+        }
+      }
+    },
+    "/basket/order": {
+      "patch": {
+        "summary": "Set the posting order for the current basket",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["selection_ids"],
+                "properties": {
+                  "selection_ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "uniqueItems": true,
+                    "items": {
+                      "$ref": "#/components/schemas/SelectionId"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Basket"
+          },
+          "409": {
+            "$ref": "#/components/responses/InvalidRequest"
+          }
+        }
+      }
+    },
+    "/basket/items/{selection_id}": {
+      "delete": {
+        "summary": "Remove one verse from the current basket",
+        "parameters": [
+          {
+            "name": "selection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/SelectionId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Basket"
+          }
+        }
+      }
+    },
+    "/post": {
+      "post": {
+        "summary": "Post the canonical server-held basket through the bot",
+        "description": "This operation accepts no verse text or client-provided references.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["idempotency_key"],
+                "properties": {
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 16,
+                    "maxLength": 64,
+                    "pattern": "^[A-Fa-f0-9-]+$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Scripture was posted exactly once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["status", "message_ids", "idempotent_replay"],
+                  "properties": {
+                    "status": {
+                      "const": "posted"
+                    },
+                    "message_ids": {
+                      "type": "array",
+                      "minItems": 1,
+                      "maxItems": 32,
+                      "items": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    },
+                    "idempotent_replay": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque"
+      },
+      "telegramInitData": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Telegram-Init-Data",
+        "description": "Raw Telegram WebApp.initData. Never log or persist this value."
+      }
+    },
+    "parameters": {
+      "TranslationQuery": {
+        "name": "translation",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/TranslationCode"
+        }
+      }
+    },
+    "responses": {
+      "Basket": {
+        "description": "Authoritative server-held basket",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Basket"
+            }
+          }
+        }
+      },
+      "SearchPage": {
+        "description": "Bounded search result page",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SearchPage"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Telegram launch data or bearer session is invalid or expired",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "InvalidRequest": {
+        "description": "The bounded request was invalid, stale, or conflicted with server state",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "The per-user or per-chat rate limit was reached",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "TranslationCode": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_-]{0,29}$"
+      },
+      "SelectionId": {
+        "type": "string",
+        "minLength": 16,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "Opaque, server-issued identifier bound to the authenticated session and canonical verse."
+      },
+      "Translation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "name", "language", "lang", "direction"],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/TranslationCode"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "language": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "lang": {
+            "type": "string",
+            "maxLength": 35,
+            "pattern": "^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,7}$",
+            "description": "BCP-47 language tag used to resolve the Mini App interface catalog."
+          },
+          "direction": {
+            "type": "string",
+            "enum": ["ltr", "rtl"],
+            "description": "Reading direction applied to the selected translation and interface."
+          }
+        }
+      },
+      "Book": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["number", "name"],
+        "properties": {
+          "number": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "testament": {
+            "type": ["string", "null"],
+            "enum": ["old", "new", "other", null]
+          }
+        }
+      },
+      "Chapter": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["number", "verses"],
+        "properties": {
+          "number": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 250
+          },
+          "verses": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000
+            }
+          }
+        }
+      },
+      "Highlight": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["start", "end"],
+        "properties": {
+          "start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "end": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "description": "Half-open UTF-16 offsets into text."
+      },
+      "Verse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "selection_id",
+          "translation",
+          "reference",
+          "book_number",
+          "book_name",
+          "chapter",
+          "verse",
+          "text",
+          "terms"
+        ],
+        "properties": {
+          "selection_id": {
+            "$ref": "#/components/schemas/SelectionId"
+          },
+          "translation": {
+            "$ref": "#/components/schemas/TranslationCode"
+          },
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 180
+          },
+          "book_number": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "book_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "chapter": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 250
+          },
+          "verse": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          },
+          "terms": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        }
+      },
+      "Basket": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items", "count", "maximum"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/Verse"
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "maximum": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        }
+      },
+      "SearchFilters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "translation",
+          "words",
+          "match",
+          "scope",
+          "case_sensitive",
+          "diacritics",
+          "sort",
+          "books",
+          "exclude",
+          "proximity"
+        ],
+        "properties": {
+          "translation": {
+            "$ref": "#/components/schemas/TranslationCode"
+          },
+          "words": {
+            "type": "string",
+            "enum": ["all", "any", "phrase"]
+          },
+          "match": {
+            "type": "string",
+            "enum": ["whole_word", "substring"]
+          },
+          "scope": {
+            "type": "string",
+            "enum": ["bible", "old_testament", "new_testament", "deuterocanon"]
+          },
+          "case_sensitive": {
+            "type": "boolean"
+          },
+          "diacritics": {
+            "type": "string",
+            "enum": ["sensitive", "insensitive"]
+          },
+          "sort": {
+            "type": "string",
+            "enum": ["canonical", "relevance"]
+          },
+          "books": {
+            "type": "array",
+            "maxItems": 200,
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          "exclude": {
+            "type": "array",
+            "maxItems": 20,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
+            }
+          },
+          "proximity": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "maximum": 100
+          }
+        }
+      },
+      "Preferences": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["translation", "search_defaults"],
+        "properties": {
+          "translation": {
+            "$ref": "#/components/schemas/TranslationCode"
+          },
+          "search_defaults": {
+            "$ref": "#/components/schemas/SearchDefaults"
+          }
+        }
+      },
+      "SearchDefaults": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "words",
+          "match",
+          "scope",
+          "case_sensitive",
+          "diacritics",
+          "sort"
+        ],
+        "properties": {
+          "words": {
+            "type": "string",
+            "enum": ["all", "any", "phrase"]
+          },
+          "match": {
+            "type": "string",
+            "enum": ["whole_word", "substring"]
+          },
+          "scope": {
+            "type": "string",
+            "enum": ["bible", "old_testament", "new_testament", "deuterocanon"]
+          },
+          "case_sensitive": {
+            "type": "boolean"
+          },
+          "diacritics": {
+            "type": "string",
+            "enum": ["sensitive", "insensitive"]
+          },
+          "sort": {
+            "type": "string",
+            "enum": ["canonical", "relevance"]
+          }
+        }
+      },
+      "Entrypoint": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["route"],
+        "properties": {
+          "route": {
+            "type": "string",
+            "enum": ["home", "search", "bible", "selection"]
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "reference": {
+            "type": "string",
+            "maxLength": 180
+          },
+          "translation": {
+            "$ref": "#/components/schemas/TranslationCode"
+          },
+          "book": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "chapter": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 250
+          }
+        }
+      },
+      "SessionState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["user", "preferences", "entrypoint", "translations", "basket"],
+        "properties": {
+          "user": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id"],
+            "properties": {
+              "id": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "preferences": {
+            "$ref": "#/components/schemas/Preferences"
+          },
+          "entrypoint": {
+            "$ref": "#/components/schemas/Entrypoint"
+          },
+          "translations": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/Translation"
+            }
+          },
+          "basket": {
+            "$ref": "#/components/schemas/Basket"
+          }
+        }
+      },
+      "NewSession": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SessionState"
+          },
+          {
+            "type": "object",
+            "required": ["session_token", "expires_in"],
+            "properties": {
+              "session_token": {
+                "type": "string",
+                "minLength": 16,
+                "maxLength": 2048,
+                "pattern": "^[A-Za-z0-9._~-]+$"
+              },
+              "expires_in": {
+                "type": "integer",
+                "minimum": 60,
+                "maximum": 86400
+              }
+            }
+          }
+        ]
+      },
+      "SearchPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "search_id",
+          "query",
+          "translation",
+          "total",
+          "available",
+          "truncated",
+          "page",
+          "page_count",
+          "items"
+        ],
+        "properties": {
+          "search_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,256}$"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "page_count": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "translation": {
+            "$ref": "#/components/schemas/TranslationCode"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000
+          },
+          "available": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "maxItems": 30,
+            "items": {
+              "$ref": "#/components/schemas/Verse"
+            }
+          }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]{1,64}$"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "retry_after": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        }
+      }
+    }
+  }
+}

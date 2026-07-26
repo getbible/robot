@@ -5,3 +5,5 @@ exceptiongroup==1.3.1
 python-dotenv==1.2.2
 python-telegram-bot[webhooks]==22.8
 requests==2.34.2
+# Imported directly by the same-process Telegram Mini App HTTP adapter.
+tornado==6.5.7

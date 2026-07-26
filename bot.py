@@ -14,6 +14,9 @@ from telegram import (
     BotCommand,
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
+    MenuButtonCommands,
+    MenuButtonWebApp,
+    WebAppInfo,
 )
 from telegram.ext import (
     Application,
@@ -29,6 +32,7 @@ from modules.commands import (
     DUPLICATE_POLLER_SLOT,
     INTERACTIONS_SLOT,
     LIMITER_SLOT,
+    MINI_APP_SLOT,
     PREFERENCES_SLOT,
     SERVICE_SLOT,
     SETTINGS_SLOT,
@@ -44,9 +48,12 @@ from modules.commands import (
 from modules.errors import ScriptureUnavailable
 from modules.health import HealthServer
 from modules.interactions import InteractionStore
+from modules.miniapp_sessions import MiniAppLaunch
+from modules.miniapp_tornado import MiniAppServer
+from modules.posting import post_scripture
 from modules.preferences import UserPreferenceStore
 from modules.rate_limit import InboundRateLimiter
-from modules.service import ScriptureService
+from modules.service import ScriptureQuery, ScriptureService
 
 HEALTH_SLOT = "health_server"
 LOGGER = logging.getLogger(__name__)
@@ -165,6 +172,33 @@ def build_application(settings: Settings) -> Application:
     application.bot_data[INTERACTIONS_SLOT] = interactions
     application.bot_data[PREFERENCES_SLOT] = preferences
     application.bot_data[HEALTH_SLOT] = health
+    if getattr(settings, "mini_app_enabled", False):
+        async def post_mini_app_scripture(
+            launch: MiniAppLaunch,
+            queries: tuple[ScriptureQuery, ...],
+        ) -> tuple[int, ...]:
+            message_ids: list[int] = []
+            for query in queries:
+                message_ids.extend(
+                    await post_scripture(
+                        bot=application.bot,
+                        chat_id=launch.target_chat_id,
+                        query=query,
+                        settings=settings,
+                        service=service,
+                        source="mini_app",
+                        message_thread_id=launch.message_thread_id,
+                    )
+                )
+            return tuple(message_ids)
+
+        application.bot_data[MINI_APP_SLOT] = MiniAppServer(
+            settings=settings,
+            service=service,
+            preferences=preferences,
+            limiter=limiter,
+            post_scripture=post_mini_app_scripture,
+        )
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("get", bible_command))
@@ -261,12 +295,30 @@ async def _synchronize_telegram_profile(
         "short description",
         application.bot.set_my_short_description(settings.bot_short_description),
     )
+    mini_app_enabled = getattr(settings, "mini_app_enabled", False)
+    mini_app_public_url = getattr(settings, "mini_app_public_url", None)
+    if mini_app_enabled and isinstance(mini_app_public_url, str):
+        menu_button: MenuButtonWebApp | MenuButtonCommands = MenuButtonWebApp(
+            text="Open getBible.Life",
+            web_app=WebAppInfo(url=f"{mini_app_public_url.rstrip('/')}/"),
+        )
+    else:
+        menu_button = MenuButtonCommands()
+    set_chat_menu_button = getattr(application.bot, "set_chat_menu_button", None)
+    if callable(set_chat_menu_button):
+        await _optional_telegram_call(
+            "menu button",
+            set_chat_menu_button(menu_button=menu_button),
+        )
 
 
 async def _post_init(application: Application) -> None:
     health: HealthServer = application.bot_data[HEALTH_SLOT]
     service: ScriptureService = application.bot_data[SERVICE_SLOT]
     settings: Settings = application.bot_data[SETTINGS_SLOT]
+    mini_app: MiniAppServer | None = application.bot_data.get(MINI_APP_SLOT)
+    if mini_app is not None:
+        await mini_app.start()
     await _synchronize_telegram_profile(application, settings)
     if settings.prewarm_default_translation:
         try:
@@ -291,6 +343,9 @@ async def _post_shutdown(application: Application) -> None:
     health: HealthServer = application.bot_data[HEALTH_SLOT]
     service: ScriptureService = application.bot_data[SERVICE_SLOT]
     preferences: UserPreferenceStore = application.bot_data[PREFERENCES_SLOT]
+    mini_app: MiniAppServer | None = application.bot_data.get(MINI_APP_SLOT)
+    if mini_app is not None:
+        await mini_app.close()
     await health.close()
     await service.close()
     preferences.close()
