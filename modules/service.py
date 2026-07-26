@@ -214,7 +214,12 @@ class ScriptureService:
         self.metrics = Metrics()
         self._closed = False
 
-    async def resolve_query(self, arguments: Sequence[str]) -> ScriptureQuery:
+    async def resolve_query(
+        self,
+        arguments: Sequence[str],
+        *,
+        default_translation: str | None = None,
+    ) -> ScriptureQuery:
         """Resolve command arguments without probing the network for ordinary references."""
         raw = " ".join(arguments).strip()
         if not raw:
@@ -224,9 +229,17 @@ class ScriptureService:
                 f"Reference input cannot exceed {self.settings.max_input_length} characters."
             )
 
+        translation = (
+            default_translation.casefold()
+            if default_translation is not None
+            else self.settings.default_translation
+        )
+        if _TRANSLATION_RE.fullmatch(translation) is None:
+            raise RobotInputError("The preferred Scripture translation is invalid.")
+
         try:
-            self._validate_reference_set(raw, self.settings.default_translation)
-            return ScriptureQuery(raw, self.settings.default_translation)
+            self._validate_reference_set(raw, translation)
+            return ScriptureQuery(raw, translation)
         except RequestLimitError:
             raise
         except ReferenceValidationError:

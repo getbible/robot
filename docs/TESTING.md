@@ -262,10 +262,10 @@ Use a separate test bot token and a private test chat. Stop any other polling pr
    /unknown
    ```
 
-7. In a group, confirm empty `/bible` is invisible to other members; continue
-   with KJV, choose John 3, select 16 as both first and last verse, review, and
-   confirm that only **Post Scripture** creates an ordinary message in the
-   originating topic.
+7. In a group, confirm empty `/bible` is invisible to other members; choose
+   John 3:16 as one verse, add 17–18 as a range, add a separate verse or another
+   chapter, remove one basket entry, review, and confirm that only **Post
+   selection** creates an ordinary message in the originating topic.
 8. Confirm `/search grace` is invisible to other group members, shows every
    returned verse in one full-width menu block, marks each matching word with
    `【】`, pages at up to 30 complete results, and posts nothing publicly until
@@ -274,11 +274,26 @@ Use a separate test bot token and a private test chat. Stop any other polling pr
    controls; run a search; switch between **All**, **Old**, **New**, and
    **Other** on the result panel; page, select, deselect, and post multiple
    results.
-10. In a test group, verify `/bible@TestBotName John 3:16`, empty `/bible@TestBotName`, selective search replies, ownership isolation between two users, and permission-safe command deletion.
-11. Open a returned Scripture link and confirm its host is exactly `getbible.life`.
-12. Leave a panel idle beyond `INTERACTION_TTL_SECONDS` and confirm its buttons expire safely.
-13. Send a sustained rejected burst and confirm only one cooldown warning is sent, with no crash or memory growth.
-14. Stop with `Ctrl+C` and confirm the health listener, worker pool, and Librarian sessions close cleanly.
+10. Choose a non-KJV translation, finish or cancel the workflow, restart the
+    bot, and confirm the same Telegram user receives that translation by
+    default in both `/bible` and `/search`; a different user must still receive
+    the application default.
+11. Search a Mandarin translation with an unspaced Han query such as `爱` and
+    confirm substring mode is selected automatically, complete matching verses
+    remain readable in the private result blocks, and selection/posting works.
+12. Navigate a Bible picker quickly through more than four buttons and confirm
+    there is no self-inflicted “Too many requests” response or state race.
+13. In a test group, verify `/bible@TestBotName John 3:16`, empty
+    `/bible@TestBotName`, selective search replies, ownership isolation between
+    two users, and permission-safe command deletion.
+14. Open a returned Scripture link and confirm its host is exactly
+    `getbible.life`.
+15. Leave a panel idle beyond `INTERACTION_TTL_SECONDS` and confirm its buttons
+    expire safely.
+16. Send a sustained rejected command burst and confirm only one cooldown
+    warning is sent, with no crash or memory growth.
+17. Stop with `Ctrl+C` and confirm the health listener, worker pool, Librarian
+    sessions, and preference database close cleanly.
 
 Do not paste tokens or private chat content into issues, CI logs, screenshots, or test artifacts. Use metadata audit mode for normal production smoke testing. If content mode is being tested, use synthetic references/search terms and remove the test log according to policy.
 

@@ -33,7 +33,14 @@ command when a user first opens a bot or follows a start link. It is intentional
 not duplicated in the synchronized command menu; its editable welcome text
 simply points to `/help`.
 
-An explicit `/bible` reference preserves the legacy fast path and posts the complete selection immediately. An empty `/bible` opens a Telegram-native picker with the configured translation preselected, then guides the user through testament, book, chapter, first verse, last verse, and confirmation. In groups and supergroups, both the command and the complete picker are ephemeral and visible only to the requesting user and the bot; only the final Scripture is posted normally.
+An explicit `/bible` reference preserves the legacy fast path and posts the
+complete selection immediately. An empty `/bible` opens a Telegram-native
+picker with the user's saved translation preselected, then builds a reviewable
+basket containing one verse, a range, or several separate verses/ranges across
+chapters and books. Choosing a translation saves it as that Telegram user's
+default; KJV remains the application fallback. In groups and supergroups, both
+the command and the complete picker are ephemeral and visible only to the
+requesting user and the bot; only the final Scripture is posted normally.
 
 `/search grace` runs Librarian 1.2 search defaults and displays each complete
 matching verse directly in one full-width selectable menu block. Matches are
@@ -55,10 +62,14 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
 - complete, bounded reference parsing with no silent fallback to a different verse;
 - bounded input length, reference count, verses per reference, and total verses;
 - bounded Telegram message count and UTF-16-aware message sizing;
-- per-user and per-chat token buckets applied to every command;
+- per-user and per-chat token buckets applied to commands and free-text inputs;
 - bounded rate-limit state under arbitrary identifier churn;
 - rejection-notification cooldowns that prevent Telegram API amplification;
 - owner-scoped, TTL/LRU-bounded interactive sessions and opaque callback tokens;
+- per-session callback serialization so rapid menu actions cannot race, while
+  ordinary menu navigation does not exhaust the command rate limit;
+- a bounded per-instance preference database containing only Telegram user IDs,
+  selected translation codes, and update times;
 - Bot API 10.2 ephemeral group Bible/search commands and panels, with no public
   workflow fallback when private delivery fails;
 - a fixed worker pool and global lookup semaphore;
@@ -80,7 +91,9 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
   duplicate pollers stopped instead of restarted;
 - per-instance JSONL/journal logs with metadata-only auditing by default and explicit content opt-in;
 - loopback-only health and readiness endpoints;
-- isolated locked service accounts and restartable, capability-free, filesystem-protected `systemd` instances;
+- isolated locked service accounts and restartable, capability-free,
+  filesystem-protected `systemd` instances with separate writable preference
+  state;
 - deterministic tests, fuzz regressions, Ruff, mypy, Bandit, dependency auditing, secret scanning, and CodeQL.
 
 See [Architecture](docs/ARCHITECTURE.md) and [the release gate](docs/RELEASE_GATE.md) for the complete model.

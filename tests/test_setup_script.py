@@ -79,7 +79,9 @@ class SetupScriptTestCase(unittest.TestCase):
             "WorkingDirectory=/opt/getbible-robot/%i/app",
             "Environment=ROBOT_INSTANCE=%i",
             "Environment=XDG_CACHE_HOME=/var/cache/getbible-robot/%i",
-            "ReadWritePaths=/var/cache/getbible-robot/%i /var/log/getbible-robot/%i.jsonl",
+            "ReadWritePaths=/var/cache/getbible-robot/%i "
+            "/var/lib/getbible-robot/%i "
+            "/var/log/getbible-robot/%i.jsonl",
             "NoNewPrivileges=true",
             "ProtectSystem=strict",
             "CapabilityBoundingSet=",

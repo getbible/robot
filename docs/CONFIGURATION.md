@@ -63,6 +63,8 @@ Content mode additionally records normalized search terms and final Scripture re
 | Variable | Default | Validation | Purpose |
 |---|---:|---|---|
 | `TRANSLATION` | `kjv` | Lowercase letters, numbers, `_`, or `-`; 1–30 characters | Default translation abbreviation |
+| `USER_PREFERENCES_FILE` | empty | Empty or an absolute path | SQLite database for per-user translation defaults; production setup assigns the isolated instance-state path |
+| `USER_PREFERENCE_LIMIT` | `100000` | `100`–`1000000` | Maximum saved user translation records before oldest-record eviction |
 | `GETBIBLE_API_BASE_URL` | `https://api.getbible.net` | HTTPS base URL; no credentials, path, query, or fragment; loopback HTTP is allowed for tests | Machine-readable Scripture repository |
 | `GETBIBLE_WEB_BASE_URL` | `https://getbible.life` | Same URL rules | Base for every clickable link shown in Telegram |
 | `WELCOME_MESSAGE` | built-in text | Non-empty; at most 4096 characters | `/start` response |
@@ -70,7 +72,12 @@ Content mode additionally records normalized search terms and final Scripture re
 | `WELCOME_MESSAGE_FILE` | empty | Empty or readable absolute UTF-8 path; takes precedence over `WELCOME_MESSAGE` | Editable multi-line `/start` content |
 | `HELP_MESSAGE_FILE` | empty | Empty or readable absolute UTF-8 path; takes precedence over `HELP_MESSAGE` | Editable multi-line `/help` content |
 
-The API and website variables are intentionally different. The API value is used only for data access. The website value is used only for user-facing links. An empty `/bible` uses `TRANSLATION` as the preselected translation and opens the guided picker; it never substitutes a default verse.
+The API and website variables are intentionally different. The API value is
+used only for data access. The website value is used only for user-facing
+links. `TRANSLATION` is the application fallback. Choosing another translation
+in `/bible` or `/search` saves it for that Telegram user; later explicit
+references, Bible pickers, and searches use the saved value. An empty `/bible`
+never substitutes a default verse.
 
 Literal `\n` sequences in inline message settings are converted to newlines.
 Production setup creates restricted per-instance content files. Edit them with
@@ -124,6 +131,10 @@ setting before raising production limits.
 ## Inbound rate limits
 
 Every supported or unknown command consumes both a user token and a chat token.
+Free-text replies that start searches or change text filters are also charged.
+Owner-scoped menu callbacks are serialized per session and do not consume these
+command tokens, so a normal picker flow cannot exhaust its allowance merely by
+navigating.
 
 | Variable | Default | Allowed range | Purpose |
 |---|---:|---:|---|
@@ -145,6 +156,11 @@ The bucket and rejection-notification registries use bounded least-recently-used
 | `CATALOG_CACHE_TTL_SECONDS` | `3600` | `60`–`86400` | In-process lifetime of validated translation, book, chapter, and verse navigation metadata |
 
 Sessions are scoped to their originating chat and user and retained only in process memory. A restart expires every open panel. Translation and book catalog responses remain subject to the repository response-byte limit, retry budget, worker capacity, timeout, circuit breaker, and structural validation.
+
+Production setup assigns
+`USER_PREFERENCES_FILE=/var/lib/getbible-robot/<instance>/preferences.sqlite3`.
+That bounded database survives upgrades and restarts and stores only Telegram
+user ID, translation code, and update time. Each instance has its own file.
 
 ## Circuit breaker
 
@@ -192,6 +208,8 @@ INSTANCE_NAME="production"
 LOG_FILE="/var/log/getbible-robot/production.jsonl"
 AUDIT_LOG_MODE="metadata"
 TRANSLATION="kjv"
+USER_PREFERENCES_FILE="/var/lib/getbible-robot/production/preferences.sqlite3"
+USER_PREFERENCE_LIMIT="100000"
 GETBIBLE_API_BASE_URL="https://api.getbible.net"
 GETBIBLE_WEB_BASE_URL="https://getbible.life"
 GETBIBLE_MAX_RESPONSE_BYTES="67108864"

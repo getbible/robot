@@ -10,10 +10,13 @@ from modules.catalog import BookOption, ChapterOption, TranslationOption
 from modules.commands import (
     INTERACTIONS_SLOT,
     LIMITER_SLOT,
+    PREFERENCES_SLOT,
     SERVICE_SLOT,
     SETTINGS_SLOT,
+    _contains_unsegmented_script,
     _highlight_search_terms,
     _highlight_search_terms_plain,
+    _reference_basket_reference,
     _reference_selection,
     _report_command_error,
     _search_page_ranges,
@@ -33,9 +36,11 @@ from modules.errors import RobotRateLimited, ScriptureUnavailable
 from modules.interactions import (
     InteractionSession,
     InteractionStore,
+    ReferenceSelection,
     SearchOptions,
     SearchResult,
 )
+from modules.preferences import UserPreferenceStore
 from modules.service import ScriptureQuery, SearchPage
 
 
@@ -338,7 +343,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         service.translations.assert_awaited_once()
         service.resolve_query.assert_not_awaited()
         self.assertIn(
-            "Skip — use KJV",
+            "Continue with KJV",
             str(context.bot.send_message.await_args.kwargs["reply_markup"]),
         )
 
@@ -385,7 +390,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             payload["reply_parameters"],
             {"ephemeral_message_id": 250},
         )
-        self.assertIn("Skip — use KJV", str(payload["reply_markup"]))
+        self.assertIn("Continue with KJV", str(payload["reply_markup"]))
 
     async def test_bible_catalog_failure_never_leaks_into_group(self) -> None:
         context = self.context(_Limiter())
@@ -438,11 +443,10 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             context.bot.send_message.await_args.kwargs["text"],
         )
 
-    async def test_session_rate_limit_notice_is_recorded_for_later_cleanup(
+    async def test_session_callbacks_do_not_consume_command_rate_tokens(
         self,
     ) -> None:
         context = self.context(_Limiter(reject=True))
-        context.bot.send_message.return_value = SimpleNamespace(message_id=901)
         store = context.application.bot_data[INTERACTIONS_SLOT]
         session = store.create(
             chat_id=100,
@@ -458,7 +462,8 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             context,
         )
 
-        self.assertIn(901, session.workflow_message_ids)
+        self.assertEqual(session.workflow_message_ids, set())
+        context.bot.send_message.assert_not_awaited()
 
     async def test_recoverable_session_error_is_recorded_for_later_cleanup(
         self,
@@ -514,13 +519,23 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             translations=AsyncMock(),
         )
         context.application.bot_data[SERVICE_SLOT] = service
+        preferences = UserPreferenceStore(
+            path=None,
+            default_translation="kjv",
+            max_users=100,
+        )
+        preferences.set_translation(200, "asv")
+        context.application.bot_data[PREFERENCES_SLOT] = preferences
         context.args = ["John", "3:16"]
         update = self.update()
         update.effective_message = SimpleNamespace(chat_id=100, message_id=250)
 
         await bible_command(update, context)
 
-        service.resolve_query.assert_awaited_once_with(["John", "3:16"])
+        service.resolve_query.assert_awaited_once_with(
+            ["John", "3:16"],
+            default_translation="asv",
+        )
         service.select.assert_awaited_once()
         service.translations.assert_not_awaited()
         self.assertIn("For God so loved", context.bot.send_message.await_args.kwargs["text"])
@@ -528,6 +543,59 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             chat_id=100,
             message_id=250,
         )
+
+    async def test_selected_translation_becomes_the_users_next_default(
+        self,
+    ) -> None:
+        context = self.context(_Limiter())
+        preferences = UserPreferenceStore(
+            path=None,
+            default_translation="kjv",
+            max_users=100,
+        )
+        context.application.bot_data[PREFERENCES_SLOT] = preferences
+        service = SimpleNamespace(
+            books=AsyncMock(
+                return_value=(BookOption(43, "约翰福音", "a" * 40),)
+            ),
+            search=AsyncMock(
+                return_value=SearchPage(
+                    query="爱",
+                    translation="chiuns",
+                    total=0,
+                    items=(),
+                )
+            ),
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        store = context.application.bot_data[INTERACTIONS_SLOT]
+        session = store.create(
+            chat_id=100,
+            user_id=200,
+            kind="reference",
+            stage="reference_translation",
+            translation="kjv",
+        )
+        session.message_id = 300
+        session.translations = (
+            TranslationOption("kjv", "King James Version", "English"),
+            TranslationOption("chiuns", "和合本", "中文"),
+        )
+
+        await interaction_callback(
+            self.callback_update(session.token, "tr", "chiuns"),
+            context,
+        )
+        self.assertEqual(preferences.translation_for(200), "chiuns")
+
+        context.args = ["爱"]
+        context.bot.send_message.reset_mock()
+        await search_command(self.update(), context)
+
+        service.search.assert_awaited_once()
+        options = service.search.await_args.args[1]
+        self.assertEqual(options.translation, "chiuns")
+        self.assertEqual(options.match, "substring")
 
     async def test_group_direct_bible_posts_only_scripture_publicly(self) -> None:
         context = self.context(_Limiter())
@@ -666,7 +734,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             ScriptureQuery("John 3:16-18", "kjv")
         )
         self.assertIsNone(store.get(session.token, chat_id=100, user_id=200))
-        self.assertEqual(limiter.calls, [(200, 100)] * 6)
+        self.assertEqual(limiter.calls, [])
         self.assertEqual(
             {
                 call.kwargs["message_id"]
@@ -788,6 +856,9 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         session.chapter = ChapterOption(3, (16,))
         session.start_verse = 16
         session.end_verse = 16
+        session.reference_selections = [
+            ReferenceSelection(43, "John", 3, 16, 16)
+        ]
 
         await interaction_callback(
             self.callback_update(session.token, "rpost"),
@@ -876,7 +947,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
 
         service.select.assert_awaited_once_with(ScriptureQuery("John 1:16", "kjv"))
         self.assertIsNone(store.get(session.token, chat_id=100, user_id=200))
-        self.assertEqual(limiter.calls, [(200, 100)] * 2)
+        self.assertEqual(limiter.calls, [])
         self.assertEqual(
             {
                 call.kwargs["message_id"]
@@ -1623,6 +1694,32 @@ class SelectionFormattingTestCase(unittest.TestCase):
             end_verse=18,
         )
         self.assertEqual(_reference_selection(session), "John 3:16-18")
+
+    def test_guided_reference_basket_compacts_ranges_and_separate_verses(
+        self,
+    ) -> None:
+        session = InteractionSession(
+            token="abcdefgh",
+            chat_id=1,
+            user_id=2,
+            kind="reference",
+            stage="reference_review",
+            touched_at=0,
+            reference_selections=[
+                ReferenceSelection(43, "John", 3, 16, 18),
+                ReferenceSelection(43, "John", 3, 20, 20),
+                ReferenceSelection(43, "John", 3, 19, 19),
+                ReferenceSelection(45, "Romans", 8, 1, 2),
+            ],
+        )
+        self.assertEqual(
+            _reference_basket_reference(session),
+            "John 3:16-20;Romans 8:1-2",
+        )
+
+    def test_unsegmented_script_detection_covers_mandarin(self) -> None:
+        self.assertTrue(_contains_unsegmented_script("神爱世人"))
+        self.assertFalse(_contains_unsegmented_script("God loves the world"))
 
     def test_search_selection_compresses_verses_by_chapter(self) -> None:
         session = InteractionSession(

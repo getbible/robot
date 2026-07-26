@@ -6,7 +6,7 @@
 Telegram long poll or authenticated HTTPS webhook
   → Telegram message, reply, or callback update
   → registered command or interactive handler
-  → per-user and per-chat token buckets
+  → command/input token buckets or serialized owner callback
   → strict reference, search, session, and callback validation
   → bounded ScriptureService capacity wait
   → upstream circuit breaker
@@ -51,13 +51,18 @@ Human-facing links:    https://getbible.life
 
 ## Translation resolution
 
-An ordinary reference is parsed locally with the configured default translation first. Therefore `John 3:16` never causes a speculative network lookup for a translation named `3:16`.
+An ordinary reference is parsed locally with the Telegram user's saved
+translation first, falling back to the configured application default.
+Therefore `John 3:16` never causes a speculative network lookup for a
+translation named `3:16`.
 
 Only when the complete input is not a valid reference does the robot consider the final whitespace-delimited token as a translation abbreviation. The candidate must match the complete abbreviation grammar. The preceding reference is validated locally before the candidate is repository-checked. Explicit `kjv` remains supported.
 
 An empty `/bible` does not enter the reference parser and never falls back to a
 configured verse. It creates an owner-scoped interactive session and opens the
-guided translation, testament, book, chapter, first-verse, and last-verse flow.
+guided translation, testament, book, chapter, verse/range, and selection-basket
+flow. The basket can combine separate verses and ranges across chapters/books,
+and compacts overlapping or adjacent intervals before final validation.
 In groups and supergroups, Bot API 10.2 keeps the command and complete picker
 ephemeral to the requesting user. Paging edits the same panel, and only **Post
 Scripture** creates an ordinary message in the originating chat and forum
@@ -66,7 +71,12 @@ or an error to the group.
 
 ## Search and confirmation flow
 
-`/search <words>` constructs Librarian's default `SearchBible` criteria. An empty `/search` creates the same criteria in a filter dashboard and allows the user to change every exposed Librarian filter before replying with query text.
+`/search <words>` constructs Librarian's default `SearchBible` criteria with the
+user's saved translation. For detected CJK scripts, default whole-word matching
+is adapted to substring matching because those scripts do not depend on
+whitespace word boundaries. An empty `/search` creates the criteria in a filter
+dashboard and allows the user to change every exposed Librarian filter before
+replying with query text.
 
 Librarian returns exact totals, grouped verse data, and ordered match metadata.
 The robot validates that every match points to a verse in the grouped results,
@@ -88,18 +98,19 @@ post payload.
 
 Callbacks contain an opaque random token rather than references, queries, or verse text. The in-memory session store validates token, chat, and user together, refreshes an inactivity TTL, and enforces an LRU size limit. Replies are accepted only when they target the exact bot prompt recorded for that session.
 
-Local pagination, filter toggles, and checkmarks do not consume worker capacity.
-Every accepted callback still consumes the normal per-user and per-chat inbound
-rate budget. Catalog reads and final posts use the reference pool. Searches use
-their own smaller pool and circuit so CPU-heavy corpus work cannot consume every
-direct-reference permit.
+Local pagination, filter toggles, and checkmarks do not consume worker capacity
+or command-rate tokens. Callbacks for one session are serialized to prevent
+rapid taps from racing state transitions. New commands and free-text replies
+still consume normal per-user and per-chat inbound budgets. Catalog reads and
+final posts use the reference pool. Searches use their own smaller pool and
+circuit so CPU-heavy corpus work cannot consume every direct-reference permit.
 
 ## Concurrency and timeout model
 
-Telegram updates may run concurrently, but all commands and session-owned
-callbacks or replies first consume user and chat rate-limit tokens. Direct
-Scripture/catalog work and searches additionally require permits from their
-separate bounded pools.
+Telegram updates may run concurrently. Commands and session-owned text replies
+consume user/chat rate-limit tokens; callbacks are serialized by their
+owner-scoped session. Direct Scripture/catalog work and searches additionally
+require permits from their separate bounded pools.
 
 Each synchronous Librarian call runs in a fixed `ThreadPoolExecutor`. The
 asynchronous caller has an overall timeout, but Python cannot safely kill a
@@ -129,7 +140,10 @@ After the threshold:
 
 ## Caches and rate-limit state
 
-Librarian reference, chapter, book, translation, and search caches are bounded. The negative translation cache has a TTL and size limit. Navigation-catalog caches, interactive sessions, user/chat token buckets, and rejection-notification cooldown state all have bounded least-recently-used retention.
+Librarian reference, chapter, book, translation, and search caches are bounded.
+The negative translation cache has a TTL and size limit. Navigation-catalog
+caches, interactive sessions, user/chat token buckets, rejection-notification
+cooldown state, and the durable per-user translation table are all bounded.
 
 Arbitrary reference strings, translation names, user IDs, and chat IDs therefore cannot create permanent process growth without limit.
 
@@ -152,13 +166,19 @@ Shutdown order:
 2. mark the Scripture service closed;
 3. stop accepting work and wait for real worker threads;
 4. close Librarian HTTP sessions;
-5. complete Telegram shutdown.
+5. close the per-instance preference database;
+6. complete Telegram shutdown.
 
 The Bot API does not offer a WebSocket update transport. Polling and webhooks
 are mutually exclusive. A polling `Conflict` stops the instance with a
 non-restarting exit status so duplicate processes do not continue fighting.
 
-The supplied `systemd` template gives every named instance its own locked `gb-<instance>` identity, root-owned application and secret configuration, writable cache and JSONL file, restart behavior, filesystem protection, no capabilities, limited address families, task/file limits, and `MemoryMax`. Instances do not share a token, process, cache, health port, log file, interaction state, or virtual environment.
+The supplied `systemd` template gives every named instance its own locked
+`gb-<instance>` identity, root-owned application and secret configuration,
+writable cache/state/JSONL paths, restart behavior, filesystem protection, no
+capabilities, limited address families, task/file limits, and `MemoryMax`.
+Instances do not share a token, process, cache, preference database, health
+port, log file, interaction state, or virtual environment.
 
 ## Errors and observability
 
@@ -168,6 +188,12 @@ Every structured event is tagged with `INSTANCE_NAME` and is written to journald
 
 ## Privacy
 
-In metadata audit mode the robot does not persist update text, references, searches, favorites, profiles, or chat history. In explicitly enabled content mode, final references and search terms are persisted to the restricted per-instance log for its configured retention period. Short-lived query and selection state otherwise exists only in bounded process memory and expires on inactivity or restart. Telegram and the configured GetBible API are independent external services with their own data practices.
-
-Any future persistence feature requires a separate design for consent, access control, retention, export, deletion, encryption, and incident response before implementation.
+In metadata audit mode the robot does not persist update text, references,
+searches, names, usernames, profiles, or chat history. The restricted
+per-instance preference database stores only Telegram user ID, translation
+code, and update time. In explicitly enabled content audit mode, final
+references and search terms are also persisted to the restricted per-instance
+log for its configured retention period. Short-lived query and selection state
+otherwise exists only in bounded process memory and expires on inactivity or
+restart. Telegram and the configured GetBible API remain independent external
+services.
