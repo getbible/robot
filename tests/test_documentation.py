@@ -24,6 +24,9 @@ REQUIRED_DOCUMENTS = {
 
 EXPECTED_TEMPLATE_KEYS = {
     "TELEGRAM_API_TOKEN",
+    "INSTANCE_NAME",
+    "LOG_FILE",
+    "AUDIT_LOG_MODE",
     "TRANSLATION",
     "GETBIBLE_API_BASE_URL",
     "GETBIBLE_WEB_BASE_URL",
@@ -95,6 +98,35 @@ class DocumentationContractTestCase(unittest.TestCase):
             if line and not line.startswith("#") and "=" in line
         }
         self.assertEqual(keys, EXPECTED_TEMPLATE_KEYS)
+
+    def test_setup_manager_and_template_are_present(self) -> None:
+        self.assertTrue((ROOT / "setup.sh").is_file())
+        self.assertTrue((ROOT / "deploy" / "getbible-robot@.service").is_file())
+
+    def test_operator_docs_use_the_multi_instance_layout(self) -> None:
+        documents = {
+            ROOT / "README.md",
+            ROOT / "SECURITY.md",
+            ROOT / "docs" / "INSTALLATION.md",
+            ROOT / "docs" / "CONFIGURATION.md",
+            ROOT / "docs" / "TESTING.md",
+            ROOT / "docs" / "UPGRADING.md",
+            ROOT / "docs" / "UNINSTALL.md",
+            ROOT / "docs" / "TROUBLESHOOTING.md",
+            ROOT / "docs" / "OPERATIONS.md",
+        }
+        stale = (
+            "/etc/getbible-robot.env",
+            "getbible-robot.service",
+            "deploy/getbible-robot.service",
+        )
+        failures = []
+        for document in documents:
+            text = document.read_text(encoding="utf-8")
+            for value in stale:
+                if value in text:
+                    failures.append(f"{document.relative_to(ROOT)} -> {value}")
+        self.assertEqual(failures, [])
 
 
 if __name__ == "__main__":

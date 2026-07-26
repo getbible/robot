@@ -92,6 +92,52 @@ class SettingsTestCase(unittest.TestCase):
             ):
                 Settings.from_env(load_environment_file=False)
 
+    def test_instance_file_and_audit_defaults_are_safe(self) -> None:
+        with patch.dict(os.environ, self.environment(), clear=True):
+            settings = Settings.from_env(load_environment_file=False)
+        self.assertEqual(settings.instance_name, "local")
+        self.assertIsNone(settings.log_file)
+        self.assertEqual(settings.audit_log_mode, "metadata")
+
+    def test_instance_file_and_audit_configuration_is_validated(self) -> None:
+        invalid = (
+            {"INSTANCE_NAME": "../escape"},
+            {"INSTANCE_NAME": "A"},
+            {"INSTANCE_NAME": "BadName"},
+            {"INSTANCE_NAME": "bad--name"},
+            {"LOG_FILE": "relative.log"},
+            {"AUDIT_LOG_MODE": "everything"},
+        )
+        for overrides in invalid:
+            with (
+                self.subTest(overrides=overrides),
+                patch.dict(
+                    os.environ,
+                    self.environment(**overrides),
+                    clear=True,
+                ),
+                self.assertRaises(ConfigurationError),
+            ):
+                Settings.from_env(load_environment_file=False)
+
+    def test_content_audit_and_absolute_log_file_are_explicit(self) -> None:
+        with patch.dict(
+            os.environ,
+            self.environment(
+                INSTANCE_NAME="production",
+                LOG_FILE="/var/log/getbible-robot/production.jsonl",
+                AUDIT_LOG_MODE="content",
+            ),
+            clear=True,
+        ):
+            settings = Settings.from_env(load_environment_file=False)
+        self.assertEqual(settings.instance_name, "production")
+        self.assertEqual(
+            settings.log_file,
+            "/var/log/getbible-robot/production.jsonl",
+        )
+        self.assertEqual(settings.audit_log_mode, "content")
+
 
 if __name__ == "__main__":
     unittest.main()

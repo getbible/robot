@@ -1,215 +1,156 @@
 # Troubleshooting
 
-Start with the service state, recent structured logs, and loopback health endpoints. Never paste a Telegram token, private message, full environment file, or sensitive infrastructure detail into a public issue.
-
-## Standard diagnostic bundle
+Start with the manager. It resolves the selected instance's account, paths, service, port, deployment metadata, and log file without printing its token.
 
 ```bash
-cd /opt/getbible-robot
-printf 'commit: '; git rev-parse HEAD
-printf 'python: '; venv/bin/python --version
-sudo systemctl status getbible-robot.service --no-pager
-sudo journalctl -u getbible-robot.service -n 200 --no-pager
-curl --silent --show-error --include http://127.0.0.1:8081/healthz
-curl --silent --show-error --include http://127.0.0.1:8081/readyz
-curl --silent --show-error http://127.0.0.1:8081/metrics
-venv/bin/python -m pip check
-sha256sum requirements.txt deploy/getbible-robot.service
+sudo getbible-robot status production
+sudo getbible-robot doctor production
+sudo getbible-robot runtime production
+sudo getbible-robot logs production 200
 ```
 
-Review output for secrets before sharing it privately with maintainers.
+Review output for sensitive content before sharing it. Content audit mode can include user-provided search terms and final references.
 
-## Service will not start
-
-Check the pre-start configuration validation:
-
-```bash
-sudo journalctl -u getbible-robot.service -b --no-pager
-sudo systemctl show getbible-robot.service \
-  -p User -p Group -p EnvironmentFiles -p ExecStartPre -p ExecStart
-```
+## Setup stops before creating the service
 
 Common causes:
 
-- missing or placeholder `TELEGRAM_API_TOKEN`;
-- conflicting `TELEGRAM_API_TOKEN` and deprecated `TELEGRAM_TOKEN`;
-- invalid URL, timeout, limit, boolean, or log-level value;
-- missing virtual environment or dependencies;
-- checkout installed somewhere other than `/opt/getbible-robot` without updating the unit;
-- missing service account or cache directory;
-- unreadable environment file;
-- unsupported Python version.
+- source is not a Git checkout or has tracked modifications;
+- source lacks `setup.sh`, `.env.template`, the lock, or unit template;
+- Python is outside 3.10–3.12;
+- required host packages cannot be installed;
+- instance name is invalid or already exists;
+- derived `gb-<instance>` account already exists unmanaged;
+- token shape is invalid or token belongs to another local instance;
+- health port is already listening;
+- hashed dependency installation or `pip check` fails;
+- target configuration fails validation;
+- instantiated systemd unit fails verification.
 
-Validate configuration directly as documented in [Configuration](CONFIGURATION.md), then run:
+Failures before installation commit are cleaned up transactionally. Correct the cause and rerun `sudo ./setup.sh install`.
+
+## Installed service does not become ready
+
+The manager intentionally retains a fully built instance when startup fails so it can be diagnosed:
 
 ```bash
-sudo systemd-analyze verify /etc/systemd/system/getbible-robot.service
+sudo getbible-robot doctor production
+sudo getbible-robot logs production 300
+sudo journalctl -u getbible-robot@production.service -b --no-pager
 ```
 
-## Telegram token or network errors
+Typical causes:
 
-Symptoms include failure during command registration, polling startup, or repeated Telegram client warnings.
+- Telegram rejected or revoked the token;
+- another host/process is polling with the same token;
+- outbound DNS, TCP 443, system time, or CA trust is broken;
+- selected health port became occupied;
+- file ownership was changed after setup;
+- GetBible API or Telegram initialization is unavailable.
 
-- Confirm the token with `@BotFather`; rotate it rather than posting it for review.
-- Ensure only one polling process uses the token.
-- Check outbound DNS, TCP 443, system time, and CA certificates.
-- Confirm the host is not intercepting TLS with an untrusted certificate.
-- Restart only after correcting the cause; repeated restart loops can hit Telegram limits.
+Do not put the token into a support ticket. Rotate it through `@BotFather` when in doubt.
 
-The health endpoint starts only after Telegram initialization succeeds. A missing listener during startup can therefore indicate a Telegram initialization failure rather than a health-server defect.
+## Configuration will not validate
+
+Use:
+
+```bash
+sudo getbible-robot config production
+```
+
+If validation fails, the manager restores the prior file automatically. Common invalid values include:
+
+- missing/template/malformed token;
+- conflicting `TELEGRAM_API_TOKEN` and `TELEGRAM_TOKEN`;
+- invalid `INSTANCE_NAME`, relative `LOG_FILE`, or audit mode;
+- public/non-loopback health host;
+- invalid URL, limit, timeout, port, boolean, translation, or log level;
+- total verse budget smaller than the per-reference budget.
+
+Do not source the environment file or print it. The manager parses it through `python-dotenv` and validates it with the deployed application.
+
+## JSON log is missing or not updating
+
+```bash
+sudo getbible-robot doctor production
+sudo stat /var/log/getbible-robot/production.jsonl
+sudo journalctl -u getbible-robot@production.service -n 100 --no-pager
+sudo logrotate --debug /etc/logrotate.d/getbible-robot
+```
+
+Expected file ownership is `gb-production:gb-production`, mode `0640`. The service unit grants write access only to that exact file and the instance cache.
+
+`LOG_LEVEL=INFO` is needed for normal audit events. `AUDIT_LOG_MODE=metadata` omits query content by design. Choose `content` only through an approved privacy decision.
 
 ## `/healthz` works but `/readyz` returns 503
 
-The process is alive but not ready. Inspect:
+The process is alive but the Scripture circuit is open or shutdown is in progress:
 
 ```bash
-curl --silent http://127.0.0.1:8081/metrics
-sudo journalctl -u getbible-robot.service -n 100 --no-pager
+sudo getbible-robot runtime production
+sudo getbible-robot logs production 100
 ```
 
-The normal reason is an open Scripture repository circuit after repeated timeouts or failures. Check:
+Inspect circuit, repository failure, and timeout metrics. After `CIRCUIT_RECOVERY_SECONDS`, one request is allowed as a half-open recovery probe. Fix the upstream/network condition instead of restarting repeatedly.
 
-- `getbible_robot_circuit_open`;
-- `getbible_robot_repository_failures`;
-- `getbible_robot_lookup_timeouts`;
-- API reachability to `https://api.getbible.net`;
-- connect/read/overall timeout settings.
+## Scripture requests time out or report busy
 
-After `CIRCUIT_RECOVERY_SECONDS`, one request is permitted as a recovery probe. Do not repeatedly restart merely to reset the circuit; fix the upstream or network condition.
+`RobotBusy` means bounded worker capacity was not acquired within `LOOKUP_QUEUE_TIMEOUT`. A timed-out synchronous worker deliberately retains its permit until the real thread exits, preventing an unbounded executor queue.
 
-## Scripture commands time out or report busy
+Measure upstream latency and worker pressure. Do not raise concurrency, timeouts, result sizes, or message budgets until the workload and memory impact are tested.
 
-`RobotBusy` means the bounded worker capacity could not be acquired within `LOOKUP_QUEUE_TIMEOUT`. A timed-out worker keeps its capacity until the underlying synchronous request really exits, which is intentional protection against an unbounded executor queue.
+## Interactive panel expired
 
-Check metrics and upstream latency. Do not increase concurrency or queue timeouts until memory, API capacity, and service limits have been load-tested.
+Run `/bible` or `/search` again. Panels are process-local and expire after `INTERACTION_TTL_SECONDS`. Restarting one instance invalidates only that instance's panels.
 
-## Ordinary references trigger translation errors
+In a group, the user who opened the panel must use its controls and reply directly to its selective prompt. Other users and older prompt replies are ignored.
 
-An ordinary reference such as `John 3:16` should be parsed locally with the default translation and should not probe a translation named `3:16`. Confirm the deployed commit includes the strict `ScriptureService.resolve_query` path and run:
+## Incorrect links or results
 
-```bash
-venv/bin/python -m unittest tests.test_service -v
-```
-
-Explicit translation syntax is:
+Expected boundaries:
 
 ```text
-/bible John 3:16 kjv
-/bible Gen 1:1 aov
+GETBIBLE_API_BASE_URL=https://api.getbible.net
+GETBIBLE_WEB_BASE_URL=https://getbible.life
 ```
 
-## Incorrect or unsafe links
+Data comes from the API host; Telegram links use the website host. Run the renderer, service, catalog, and command tests before deploying any fix.
 
-Every Scripture/search link shown in Telegram must begin with `https://getbible.life`. Data comes from `https://api.getbible.net`.
+## Upgrade fails
 
-Check only the non-secret settings:
+The manager builds `app.next` before stopping the service. If the new application fails readiness after the swap, it automatically restores the prior `app`.
+
+After any reported rollback:
 
 ```bash
-sudo grep -E '^(GETBIBLE_API_BASE_URL|GETBIBLE_WEB_BASE_URL)=' \
-  /etc/getbible-robot.env
+sudo getbible-robot status production
+sudo getbible-robot doctor production
+sudo getbible-robot logs production 300
 ```
 
-Expected values:
-
-```text
-GETBIBLE_API_BASE_URL="https://api.getbible.net"
-GETBIBLE_WEB_BASE_URL="https://getbible.life"
-```
-
-Run renderer tests after any URL or formatting change:
-
-```bash
-venv/bin/python -m unittest tests.test_renderer -v
-```
-
-## Telegram rejects a message
-
-The renderer escapes HTML, percent-encodes URL segments, measures UTF-16 code units, splits at safe block boundaries, and caps the number of output messages. A rejection can indicate malformed repository data, an untested Telegram HTML rule, or deployment of mismatched code/dependencies.
-
-Record the incident correlation ID and deployed commit. Do not log or paste the full private Scripture request unless the user has consented and the channel is approved.
-
-## Command deletion fails
-
-Deletion is disabled by default. When `DELETE_COMMAND_MESSAGES=true`, group deletion may require administrator permissions. `BadRequest` and `Forbidden` are non-fatal; Scripture delivery should still succeed.
-
-Either grant the narrowly required Telegram permission or set:
-
-```dotenv
-DELETE_COMMAND_MESSAGES="false"
-```
-
-## Rate limiting appears too strict
-
-Every command consumes both a user and chat token, including `/help`, `/start`, `/search`, and unknown commands. This prevents cheap-command flooding from bypassing the lookup limiter.
-
-Review `USER_RATE_*`, `CHAT_RATE_*`, and `getbible_robot_rate_limit_*` metrics. Increase values cautiously and keep `RATE_LIMIT_CACHE_SIZE` bounded.
-
-Only the first rejection for a user/chat cooldown sends a Telegram warning. Later rejected requests are intentionally silent until `RATE_LIMIT_NOTICE_COOLDOWN` has elapsed without another warning attempt.
-
-## An interactive panel expired or does not respond
-
-Run `/bible` or `/search` again. Panels are intentionally process-local and expire after `INTERACTION_TTL_SECONDS`; a service restart invalidates every old callback token.
-
-In a group, reply directly to the bot's selective search prompt from the same user who opened the panel. Unrelated messages, another user's reply, and replies to an older prompt are ignored.
-
-Review `getbible_robot_interaction_*` metrics for active, expired, and evicted sessions. Do not remove ownership checks or make sessions unbounded to avoid an expiry.
-
-## Health port is unavailable
-
-Confirm the configured loopback port and identify the listener:
-
-```bash
-sudo ss -ltnp | grep ':8081 '
-```
-
-Choose another unused loopback port or set `HEALTH_PORT=0` to disable the endpoint. `HEALTH_HOST` cannot bind publicly by design.
-
-## Hashed dependency installation fails
-
-Use the lock belonging to the same robot commit. Do not remove `--require-hashes`.
-
-```bash
-git status --short
-git rev-parse HEAD
-head -n 8 requirements.txt
-python3 --version
-venv/bin/python -m pip --version
-```
-
-If the direct inputs changed, regenerate both locks with [the dependency procedure](DEPENDENCIES.md). Validate the runtime lock separately on Python 3.10, 3.11, and 3.12.
-
-## CI fails at Ruff, mypy, Bandit, audit, or secret scanning
-
-Open the exact failed step and artifact. Fix the source or dependency; do not:
-
-- disable a rule without a documented false-positive analysis;
-- remove a supported Python version to hide a lock problem;
-- ignore a vulnerability without impact and compensating-control documentation;
-- add a secret baseline that contains a real token;
-- skip a job solely to obtain a green gate.
+Do not manually copy a lock or virtual environment between application trees.
 
 ## Memory or restart pressure
 
-Check:
-
 ```bash
-systemctl show getbible-robot.service \
-  -p MemoryCurrent -p MemoryPeak -p MemoryMax -p NRestarts
+sudo getbible-robot runtime production
 ```
 
-Likely causes include unusually large configured limits, too many worker threads, repeated upstream stalls, or an unexpectedly large translation/cache. Preserve the bounded defaults, inspect cache telemetry, and reproduce under load before changing `MemoryMax`.
+Likely causes include increased configured bounds, too many worker threads, repeated upstream stalls, a large translation/cache, or repeated Telegram initialization failure. Preserve bounded defaults and reproduce under load before changing `MemoryMax`.
 
 ## Safe support request
 
 Include:
 
-- robot commit SHA;
-- Python version;
-- operating-system and systemd version;
-- redacted configuration names that differ from defaults, without values when sensitive;
-- failing test/check name;
-- correlation ID and sanitized log event;
-- exact expected and observed behavior;
-- whether the problem occurs with a dedicated test bot.
+- instance name, but no token;
+- exact robot commit;
+- Python, operating-system, and systemd versions;
+- CI and CodeQL URLs;
+- `doctor` result;
+- redacted names of non-default settings;
+- failing test/check;
+- incident correlation ID and sanitized JSON event;
+- expected and observed behavior;
+- whether it reproduces with a dedicated test bot.
 
 Report vulnerabilities privately according to [`SECURITY.md`](../SECURITY.md).

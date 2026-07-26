@@ -53,6 +53,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             max_input_length=256,
             max_references=8,
             max_total_verses=100,
+            audit_log_mode="metadata",
         )
         application = SimpleNamespace(
             bot_data={

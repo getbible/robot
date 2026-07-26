@@ -6,6 +6,9 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Security
 
+- Added a transactional multi-instance setup manager with hidden token entry, duplicate-token prevention, exact-commit deployment, isolated locked accounts, root-only configuration, and instantiated unit verification.
+- Added per-instance JSONL logs, rotation, instance tagging, metadata-only auditing by default, and explicit privacy-gated content auditing.
+- Added hardened templated systemd isolation so instances cannot share application writes, environments, caches, state, logs, ports, or process limits.
 - Added owner-scoped opaque callback sessions with TTL/LRU retention and selective-reply verification.
 - Added checksum-verified, response-bounded translation/book/chapter/verse navigation metadata.
 - Added a rate-limit rejection cooldown so hostile floods cannot amplify Telegram API traffic.
@@ -21,6 +24,9 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Reliability
 
+- Added interactive and direct `list`, `start`, `stop`, `restart`, `status`, `runtime`, `logs`, `follow`, `doctor`, `config`, `upgrade`, `rollback`, and `uninstall` operations.
+- Added prebuilt upgrades, complete application-tree swaps, readiness checks, automatic failed-upgrade restoration, and one-step manual rollback.
+- Added transaction cleanup for incomplete installs and safe instance selection when several bots share one server.
 - Preserved immediate legacy posting for `/bible <reference>` while replacing empty-command default-verse substitution with a guided picker.
 - Added Librarian 1.2 default search for `/search <words>` and a complete filter dashboard for empty `/search`.
 - Added paginated multi-select search results; Scripture is posted only after explicit confirmation.
@@ -34,6 +40,7 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Testing and delivery
 
+- Added setup syntax/self-tests, unit-template contracts, audit privacy tests, JSONL formatter tests, and multi-instance documentation contracts.
 - Added deterministic catalog integrity, interactive ownership/expiry, picker, search-confirmation, and cooldown regressions.
 - Added deterministic parser, service, circuit, timeout, rate-limit, renderer, error, configuration, health, command, and documentation-contract tests.
 - Added a Python 3.10–3.12 CI matrix with exact hashed installs.
@@ -61,5 +68,6 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Documentation
 
+- Replaced the manual single-instance deployment path with the setup questionnaire and complete multi-instance installation, operations, upgrade, rollback, logging, diagnostics, troubleshooting, and removal contract.
 - Added the interactive command contract, search filters, group behavior, safety model, and rollout roadmap.
 - Added complete installation, configuration, testing, dependency, upgrade, rollback, uninstall, troubleshooting, architecture, operations, security, and release-gate documentation.

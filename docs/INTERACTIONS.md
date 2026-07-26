@@ -124,6 +124,7 @@ The process stores only short-lived selection state. It does not persist query t
 - Group-safe selective replies added.
 - Session ownership, TTL/LRU bounds, callback bounds, catalog validation, checksums, and metrics added.
 - Deterministic security, service, catalog, interaction, and command regressions added.
+- Per-instance audit events record workflow source, translation, filter modes, result/selection counts, and posting outcome. Exact search terms and final references are present only when `AUDIT_LOG_MODE=content`.
 
 ### Required before production merge
 

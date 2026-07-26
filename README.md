@@ -52,9 +52,9 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
 - escaped Telegram HTML, percent-encoded URL segments, and safe chunk boundaries;
 - optional command deletion that cannot fail a successful lookup;
 - validated startup configuration and narrow Telegram update subscriptions;
-- structured logs without message content and aggregate-only metrics;
+- per-instance JSONL/journal logs with metadata-only auditing by default and explicit content opt-in;
 - loopback-only health and readiness endpoints;
-- a restartable, capability-free, filesystem-protected `systemd` service;
+- isolated locked service accounts and restartable, capability-free, filesystem-protected `systemd` instances;
 - deterministic tests, fuzz regressions, Ruff, mypy, Bandit, dependency auditing, secret scanning, and CodeQL.
 
 See [Architecture](docs/ARCHITECTURE.md) and [the release gate](docs/RELEASE_GATE.md) for the complete model.
@@ -99,41 +99,29 @@ venv/bin/python -m unittest discover -s tests -v
 
 ## Production installation summary
 
-Deploy an exact reviewed robot commit:
+Deploy an exact reviewed robot commit and run the questionnaire:
 
 ```bash
-sudo git clone https://github.com/getbible/robot.git /opt/getbible-robot
-cd /opt/getbible-robot
-sudo git checkout --detach <reviewed-commit-sha>
-
-sudo python3 -m venv venv
-sudo venv/bin/python -m pip install --upgrade pip
-sudo venv/bin/python -m pip install --require-hashes -r requirements.txt
-sudo venv/bin/python -m pip check
+git clone https://github.com/getbible/robot.git
+cd robot
+git checkout --detach <reviewed-commit-sha>
+sudo ./setup.sh install
 ```
 
-Create the service account and cache, install `/etc/getbible-robot.env` with mode `0600`, and install the supplied unit:
+The manager creates a separate locked Linux account, exact hashed environment, root-only token file, cache, state, JSONL log, rotation policy, health port, and hardened systemd service for every named instance. Tokens are entered with terminal echo disabled and are never accepted as command-line arguments.
 
 ```bash
-if ! id getbible-robot >/dev/null 2>&1; then
-  sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin getbible-robot
-fi
-sudo install -d -o getbible-robot -g getbible-robot -m 0700 /var/cache/getbible-robot
-sudo install -o root -g root -m 0600 .env.template /etc/getbible-robot.env
-sudo editor /etc/getbible-robot.env
-sudo install -o root -g root -m 0644 \
-  deploy/getbible-robot.service \
-  /etc/systemd/system/getbible-robot.service
-sudo systemd-analyze verify /etc/systemd/system/getbible-robot.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now getbible-robot.service
+sudo getbible-robot list
+sudo getbible-robot status production
+sudo getbible-robot logs production
+sudo getbible-robot doctor production
 ```
 
-At minimum, replace `TELEGRAM_API_TOKEN` before startup. Follow [Installation](docs/INSTALLATION.md) rather than relying on this summary for production.
+Run `sudo getbible-robot` without arguments for an interactive operations menu. Follow [Installation](docs/INSTALLATION.md) for the complete production contract.
 
 ## Health and metrics
 
-The default endpoint binds only to `127.0.0.1:8081`:
+Each instance receives a unique loopback port, beginning at `127.0.0.1:8081`:
 
 ```bash
 curl --fail http://127.0.0.1:8081/healthz
@@ -141,7 +129,7 @@ curl --fail http://127.0.0.1:8081/readyz
 curl --fail http://127.0.0.1:8081/metrics
 ```
 
-Set `HEALTH_PORT=0` to disable it. Do not expose the endpoint publicly without an authenticated, access-controlled proxy.
+Use `sudo getbible-robot runtime <instance>` to resolve and query the correct port. Set `HEALTH_PORT=0` to disable it. Do not expose an endpoint publicly without an authenticated, access-controlled proxy.
 
 ## Documentation
 

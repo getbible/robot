@@ -12,8 +12,8 @@ Include the affected commit, reproduction steps using a local test bot where pos
 
 ## Secrets
 
-A Telegram token must never be committed. Store it in `/etc/getbible-robot.env` or an equivalent secret manager with permissions restricted to the service account. If a token is exposed, revoke it immediately through `@BotFather`, replace it, and inspect deployment and Git history.
+A Telegram token must never be committed or passed on a command line. The setup manager stores each token in `/etc/getbible-robot/<instance>.env` as `root:root` mode `0600`. If a token is exposed, revoke it immediately through `@BotFather`, replace it, and inspect deployment, logs, process history, and Git history.
 
 ## Data handling
 
-The robot does not persist user messages, references, favorites, or profiles. Structured logs contain aggregate operational events and correlation IDs, not message content. Telegram and the configured GetBible API remain independent external services with their own data practices.
+Metadata audit mode does not persist user messages, references, search terms, favorites, profiles, user IDs, or chat IDs. Content audit mode is an explicit operator choice that additionally stores normalized search terms and final references in the restricted per-instance JSONL log; it still excludes tokens, identities, verse bodies, and repository payloads. Deployers who enable it are responsible for disclosure, access control, retention, backup, and deletion appropriate to user-provided content. Telegram and the configured GetBible API remain independent external services with their own data practices.

@@ -6,6 +6,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
@@ -16,8 +17,10 @@ class ConfigurationError(RuntimeError):
 
 
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
+_INSTANCE_RE = re.compile(r"[a-z][a-z0-9-]{0,22}[a-z0-9]\Z")
 _TELEGRAM_TOKEN_RE = re.compile(r"[0-9]{6,12}:[A-Za-z0-9_-]{30,64}\Z")
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+_AUDIT_LOG_MODES = frozenset({"metadata", "content"})
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -80,6 +83,27 @@ def _message(name: str, default: str) -> str:
     return value
 
 
+def _instance_name() -> str:
+    value = _env("INSTANCE_NAME", "local") or ""
+    if _INSTANCE_RE.fullmatch(value) is None or "--" in value:
+        raise ConfigurationError(
+            "INSTANCE_NAME must be 2-24 lowercase letters, numbers, or single hyphens."
+        )
+    return value
+
+
+def _log_file() -> str | None:
+    value = _env("LOG_FILE", "") or ""
+    if not value:
+        return None
+    if len(value) > 4096 or "\x00" in value:
+        raise ConfigurationError("LOG_FILE contains an invalid path.")
+    path = Path(value)
+    if not path.is_absolute():
+        raise ConfigurationError("LOG_FILE must be an absolute path or empty.")
+    return str(path)
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     """All settings are validated once before Telegram polling starts."""
@@ -120,6 +144,9 @@ class Settings:
     drop_pending_updates: bool
     health_host: str
     health_port: int
+    instance_name: str
+    log_file: str | None
+    audit_log_mode: str
     log_level: int
 
     @classmethod
@@ -142,6 +169,10 @@ class Settings:
         translation = (_env("TRANSLATION", "kjv") or "").casefold()
         if _TRANSLATION_RE.fullmatch(translation) is None:
             raise ConfigurationError("TRANSLATION must be a valid GetBible abbreviation.")
+
+        audit_log_mode = (_env("AUDIT_LOG_MODE", "metadata") or "").casefold()
+        if audit_log_mode not in _AUDIT_LOG_MODES:
+            raise ConfigurationError("AUDIT_LOG_MODE must be metadata or content.")
 
         log_name = (_env("LOG_LEVEL", "INFO") or "").upper()
         log_level = getattr(logging, log_name, None)
@@ -230,5 +261,8 @@ class Settings:
             drop_pending_updates=_boolean("DROP_PENDING_UPDATES", True),
             health_host=health_host,
             health_port=_integer("HEALTH_PORT", 8081, 0, 65_535),
+            instance_name=_instance_name(),
+            log_file=_log_file(),
+            audit_log_mode=audit_log_mode,
             log_level=log_level,
         )

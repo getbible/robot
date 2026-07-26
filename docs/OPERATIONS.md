@@ -1,188 +1,141 @@
 # Operations
 
-This guide covers routine production operation after [installation](INSTALLATION.md). Use [Upgrading](UPGRADING.md) for changes, [Troubleshooting](TROUBLESHOOTING.md) for diagnosis, and [Uninstalling](UNINSTALL.md) for removal.
+The installed `getbible-robot` manager is the supported interface for routine production operation. Every command accepts an instance name. If it is omitted in an interactive terminal, the manager lists installed instances for selection.
 
-## Runtime inventory
-
-Record and monitor:
+## Inventory
 
 ```bash
-cd /opt/getbible-robot
-git rev-parse HEAD
-venv/bin/python --version
-sha256sum requirements.txt deploy/getbible-robot.service
-sudo systemctl status getbible-robot.service --no-pager
+sudo getbible-robot list
+sudo getbible-robot status production
+sudo getbible-robot runtime production
 ```
 
-The authoritative configuration is `/etc/getbible-robot.env`; do not print or copy it into logs. `TELEGRAM_API_TOKEN` is canonical. The deprecated `TELEGRAM_TOKEN` exists only for migration, and startup fails if both disagree.
+`list` reports instance, isolated service account, service state, health port, and abbreviated deployed commit. `status` adds the exact commit, Python version, creation date, JSON log path, enablement, and readiness. `runtime` adds `pip check`, systemd memory/task/restart counters, and aggregate application metrics.
 
-Keep the external boundaries separate:
+No command prints the secret environment file or Telegram token.
+
+## Start, stop, and restart
+
+```bash
+sudo getbible-robot start production
+sudo getbible-robot stop production
+sudo getbible-robot restart production
+```
+
+Start and restart wait for the configured loopback readiness endpoint. If `HEALTH_PORT=0`, only the service transition is checked.
+
+Never run a second process with the same Telegram token.
+
+## Logs
+
+Show a bounded recent window:
+
+```bash
+sudo getbible-robot logs production
+sudo getbible-robot logs production 500
+```
+
+Follow new events:
+
+```bash
+sudo getbible-robot follow production
+```
+
+The canonical file is:
 
 ```text
-GETBIBLE_API_BASE_URL=https://api.getbible.net
-GETBIBLE_WEB_BASE_URL=https://getbible.life
+/var/log/getbible-robot/<instance>.jsonl
 ```
 
-## Routine service commands
+The process also writes to journald:
 
 ```bash
-sudo systemctl start getbible-robot.service
-sudo systemctl stop getbible-robot.service
-sudo systemctl restart getbible-robot.service
-sudo systemctl reload-or-restart getbible-robot.service
-sudo systemctl status getbible-robot.service --no-pager
-sudo journalctl -u getbible-robot.service -f
+sudo journalctl -u getbible-robot@production.service -n 200 --no-pager
 ```
 
-The service validates configuration before starting, registers Telegram commands, starts the loopback health listener, and only then reports successful initialization.
+Each JSON object contains an instance name, UTC timestamp, severity, logger, message, and optional controlled audit fields. `metadata` audit mode never stores Telegram query text or final references. `content` mode adds search terms and final references only; tokens, user IDs, chat IDs, verse bodies, and repository response bodies remain prohibited.
 
-Never run a second polling process with the same token while the service is active.
+Logs rotate daily or at 10 MiB, retain 14 compressed rotations, and use `copytruncate` so the running file handler remains valid.
 
-## Health, readiness, and metrics
-
-Default loopback endpoints:
+## Diagnostics
 
 ```bash
-curl --fail http://127.0.0.1:8081/healthz
-curl --fail http://127.0.0.1:8081/readyz
-curl --fail http://127.0.0.1:8081/metrics
+sudo getbible-robot doctor production
 ```
 
-- `/healthz` confirms that the process and listener are alive.
-- `/readyz` returns 503 while the Scripture circuit is open or the service is closing.
-- `/metrics` exposes aggregate counters only; it contains no message text, token, reference, or verse text.
+The non-destructive diagnostic checks:
 
-Keep the listener on loopback. Set `HEALTH_PORT=0` only when an external supervisor provides equivalent checks.
+- service account existence;
+- application and virtual environment;
+- root-only environment permissions;
+- per-instance log ownership;
+- complete configuration validation;
+- installed dependency consistency;
+- deployed Git commit against metadata;
+- instantiated unit verification;
+- systemd status;
+- health and readiness when running.
+
+Use `runtime` for operational counters and `doctor` for an evidence-backed pass/fail deployment check.
+
+## Configuration changes
+
+```bash
+sudo getbible-robot config production
+```
+
+The manager:
+
+1. makes a restricted temporary backup;
+2. opens the configured editor;
+3. restores root ownership and mode `0600`;
+4. validates the complete file with the deployed code;
+5. automatically restores the prior file if validation fails;
+6. offers to restart the selected instance.
+
+See [Configuration](CONFIGURATION.md) before changing any bound. Never copy one instance's token or environment file over another.
 
 ## Monitoring
 
 Alert on:
 
-- `getbible_robot_ready == 0` for longer than the expected circuit recovery interval;
-- `getbible_robot_circuit_open == 1`;
-- growth in `lookup_timeouts`, `repository_failures`, `unexpected_failures`, or `queue_rejections`;
-- sustained user/chat rate-limit rejection;
-- sustained `getbible_robot_interaction_evictions` growth or sessions remaining at the configured limit;
-- unusual growth in expired interactive sessions without completed posts;
-- repeated service restarts;
+- an inactive service or repeated restart growth;
+- readiness unavailable longer than `CIRCUIT_RECOVERY_SECONDS`;
+- an open upstream circuit;
+- lookup timeouts, repository failures, queue rejections, or unexpected failures;
+- sustained rate-limit rejection;
+- interactive session evictions or saturation;
 - memory approaching `MemoryMax`;
-- file-descriptor or task pressure;
-- failure of a private scheduled Scripture probe;
-- a returned Telegram link whose host is not `getbible.life`.
+- task or file-descriptor pressure;
+- log write/rotation failures;
+- a returned link not hosted on `getbible.life`.
 
-Useful systemd counters:
-
-```bash
-systemctl show getbible-robot.service \
-  -p ActiveState \
-  -p SubState \
-  -p NRestarts \
-  -p MemoryCurrent \
-  -p MemoryPeak \
-  -p MemoryMax \
-  -p TasksCurrent \
-  -p TasksMax
-```
-
-## Logs and privacy
-
-Logs are JSON objects written to the journal. They contain event descriptions, exception class names, aggregate state, and random correlation IDs. They must not contain Telegram message text, bot tokens, full user references, filesystem secrets, or repository response bodies.
-
-Retrieve a bounded window:
-
-```bash
-sudo journalctl \
-  -u getbible-robot.service \
-  --since '30 minutes ago' \
-  --no-pager
-```
-
-Treat correlation IDs as diagnostic handles, not proof of user identity.
-
-## Configuration changes
-
-1. Back up the secret file with mode `0600`.
-2. Edit only the intended keys.
-3. Validate with the currently deployed code.
-4. Restart the service.
-5. Verify readiness, logs, and a private Telegram lookup.
-6. Roll back the file if validation or behavior fails.
-
-```bash
-sudo cp -a /etc/getbible-robot.env /etc/getbible-robot.env.backup
-sudo editor /etc/getbible-robot.env
-sudo bash -c '
-  set -a
-  . /etc/getbible-robot.env
-  set +a
-  cd /opt/getbible-robot
-  venv/bin/python -c "from config import Settings; Settings.from_env()"
-'
-sudo systemctl restart getbible-robot.service
-curl --fail http://127.0.0.1:8081/readyz
-```
-
-See [Configuration](CONFIGURATION.md) before changing bounds.
-
-## Deployment and upgrade
-
-Deploy only an exact robot commit whose permanent security and CodeQL gates are green. Install only its checked-in lock with `--require-hashes`. Follow [Upgrading and rollback](UPGRADING.md); do not combine source, lockfiles, or virtual environments from different commits.
-
-The deployment record should include the robot commit, lockfile checksum, Python version, unit checksum, CI URLs, smoke-test result, and rollback commit.
-
-## Backup scope
-
-The only secret state is the external environment file and Telegram token. The code and dependency locks are recoverable from Git. The cache is recoverable from the GetBible API and normally does not require backup.
-
-For disaster recovery, retain securely:
-
-- the deployed robot commit SHA;
-- an encrypted copy of `/etc/getbible-robot.env`, subject to secret-retention policy;
-- the previous known-good robot commit;
-- installation and host-configuration records.
-
-Do not back up virtual environments as a substitute for the lockfile.
+Runtime metrics contain aggregates only. Do not expose the loopback listener publicly without an authenticated, access-controlled proxy.
 
 ## Incident response
 
-1. Stop or disable the service if it produces unsafe, incorrect, or uncontrolled responses.
-2. Revoke the Telegram token through `@BotFather` immediately if disclosure is possible.
-3. Preserve the deployed commit, lock checksums, unit checksum, and relevant journal window.
-4. Verify whether the issue is Telegram, host networking, the GetBible API, Librarian, rendering, or configuration.
-5. Roll back to the last complete release-gate success when safe.
-6. Confirm `/readyz`, a private lookup, rate limiting, and link domains.
-7. Add a deterministic regression test before redeploying the fix.
-8. Report security defects privately under [`SECURITY.md`](../SECURITY.md).
+1. Stop only the affected instance: `sudo getbible-robot stop <instance>`.
+2. Revoke the token immediately through `@BotFather` if disclosure is possible.
+3. Record `status`, `runtime`, the deployed commit, lock checksum, unit checksum, and a bounded log window.
+4. Determine whether the failure is Telegram, host networking, GetBible API, Librarian, rendering, configuration, or deployment.
+5. Use `rollback` if the immediately previous application is known-good.
+6. Run `doctor`, readiness, and the private smoke test before returning to service.
+7. Add a deterministic regression test before deploying a code fix.
+8. Report security defects according to [`SECURITY.md`](../SECURITY.md).
 
-## Rollback
+## Backups
 
-The preferred rollback keeps the previous virtual environment during the acceptance window. Follow the exact procedure in [Upgrading](UPGRADING.md).
+The code and exact dependency locks are recoverable from Git. Cache data is recoverable from the GetBible API. Retain securely:
 
-An emergency rebuild from the previous commit is:
+- the exact deployed and prior commits;
+- an encrypted copy of `/etc/getbible-robot/<instance>.env` when policy requires it;
+- deployment and smoke-test records;
+- content logs only for the minimum approved retention period.
 
-```bash
-sudo systemctl stop getbible-robot.service
-cd /opt/getbible-robot
-git checkout --detach <last-known-good-commit>
-sudo rm -rf venv
-sudo python3 -m venv venv
-sudo venv/bin/python -m pip install --upgrade pip
-sudo venv/bin/python -m pip install --require-hashes -r requirements.txt
-sudo venv/bin/python -m pip check
-sudo systemctl start getbible-robot.service
-curl --fail http://127.0.0.1:8081/readyz
-```
+Do not use a copied virtual environment as a substitute for the matching commit and lock.
 
-Do not reuse a lockfile from a different commit.
+## Capacity
 
-## Capacity changes
+Increase bounds only after measuring memory, worker occupancy, Telegram output count, API latency, circuit behavior, and interaction state under representative load. Hard complexity limits also apply to administrators. A timed-out synchronous lookup intentionally retains its worker permit until the underlying thread exits.
 
-Increase limits only after a test reproduces the expected workload and measures memory, worker occupancy, Telegram message count, repository latency, and circuit behavior.
-
-Hard complexity limits should never be disabled for administrators. Scaling process count multiplies per-process cache, interaction state, and worker memory. Increasing `MAX_CONCURRENT_LOOKUPS` without increasing API capacity can worsen an outage. A timed-out lookup intentionally retains its worker permit until the actual thread exits.
-
-Interactive Bible and search state is deliberately ephemeral. Restarting the process, reaching the bounded LRU capacity, or exceeding `INTERACTION_TTL_SECONDS` expires an unfinished panel; the user can safely start the command again. Do not persist query text or selected verses in logs or metrics.
-
-## Planned retirement
-
-Use [Uninstalling](UNINSTALL.md). Stopping or deleting files does not revoke the Telegram token; bot retirement or token rotation must be completed separately through `@BotFather`.
+Interactive state is process-local, bounded, and ephemeral. Restarting one instance expires only that instance's unfinished panels.

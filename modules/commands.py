@@ -28,6 +28,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from config import Settings
+from modules.audit import audit_event
 from modules.catalog import BookOption, ChapterOption, TranslationOption
 from modules.errors import (
     CircuitOpen,
@@ -174,7 +175,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         query = " ".join(context.args or ()).strip()
         if query:
             await send_typing(update, context)
-            await _run_search(session, query, service)
+            await _run_search(session, query, service, settings)
             message = await context.bot.send_message(
                 chat_id=chat_id,
                 text=_search_results_text(session, 0),
@@ -219,7 +220,14 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if context.args:
             await send_typing(update, context)
             query = await service.resolve_query(context.args)
-            await _post_scripture(chat_id, query, settings, service, context)
+            await _post_scripture(
+                chat_id,
+                query,
+                settings,
+                service,
+                context,
+                source="bible_direct",
+            )
             return
 
         await send_typing(update, context)
@@ -380,7 +388,7 @@ async def interaction_reply(
         if session.stage != "search_query":
             return
         await send_typing(update, context)
-        await _run_search(session, text, service)
+        await _run_search(session, text, service, settings)
         session.prompt_message_id = None
         await _edit(
             session,
@@ -590,7 +598,14 @@ async def _dispatch_callback(
             f"Posting {reference} ({session.translation})…",
             None,
         )
-        await _post_scripture(session.chat_id, query, settings, service, context)
+        await _post_scripture(
+            session.chat_id,
+            query,
+            settings,
+            service,
+            context,
+            source="bible_guided",
+        )
         interactions.remove(session.token)
         return
     if action == "rreset":
@@ -812,7 +827,14 @@ async def _dispatch_callback(
             ),
             None,
         )
-        await _post_scripture(session.chat_id, query, settings, service, context)
+        await _post_scripture(
+            session.chat_id,
+            query,
+            settings,
+            service,
+            context,
+            source="search_selection",
+        )
         interactions.remove(session.token)
         return
     if action == "cancel":
@@ -891,6 +913,7 @@ async def _run_search(
     session: InteractionSession,
     query: str,
     service: ScriptureService,
+    settings: Settings,
 ) -> None:
     if not query:
         raise RobotInputError("Search words are required.")
@@ -900,6 +923,27 @@ async def _run_search(
     session.search_results = page.items
     session.selected.clear()
     session.stage = "search_results"
+    options = session.search_options
+    audit_event(
+        LOGGER,
+        settings,
+        "search_completed",
+        metadata={
+            "translation": options.translation,
+            "total_results": page.total,
+            "returned_results": len(page.items),
+            "word_mode": options.words,
+            "match_mode": options.match,
+            "scope": options.scope,
+            "case_sensitive": options.case_sensitive,
+            "diacritics": options.diacritics,
+            "sort": options.sort,
+            "book_filter_count": len(options.books),
+            "exclusion_count": len(options.exclude),
+            "proximity": options.proximity,
+        },
+        content={"query": page.query},
+    )
 
 
 async def _post_scripture(
@@ -908,8 +952,15 @@ async def _post_scripture(
     settings: Settings,
     service: ScriptureService,
     context: ContextTypes.DEFAULT_TYPE,
+    *,
+    source: str,
 ) -> None:
     result = await service.select(query)
+    verse_count = sum(
+        len(chapter["verses"])
+        for chapter in result.values()
+        if isinstance(chapter, dict) and isinstance(chapter.get("verses"), list)
+    )
     chunks = render_scripture(
         result,
         settings.web_base_url,
@@ -922,6 +973,19 @@ async def _post_scripture(
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
+    audit_event(
+        LOGGER,
+        settings,
+        "scripture_posted",
+        metadata={
+            "source": source,
+            "translation": query.translation,
+            "reference_group_count": query.references.count(";") + 1,
+            "verse_count": verse_count,
+            "message_count": len(chunks),
+        },
+        content={"reference": query.references},
+    )
 
 
 async def _report_command_error(
