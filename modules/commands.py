@@ -64,6 +64,53 @@ BUTTON_LABEL_LIMIT = 60
 _CALLBACK_RE = re.compile(r"gb:([A-Za-z0-9_-]{8,16}):([a-z]{1,8}):([A-Za-z0-9_-]{0,32})\Z")
 _T = TypeVar("_T")
 
+CALLBACK_ACTIONS = frozenset(
+    {
+        "bg",
+        "bp",
+        "bs",
+        "bt",
+        "cancel",
+        "cb",
+        "chback",
+        "cp",
+        "cs",
+        "rpost",
+        "rreset",
+        "sb",
+        "sbclear",
+        "sbdone",
+        "sbg",
+        "sbp",
+        "sbt",
+        "sc",
+        "sdash",
+        "sdi",
+        "sm",
+        "snew",
+        "so",
+        "spost",
+        "spr",
+        "spv",
+        "sq",
+        "sreset",
+        "srp",
+        "srt",
+        "ss",
+        "st",
+        "sw",
+        "sx",
+        "tc",
+        "tp",
+        "tr",
+        "vback",
+        "ve",
+        "vep",
+        "vs",
+        "vsp",
+    }
+)
+
 
 def _components(
     context: ContextTypes.DEFAULT_TYPE,
@@ -276,6 +323,9 @@ async def interaction_callback(
     _, service, limiter, interactions = _components(context)
     chat_id, user_id = identity
     token, action, value = match.groups()
+    if action not in CALLBACK_ACTIONS:
+        await callback.answer("This control is invalid.", show_alert=True)
+        return
     session = interactions.get(token, chat_id=chat_id, user_id=user_id)
     if session is None:
         await callback.answer(

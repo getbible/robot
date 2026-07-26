@@ -37,8 +37,11 @@ venv/bin/python -m unittest tests.test_renderer -v
 venv/bin/python -m unittest tests.test_security -v
 venv/bin/python -m unittest tests.test_audit_runtime -v
 venv/bin/python -m unittest tests.test_audit -v
+venv/bin/python -m unittest tests.test_bot -v
+venv/bin/python -m unittest tests.test_interactive_features -v
 venv/bin/python -m unittest tests.test_logging -v
 venv/bin/python -m unittest tests.test_setup_script -v
+venv/bin/python -m unittest tests.test_utils -v
 venv/bin/python -m unittest tests.test_documentation -v
 ```
 
@@ -73,8 +76,12 @@ Validate the manager:
 
 ```bash
 bash -n setup.sh
+bash -n tests/setup_manager_lifecycle.sh
 bash setup.sh self-test
+bash tests/setup_manager_lifecycle.sh
 ```
+
+The lifecycle harness is hermetic: it redirects all managed paths into a temporary root and substitutes only host boundaries such as systemd and account management. It executes the real questionnaire and manager logic for two instances, including transactional cleanup, duplicate-token rejection, selectors, lifecycle commands, diagnostics, configuration restoration, upgrades, automatic failed-upgrade restoration, manual rollback, and isolated uninstall. It never contacts Telegram or changes the host.
 
 The CI quality job creates an isolated `ci` service fixture and verifies `getbible-robot@ci.service`, then performs an isolated hashed install, Ruff, mypy, robot/Librarian Bandit scans, strict source-aware dependency auditing, secret scanning, and manager tests. CodeQL runs separately. A deployable commit must have both permanent gate statuses green.
 
@@ -89,6 +96,8 @@ The tests cover at least these invariants:
 - explicit `/bible <reference>` commands still post immediately;
 - `/search <words>` returns selectable previews and never posts before confirmation;
 - empty `/search` exposes Librarian 1.2 filters through a bounded dashboard;
+- every registered command alias and every implemented callback action appears in an explicit test inventory;
+- every translation, testament, book, chapter, verse, pagination, back, reset, cancel, filter, exclusion, proximity, selection, and confirmation control executes through the interaction state machine;
 - callback sessions require the originating user and chat and expire under TTL/LRU bounds;
 - guided navigation rejects malformed catalogs, oversized responses, redirects, and book checksum mismatches;
 - selected search verses are compressed and revalidated before Librarian retrieval;
@@ -107,6 +116,10 @@ The tests cover at least these invariants:
 - all public links use `https://getbible.life` and data access uses `https://api.getbible.net`.
 - instance, token, health-port, account, path, cache, and log isolation is preserved;
 - setup shell syntax and the manager's fail-closed validators pass;
+- the setup questionnaire installs two isolated instances in a temporary host fixture;
+- failed installation is cleaned transactionally without retaining an account, secret, cache, state, or application;
+- list, selection, start, stop, restart, status, runtime, logs, follow, doctor, configuration, upgrade, rollback, menu, and uninstall manager paths execute;
+- invalid configuration is restored, a failed upgrade restores the active application, and uninstalling one instance leaves the other intact;
 - metadata audit mode omits query/reference content;
 - content audit mode includes only the deliberately permitted normalized fields;
 - JSONL events include the selected instance and controlled audit object.

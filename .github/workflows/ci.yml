@@ -61,7 +61,10 @@ jobs:
         run: |
           set -o pipefail
           bash -n setup.sh
+          bash -n tests/setup_manager_lifecycle.sh
           bash setup.sh self-test 2>&1 | tee "${RUNNER_TEMP}/setup-manager.log"
+          bash tests/setup_manager_lifecycle.sh \
+            2>&1 | tee -a "${RUNNER_TEMP}/setup-manager.log"
 
       - name: Run deterministic test suite
         shell: bash
