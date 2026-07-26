@@ -50,6 +50,23 @@ Typical causes:
 
 Do not put the token into a support ticket. Rotate it through `@BotFather` when in doubt.
 
+## Service fails with `status=200/CHDIR`
+
+This status means systemd could not enter the configured application directory
+as the instance account; Python and Telegram have not started yet. Confirm and
+repair it from the exact reviewed checkout:
+
+```bash
+sudo getbible-robot doctor production
+sudo ./setup.sh repair production
+sudo getbible-robot status production
+```
+
+The repair keeps the application root-owned, grants read/traverse access only
+to `gb-production`, verifies the import as that real account, clears the
+systemd start limit, and starts the service if it is enabled. Do not work around
+this with world-writable or recursively mode-`0777` permissions.
+
 ## Configuration will not validate
 
 Use:
