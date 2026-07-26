@@ -24,7 +24,9 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Reliability
 
-- Added interactive and direct `list`, `start`, `stop`, `restart`, `status`, `runtime`, `logs`, `follow`, `doctor`, `config`, `upgrade`, `rollback`, and `uninstall` operations.
+- Fixed hardened deployments failing with systemd `200/CHDIR` by granting the locked instance group read/traverse access while retaining root ownership and no access for other users.
+- Added a service-account import preflight to install, upgrade, diagnostics, and the new targeted `repair` operation.
+- Added interactive and direct `list`, `start`, `stop`, `restart`, `status`, `runtime`, `logs`, `follow`, `doctor`, `repair`, `config`, `upgrade`, `rollback`, and `uninstall` operations.
 - Added prebuilt upgrades, complete application-tree swaps, readiness checks, automatic failed-upgrade restoration, and one-step manual rollback.
 - Added transaction cleanup for incomplete installs and safe instance selection when several bots share one server.
 - Preserved immediate legacy posting for `/bible <reference>` while replacing empty-command default-verse substitution with a guided picker.
@@ -40,6 +42,8 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Testing and delivery
 
+- Replaced the mocked application-preparation boundary with the real clone, permission-hardening, move, and locked-account preflight path in the lifecycle suite.
+- Added a CI host regression that starts with a root-only application tree and proves the actual system account can enter and import it only after the production permission function runs.
 - Added a hermetic two-instance setup-manager lifecycle covering transactional failure cleanup, operations, configuration restoration, upgrade recovery, rollback, and isolated uninstall.
 - Added an enforced callback-action inventory plus complete reference navigation, search-filter, reply, pagination, reset, cancel, command-registration, lifecycle-hook, and optional Telegram-action regressions.
 - Added setup syntax/self-tests, unit-template contracts, audit privacy tests, JSONL formatter tests, and multi-instance documentation contracts.
