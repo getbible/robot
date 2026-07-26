@@ -1057,13 +1057,30 @@ async def _report_command_error(
 ) -> None:
     message, expected = _safe_error_message(error, request_id)
     log = LOGGER.info if expected else LOGGER.error
+    causes = _error_cause_types(error)
     log(
-        "Request %s %s (%s)",
+        "Request %s %s (%s%s)",
         request_id,
         "rejected safely" if expected else "failed unexpectedly",
         type(error).__name__,
+        f"; causes={','.join(causes)}" if causes else "",
     )
     await context.bot.send_message(chat_id=chat_id, text=message)
+
+
+def _error_cause_types(error: Exception) -> tuple[str, ...]:
+    """Return a bounded, message-free exception chain for operator diagnostics."""
+    result: list[str] = []
+    seen = {id(error)}
+    current: BaseException = error
+    for _ in range(4):
+        cause = current.__cause__ or current.__context__
+        if cause is None or id(cause) in seen:
+            break
+        seen.add(id(cause))
+        result.append(type(cause).__name__)
+        current = cause
+    return tuple(result)
 
 
 async def _edit(

@@ -165,6 +165,25 @@ Measure upstream latency, memory, and the applicable worker pool. Do not raise
 concurrency, timeouts, result sizes, or message budgets until the impact is
 tested.
 
+## `/bible` returns a temporary-unavailable reference
+
+Find the matching request ID without exposing the environment file or token:
+
+```bash
+sudo getbible-robot logs production 500 | grep -i 'reference-id'
+```
+
+Replace `reference-id` with the eight-character reference displayed by the bot.
+The matching operator log records only controlled exception class names. It
+does not record exception messages, repository URLs, filesystem paths, tokens,
+or user content.
+
+An empty `/bible` command must open the translation picker without resolving a
+Scripture reference. The live translation catalog may omit optional display
+language labels; such omissions are accepted, while structurally unsafe entries
+are omitted individually. If every entry is unusable, the catalog still fails
+closed.
+
 ## Interactive panel expired
 
 Run `/bible` or `/search` again. Panels are process-local and expire after `INTERACTION_TTL_SECONDS`. Restarting one instance invalidates only that instance's panels.

@@ -1,6 +1,9 @@
+import logging
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+from getbible import RepositoryError
 
 from modules.catalog import BookOption, ChapterOption, TranslationOption
 from modules.commands import (
@@ -9,6 +12,7 @@ from modules.commands import (
     SERVICE_SLOT,
     SETTINGS_SLOT,
     _reference_selection,
+    _report_command_error,
     _selected_search_reference,
     bible_command,
     help_command,
@@ -17,7 +21,7 @@ from modules.commands import (
     start_command,
     unknown_command,
 )
-from modules.errors import RobotRateLimited
+from modules.errors import RobotRateLimited, ScriptureUnavailable
 from modules.interactions import (
     InteractionSession,
     InteractionStore,
@@ -168,6 +172,23 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "Skip — use KJV",
             str(context.bot.send_message.await_args.kwargs["reply_markup"]),
+        )
+
+    async def test_safe_error_log_correlates_reference_with_cause_types(self) -> None:
+        context = self.context(_Limiter())
+        repository_error = RepositoryError("controlled repository failure")
+        error = ScriptureUnavailable("safe public failure")
+        error.__cause__ = repository_error
+
+        with self.assertLogs("modules.commands", level=logging.INFO) as captured:
+            await _report_command_error(error, "891beaa0", 100, context)
+
+        self.assertIn("891beaa0", captured.output[0])
+        self.assertIn("causes=RepositoryError", captured.output[0])
+        self.assertNotIn("controlled repository failure", captured.output[0])
+        self.assertIn(
+            "Reference: 891beaa0",
+            context.bot.send_message.await_args.kwargs["text"],
         )
 
     async def test_bible_with_reference_preserves_immediate_legacy_post(self) -> None:
