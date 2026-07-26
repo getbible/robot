@@ -1,5 +1,5 @@
 [Unit]
-Description=GetBible Telegram Robot
+Description=GetBible Telegram Robot (%i)
 Documentation=https://github.com/getbible/robot
 Wants=network-online.target
 After=network-online.target
@@ -8,17 +8,19 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=getbible-robot
-Group=getbible-robot
-WorkingDirectory=/opt/getbible-robot
-EnvironmentFile=/etc/getbible-robot.env
+User=gb-%i
+Group=gb-%i
+WorkingDirectory=/opt/getbible-robot/%i/app
+EnvironmentFile=/etc/getbible-robot/%i.env
 Environment=PYTHONUNBUFFERED=1
-Environment=XDG_CACHE_HOME=/var/cache/getbible-robot
-ExecStartPre=/opt/getbible-robot/venv/bin/python -c "from config import Settings; Settings.from_env()"
-ExecStart=/opt/getbible-robot/venv/bin/python /opt/getbible-robot/bot.py
+Environment=ROBOT_INSTANCE=%i
+Environment=XDG_CACHE_HOME=/var/cache/getbible-robot/%i
+ExecStartPre=/opt/getbible-robot/%i/app/venv/bin/python -c "from config import Settings; Settings.from_env()"
+ExecStart=/opt/getbible-robot/%i/app/venv/bin/python /opt/getbible-robot/%i/app/bot.py
 
 Restart=on-failure
 RestartSec=5s
+TimeoutStartSec=90
 TimeoutStopSec=30
 KillSignal=SIGTERM
 
@@ -34,7 +36,8 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectProc=invisible
 ProtectSystem=strict
-ReadWritePaths=/var/cache/getbible-robot
+ReadOnlyPaths=/opt/getbible-robot/%i/app
+ReadWritePaths=/var/cache/getbible-robot/%i /var/log/getbible-robot/%i.jsonl
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 RestrictRealtime=true
@@ -52,6 +55,7 @@ LimitNOFILE=1024
 
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=getbible-robot-%i
 
 [Install]
 WantedBy=multi-user.target

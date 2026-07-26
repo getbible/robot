@@ -116,16 +116,16 @@ Shutdown order:
 4. close Librarian HTTP sessions;
 5. complete Telegram shutdown.
 
-The supplied `systemd` unit adds restart behavior, a dedicated identity, filesystem protection, no capabilities, limited address families, task/file limits, and `MemoryMax`.
+The supplied `systemd` template gives every named instance its own locked `gb-<instance>` identity, root-owned application and secret configuration, writable cache and JSONL file, restart behavior, filesystem protection, no capabilities, limited address families, task/file limits, and `MemoryMax`. Instances do not share a token, process, cache, health port, log file, interaction state, or virtual environment.
 
 ## Errors and observability
 
 Expected failures map to fixed user-safe messages. Unexpected failures receive a random correlation ID; raw exception strings are never reflected to Telegram.
 
-Structured logs contain event names, exception class names, and correlation IDs, not message text. Metrics are aggregate counters. The loopback health server exposes no token, reference, verse text, repository payload, or filesystem path.
+Every structured event is tagged with `INSTANCE_NAME` and is written to journald plus the optional absolute `LOG_FILE`. Metadata audit mode records event names, filter modes, translations, counts, exception class names, and correlation IDs without Telegram message text. Content audit mode is an explicit operator choice that additionally permits normalized search terms and final references. Neither mode records tokens, user/chat IDs, verse bodies, repository payloads, or secret paths. Metrics remain aggregate counters.
 
 ## Privacy
 
-The robot does not persist update text, references, searches, favorites, profiles, or chat history. Short-lived query and selection state exists only in bounded process memory and expires on inactivity or restart. Telegram and the configured GetBible API are independent external services with their own data practices.
+In metadata audit mode the robot does not persist update text, references, searches, favorites, profiles, or chat history. In explicitly enabled content mode, final references and search terms are persisted to the restricted per-instance log for its configured retention period. Short-lived query and selection state otherwise exists only in bounded process memory and expires on inactivity or restart. Telegram and the configured GetBible API are independent external services with their own data practices.
 
 Any future persistence feature requires a separate design for consent, access control, retention, export, deletion, encryption, and incident response before implementation.

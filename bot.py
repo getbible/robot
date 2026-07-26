@@ -42,26 +42,53 @@ LOGGER = logging.getLogger(__name__)
 
 
 class JsonFormatter(logging.Formatter):
-    """One JSON object per line without recording Telegram message content."""
+    """One instance-tagged JSON object per line with controlled audit fields."""
+
+    def __init__(self, instance_name: str) -> None:
+        super().__init__()
+        self.instance_name = instance_name
 
     def format(self, record: logging.LogRecord) -> str:
-        payload = {
+        payload: dict[str, object] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
+            "instance": self.instance_name,
             "message": record.getMessage(),
         }
+        event = getattr(record, "event", None)
+        audit = getattr(record, "audit", None)
+        if isinstance(event, str):
+            payload["event"] = event
+        if isinstance(audit, dict):
+            payload["audit"] = audit
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def configure_logging(level: int) -> None:
-    handler = logging.StreamHandler()
-    handler.setFormatter(JsonFormatter())
+def configure_logging(
+    level: int,
+    *,
+    instance_name: str,
+    log_file: str | None,
+) -> None:
+    formatter = JsonFormatter(instance_name)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+
     root = logging.getLogger()
+    previous_handlers = tuple(root.handlers)
     root.handlers.clear()
-    root.addHandler(handler)
+    for handler in previous_handlers:
+        handler.close()
+    root.addHandler(stream_handler)
+
+    if log_file is not None:
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+
     root.setLevel(level)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("telegram").setLevel(logging.WARNING)
@@ -148,7 +175,18 @@ def main() -> int:
         logging.critical("Configuration error: %s", error)
         return 2
 
-    configure_logging(settings.log_level)
+    try:
+        configure_logging(
+            settings.log_level,
+            instance_name=settings.instance_name,
+            log_file=settings.log_file,
+        )
+    except OSError as error:
+        logging.critical(
+            "Unable to initialize the configured log safely (%s).",
+            type(error).__name__,
+        )
+        return 2
     application = build_application(settings)
     application.run_polling(
         allowed_updates=["message", "callback_query"],

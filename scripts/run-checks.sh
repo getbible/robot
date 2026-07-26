@@ -9,6 +9,8 @@ if [[ ! -x "$PYTHON" ]]; then
   exit 2
 fi
 
+bash -n setup.sh
+bash setup.sh self-test
 "$PYTHON" -m pip check
 "$PYTHON" -m compileall -q bot.py config.py modules scripts tests
 "$PYTHON" -m unittest discover -s tests -v
@@ -76,7 +78,11 @@ if [[ "${VERIFY_SYSTEMD:-0}" == "1" ]]; then
     echo "VERIFY_SYSTEMD=1 but systemd-analyze is unavailable." >&2
     exit 2
   fi
-  systemd-analyze verify deploy/getbible-robot.service
+  if [[ ! "${VERIFY_SYSTEMD_INSTANCE:-}" =~ ^[a-z][a-z0-9-]{0,22}[a-z0-9]$ ]]; then
+    echo "Set VERIFY_SYSTEMD_INSTANCE to an installed instance name." >&2
+    exit 2
+  fi
+  systemd-analyze verify "getbible-robot@${VERIFY_SYSTEMD_INSTANCE}.service"
 fi
 
 echo "All local deterministic, quality, dependency, and secret checks passed."

@@ -16,13 +16,14 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - The exact runtime lock installs with `--require-hashes` on Python 3.10, 3.11, and 3.12.
 - `pip check` succeeds in every runtime environment.
 - Python source, maintenance helpers, and tests compile.
+- `setup.sh` passes `bash -n` and its fail-closed self-test.
 - Deterministic unit, asynchronous, regression, documentation-contract, audit-contract, and symbol-fuzz tests pass on every supported Python version.
 - Ruff passes without new suppressions added solely for the release.
 - mypy passes with the configured strictness.
 - Bandit reports no medium/high finding in the robot, maintenance scripts, or exact installed Librarian source.
 - `scripts/audit_runtime.py` runs `pip-audit --strict` against the complete released Librarian 1.2.0 lock.
 - Secret scanning reports no real secret.
-- The hardened systemd unit passes `systemd-analyze verify`.
+- The hardened instantiated `getbible-robot@ci.service` passes `systemd-analyze verify`.
 - CodeQL succeeds.
 - The permanent `robot/security-gate` and `robot/codeql-gate` statuses are green for the exact commit.
 
@@ -84,24 +85,31 @@ A robot commit is deployable only when every applicable item below is satisfied.
 
 ## Startup, health, and observability
 
-- Configuration validation fails closed for missing tokens, conflicting aliases, invalid URLs, and inconsistent bounds.
+- Configuration validation fails closed for missing tokens, conflicting aliases, invalid instance/log/audit values, invalid URLs, and inconsistent bounds.
+- Metadata audit mode omits search terms and final references.
+- Content audit mode includes only the documented normalized query/reference fields.
+- No audit mode records a token, Telegram user/chat ID, verse body, or repository payload.
+- Every JSONL event is tagged with the selected instance.
 - Telegram initialization and command registration complete before readiness is exposed.
 - `/healthz`, `/readyz`, and `/metrics` behave as documented on loopback.
 - Readiness becomes false when the circuit is open or service is closing.
 - Metrics contain aggregate values only.
-- Logs contain no message text or secrets.
+- Logs contain no secrets; message-derived search/reference content is absent unless content audit mode is explicitly enabled.
 - A normal SIGTERM closes health, workers, repository sessions, and polling cleanly.
 
 ## Documentation and operations
 
 - README links to the canonical documentation index.
-- Installation was followed successfully on a clean host or clean test image.
+- The setup questionnaire completed successfully on a clean host or clean test image.
+- Two test instances demonstrate distinct accounts, applications, environments, tokens, caches, ports, logs, processes, and state.
+- Instance selection resolves the intended target for list, start, stop, restart, status, runtime, logs, follow, doctor, config, upgrade, rollback, and uninstall.
+- Setup rejects duplicate instance names, unmanaged account collisions, reused tokens, dirty source, unsupported Python, invalid ports, and malformed secrets.
 - Every current environment variable appears in the configuration reference and `.env.template`.
 - Required operator documents exist and every relative Markdown link resolves.
 - Deterministic and live test steps match the current commands and files.
 - Dependency refresh instructions reproduce the checked-in lock process.
 - Upgrade and rollback were rehearsed with the target and previous commits.
-- Uninstall steps were reviewed for service, code, cache, secret, account, and token handling.
+- Uninstall steps were reviewed for the selected service, code, cache, state, secret, account, retained log, and token handling without affecting other instances.
 - Troubleshooting guidance matches current metrics, paths, and failure behavior.
 - The deployment record contains the robot SHA, lock checksum, Python version, unit checksum, CI URLs, smoke-test result, and rollback SHA.
 
@@ -120,7 +128,8 @@ Using a dedicated test bot first, and then a private production-bot chat before 
 - A group mention command parses correctly.
 - Returned links open on `getbible.life`.
 - API failure injection produces generic errors and circuit/readiness behavior.
-- No token, exception, path, or private message appears in logs or artifacts.
+- In metadata mode, no token, identity, exception detail, secret path, query, reference, or private message appears in logs or artifacts.
+- In content-mode testing, only synthetic search terms and final references appear; tokens, identities, verse bodies, and repository payloads remain absent.
 
 ## Final rollout decision
 

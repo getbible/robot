@@ -56,6 +56,13 @@ jobs:
           python -m compileall -q bot.py config.py modules scripts tests \
             2>&1 | tee "${RUNNER_TEMP}/compile.log"
 
+      - name: Validate setup manager
+        shell: bash
+        run: |
+          set -o pipefail
+          bash -n setup.sh
+          bash setup.sh self-test 2>&1 | tee "${RUNNER_TEMP}/setup-manager.log"
+
       - name: Run deterministic test suite
         shell: bash
         run: |
@@ -72,6 +79,7 @@ jobs:
             ${{ runner.temp }}/runtime-install.log
             ${{ runner.temp }}/pip-check.log
             ${{ runner.temp }}/compile.log
+            ${{ runner.temp }}/setup-manager.log
             ${{ runner.temp }}/tests.log
           if-no-files-found: warn
 
@@ -160,11 +168,30 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin getbible-robot
-          sudo install -d /opt/getbible-robot/venv/bin /var/cache/getbible-robot
-          sudo ln -s "$(command -v python)" /opt/getbible-robot/venv/bin/python
-          sudo touch /etc/getbible-robot.env
-          systemd-analyze verify deploy/getbible-robot.service \
+          sudo useradd \
+            --system \
+            --home-dir /var/lib/getbible-robot/ci \
+            --shell /usr/sbin/nologin \
+            gb-ci
+          sudo install -d \
+            /opt/getbible-robot/ci/app/venv/bin \
+            /var/cache/getbible-robot/ci \
+            /var/log/getbible-robot \
+            /etc/getbible-robot
+          sudo ln -s "$(command -v python)" \
+            /opt/getbible-robot/ci/app/venv/bin/python
+          sudo touch \
+            /opt/getbible-robot/ci/app/bot.py \
+            /etc/getbible-robot/ci.env \
+            /var/log/getbible-robot/ci.jsonl
+          sudo chown gb-ci:gb-ci \
+            /var/cache/getbible-robot/ci \
+            /var/log/getbible-robot/ci.jsonl
+          sudo install -o root -g root -m 0644 \
+            deploy/getbible-robot@.service \
+            /etc/systemd/system/getbible-robot@.service
+          sudo systemctl daemon-reload
+          systemd-analyze verify getbible-robot@ci.service \
             2>&1 | tee "${RUNNER_TEMP}/systemd.log"
 
       - name: Upload quality diagnostics

@@ -36,6 +36,9 @@ venv/bin/python -m unittest tests.test_commands -v
 venv/bin/python -m unittest tests.test_renderer -v
 venv/bin/python -m unittest tests.test_security -v
 venv/bin/python -m unittest tests.test_audit_runtime -v
+venv/bin/python -m unittest tests.test_audit -v
+venv/bin/python -m unittest tests.test_logging -v
+venv/bin/python -m unittest tests.test_setup_script -v
 venv/bin/python -m unittest tests.test_documentation -v
 ```
 
@@ -66,13 +69,14 @@ Librarian 1.2.0 is installed as a released, hashed package, so `scripts/audit_ru
 
 Review secret-scan output rather than blindly suppressing it. The `.env.template` contains a deliberate placeholder and is excluded; real tokens are never acceptable. `scripts/run-checks.sh` also excludes the configured in-repository virtual environment and standard environment directory names so following the documented `venv` workflow does not scan installed dependency metadata.
 
-Verify the production unit on a Linux host:
+Validate the manager:
 
 ```bash
-sudo systemd-analyze verify deploy/getbible-robot.service
+bash -n setup.sh
+bash setup.sh self-test
 ```
 
-The CI quality job also performs an isolated hashed install, Ruff, mypy, robot/Librarian Bandit scans, strict source-aware dependency auditing, secret scanning, and unit verification. CodeQL runs separately. A deployable commit must have both permanent gate statuses green.
+The CI quality job creates an isolated `ci` service fixture and verifies `getbible-robot@ci.service`, then performs an isolated hashed install, Ruff, mypy, robot/Librarian Bandit scans, strict source-aware dependency auditing, secret scanning, and manager tests. CodeQL runs separately. A deployable commit must have both permanent gate statuses green.
 
 ## What the regression suite must prove
 
@@ -101,6 +105,11 @@ The tests cover at least these invariants:
 - the complete released Librarian lock is included in strict dependency auditing;
 - all required operator documents and relative links remain valid;
 - all public links use `https://getbible.life` and data access uses `https://api.getbible.net`.
+- instance, token, health-port, account, path, cache, and log isolation is preserved;
+- setup shell syntax and the manager's fail-closed validators pass;
+- metadata audit mode omits query/reference content;
+- content audit mode includes only the deliberately permitted normalized fields;
+- JSONL events include the selected instance and controlled audit object.
 
 When a defect is found, first add a deterministic regression test that fails for the defect and then implement the fix. Never weaken an assertion or disable a security job merely to make CI green.
 
@@ -198,16 +207,17 @@ Use a separate test bot token and a private test chat. Stop any other polling pr
 13. Send a sustained rejected burst and confirm only one cooldown warning is sent, with no crash or memory growth.
 14. Stop with `Ctrl+C` and confirm the health listener, worker pool, and Librarian sessions close cleanly.
 
-Do not paste tokens or private chat content into issues, CI logs, screenshots, or test artifacts.
+Do not paste tokens or private chat content into issues, CI logs, screenshots, or test artifacts. Use metadata audit mode for normal production smoke testing. If content mode is being tested, use synthetic references/search terms and remove the test log according to policy.
 
 ## Production pre-rollout test
 
 After installation but before announcing availability:
 
 ```bash
-sudo systemctl status getbible-robot.service --no-pager
-sudo journalctl -u getbible-robot.service -n 100 --no-pager
-curl --fail http://127.0.0.1:8081/readyz
+sudo getbible-robot status production
+sudo getbible-robot doctor production
+sudo getbible-robot runtime production
+sudo getbible-robot logs production 100
 ```
 
-Then repeat the small private Telegram smoke set using the production bot. Record the deployed robot commit and lockfile checksums. Complete every item in [the release gate](RELEASE_GATE.md).
+Then repeat the small private Telegram smoke set using the production bot. If multiple instances share the host, confirm each selector resolves the intended service and that start/stop, cache, port, log, metrics, and token behavior do not cross instance boundaries. Record the deployed robot commit and lockfile checksums. Complete every item in [the release gate](RELEASE_GATE.md).

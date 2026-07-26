@@ -29,6 +29,7 @@ htmlcov/
 .tox/
 .nox/
 *.log
+*.jsonl
 
 # Editors and operating systems
 .idea/

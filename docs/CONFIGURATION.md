@@ -2,7 +2,7 @@
 
 GetBible Robot validates all configuration before Telegram polling begins. Invalid security-sensitive values fail startup instead of silently falling back.
 
-The production service reads `/etc/getbible-robot.env`. Local development may use a `.env` file in the checkout. Environment variables already present in the process take precedence over `.env` values.
+Each production instance reads `/etc/getbible-robot/<instance>.env`. Local development may use a `.env` file in the checkout. Environment variables already present in the process take precedence over `.env` values.
 
 ## Required secret
 
@@ -12,6 +12,30 @@ The production service reads `/etc/getbible-robot.env`. Local development may us
 | `TELEGRAM_TOKEN` | none | Deprecated migration alias | Accepted only when `TELEGRAM_API_TOKEN` is absent; startup fails if both disagree |
 
 Store the token outside Git with restrictive permissions. Revoke and replace it immediately through `@BotFather` if disclosure is suspected.
+
+`setup.sh` accepts tokens only through a hidden interactive prompt, stores each file as `root:root` mode `0600`, and rejects reuse by another local instance.
+
+## Instance identity and audit logging
+
+| Variable | Default | Validation | Purpose |
+|---|---:|---|---|
+| `INSTANCE_NAME` | `local` | 2–24 lowercase letters, numbers, or single hyphens | Tags every JSON event and identifies the isolated deployment |
+| `LOG_FILE` | empty | Empty or an absolute path | Optional JSONL application log in addition to journald |
+| `AUDIT_LOG_MODE` | `metadata` | `metadata` or `content` | Controls whether user-provided query/reference text may enter audit fields |
+
+The setup manager assigns these values per instance:
+
+```dotenv
+INSTANCE_NAME="production"
+LOG_FILE="/var/log/getbible-robot/production.jsonl"
+AUDIT_LOG_MODE="metadata"
+```
+
+`INSTANCE_NAME`, `LOG_FILE`, and `HEALTH_PORT` are manager-owned after installation. `getbible-robot config` rejects changes that would detach the environment from its isolated account, log, metadata, or health endpoint.
+
+Metadata mode records operational choices and outcomes without Telegram message text: source workflow, translation, search filter modes, result counts, selected/reference-group counts, output message count, failures, and correlation IDs. It never records tokens, user IDs, chat IDs, verse bodies, or repository response bodies.
+
+Content mode additionally records normalized search terms and final Scripture references. It must be enabled deliberately and used only where privacy, access, and retention requirements permit storing user-provided content.
 
 ## Scripture and public-link settings
 
@@ -102,12 +126,15 @@ Validation errors and request-limit rejections do not count as upstream failures
 | `HEALTH_PORT` | `8081` | `0`–`65535`; `0` disables | Health/readiness/metrics port |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level name | Structured JSON log threshold |
 
-The health listener is deliberately loopback-only. Do not expose it publicly without an authenticated, access-controlled proxy.
+The health listener is deliberately loopback-only. Each running instance requires a unique nonzero port. Do not expose it publicly without an authenticated, access-controlled proxy.
 
 ## Environment-file example
 
 ```dotenv
 TELEGRAM_API_TOKEN="123456789:replace-with-real-secret"
+INSTANCE_NAME="production"
+LOG_FILE="/var/log/getbible-robot/production.jsonl"
+AUDIT_LOG_MODE="metadata"
 TRANSLATION="kjv"
 GETBIBLE_API_BASE_URL="https://api.getbible.net"
 GETBIBLE_WEB_BASE_URL="https://getbible.life"
@@ -116,7 +143,7 @@ HEALTH_PORT="8081"
 LOG_LEVEL="INFO"
 ```
 
-Use quotes for values containing spaces. Do not place shell commands, command substitutions, or exported secrets in the file.
+Use quotes for values containing spaces. Do not place shell commands, command substitutions, or exported secrets in the file. The manager parses this file as dotenv data and never sources it as shell code.
 
 ## Validate configuration
 
@@ -129,13 +156,8 @@ venv/bin/python -c 'from config import Settings; Settings.from_env()'
 Production file:
 
 ```bash
-sudo bash -c '
-  set -a
-  . /etc/getbible-robot.env
-  set +a
-  cd /opt/getbible-robot
-  venv/bin/python -c "from config import Settings; Settings.from_env()"
-'
+sudo getbible-robot config production
+sudo getbible-robot doctor production
 ```
 
-A successful validation exits zero without printing the token or settings.
+`config` validates before accepting changes and restores the prior file on failure. `doctor` validates permissions, configuration, dependencies, deployment identity, unit, service, health, and readiness without printing the token.
