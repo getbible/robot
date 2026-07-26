@@ -1,7 +1,9 @@
+import logging
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from telegram.error import BadRequest
 from telegram.ext import CommandHandler
 
 import bot
@@ -75,6 +77,46 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(application.add_handler.call_count, 9)
         application.add_error_handler.assert_called_once_with(bot.error_handler)
 
+    def test_preference_database_failure_falls_back_to_memory(self) -> None:
+        application = SimpleNamespace(
+            bot_data={},
+            add_handler=Mock(),
+            add_error_handler=Mock(),
+        )
+        builder = Mock()
+        builder.token.return_value = builder
+        builder.concurrent_updates.return_value = builder
+        builder.post_init.return_value = builder
+        builder.post_shutdown.return_value = builder
+        builder.build.return_value = application
+        settings = self.settings()
+        settings.user_preferences_file = (
+            "/var/lib/getbible-robot/production/preferences.sqlite3"
+        )
+        memory_store = Mock()
+
+        with (
+            patch.object(bot, "ApplicationBuilder", return_value=builder),
+            patch.object(bot, "ScriptureService", return_value=Mock()),
+            patch.object(bot, "InboundRateLimiter", return_value=Mock()),
+            patch.object(bot, "InteractionStore", return_value=Mock()),
+            patch.object(
+                bot,
+                "UserPreferenceStore",
+                side_effect=[OSError("permission denied"), memory_store],
+            ) as preference_store,
+            patch.object(bot, "HealthServer", return_value=Mock()),
+        ):
+            result = bot.build_application(settings)
+
+        self.assertIs(result.bot_data[bot.PREFERENCES_SLOT], memory_store)
+        self.assertEqual(preference_store.call_count, 2)
+        self.assertEqual(
+            preference_store.call_args_list[0].kwargs["path"],
+            settings.user_preferences_file,
+        )
+        self.assertIsNone(preference_store.call_args_list[1].kwargs["path"])
+
     async def test_startup_and_shutdown_cover_telegram_health_and_service(self) -> None:
         health = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
         service = SimpleNamespace(
@@ -138,6 +180,81 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         health.close.assert_awaited_once()
         service.close.assert_awaited_once()
         preferences.close.assert_called_once_with()
+
+    async def test_ephemeral_registration_failure_uses_ordinary_group_commands(
+        self,
+    ) -> None:
+        health = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
+        service = SimpleNamespace(
+            close=AsyncMock(),
+            warm_default_translation=AsyncMock(
+                return_value={"abbreviation": "kjv", "verses": 31_102}
+            ),
+        )
+        preferences = SimpleNamespace(close=Mock())
+        telegram_bot = SimpleNamespace(
+            set_my_commands=AsyncMock(
+                side_effect=[
+                    True,
+                    BadRequest("ephemeral commands are unavailable"),
+                    True,
+                ]
+            ),
+            set_my_name=AsyncMock(),
+            set_my_description=AsyncMock(),
+            set_my_short_description=AsyncMock(),
+        )
+        settings = self.settings()
+        application = SimpleNamespace(
+            bot=telegram_bot,
+            bot_data={
+                bot.HEALTH_SLOT: health,
+                bot.SERVICE_SLOT: service,
+                bot.SETTINGS_SLOT: settings,
+                bot.PREFERENCES_SLOT: preferences,
+            },
+        )
+
+        await bot._post_init(application)
+
+        self.assertEqual(telegram_bot.set_my_commands.await_count, 3)
+        failed_ephemeral_call = telegram_bot.set_my_commands.await_args_list[1]
+        fallback_call = telegram_bot.set_my_commands.await_args_list[2]
+        self.assertTrue(
+            failed_ephemeral_call.args[0][0].api_kwargs["is_ephemeral"]
+        )
+        self.assertEqual(
+            fallback_call.kwargs["scope"].to_dict()["type"],
+            "all_group_chats",
+        )
+        self.assertTrue(
+            all(
+                "is_ephemeral" not in command.api_kwargs
+                for command in fallback_call.args[0]
+            )
+        )
+        health.start.assert_awaited_once()
+
+    def test_main_logs_unhandled_startup_failure(self) -> None:
+        settings = SimpleNamespace(
+            log_level=logging.INFO,
+            instance_name="production",
+            log_file=None,
+        )
+        with (
+            patch.object(bot.Settings, "from_env", return_value=settings),
+            patch.object(bot, "configure_logging"),
+            patch.object(
+                bot,
+                "build_application",
+                side_effect=RuntimeError("startup failed"),
+            ),
+            self.assertLogs(bot.LOGGER, level="CRITICAL") as captured,
+        ):
+            result = bot.main()
+
+        self.assertEqual(result, 1)
+        self.assertIn("unhandled startup or runtime failure", captured.output[0])
 
     def test_delivery_runner_selects_polling_or_webhook_exclusively(self) -> None:
         application = SimpleNamespace(
