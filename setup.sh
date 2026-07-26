@@ -4,7 +4,7 @@ IFS=$'\n\t'
 umask 077
 
 PROGRAM="getbible-robot"
-VERSION="1"
+VERSION="2"
 SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
 SCRIPT_DIR=$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)
 
@@ -96,6 +96,7 @@ Commands:
   logs        Show recent per-instance JSON logs
   follow      Follow per-instance JSON logs
   doctor      Run non-destructive deployment diagnostics
+  repair      Restore secure application access for the service account
   config      Safely edit, validate, and optionally restart configuration
   upgrade     Deploy the exact commit from a reviewed source checkout
   rollback    Return to the immediately previous deployed application
@@ -208,7 +209,7 @@ record_operation() {
 install_host_prerequisites() {
     local missing=()
     local command
-    for command in git curl tar systemctl systemd-analyze logrotate ss useradd nologin; do
+    for command in git curl tar systemctl systemd-analyze logrotate runuser ss useradd nologin; do
         command -v "$command" >/dev/null 2>&1 || missing+=("$command")
     done
     if ((${#missing[@]} == 0)); then
@@ -513,13 +514,55 @@ safe_remove_tree() {
     rm -rf --one-file-system -- "$path"
 }
 
+install_python_environment() {
+    local app_dir=$1
+    local python_bin=$2
+
+    info "Creating the isolated Python environment"
+    "$python_bin" -m venv "${app_dir}/venv"
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+        "${app_dir}/venv/bin/python" -m pip install --upgrade pip
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+        "${app_dir}/venv/bin/python" -m pip install \
+        --require-hashes \
+        -r "${app_dir}/requirements.txt"
+    "${app_dir}/venv/bin/python" -m pip check
+}
+
+secure_application_tree() {
+    local app_dir=$1
+    local service_user=$2
+
+    [[ -d "$app_dir" ]] || die "Application directory is missing: ${app_dir}"
+    id "$service_user" >/dev/null 2>&1 ||
+        die "Service account is missing: ${service_user}"
+
+    # The code and virtual environment remain root-owned and immutable to the
+    # robot. Only the matching instance group may read and traverse them.
+    chown -R "root:${service_user}" "$app_dir"
+    chmod -R u=rwX,g=rX,o= "$app_dir"
+}
+
+verify_service_account_access() {
+    local app_dir=$1
+    local service_user=$2
+
+    runuser --user "$service_user" -- /bin/sh -c '
+        app_dir=$1
+        cd -- "$app_dir"
+        exec "$app_dir/venv/bin/python" -c \
+            "from config import Settings; assert Settings is not None"
+    ' getbible-robot-preflight "$app_dir"
+}
+
 prepare_application() {
     local source_dir=$1
     local source_url=$2
     local sha=$3
     local destination=$4
     local python_bin=$5
-    local env_file=${6:-}
+    local service_user=$6
+    local env_file=${7:-}
     local parent
     local temporary
     parent=$(dirname "$destination")
@@ -534,25 +577,17 @@ prepare_application() {
     [[ "$(git -C "${temporary}/app" rev-parse HEAD)" == "$sha" ]] ||
         die "Prepared source commit does not match the requested commit."
 
-    info "Creating the isolated Python environment"
-    "$python_bin" -m venv "${temporary}/app/venv"
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-        "${temporary}/app/venv/bin/python" -m pip install --upgrade pip
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-        "${temporary}/app/venv/bin/python" -m pip install \
-        --require-hashes \
-        -r "${temporary}/app/requirements.txt"
-    "${temporary}/app/venv/bin/python" -m pip check
+    install_python_environment "${temporary}/app" "$python_bin"
 
     if [[ -n "$env_file" ]]; then
         validate_environment "${temporary}/app" "$env_file"
     fi
 
-    chown -R root:root "${temporary}/app"
-    chmod -R go-w "${temporary}/app"
+    secure_application_tree "${temporary}/app" "$service_user"
     mv -- "${temporary}/app" "$destination"
     rmdir "$temporary"
     TEMP_PATHS=()
+    verify_service_account_access "$destination" "$service_user"
 }
 
 install_shared_manager() {
@@ -756,6 +791,7 @@ cmd_install() {
     INSTALL_TRANSACTION=1
     useradd \
         --system \
+        --user-group \
         --home-dir "$state_dir" \
         --create-home \
         --shell "$nologin_shell" \
@@ -775,7 +811,9 @@ cmd_install() {
     replace_env_value "$python_bin" "$env_file" "LOG_FILE" "$log_file"
     replace_env_value "$python_bin" "$env_file" "AUDIT_LOG_MODE" "$audit_mode"
 
-    prepare_application "$source_dir" "$source_url" "$sha" "$app_dir" "$python_bin" "$env_file"
+    prepare_application \
+        "$source_dir" "$source_url" "$sha" "$app_dir" "$python_bin" \
+        "$service_user" "$env_file"
     write_metadata "$instance" "$service_user" "$health_port" "$sha" "$source_url" "$created_at"
 
     if confirm "Verify this token with Telegram now?" yes; then
@@ -977,6 +1015,11 @@ cmd_doctor() {
         ((failures += 1))
     }
     if [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]]; then
+        verify_service_account_access "$app_dir" "$ACTIVE_USER" || {
+            warn "The service account cannot enter or read the application directory."
+            warn "Run '${PROGRAM} repair ${ACTIVE_INSTANCE}' from the current reviewed checkout."
+            ((failures += 1))
+        }
         validate_environment "$app_dir" "$env_file" || {
             warn "Configuration validation failed."
             ((failures += 1))
@@ -1005,6 +1048,39 @@ cmd_doctor() {
     fi
     record_operation doctor "$ACTIVE_INSTANCE" ok
     printf 'All deployment diagnostics passed.\n'
+}
+
+cmd_repair() {
+    require_root
+    select_instance "${1:-}"
+    local service
+    local app_dir
+    local candidate
+    local enabled
+    service=$(service_name_for "$ACTIVE_INSTANCE")
+    app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
+
+    systemctl stop "$service" 2>/dev/null || true
+    for candidate in \
+        "$app_dir" \
+        "${INSTANCE_ROOT}/${ACTIVE_INSTANCE}/app.previous"; do
+        if [[ -d "$candidate" ]]; then
+            secure_application_tree "$candidate" "$ACTIVE_USER"
+        fi
+    done
+    verify_service_account_access "$app_dir" "$ACTIVE_USER"
+    systemctl reset-failed "$service" 2>/dev/null || true
+
+    enabled=$(systemctl is-enabled "$service" 2>/dev/null || true)
+    if [[ "$enabled" == "enabled" ]]; then
+        systemctl start "$service"
+        wait_for_readiness "$ACTIVE_PORT" ||
+            die "Permissions were repaired, but the service did not become ready."
+    fi
+
+    record_operation repair "$ACTIVE_INSTANCE" ok
+    printf 'Application access repaired for %s.\n' "$ACTIVE_INSTANCE"
+    cmd_status "$ACTIVE_INSTANCE"
 }
 
 cmd_config() {
@@ -1110,7 +1186,8 @@ cmd_upgrade() {
     [[ ! -e "$next_dir" ]] || safe_remove_tree "$next_dir"
     UPGRADE_NEXT=$next_dir
     prepare_application \
-        "$source_dir" "$source_url" "$target_sha" "$next_dir" "$python_bin" "$env_file"
+        "$source_dir" "$source_url" "$target_sha" "$next_dir" "$python_bin" \
+        "$ACTIVE_USER" "$env_file"
     install_shared_manager "$source_dir"
     install_log_rotation
     systemctl daemon-reload
@@ -1270,10 +1347,11 @@ GetBible Robot operations
   8) Follow logs
   9) Runtime details
  10) Diagnostics
- 11) Edit configuration
- 12) Upgrade
- 13) Roll back
- 14) Uninstall
+ 11) Repair application access
+ 12) Edit configuration
+ 13) Upgrade
+ 14) Roll back
+ 15) Uninstall
   0) Exit
 EOF
         read -r -p "Selection: " selection
@@ -1288,10 +1366,11 @@ EOF
             8) cmd_follow ;;
             9) cmd_runtime ;;
             10) cmd_doctor ;;
-            11) cmd_config ;;
-            12) cmd_upgrade ;;
-            13) cmd_rollback ;;
-            14) cmd_uninstall ;;
+            11) cmd_repair ;;
+            12) cmd_config ;;
+            13) cmd_upgrade ;;
+            14) cmd_rollback ;;
+            15) cmd_uninstall ;;
             0) return ;;
             *) warn "Unknown selection." ;;
         esac
@@ -1312,6 +1391,7 @@ main() {
         logs) cmd_logs "$@" ;;
         follow) cmd_follow "$@" ;;
         doctor) cmd_doctor "$@" ;;
+        repair) cmd_repair "$@" ;;
         config) cmd_config "$@" ;;
         upgrade) cmd_upgrade "$@" ;;
         rollback) cmd_rollback "$@" ;;
