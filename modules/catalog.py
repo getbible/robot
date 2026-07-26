@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -25,6 +26,7 @@ _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
 _SHA1_RE = re.compile(r"[0-9a-f]{40}\Z")
 _T = TypeVar("_T")
 _K = TypeVar("_K")
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,23 +296,43 @@ class CatalogClient:
         if not isinstance(payload, dict) or not 1 <= len(payload) <= 1000:
             raise RepositoryResponseError("Translation catalog is malformed.")
         result: list[TranslationOption] = []
+        rejected = 0
         for raw_code, metadata in payload.items():
             if not isinstance(raw_code, str) or not isinstance(metadata, dict):
-                raise RepositoryResponseError("Translation catalog is malformed.")
+                rejected += 1
+                continue
             code = raw_code.casefold()
             abbreviation = metadata.get("abbreviation")
             name = metadata.get("translation")
-            language = metadata.get("language")
             if (
                 _TRANSLATION_RE.fullmatch(code) is None
                 or abbreviation != code
                 or not isinstance(name, str)
                 or not 1 <= len(name.strip()) <= 256
-                or not isinstance(language, str)
-                or not 1 <= len(language.strip()) <= 128
             ):
-                raise RepositoryResponseError("Translation catalog is malformed.")
+                rejected += 1
+                continue
+
+            language = metadata.get("language")
+            if language is None or (isinstance(language, str) and not language.strip()):
+                language = metadata.get("lang")
+            if language is None:
+                language = "Unspecified"
+            if not isinstance(language, str) or not 1 <= len(language.strip()) <= 128:
+                rejected += 1
+                continue
             result.append(TranslationOption(code, name.strip(), language.strip()))
+
+        if not result:
+            raise RepositoryResponseError(
+                "Translation catalog contains no usable translations."
+            )
+        if rejected:
+            LOGGER.warning(
+                "Ignored %d malformed translation catalog entr%s",
+                rejected,
+                "y" if rejected == 1 else "ies",
+            )
         return tuple(
             sorted(
                 result,

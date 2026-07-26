@@ -130,6 +130,9 @@ The tests cover at least these invariants:
 - the complete released Librarian lock is included in strict dependency auditing;
 - all required operator documents and relative links remain valid;
 - all public links use `https://getbible.life` and data access uses `https://api.getbible.net`.
+- missing optional translation-language labels cannot disable the `/bible` picker;
+- one malformed translation entry is ignored without weakening validation of entries
+  that become Telegram callback values;
 - instance, token, health-port, account, path, cache, and log isolation is preserved;
 - setup shell syntax and the manager's fail-closed validators pass;
 - the setup questionnaire installs two isolated instances in a temporary host fixture;

@@ -24,6 +24,13 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Reliability
 
+- Fixed empty `/bible` failing before the picker opened when an otherwise valid
+  translation omitted its optional display-language label. The catalog now
+  falls back to its language code, ignores isolated unusable entries, and still
+  fails closed if no safe translation remains.
+- Added message-free exception-chain classes to request-reference log entries so
+  operators can correlate Telegram error references without logging secrets,
+  URLs, paths, or upstream content.
 - Raised the bounded full-repository response allowance from 8 MiB to 64 MiB
   so KJV and larger translations can be loaded, while retaining an independent
   4 MiB constructed-search-result ceiling.

@@ -6,6 +6,7 @@ from unittest.mock import patch
 from getbible import (
     CacheIntegrityError,
     RepositoryError,
+    RepositoryResponseError,
     RepositoryResponseTooLarge,
 )
 
@@ -79,6 +80,87 @@ class CatalogClientTestCase(unittest.TestCase):
 
         self.assertEqual(translation_options[0].code, "kjv")
         self.assertEqual(book_options[0].name, "John")
+
+    def test_translation_catalog_tolerates_missing_display_language(self) -> None:
+        translations = json.dumps(
+            {
+                "kjv": {
+                    "abbreviation": "kjv",
+                    "translation": "King James Version",
+                    "lang": "en",
+                    "language": "English",
+                },
+                "klv": {
+                    "abbreviation": "klv",
+                    "translation": "Klingon Language Version",
+                    "lang": "tlh",
+                    "language": "",
+                },
+                "mal1910": {
+                    "abbreviation": "mal1910",
+                    "translation": "Malayalam Bible",
+                },
+            }
+        ).encode()
+        with patch(
+            "modules.catalog.requests.get",
+            return_value=_Response(translations),
+        ):
+            options = _client().translations()
+
+        by_code = {option.code: option for option in options}
+        self.assertEqual(set(by_code), {"kjv", "klv", "mal1910"})
+        self.assertEqual(by_code["kjv"].language, "English")
+        self.assertEqual(by_code["klv"].language, "tlh")
+        self.assertEqual(by_code["mal1910"].language, "Unspecified")
+
+    def test_one_malformed_translation_does_not_disable_valid_picker_entries(
+        self,
+    ) -> None:
+        translations = json.dumps(
+            {
+                "kjv": {
+                    "abbreviation": "kjv",
+                    "translation": "King James Version",
+                    "language": "English",
+                },
+                "unsafe code": {
+                    "abbreviation": "unsafe code",
+                    "translation": "Rejected",
+                    "language": "English",
+                },
+            }
+        ).encode()
+        with (
+            patch(
+                "modules.catalog.requests.get",
+                return_value=_Response(translations),
+            ),
+            self.assertLogs("modules.catalog", level="WARNING") as captured,
+        ):
+            options = _client().translations()
+
+        self.assertEqual([option.code for option in options], ["kjv"])
+        self.assertIn("Ignored 1 malformed translation catalog entry", captured.output[0])
+
+    def test_catalog_without_any_usable_translation_fails_closed(self) -> None:
+        translations = json.dumps(
+            {
+                "unsafe code": {
+                    "abbreviation": "unsafe code",
+                    "translation": "",
+                    "language": [],
+                }
+            }
+        ).encode()
+        with (
+            patch(
+                "modules.catalog.requests.get",
+                return_value=_Response(translations),
+            ),
+            self.assertRaises(RepositoryResponseError),
+        ):
+            _client().translations()
 
     def test_book_navigation_requires_published_checksum(self) -> None:
         payload = json.dumps(
