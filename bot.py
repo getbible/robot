@@ -8,7 +8,11 @@ import sys
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
-from telegram import BotCommand
+from telegram import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+)
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -142,7 +146,7 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(interaction_callback, pattern=r"^gb:"))
     application.add_handler(
-        MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, interaction_reply)
+        MessageHandler(filters.TEXT & ~filters.COMMAND, interaction_reply)
     )
     application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
     application.add_error_handler(error_handler)
@@ -153,12 +157,26 @@ async def _post_init(application: Application) -> None:
     health: HealthServer = application.bot_data[HEALTH_SLOT]
     service: ScriptureService = application.bot_data[SERVICE_SLOT]
     settings: Settings = application.bot_data[SETTINGS_SLOT]
+    ordinary_commands = [
+        BotCommand("bible", "Retrieve Scripture by reference"),
+        BotCommand("search", "Search and select Scripture"),
+        BotCommand("help", "Show detailed usage guidance"),
+    ]
+    await application.bot.set_my_commands(
+        ordinary_commands,
+        scope=BotCommandScopeAllPrivateChats(),
+    )
     await application.bot.set_my_commands(
         [
-            BotCommand("bible", "Retrieve Scripture by reference"),
-            BotCommand("search", "Search and select Scripture"),
-            BotCommand("help", "Show detailed usage guidance"),
-        ]
+            ordinary_commands[0],
+            BotCommand(
+                "search",
+                "Search and select Scripture",
+                api_kwargs={"is_ephemeral": True},
+            ),
+            ordinary_commands[2],
+        ],
+        scope=BotCommandScopeAllGroupChats(),
     )
     await application.bot.set_my_name(settings.bot_name)
     await application.bot.set_my_description(settings.bot_description)

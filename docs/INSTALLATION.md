@@ -34,6 +34,10 @@ Running `sudo getbible-robot` without a command opens the operations menu.
 - Outbound HTTPS to Telegram, PyPI during installation, GitHub when cloning, and `https://api.getbible.net` at runtime.
 - `git`, `curl`, `tar`, `logrotate`, `iproute2`, and the matching Python `venv` package.
 - A dedicated Telegram Bot API token from `@BotFather` for each running instance.
+- Administrator access for the bot in every group where private search and
+  clean-chat deletion are required. Bot API 10.2 permits an administrator to
+  deliver per-user ephemeral panels even when a search completes outside the
+  short callback-response window.
 
 On Debian, Ubuntu, Fedora, or another `dnf` host, the manager offers to install missing host packages. It refuses unsupported Python versions.
 

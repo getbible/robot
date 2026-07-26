@@ -64,9 +64,12 @@ An empty `/bible` does not enter the reference parser and never falls back to a 
 Librarian returns exact totals, grouped verse data, and ordered match metadata.
 The robot validates that every match points to a verse in the grouped results,
 retains only the configured bounded result set, and renders complete escaped
-verses with matched words bolded. Separate compact inline-keyboard messages list
-every returned reference without paging while respecting Telegram's 100-button
-limit. No verse is posted from search until the owner presses **Post selected**.
+verses with matched words bolded. In groups and supergroups, Bot API 10.2 keeps
+the command and result panel ephemeral to the requesting user. Each page holds
+at most 30 complete results and dynamically ends earlier when needed to stay
+inside Telegram's 4,096-character limit. Previous/Next edits the same ephemeral
+panel. No ordinary group message is sent from search until the owner presses
+**Post selected**.
 
 Selected match metadata is converted back into compressed canonical references.
 The final post performs a normal Librarian `select()` call and passes through the

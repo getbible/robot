@@ -1,9 +1,10 @@
 import logging
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from getbible import RepositoryError
+from telegram.error import TelegramError
 
 from modules.catalog import BookOption, ChapterOption, TranslationOption
 from modules.commands import (
@@ -14,15 +15,19 @@ from modules.commands import (
     _highlight_search_terms,
     _reference_selection,
     _report_command_error,
+    _search_page_ranges,
     _search_results_keyboard,
+    _search_results_text,
     _selected_search_reference,
     bible_command,
     help_command,
     interaction_callback,
+    interaction_reply,
     search_command,
     start_command,
     unknown_command,
 )
+from modules.ephemeral import TELEGRAM_TEXT_LIMIT, telegram_text_length
 from modules.errors import RobotRateLimited, ScriptureUnavailable
 from modules.interactions import (
     InteractionSession,
@@ -81,6 +86,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
                 send_chat_action=AsyncMock(),
                 delete_message=AsyncMock(),
                 edit_message_text=AsyncMock(),
+                do_api_request=AsyncMock(),
             ),
             args=[],
         )
@@ -151,7 +157,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
 
         service.search.assert_awaited_once()
         service.select.assert_not_awaited()
-        result, controls = context.bot.send_message.await_args_list
+        result = context.bot.send_message.await_args
         self.assertIn(
             "And of his fulness have all we received, and "
             "<b>grace</b> for <b>grace</b>.",
@@ -159,8 +165,140 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("…", result.kwargs["text"])
         self.assertEqual(result.kwargs["parse_mode"], "HTML")
-        self.assertIn("Select one or more references", controls.kwargs["text"])
-        self.assertIsNotNone(controls.kwargs["reply_markup"])
+        self.assertIn("Select one or more references", result.kwargs["text"])
+        self.assertIsNotNone(result.kwargs["reply_markup"])
+
+    async def test_group_search_results_are_ephemeral_until_post(self) -> None:
+        limiter = _Limiter()
+        context = self.context(limiter)
+        context.bot.do_api_request.return_value = {
+            "message_id": 0,
+            "ephemeral_message_id": 901,
+        }
+        service = SimpleNamespace(
+            search=AsyncMock(
+                return_value=SearchPage(
+                    query="grace",
+                    translation="kjv",
+                    total=1,
+                    items=(
+                        SearchResult(
+                            reference="John 1:16",
+                            book_number=43,
+                            book_name="John",
+                            chapter=1,
+                            verse=16,
+                            text="Grace for grace.",
+                            terms=("grace",),
+                        ),
+                    ),
+                )
+            ),
+            select=AsyncMock(),
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        context.args = ["grace"]
+        update = self.update()
+        update.effective_chat.type = "supergroup"
+        update.effective_message = SimpleNamespace(
+            message_id=0,
+            message_thread_id=12,
+            api_kwargs={
+                "ephemeral_message_id": 250,
+                "receiver_user": {"id": 999},
+            },
+        )
+
+        await search_command(update, context)
+
+        context.bot.send_message.assert_not_awaited()
+        service.select.assert_not_awaited()
+        call = context.bot.do_api_request.await_args
+        self.assertEqual(call.args[0], "sendMessage")
+        payload = call.kwargs["api_kwargs"]
+        self.assertEqual(payload["chat_id"], 100)
+        self.assertEqual(payload["receiver_user_id"], 200)
+        self.assertEqual(payload["message_thread_id"], 12)
+        self.assertEqual(
+            payload["reply_parameters"],
+            {"ephemeral_message_id": 250},
+        )
+        self.assertIn("<b>Grace</b> for <b>grace</b>.", payload["text"])
+        self.assertIn("inline_keyboard", payload["reply_markup"])
+
+    async def test_pre_session_search_failure_remains_ephemeral(self) -> None:
+        context = self.context(_Limiter())
+        context.bot.do_api_request.return_value = {
+            "message_id": 0,
+            "ephemeral_message_id": 901,
+        }
+        interactions = context.application.bot_data[INTERACTIONS_SLOT]
+        interactions.create = Mock(
+            side_effect=RuntimeError("creation failed")
+        )
+        update = self.update()
+        update.effective_chat.type = "supergroup"
+        update.effective_message = SimpleNamespace(
+            message_id=0,
+            message_thread_id=12,
+            api_kwargs={"ephemeral_message_id": 250},
+        )
+
+        await search_command(update, context)
+
+        context.bot.send_message.assert_not_awaited()
+        call = context.bot.do_api_request.await_args
+        self.assertEqual(call.args[0], "sendMessage")
+        payload = call.kwargs["api_kwargs"]
+        self.assertEqual(payload["receiver_user_id"], 200)
+        self.assertEqual(payload["message_thread_id"], 12)
+        self.assertEqual(
+            payload["reply_parameters"],
+            {"ephemeral_message_id": 250},
+        )
+
+    async def test_ephemeral_delivery_failure_never_leaks_public_results(
+        self,
+    ) -> None:
+        context = self.context(_Limiter())
+        context.bot.do_api_request.side_effect = TelegramError(
+            "ephemeral unavailable"
+        )
+        service = SimpleNamespace(
+            search=AsyncMock(
+                return_value=SearchPage(
+                    query="grace",
+                    translation="kjv",
+                    total=1,
+                    items=(
+                        SearchResult(
+                            "John 1:16",
+                            43,
+                            "John",
+                            1,
+                            16,
+                            "Grace for grace.",
+                            ("grace",),
+                        ),
+                    ),
+                )
+            ),
+            select=AsyncMock(),
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        context.args = ["grace"]
+        update = self.update()
+        update.effective_chat.type = "group"
+        update.effective_message = SimpleNamespace(
+            message_id=250,
+            message_thread_id=None,
+        )
+
+        with self.assertLogs("modules.commands", level=logging.WARNING):
+            await search_command(update, context)
+
+        context.bot.send_message.assert_not_awaited()
+        service.select.assert_not_awaited()
 
     async def test_bible_without_reference_opens_translation_picker(self) -> None:
         limiter = _Limiter()
@@ -445,7 +583,11 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.selected, {0})
 
         await interaction_callback(
-            self.callback_update(session.token, "spost"),
+            self.callback_update(
+                session.token,
+                "spost",
+                str(session.search_generation),
+            ),
             context,
         )
 
@@ -459,6 +601,249 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             },
             {250, 300, 301, 302},
         )
+
+    async def test_ephemeral_search_posts_only_final_scripture_publicly(
+        self,
+    ) -> None:
+        limiter = _Limiter()
+        context = self.context(limiter)
+        context.bot.do_api_request.return_value = True
+        service = SimpleNamespace(
+            select=AsyncMock(
+                return_value={
+                    "kjv_43_1": {
+                        "book_name": "John",
+                        "abbreviation": "kjv",
+                        "chapter": 1,
+                        "verses": [{"verse": 16, "text": "Grace for grace."}],
+                    }
+                }
+            )
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        store = context.application.bot_data[INTERACTIONS_SLOT]
+        session = store.create(
+            chat_id=100,
+            user_id=200,
+            kind="search",
+            stage="search_results",
+            translation="kjv",
+        )
+        session.ephemeral = True
+        session.ephemeral_message_id = 701
+        session.source_ephemeral_message_id = 700
+        session.source_ephemeral_receiver_user_id = 999
+        session.message_thread_id = 12
+        session.search_query = "grace"
+        session.search_total = 1
+        session.search_results = (
+            SearchResult(
+                "John 1:16",
+                43,
+                "John",
+                1,
+                16,
+                "Grace for grace.",
+            ),
+        )
+        session.search_page_ranges = _search_page_ranges(session)
+
+        await interaction_callback(
+            self.callback_update(
+                session.token,
+                "srt",
+                f"{session.search_generation}-0",
+            ),
+            context,
+        )
+
+        context.bot.send_message.assert_not_awaited()
+        self.assertEqual(session.selected, {0})
+
+        await interaction_callback(
+            self.callback_update(
+                session.token,
+                "spost",
+                str(session.search_generation),
+            ),
+            context,
+        )
+
+        context.bot.send_message.assert_awaited_once()
+        sent = context.bot.send_message.await_args.kwargs
+        self.assertEqual(sent["chat_id"], 100)
+        self.assertEqual(sent["message_thread_id"], 12)
+        self.assertNotIn("receiver_user_id", sent)
+        self.assertIn("Grace for grace.", sent["text"])
+        self.assertEqual(
+            [
+                call.args[0]
+                for call in context.bot.do_api_request.await_args_list
+            ],
+            [
+                "editEphemeralMessageText",
+                "editEphemeralMessageText",
+                "deleteEphemeralMessage",
+                "deleteEphemeralMessage",
+            ],
+        )
+        deleted_receivers = {
+            call.kwargs["api_kwargs"]["receiver_user_id"]
+            for call in context.bot.do_api_request.await_args_list[-2:]
+        }
+        self.assertEqual(deleted_receivers, {200, 999})
+        self.assertIsNone(
+            store.get(session.token, chat_id=100, user_id=200)
+        )
+
+    async def test_failed_ephemeral_post_restores_private_controls(self) -> None:
+        context = self.context(_Limiter())
+        context.bot.do_api_request.side_effect = [
+            True,
+            True,
+            {"message_id": 0, "ephemeral_message_id": 702},
+        ]
+        service = SimpleNamespace(
+            select=AsyncMock(side_effect=ScriptureUnavailable("unavailable"))
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        store = context.application.bot_data[INTERACTIONS_SLOT]
+        session = store.create(
+            chat_id=100,
+            user_id=200,
+            kind="search",
+            stage="search_results",
+            translation="kjv",
+        )
+        session.ephemeral = True
+        session.ephemeral_message_id = 701
+        session.search_query = "grace"
+        session.search_total = 1
+        session.search_generation = 4
+        session.search_results = (
+            SearchResult(
+                "John 1:16",
+                43,
+                "John",
+                1,
+                16,
+                "Grace for grace.",
+                ("grace",),
+            ),
+        )
+        session.search_page_ranges = _search_page_ranges(session)
+        session.selected = {0}
+
+        await interaction_callback(
+            self.callback_update(session.token, "spost", "4"),
+            context,
+        )
+
+        context.bot.send_message.assert_not_awaited()
+        self.assertIs(
+            store.get(session.token, chat_id=100, user_id=200),
+            session,
+        )
+        self.assertEqual(session.selected, {0})
+        calls = context.bot.do_api_request.await_args_list
+        self.assertEqual(
+            [call.args[0] for call in calls],
+            [
+                "editEphemeralMessageText",
+                "editEphemeralMessageText",
+                "sendMessage",
+            ],
+        )
+        restored = calls[1].kwargs["api_kwargs"]
+        self.assertIn("<b>1. John 1:16</b>", restored["text"])
+        self.assertIn("inline_keyboard", restored["reply_markup"])
+
+    async def test_stale_search_navigation_and_post_fail_closed(self) -> None:
+        context = self.context(_Limiter())
+        service = SimpleNamespace(select=AsyncMock())
+        context.application.bot_data[SERVICE_SLOT] = service
+        store = context.application.bot_data[INTERACTIONS_SLOT]
+        session = store.create(
+            chat_id=100,
+            user_id=200,
+            kind="search",
+            stage="search_results",
+            translation="kjv",
+        )
+        session.ephemeral = True
+        session.ephemeral_message_id = 701
+        session.search_query = "new"
+        session.search_total = 1
+        session.search_generation = 5
+        session.search_results = (
+            SearchResult("John 1:1", 43, "John", 1, 1, "New result."),
+        )
+        session.search_page_ranges = _search_page_ranges(session)
+        session.selected = {0}
+
+        stale_post = self.callback_update(session.token, "spost", "4")
+        await interaction_callback(stale_post, context)
+        stale_post.callback_query.answer.assert_awaited_once_with(
+            "Those search results are no longer active.",
+            show_alert=True,
+        )
+        service.select.assert_not_awaited()
+        context.bot.send_message.assert_not_awaited()
+
+        session.stage = "search_query"
+        stale_page = self.callback_update(session.token, "srp", "5-0")
+        await interaction_callback(stale_page, context)
+        stale_page.callback_query.answer.assert_awaited_once_with(
+            "Reply to the current private prompt first.",
+            show_alert=True,
+        )
+        context.bot.do_api_request.assert_not_awaited()
+
+    async def test_ephemeral_search_paging_edits_the_same_private_panel(
+        self,
+    ) -> None:
+        context = self.context(_Limiter())
+        context.bot.do_api_request.return_value = True
+        store = context.application.bot_data[INTERACTIONS_SLOT]
+        session = store.create(
+            chat_id=100,
+            user_id=200,
+            kind="search",
+            stage="search_results",
+            translation="kjv",
+        )
+        session.ephemeral = True
+        session.ephemeral_message_id = 701
+        session.search_query = "grace"
+        session.search_total = 31
+        session.search_generation = 4
+        session.search_results = tuple(
+            SearchResult(
+                f"John 1:{index}",
+                43,
+                "John",
+                1,
+                index,
+                f"Grace result {index}.",
+                ("grace",),
+            )
+            for index in range(1, 32)
+        )
+        session.search_page_ranges = _search_page_ranges(session)
+
+        await interaction_callback(
+            self.callback_update(session.token, "srp", "4-1"),
+            context,
+        )
+
+        self.assertEqual(session.search_page, 1)
+        context.bot.send_message.assert_not_awaited()
+        call = context.bot.do_api_request.await_args
+        self.assertEqual(call.args[0], "editEphemeralMessageText")
+        payload = call.kwargs["api_kwargs"]
+        self.assertEqual(payload["ephemeral_message_id"], 701)
+        self.assertIn("<b>31. John 1:31</b>", payload["text"])
+        self.assertNotIn("<b>1. John 1:1</b>", payload["text"])
 
     async def test_group_search_prompt_selectively_mentions_owner(self) -> None:
         limiter = _Limiter()
@@ -486,6 +871,117 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.stage, "search_query")
         self.assertEqual(session.prompt_message_id, 300)
 
+    async def test_group_search_prompt_is_ephemeral_for_owner(self) -> None:
+        context = self.context(_Limiter())
+        context.bot.do_api_request.return_value = {
+            "message_id": 0,
+            "ephemeral_message_id": 702,
+        }
+        store = context.application.bot_data[INTERACTIONS_SLOT]
+        session = store.create(
+            chat_id=100,
+            user_id=200,
+            kind="search",
+            stage="search_dashboard",
+            translation="kjv",
+        )
+        session.ephemeral = True
+        session.ephemeral_message_id = 701
+        session.message_thread_id = 12
+
+        await interaction_callback(
+            self.callback_update(session.token, "sq"),
+            context,
+        )
+
+        context.bot.send_message.assert_not_awaited()
+        call = context.bot.do_api_request.await_args
+        self.assertEqual(call.args[0], "sendMessage")
+        payload = call.kwargs["api_kwargs"]
+        self.assertEqual(payload["receiver_user_id"], 200)
+        self.assertEqual(payload["callback_query_id"], "callback-1")
+        self.assertEqual(payload["message_thread_id"], 12)
+        self.assertIn("force_reply", payload["reply_markup"])
+        self.assertEqual(session.prompt_ephemeral_message_id, 702)
+
+    async def test_ephemeral_search_reply_does_not_require_public_reply_target(
+        self,
+    ) -> None:
+        context = self.context(_Limiter())
+        context.bot.do_api_request.return_value = True
+        service = SimpleNamespace(
+            search=AsyncMock(
+                return_value=SearchPage(
+                    query="grace",
+                    translation="kjv",
+                    total=1,
+                    items=(
+                        SearchResult(
+                            "John 1:16",
+                            43,
+                            "John",
+                            1,
+                            16,
+                            "Grace for grace.",
+                            ("grace",),
+                        ),
+                    ),
+                )
+            )
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        store = context.application.bot_data[INTERACTIONS_SLOT]
+        session = store.create(
+            chat_id=100,
+            user_id=200,
+            kind="search",
+            stage="search_query",
+            translation="kjv",
+        )
+        session.ephemeral = True
+        session.ephemeral_message_id = 701
+        session.prompt_ephemeral_message_id = 702
+        update = SimpleNamespace(
+            effective_chat=SimpleNamespace(id=100),
+            effective_user=SimpleNamespace(id=200),
+            effective_message=SimpleNamespace(
+                text="grace",
+                reply_to_message=None,
+                message_id=0,
+                message_thread_id=None,
+                ephemeral_message_id=703,
+                api_kwargs={
+                    "receiver_user": {"id": 999},
+                },
+            ),
+        )
+
+        await interaction_reply(update, context)
+
+        service.search.assert_awaited_once()
+        context.bot.send_message.assert_not_awaited()
+        self.assertEqual(session.stage, "search_results")
+        self.assertIsNone(session.prompt_ephemeral_message_id)
+        self.assertEqual(
+            [
+                call.args[0]
+                for call in context.bot.do_api_request.await_args_list
+            ],
+            [
+                "deleteEphemeralMessage",
+                "deleteEphemeralMessage",
+                "editEphemeralMessageText",
+            ],
+        )
+        delete_calls = context.bot.do_api_request.await_args_list[:2]
+        self.assertEqual(
+            [
+                call.kwargs["api_kwargs"]["receiver_user_id"]
+                for call in delete_calls
+            ],
+            [200, 999],
+        )
+
     @staticmethod
     def callback_update(
         token: str,
@@ -496,6 +992,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             effective_chat=SimpleNamespace(id=100),
             effective_user=SimpleNamespace(id=200),
             callback_query=SimpleNamespace(
+                id="callback-1",
                 data=f"gb:{token}:{action}:{value}",
                 answer=AsyncMock(),
             ),
@@ -526,6 +1023,8 @@ class SelectionFormattingTestCase(unittest.TestCase):
             kind="search",
             stage="search_results",
             touched_at=0,
+            search_query="grace",
+            search_total=7,
             search_results=tuple(
                 SearchResult(
                     f"John 1:{index}",
@@ -538,6 +1037,7 @@ class SelectionFormattingTestCase(unittest.TestCase):
                 for index in range(1, 8)
             ),
         )
+        session.search_page_ranges = _search_page_ranges(session)
 
         keyboard = _search_results_keyboard(session)
         buttons = [
@@ -552,7 +1052,7 @@ class SelectionFormattingTestCase(unittest.TestCase):
         )
         self.assertFalse(any("Next" in label or "Previous" in label for label in labels))
 
-    def test_large_configured_result_set_uses_bounded_scroll_selectors(self) -> None:
+    def test_large_result_set_uses_complete_thirty_result_pages(self) -> None:
         session = InteractionSession(
             token="abcdefgh",
             chat_id=1,
@@ -561,6 +1061,8 @@ class SelectionFormattingTestCase(unittest.TestCase):
             stage="search_results",
             touched_at=0,
             search_generation=3,
+            search_query="complete",
+            search_total=200,
             search_results=tuple(
                 SearchResult(
                     f"John 1:{index}",
@@ -573,15 +1075,18 @@ class SelectionFormattingTestCase(unittest.TestCase):
                 for index in range(1, 201)
             ),
         )
+        session.search_page_ranges = _search_page_ranges(session)
         callbacks: set[str] = set()
-        ranges = ((0, 96), (96, 192), (192, 200))
-        for start, end in ranges:
-            keyboard = _search_results_keyboard(
-                session,
-                start=start,
-                end=end,
-                include_controls=end == 200,
+        self.assertEqual(len(session.search_page_ranges), 7)
+        self.assertTrue(
+            all(
+                1 <= end - start <= 30
+                for start, end in session.search_page_ranges
             )
+        )
+        for page in range(len(session.search_page_ranges)):
+            session.search_page = page
+            keyboard = _search_results_keyboard(session)
             buttons = [
                 button
                 for row in keyboard.inline_keyboard
@@ -597,6 +1102,94 @@ class SelectionFormattingTestCase(unittest.TestCase):
 
         self.assertEqual(len(callbacks), 200)
         self.assertIn("gb:abcdefgh:srt:3-199", callbacks)
+
+    def test_long_results_reduce_page_size_without_truncating_verses(self) -> None:
+        results = tuple(
+            SearchResult(
+                f"Psalm 119:{index}",
+                19,
+                "Psalm",
+                119,
+                index,
+                f"Complete verse {index}: " + ("grace " * 65).strip(),
+                ("grace",),
+            )
+            for index in range(1, 31)
+        )
+        session = InteractionSession(
+            token="abcdefgh",
+            chat_id=1,
+            user_id=2,
+            kind="search",
+            stage="search_results",
+            touched_at=0,
+            search_query="grace",
+            search_total=30,
+            search_results=results,
+        )
+        session.search_page_ranges = _search_page_ranges(session)
+
+        self.assertGreater(len(session.search_page_ranges), 1)
+        self.assertTrue(
+            all(
+                end - start <= 30
+                for start, end in session.search_page_ranges
+            )
+        )
+        rendered = []
+        for page in range(len(session.search_page_ranges)):
+            session.search_page = page
+            text = _search_results_text(session)
+            self.assertLessEqual(
+                telegram_text_length(text),
+                TELEGRAM_TEXT_LIMIT,
+            )
+            rendered.append(text)
+        combined = "\n".join(rendered)
+        for index in range(1, 31):
+            self.assertIn(f"Complete verse {index}:", combined)
+
+    def test_selected_count_growth_stays_within_page_budget(self) -> None:
+        session = InteractionSession(
+            token="abcdefgh",
+            chat_id=1,
+            user_id=2,
+            kind="search",
+            stage="search_results",
+            touched_at=0,
+            search_generation=9,
+            search_query="grace",
+            search_total=100,
+            search_results=tuple(
+                SearchResult(
+                    f"Psalm 119:{index}",
+                    19,
+                    "Psalm",
+                    119,
+                    index,
+                    f"Complete verse {index}: " + ("grace " * 55).strip(),
+                    ("grace",),
+                )
+                for index in range(1, 101)
+            ),
+        )
+        session.search_page_ranges = _search_page_ranges(session)
+        session.selected = set(range(100))
+
+        for page in range(len(session.search_page_ranges)):
+            session.search_page = page
+            self.assertLessEqual(
+                telegram_text_length(_search_results_text(session)),
+                TELEGRAM_TEXT_LIMIT,
+            )
+
+        buttons = [
+            button
+            for row in _search_results_keyboard(session).inline_keyboard
+            for button in row
+        ]
+        post = next(button for button in buttons if button.text.startswith("Post"))
+        self.assertEqual(post.callback_data, "gb:abcdefgh:spost:9")
 
     def test_guided_reference_uses_start_and_end_range(self) -> None:
         session = InteractionSession(

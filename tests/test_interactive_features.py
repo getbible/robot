@@ -45,6 +45,7 @@ EXPECTED_CALLBACK_ACTIONS = frozenset(
         "so",
         "spost",
         "spr",
+        "srp",
         "spv",
         "sq",
         "sreset",
@@ -399,7 +400,11 @@ class InteractiveFeatureTestCase(unittest.IsolatedAsyncioTestCase):
         await interaction_callback(callback, self.context)
         self.assertEqual(session.selected, {0})
         await interaction_callback(
-            self.callback_update(session.token, "spost"),
+            self.callback_update(
+                session.token,
+                "spost",
+                str(session.search_generation),
+            ),
             self.context,
         )
         self.service.select.assert_awaited()

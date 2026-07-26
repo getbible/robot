@@ -5,10 +5,11 @@ The robot has two intentionally different command paths:
 - an explicit command remains fast and compatible with the legacy bot;
 - an empty command opens a Telegram-native selection panel.
 
-The Bible picker uses inline-keyboard pagination; search results use normal
-Telegram scrolling plus a compact selection keyboard. Selective replies collect
-search words and filters. No separately hosted Telegram Mini App or other web
-application is required.
+The Bible picker uses inline-keyboard pagination. Search uses Telegram Bot API
+10.2 ephemeral commands and messages in groups and supergroups, so the
+requesting user and bot are the only participants that see the dashboard,
+prompts, complete results, selections, navigation, and notices. No separately
+hosted Telegram Mini App or other web application is required.
 
 ## Bible reference behavior
 
@@ -61,10 +62,10 @@ The command text is passed to Librarian 1.2 with its safe defaults:
 - configured default translation.
 
 The robot displays every returned verse in full with the words reported by
-Librarian bolded. The result text is sent as a bounded group of ordinary
-Telegram messages, so the user can scroll through it naturally. Scripture is
-not posted until the user selects one or more references and presses
-**Post selected**.
+Librarian bolded. In a group or supergroup, the result panel is ephemeral and
+addressed to the requesting user; other members cannot see it. Scripture is not
+posted until the user selects one or more references and presses **Post
+selected**.
 
 ### Configurable search
 
@@ -89,22 +90,25 @@ The filter dashboard exposes the Librarian 1.2 search contract:
 
 Choosing proximity automatically selects the Librarian-compatible `all` word mode. Changing translation clears a previous book restriction because book availability is translation-specific. **Reset defaults** returns the dashboard to the configured default translation and Librarian defaults.
 
-After selecting **Search words**, the user replies to the bot's selective prompt. This reply mechanism works in private chats and groups without treating unrelated group messages as search input.
+After selecting **Search words**, the user replies to the bot's prompt. The
+prompt and response are ephemeral in a group or supergroup. The session remains
+scoped to the originating chat and user, so another member's text cannot enter
+the workflow.
 
 ## Result selection
 
 Search matches are displayed as complete, HTML-escaped verses. Matching words
 are bolded according to the active case, diacritic, and whole-word/substring
-settings. No verse is shortened. A compact selector beneath the scrollable text
-lists every returned canonical reference, two buttons per row, with unchecked or
-checked markers. If an operator raises the result limit beyond one Telegram
-keyboard's 100-button ceiling, the robot emits another bounded selector message
-instead of reintroducing Previous/Next result pages.
+settings. No verse is shortened. A compact selector beneath the text lists the
+current page's canonical references, two buttons per row, with unchecked or
+checked markers. A page contains at most 30 results. If 30 complete verses would
+exceed Telegram's 4,096-character limit, the page ends earlier and the remaining
+complete verses move to the next page. **Previous** and **Next** edit the same
+per-user panel, and selections persist across pages.
 
 The result set remains bounded by `SEARCH_RESULT_LIMIT`,
-`SEARCH_MAX_RESPONSE_BYTES`, Telegram's message limit, and
-`MAX_OUTPUT_CHUNKS`. The exact Librarian total is displayed when it is larger
-than the returned set.
+`SEARCH_MAX_RESPONSE_BYTES`, and Telegram's per-message limit. The exact
+Librarian total is displayed when it is larger than the returned set.
 
 The robot groups selected verses by book and chapter, compresses contiguous
 verse numbers into ranges, revalidates the resulting reference against
@@ -120,9 +124,13 @@ paragraphs.
 
 ## Chat cleanup contract
 
-The picker and search conversation remains visible while the user is working.
-Only after every final Scripture message has been delivered successfully does
-the robot remove the workflow conversation:
+In private chats, the workflow is visible only to that user. In groups and
+supergroups, `/search` is registered as an ephemeral command and all bot search
+messages are addressed only to the requesting user. A manually typed command
+from a client that does not send it ephemerally can still appear temporarily,
+but no search result is ever sent as an ordinary group message. Only after every
+final Scripture message has been delivered successfully does the robot remove
+the recorded workflow conversation:
 
 - the user's initiating `/bible`, `/get`, `/getbible`, or `/search` command;
 - the bot's picker, dashboard, or result panel;
@@ -140,6 +148,19 @@ user can recover or retry. If Telegram refuses one or more deletions because of
 group permissions, message age, or a transient API failure, the robot logs the
 best-effort cleanup failure and still treats the already delivered Scripture as
 successful.
+
+Telegram ephemeral messages are available only in groups and supergroups, may
+disappear after time or an app restart, and are not guaranteed to reach an
+offline client. The robot therefore keeps its authoritative session state on
+the server and never falls back to public result messages. Literal Telegram
+channels do not support per-user ephemeral panels; the current command bot does
+not subscribe to `channel_post` updates.
+
+For reliable group delivery after a cold or long-running search, keep the bot
+as a group administrator. Telegram permits any bot to respond ephemerally
+within the short incoming-action window, while an administrator may send the
+per-user response later. The existing **Delete messages** permission remains
+required to remove manually visible commands and legacy picker messages.
 
 ## Session and callback safety
 
