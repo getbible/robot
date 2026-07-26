@@ -3,7 +3,7 @@ import unittest
 from getbible import RequestLimitError
 
 from modules.errors import ScriptureUnavailable
-from modules.renderer import render_scripture
+from modules.renderer import pack_html_blocks, render_scripture
 
 
 def _telegram_length(value: str) -> int:
@@ -95,6 +95,24 @@ class RendererTestCase(unittest.TestCase):
                 chunk_limit=512,
                 max_chunks=1,
             )
+
+    def test_search_blocks_are_packed_without_truncating_any_verse(self) -> None:
+        blocks = [
+            f"<b>{index}. John 1:{index}</b>\n" + ("Complete verse. " * 12)
+            for index in range(1, 8)
+        ]
+
+        chunks = pack_html_blocks(
+            blocks,
+            chunk_limit=512,
+            max_chunks=8,
+        )
+
+        rendered = "\n\n".join(chunks)
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(_telegram_length(chunk) <= 512 for chunk in chunks))
+        self.assertTrue(all(block in rendered for block in blocks))
+        self.assertNotIn("…", rendered)
 
     def test_empty_results_fail_closed(self) -> None:
         with self.assertRaises(ScriptureUnavailable):

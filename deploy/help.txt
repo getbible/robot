@@ -1,35 +1,12 @@
-GetBible Robot help
+Available commands:
 
-Retrieve Scripture immediately
+You can use a reference to get verses like:
 
-/bible John 3:16
-/bible 1 John 3:10-17
-/bible John 3:16-18;Romans 8:1
+/bible 1 John 3:16
+/bible John 3:16-19;1 John 3:10-17
+/bible Gen 1:1-5 codex
+/bible Ps 1:1-5 aov
 
-KJV is used by default. Add a translation abbreviation at the end to use another translation:
-
-/bible Psalm 23:1-6 aov
-/bible Genesis 1:1-5 codex
-
-Guided Bible picker
-
-Send /bible without a reference. Choose a translation, testament, book, chapter, starting verse, and ending verse. Scripture is posted only after confirmation.
-
-Search Scripture
-
-/search grace
-
-This searches with safe defaults and shows selectable results. Select one or more verses, then choose “Post selected.”
-
-Send /search without words to configure translation, word mode, match mode, scope, book filters, case sensitivity, diacritics, exclusions, proximity, and ordering before searching.
-
-Privacy
-
-The bot does not include Telegram tokens, user IDs, chat IDs, or verse bodies in its audit log. Exact searches and references are logged only when the operator explicitly enables content audit mode.
-
-Commands
-
-/start — welcome and quick start
-/bible — retrieve or choose Scripture
-/search — search and select Scripture
-/help — show this guide
+/search grace — search and scroll through complete matching verses
+/search — configure search filters
+/help — get this help message again

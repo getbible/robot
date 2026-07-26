@@ -93,6 +93,7 @@ class _Client:
                     "book_nr": 43,
                     "chapter": 3,
                     "verse": 16,
+                    "terms": ["loved"],
                 }
             ],
         }
@@ -223,6 +224,7 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.total, 1)
         self.assertEqual(page.items[0].reference, "John 3:16")
         self.assertEqual(page.items[0].text, "For God so loved the world.")
+        self.assertEqual(page.items[0].terms, ("loved",))
         self.assertEqual(len(client.search_calls), 1)
 
     async def test_default_translation_prewarm_uses_search_capacity(self) -> None:

@@ -24,6 +24,17 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Reliability
 
+- Restored the legacy clean-chat contract for every Scripture-producing path.
+  Direct `/bible`, guided `/bible`, and `/search` now remove only their recorded
+  initiating command, bot panels, prompts, acknowledgements, and prompt replies
+  after all Scripture chunks are delivered; final Scripture remains, failures
+  preserve recovery context, and Telegram deletion failures are non-fatal.
+- Replaced truncated, five-at-a-time search previews with complete scrollable
+  verse text, bolded search matches, and bounded reference selectors without
+  result paging.
+- Restored the original default welcome/help copy with only the completed search
+  guidance updated. The original Telegram `/start` entry handler remains
+  available but is no longer duplicated in the visible command menu.
 - Fixed empty `/bible` failing before the picker opened when an otherwise valid
   translation omitted its optional display-language label. The catalog now
   falls back to its language code, ignores isolated unusable entries, and still
@@ -51,7 +62,7 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 - Added transaction cleanup for incomplete installs and safe instance selection when several bots share one server.
 - Preserved immediate legacy posting for `/bible <reference>` while replacing empty-command default-verse substitution with a guided picker.
 - Added Librarian 1.2 default search for `/search <words>` and a complete filter dashboard for empty `/search`.
-- Added paginated multi-select search results; Scripture is posted only after explicit confirmation.
+- Added bounded multi-select search results; Scripture is posted only after explicit confirmation.
 - Added translation-specific testament/book navigation and first/last verse range selection.
 - Fixed local secret scanning so the documented in-repository `venv` is excluded.
 - Separated the machine-readable API base (`api.getbible.net`) from public Telegram links (`getbible.life`).
@@ -65,7 +76,9 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 - Replaced the mocked application-preparation boundary with the real clone, permission-hardening, move, and locked-account preflight path in the lifecycle suite.
 - Added a CI host regression that starts with a root-only application tree and proves the actual system account can enter and import it only after the production permission function runs.
 - Added a hermetic two-instance setup-manager lifecycle covering transactional failure cleanup, operations, configuration restoration, upgrade recovery, rollback, and isolated uninstall.
-- Added an enforced callback-action inventory plus complete reference navigation, search-filter, reply, pagination, reset, cancel, command-registration, lifecycle-hook, and optional Telegram-action regressions.
+- Added an enforced callback-action inventory plus complete reference
+  navigation, search-filter, reply, full-result selection, reset, cancel,
+  command-registration, lifecycle-hook, and optional Telegram-action regressions.
 - Added setup syntax/self-tests, unit-template contracts, audit privacy tests, JSONL formatter tests, and multi-instance documentation contracts.
 - Added deterministic catalog integrity, interactive ownership/expiry, picker, search-confirmation, and cooldown regressions.
 - Added deterministic parser, service, circuit, timeout, rate-limit, renderer, error, configuration, health, command, and documentation-contract tests.

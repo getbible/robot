@@ -48,7 +48,6 @@ EXPECTED_CALLBACK_ACTIONS = frozenset(
         "spv",
         "sq",
         "sreset",
-        "srp",
         "srt",
         "ss",
         "st",
@@ -166,6 +165,7 @@ class InteractiveFeatureTestCase(unittest.IsolatedAsyncioTestCase):
                     return_value=SimpleNamespace(message_id=901)
                 ),
                 send_chat_action=AsyncMock(),
+                delete_message=AsyncMock(),
                 edit_message_text=AsyncMock(),
             ),
             args=[],
@@ -197,12 +197,14 @@ class InteractiveFeatureTestCase(unittest.IsolatedAsyncioTestCase):
         text: str,
         *,
         user_id: int = 200,
+        message_id: int = 902,
     ) -> SimpleNamespace:
         return SimpleNamespace(
             effective_chat=SimpleNamespace(id=100),
             effective_user=SimpleNamespace(id=user_id),
             effective_message=SimpleNamespace(
                 chat_id=100,
+                message_id=message_id,
                 text=text,
                 reply_to_message=SimpleNamespace(message_id=prompt_message_id),
             ),
@@ -374,7 +376,6 @@ class InteractiveFeatureTestCase(unittest.IsolatedAsyncioTestCase):
         self.service.search.assert_awaited()
         self.assertEqual(session.stage, "search_results")
         self.assertEqual(len(session.search_results), 7)
-        await self.dispatch(session, "srp", "1")
 
         await self.dispatch(session, "snew")
         self.assertEqual(session.stage, "search_query")
@@ -390,7 +391,11 @@ class InteractiveFeatureTestCase(unittest.IsolatedAsyncioTestCase):
         session.search_total = len(self.search_results)
         session.search_results = self.search_results
         session.stage = "search_results"
-        callback = self.callback_update(session.token, "srt", "0")
+        callback = self.callback_update(
+            session.token,
+            "srt",
+            f"{session.search_generation}-0",
+        )
         await interaction_callback(callback, self.context)
         self.assertEqual(session.selected, {0})
         await interaction_callback(
@@ -400,6 +405,14 @@ class InteractiveFeatureTestCase(unittest.IsolatedAsyncioTestCase):
         self.service.select.assert_awaited()
         self.assertIsNone(
             self.store.get(session.token, chat_id=100, user_id=200)
+        )
+        self.assertTrue(
+            {300, 901, 902}.issubset(
+                {
+                    call.kwargs["message_id"]
+                    for call in self.context.bot.delete_message.await_args_list
+                }
+            )
         )
 
         cancelled = self.store.create(

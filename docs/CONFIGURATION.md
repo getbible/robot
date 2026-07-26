@@ -159,7 +159,7 @@ Validation errors and request-limit rejections do not count as upstream failures
 
 | Variable | Default | Validation | Purpose |
 |---|---:|---|---|
-| `DELETE_COMMAND_MESSAGES` | `false` | `true` or `false` | Attempt to delete user commands after handling; permission failures are non-fatal |
+| `DELETE_COMMAND_MESSAGES` | `false` | `true` or `false` | Attempt to delete standalone handled commands such as `/start` and `/help`; permission failures are non-fatal |
 | `DROP_PENDING_UPDATES` | `true` | `true` or `false` | Drop updates accumulated while the bot was offline at startup |
 | `PREWARM_DEFAULT_TRANSLATION` | `true` | `true` or `false` | Load and index the default search corpus before readiness; safe failure does not prevent direct references |
 | `HEALTH_HOST` | `127.0.0.1` | `127.0.0.1`, `::1`, or `localhost` only | Health listener address |
@@ -167,6 +167,15 @@ Validation errors and request-limit rejections do not count as upstream failures
 | `LOG_LEVEL` | `INFO` | Standard Python logging level name | Structured JSON log threshold |
 
 The health listener is deliberately loopback-only. Each running instance requires a unique nonzero port. Do not expose it publicly without an authenticated, access-controlled proxy.
+
+Completed `/bible` and `/search` workflows have a stricter cleanup contract
+independent of `DELETE_COMMAND_MESSAGES`. After every final Scripture chunk is
+successfully delivered, the robot removes the initiating command and only the
+bot panel, prompts, acknowledgements, and user replies recorded for that
+workflow. The Scripture messages are never recorded for deletion. Failed
+lookups preserve the workflow messages for diagnosis and retry, while Telegram
+permission or deletion failures are logged and cannot turn a successful
+Scripture delivery into an error.
 
 ## Environment-file example
 

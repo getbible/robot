@@ -5,7 +5,10 @@ The robot has two intentionally different command paths:
 - an explicit command remains fast and compatible with the legacy bot;
 - an empty command opens a Telegram-native selection panel.
 
-The panel uses inline keyboards, pagination, and selective replies. It does not require a separately hosted Telegram Mini App or expose another web application.
+The Bible picker uses inline-keyboard pagination; search results use normal
+Telegram scrolling plus a compact selection keyboard. Selective replies collect
+search words and filters. No separately hosted Telegram Mini App or other web
+application is required.
 
 ## Bible reference behavior
 
@@ -57,7 +60,11 @@ The command text is passed to Librarian 1.2 with its safe defaults:
 - no book restriction, exclusions, or proximity;
 - configured default translation.
 
-The robot displays the returned verses as selectable rows. It does not post any Scripture until the user selects one or more rows and presses **Post selected**.
+The robot displays every returned verse in full with the words reported by
+Librarian bolded. The result text is sent as a bounded group of ordinary
+Telegram messages, so the user can scroll through it naturally. Scripture is
+not posted until the user selects one or more references and presses
+**Post selected**.
 
 ### Configurable search
 
@@ -86,21 +93,53 @@ After selecting **Search words**, the user replies to the bot's selective prompt
 
 ## Result selection
 
-Search matches are displayed five at a time. Each row contains:
+Search matches are displayed as complete, HTML-escaped verses. Matching words
+are bolded according to the active case, diacritic, and whole-word/substring
+settings. No verse is shortened. A compact selector beneath the scrollable text
+lists every returned canonical reference, two buttons per row, with unchecked or
+checked markers. If an operator raises the result limit beyond one Telegram
+keyboard's 100-button ceiling, the robot emits another bounded selector message
+instead of reintroducing Previous/Next result pages.
 
-- an unchecked or checked marker;
-- the canonical verse reference;
-- a short plain-text preview.
+The result set remains bounded by `SEARCH_RESULT_LIMIT`,
+`SEARCH_MAX_RESPONSE_BYTES`, Telegram's message limit, and
+`MAX_OUTPUT_CHUNKS`. The exact Librarian total is displayed when it is larger
+than the returned set.
 
-Navigation buttons page through at most `SEARCH_RESULT_LIMIT` returned matches. The exact Librarian total is displayed when it is larger than the returned set. Selection is preserved while paging.
-
-The robot groups selected verses by book and chapter, compresses contiguous verse numbers into ranges, revalidates the resulting reference against `MAX_INPUT_LENGTH`, `MAX_REFERENCES`, and `MAX_TOTAL_VERSES`, and retrieves the final Scripture through Librarian. Search preview data is never treated as the authoritative post payload.
+The robot groups selected verses by book and chapter, compresses contiguous
+verse numbers into ranges, revalidates the resulting reference against
+`MAX_INPUT_LENGTH`, `MAX_REFERENCES`, and `MAX_TOTAL_VERSES`, and retrieves the
+final Scripture through Librarian. Displayed search-result text is never treated
+as the authoritative post payload.
 
 **New search** retains the current filters. **Filters** returns to the dashboard. **Cancel** closes the session.
 
 Rendered verses are compact: the linked reference header is followed by one
 line per verse, and adjacent verses use a single newline rather than blank
 paragraphs.
+
+## Chat cleanup contract
+
+The picker and search conversation remains visible while the user is working.
+Only after every final Scripture message has been delivered successfully does
+the robot remove the workflow conversation:
+
+- the user's initiating `/bible`, `/get`, `/getbible`, or `/search` command;
+- the bot's picker, dashboard, or result panel;
+- bot-created selective-reply prompts and acknowledgements;
+- the owner's replies to those prompts.
+
+The final Scripture message IDs are never added to the cleanup ledger, so the
+Scripture remains in the chat. The ledger is bounded, scoped to the originating
+chat/session, and contains only exact message IDs created or accepted by that
+workflow; unrelated group messages cannot be deleted. An explicit **Cancel**
+also removes the recorded workflow conversation without posting Scripture.
+
+If Scripture lookup or delivery fails, the conversation is preserved so the
+user can recover or retry. If Telegram refuses one or more deletions because of
+group permissions, message age, or a transient API failure, the robot logs the
+best-effort cleanup failure and still treats the already delivered Scripture as
+successful.
 
 ## Session and callback safety
 
@@ -111,8 +150,11 @@ paragraphs.
 - Restarting the process intentionally invalidates every open panel; the user can run the command again.
 - Repository calls still pass through the shared queue, fixed worker pool, timeout, circuit breaker, and user/chat rate limits.
 - Every accepted command, callback, and session-owned prompt reply consumes the inbound user/chat rate budget, including local pagination and selection changes.
-- Pure local paging and checkmark changes do not consume a repository worker.
+- Scrolling is native Telegram behavior, and checkmark changes do not consume a
+  repository worker.
 - Repeated rate-limit rejections produce at most one Telegram warning per cooldown period.
+- Workflow cleanup records at most 256 exact message IDs per session and runs
+  only after successful Scripture delivery or explicit cancellation.
 
 The process stores only short-lived selection state. It does not persist query text, selected verses, user profiles, or chat history.
 

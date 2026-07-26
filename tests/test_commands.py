@@ -11,8 +11,10 @@ from modules.commands import (
     LIMITER_SLOT,
     SERVICE_SLOT,
     SETTINGS_SLOT,
+    _highlight_search_terms,
     _reference_selection,
     _report_command_error,
+    _search_results_keyboard,
     _selected_search_reference,
     bible_command,
     help_command,
@@ -131,7 +133,11 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
                             book_name="John",
                             chapter=1,
                             verse=16,
-                            text="Grace for grace.",
+                            text=(
+                                "And of his fulness have all we received, "
+                                "and grace for grace."
+                            ),
+                            terms=("grace",),
                         ),
                     ),
                 )
@@ -145,9 +151,16 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
 
         service.search.assert_awaited_once()
         service.select.assert_not_awaited()
-        sent = context.bot.send_message.await_args.kwargs
-        self.assertIn("Select one or more verses", sent["text"])
-        self.assertIsNotNone(sent["reply_markup"])
+        result, controls = context.bot.send_message.await_args_list
+        self.assertIn(
+            "And of his fulness have all we received, and "
+            "<b>grace</b> for <b>grace</b>.",
+            result.kwargs["text"],
+        )
+        self.assertNotIn("…", result.kwargs["text"])
+        self.assertEqual(result.kwargs["parse_mode"], "HTML")
+        self.assertIn("Select one or more references", controls.kwargs["text"])
+        self.assertIsNotNone(controls.kwargs["reply_markup"])
 
     async def test_bible_without_reference_opens_translation_picker(self) -> None:
         limiter = _Limiter()
@@ -181,14 +194,71 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         error.__cause__ = repository_error
 
         with self.assertLogs("modules.commands", level=logging.INFO) as captured:
-            await _report_command_error(error, "891beaa0", 100, context)
+            message_id = await _report_command_error(
+                error,
+                "891beaa0",
+                100,
+                context,
+            )
 
+        self.assertEqual(message_id, 300)
         self.assertIn("891beaa0", captured.output[0])
         self.assertIn("causes=RepositoryError", captured.output[0])
         self.assertNotIn("controlled repository failure", captured.output[0])
         self.assertIn(
             "Reference: 891beaa0",
             context.bot.send_message.await_args.kwargs["text"],
+        )
+
+    async def test_session_rate_limit_notice_is_recorded_for_later_cleanup(
+        self,
+    ) -> None:
+        context = self.context(_Limiter(reject=True))
+        context.bot.send_message.return_value = SimpleNamespace(message_id=901)
+        store = context.application.bot_data[INTERACTIONS_SLOT]
+        session = store.create(
+            chat_id=100,
+            user_id=200,
+            kind="search",
+            stage="search_dashboard",
+            translation="kjv",
+        )
+        session.message_id = 300
+
+        await interaction_callback(
+            self.callback_update(session.token, "sdash"),
+            context,
+        )
+
+        self.assertIn(901, session.workflow_message_ids)
+
+    async def test_recoverable_session_error_is_recorded_for_later_cleanup(
+        self,
+    ) -> None:
+        context = self.context(_Limiter())
+        context.bot.send_message.return_value = SimpleNamespace(message_id=901)
+        context.application.bot_data[SERVICE_SLOT] = SimpleNamespace(
+            books=AsyncMock(side_effect=ScriptureUnavailable("unavailable")),
+        )
+        store = context.application.bot_data[INTERACTIONS_SLOT]
+        session = store.create(
+            chat_id=100,
+            user_id=200,
+            kind="reference",
+            stage="reference_translation",
+            translation="kjv",
+        )
+        session.message_id = 300
+
+        await interaction_callback(
+            self.callback_update(session.token, "tc"),
+            context,
+        )
+
+        self.assertIn(901, session.workflow_message_ids)
+        self.assertIs(
+            store.get(session.token, chat_id=100, user_id=200),
+            session,
         )
 
     async def test_bible_with_reference_preserves_immediate_legacy_post(self) -> None:
@@ -218,7 +288,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         context.application.bot_data[SERVICE_SLOT] = service
         context.args = ["John", "3:16"]
         update = self.update()
-        update.effective_message = SimpleNamespace(chat_id=100)
+        update.effective_message = SimpleNamespace(chat_id=100, message_id=250)
 
         await bible_command(update, context)
 
@@ -226,6 +296,32 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         service.select.assert_awaited_once()
         service.translations.assert_not_awaited()
         self.assertIn("For God so loved", context.bot.send_message.await_args.kwargs["text"])
+        context.bot.delete_message.assert_awaited_once_with(
+            chat_id=100,
+            message_id=250,
+        )
+
+    async def test_failed_direct_bible_post_preserves_command_for_retry(self) -> None:
+        context = self.context(_Limiter())
+        service = SimpleNamespace(
+            resolve_query=AsyncMock(
+                return_value=ScriptureQuery("John 3:16", "kjv")
+            ),
+            select=AsyncMock(side_effect=ScriptureUnavailable("unavailable")),
+            translations=AsyncMock(),
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        context.args = ["John", "3:16"]
+        update = self.update()
+        update.effective_message = SimpleNamespace(chat_id=100, message_id=250)
+
+        await bible_command(update, context)
+
+        context.bot.delete_message.assert_not_awaited()
+        self.assertIn(
+            "temporarily unavailable",
+            context.bot.send_message.await_args.kwargs["text"],
+        )
 
     async def test_guided_bible_picker_posts_only_after_confirmation(self) -> None:
         limiter = _Limiter()
@@ -262,6 +358,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             translation="kjv",
         )
         session.message_id = 300
+        session.workflow_message_ids.update({250, 301, 302})
         session.translations = (
             TranslationOption("kjv", "King James Version", "English"),
         )
@@ -289,6 +386,13 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(store.get(session.token, chat_id=100, user_id=200))
         self.assertEqual(limiter.calls, [(200, 100)] * 6)
+        self.assertEqual(
+            {
+                call.kwargs["message_id"]
+                for call in context.bot.delete_message.await_args_list
+            },
+            {250, 300, 301, 302},
+        )
 
     async def test_search_results_toggle_then_post_selected(self) -> None:
         limiter = _Limiter()
@@ -315,6 +419,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             translation="kjv",
         )
         session.message_id = 300
+        session.workflow_message_ids.update({250, 301, 302})
         session.search_query = "grace"
         session.search_total = 1
         session.search_results = (
@@ -329,7 +434,11 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         await interaction_callback(
-            self.callback_update(session.token, "srt", "0"),
+            self.callback_update(
+                session.token,
+                "srt",
+                f"{session.search_generation}-0",
+            ),
             context,
         )
         service.select.assert_not_awaited()
@@ -343,6 +452,13 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         service.select.assert_awaited_once_with(ScriptureQuery("John 1:16", "kjv"))
         self.assertIsNone(store.get(session.token, chat_id=100, user_id=200))
         self.assertEqual(limiter.calls, [(200, 100)] * 2)
+        self.assertEqual(
+            {
+                call.kwargs["message_id"]
+                for call in context.bot.delete_message.await_args_list
+            },
+            {250, 300, 301, 302},
+        )
 
     async def test_group_search_prompt_selectively_mentions_owner(self) -> None:
         limiter = _Limiter()
@@ -387,6 +503,101 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
 
 
 class SelectionFormattingTestCase(unittest.TestCase):
+    def test_search_highlight_preserves_full_escaped_verse_text(self) -> None:
+        rendered = _highlight_search_terms(
+            "Grâce & truth; beloved.",
+            ("grace", "love"),
+            SearchOptions(
+                match="substring",
+                diacritics="insensitive",
+            ),
+        )
+
+        self.assertEqual(
+            rendered,
+            "<b>Grâce</b> &amp; truth; <b>beloved</b>.",
+        )
+
+    def test_search_result_keyboard_lists_every_reference_without_paging(self) -> None:
+        session = InteractionSession(
+            token="abcdefgh",
+            chat_id=1,
+            user_id=2,
+            kind="search",
+            stage="search_results",
+            touched_at=0,
+            search_results=tuple(
+                SearchResult(
+                    f"John 1:{index}",
+                    43,
+                    "John",
+                    1,
+                    index,
+                    f"Complete verse {index}",
+                )
+                for index in range(1, 8)
+            ),
+        )
+
+        keyboard = _search_results_keyboard(session)
+        buttons = [
+            button
+            for row in keyboard.inline_keyboard
+            for button in row
+        ]
+        labels = [button.text for button in buttons]
+
+        self.assertTrue(
+            all(f"John 1:{index}" in labels[index - 1] for index in range(1, 8))
+        )
+        self.assertFalse(any("Next" in label or "Previous" in label for label in labels))
+
+    def test_large_configured_result_set_uses_bounded_scroll_selectors(self) -> None:
+        session = InteractionSession(
+            token="abcdefgh",
+            chat_id=1,
+            user_id=2,
+            kind="search",
+            stage="search_results",
+            touched_at=0,
+            search_generation=3,
+            search_results=tuple(
+                SearchResult(
+                    f"John 1:{index}",
+                    43,
+                    "John",
+                    1,
+                    index,
+                    f"Complete verse {index}",
+                )
+                for index in range(1, 201)
+            ),
+        )
+        callbacks: set[str] = set()
+        ranges = ((0, 96), (96, 192), (192, 200))
+        for start, end in ranges:
+            keyboard = _search_results_keyboard(
+                session,
+                start=start,
+                end=end,
+                include_controls=end == 200,
+            )
+            buttons = [
+                button
+                for row in keyboard.inline_keyboard
+                for button in row
+            ]
+            self.assertLessEqual(len(buttons), 100)
+            callbacks.update(
+                button.callback_data
+                for button in buttons
+                if button.callback_data is not None
+                and ":srt:" in button.callback_data
+            )
+
+        self.assertEqual(len(callbacks), 200)
+        self.assertIn("gb:abcdefgh:srt:3-199", callbacks)
+
     def test_guided_reference_uses_start_and_end_range(self) -> None:
         session = InteractionSession(
             token="abcdefgh",

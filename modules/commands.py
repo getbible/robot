@@ -6,6 +6,7 @@ import html
 import logging
 import re
 import secrets
+import unicodedata
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import replace
@@ -41,11 +42,12 @@ from modules.interactions import (
     InteractionSession,
     InteractionStore,
     SearchOptions,
+    SearchResult,
 )
 from modules.rate_limit import InboundRateLimiter
-from modules.renderer import render_scripture
+from modules.renderer import pack_html_blocks, render_scripture
 from modules.service import ScriptureQuery, ScriptureService
-from modules.utils import safe_delete_command, send_typing
+from modules.utils import safe_delete_command, safe_delete_messages, send_typing
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,7 +61,7 @@ TRANSLATION_PAGE_SIZE = 6
 BOOK_PAGE_SIZE = 10
 CHAPTER_PAGE_SIZE = 20
 VERSE_PAGE_SIZE = 25
-SEARCH_PAGE_SIZE = 5
+SEARCH_SELECTOR_RESULTS_PER_MESSAGE = 96
 MAX_EXCLUSIONS = 32
 BUTTON_LABEL_LIMIT = 60
 _CALLBACK_RE = re.compile(r"gb:([A-Za-z0-9_-]{8,16}):([a-z]{1,8}):([A-Za-z0-9_-]{0,32})\Z")
@@ -95,7 +97,6 @@ CALLBACK_ACTIONS = frozenset(
         "spv",
         "sq",
         "sreset",
-        "srp",
         "srt",
         "ss",
         "st",
@@ -140,6 +141,8 @@ async def _allow_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     limiter: InboundRateLimiter,
+    *,
+    session: InteractionSession | None = None,
 ) -> bool:
     """Apply budgets and suppress repeated Telegram rejection notifications."""
     identity = _identity(update)
@@ -150,13 +153,15 @@ async def _allow_command(
         await limiter.acquire(user_id=user_id, chat_id=chat_id)
     except RobotRateLimited as error:
         if await limiter.should_notify_rejection(user_id=user_id, chat_id=chat_id):
-            await context.bot.send_message(
+            message = await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
                     "Too many requests. Please try again in about "
                     f"{error.retry_after} seconds."
                 ),
             )
+            if session is not None:
+                session.remember_message(message.message_id)
         return False
     return True
 
@@ -220,16 +225,12 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             stage="search_dashboard",
             translation=settings.default_translation,
         )
+        session.remember_message(_update_message_id(update))
         query = " ".join(context.args or ()).strip()
         if query:
             await send_typing(update, context)
             await _run_search(session, query, service, settings)
-            message = await context.bot.send_message(
-                chat_id=chat_id,
-                text=_search_results_text(session, 0),
-                reply_markup=_search_results_keyboard(session, 0),
-                disable_web_page_preview=True,
-            )
+            await _send_search_results(session, context, settings)
         else:
             message = await context.bot.send_message(
                 chat_id=chat_id,
@@ -237,17 +238,12 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 reply_markup=_search_dashboard_keyboard(session),
                 disable_web_page_preview=True,
             )
-        session.message_id = message.message_id
+            session.message_id = message.message_id
+            session.remember_message(message.message_id)
     except Exception as error:
         if "session" in locals():
             interactions.remove(session.token)
         await _report_command_error(error, request_id, chat_id, context)
-    finally:
-        await safe_delete_command(
-            update,
-            context,
-            enabled=settings.delete_command_messages,
-        )
 
 
 async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -276,6 +272,13 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 context,
                 source="bible_direct",
             )
+            message_id = _update_message_id(update)
+            if message_id is not None:
+                await safe_delete_messages(
+                    context,
+                    chat_id=chat_id,
+                    message_ids=(message_id,),
+                )
             return
 
         await send_typing(update, context)
@@ -287,6 +290,7 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             stage="reference_translation",
             translation=settings.default_translation,
         )
+        session.remember_message(_update_message_id(update))
         session.translations = translations
         message = await context.bot.send_message(
             chat_id=chat_id,
@@ -295,16 +299,11 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             disable_web_page_preview=True,
         )
         session.message_id = message.message_id
+        session.remember_message(message.message_id)
     except Exception as error:
         if session is not None:
             interactions.remove(session.token)
         await _report_command_error(error, request_id, chat_id, context)
-    finally:
-        await safe_delete_command(
-            update,
-            context,
-            enabled=settings.delete_command_messages,
-        )
 
 
 async def interaction_callback(
@@ -335,14 +334,27 @@ async def interaction_callback(
         )
         return
 
-    if not await _allow_command(update, context, limiter):
+    if not await _allow_command(
+        update,
+        context,
+        limiter,
+        session=session,
+    ):
         return
 
     if action == "srt":
-        if not value.isdigit() or int(value) >= len(session.search_results):
+        generation, separator, raw_index = value.partition("-")
+        if (
+            session.stage != "search_results"
+            or not separator
+            or not generation.isdigit()
+            or int(generation) != session.search_generation
+            or not raw_index.isdigit()
+            or int(raw_index) >= len(session.search_results)
+        ):
             await callback.answer("That result is no longer available.", show_alert=True)
             return
-        index = int(value)
+        index = int(raw_index)
         if index not in session.selected and not _search_selection_fits(
             session,
             session.selected | {index},
@@ -358,12 +370,11 @@ async def interaction_callback(
         else:
             session.selected.add(index)
         await callback.answer()
-        page = _page_containing(index, SEARCH_PAGE_SIZE)
-        await _edit(
+        await _edit_search_selection(
             session,
+            index,
+            update,
             context,
-            _search_results_text(session, page),
-            _search_results_keyboard(session, page),
         )
         return
 
@@ -384,7 +395,13 @@ async def interaction_callback(
             interactions,
         )
     except Exception as error:
-        await _report_command_error(error, request_id, chat_id, context)
+        message_id = await _report_command_error(
+            error,
+            request_id,
+            chat_id,
+            context,
+        )
+        session.remember_message(message_id)
 
 
 async def interaction_reply(
@@ -411,10 +428,16 @@ async def interaction_reply(
     if session is None:
         return
 
+    session.remember_message(_update_message_id(update))
     text = update.effective_message.text.strip()
     request_id = secrets.token_hex(4)
     try:
-        if not await _allow_command(update, context, limiter):
+        if not await _allow_command(
+            update,
+            context,
+            limiter,
+            session=session,
+        ):
             return
         if session.stage == "search_exclude":
             exclusions = _parse_exclusions(text, settings.max_input_length)
@@ -430,10 +453,11 @@ async def interaction_reply(
                 _search_dashboard_text(session),
                 _search_dashboard_keyboard(session),
             )
-            await context.bot.send_message(
+            message = await context.bot.send_message(
                 chat_id=chat_id,
                 text="Search exclusions updated.",
             )
+            session.remember_message(message.message_id)
             return
 
         if session.stage != "search_query":
@@ -441,14 +465,15 @@ async def interaction_reply(
         await send_typing(update, context)
         await _run_search(session, text, service, settings)
         session.prompt_message_id = None
-        await _edit(
-            session,
-            context,
-            _search_results_text(session, 0),
-            _search_results_keyboard(session, 0),
-        )
+        await _send_search_results(session, context, settings)
     except Exception as error:
-        await _report_command_error(error, request_id, chat_id, context)
+        message_id = await _report_command_error(
+            error,
+            request_id,
+            chat_id,
+            context,
+        )
+        session.remember_message(message_id)
 
 
 async def _dispatch_callback(
@@ -658,6 +683,7 @@ async def _dispatch_callback(
             source="bible_guided",
         )
         interactions.remove(session.token)
+        await _cleanup_interaction(session, context)
         return
     if action == "rreset":
         _require_kind(session, "reference")
@@ -857,15 +883,6 @@ async def _dispatch_callback(
         session.selected.clear()
         await _show_search_dashboard(session, context)
         return
-    if action == "srp":
-        page = _bounded_page(value, len(session.search_results), SEARCH_PAGE_SIZE)
-        await _edit(
-            session,
-            context,
-            _search_results_text(session, page),
-            _search_results_keyboard(session, page),
-        )
-        return
     if action == "spost":
         reference = _selected_search_reference(session)
         query = ScriptureQuery(reference, session.search_options.translation)
@@ -887,10 +904,11 @@ async def _dispatch_callback(
             source="search_selection",
         )
         interactions.remove(session.token)
+        await _cleanup_interaction(session, context)
         return
     if action == "cancel":
         interactions.remove(session.token)
-        await _edit(session, context, "Selection cancelled.", None)
+        await _cleanup_interaction(session, context)
         return
 
     raise RobotInputError("Unknown interactive action.")
@@ -982,6 +1000,8 @@ async def _run_search(
     session.search_query = page.query
     session.search_total = page.total
     session.search_results = page.items
+    session.search_generation = (session.search_generation % 999_999) + 1
+    session.search_selector_ranges.clear()
     session.selected.clear()
     session.stage = "search_results"
     options = session.search_options
@@ -1005,6 +1025,64 @@ async def _run_search(
         },
         content={"query": page.query},
     )
+
+
+async def _send_search_results(
+    session: InteractionSession,
+    context: ContextTypes.DEFAULT_TYPE,
+    settings: Settings,
+) -> None:
+    """Send complete searchable verses followed by bounded selection controls."""
+    if session.search_results:
+        chunks = pack_html_blocks(
+            (
+                _search_result_block(session, index, result)
+                for index, result in enumerate(session.search_results)
+            ),
+            max_chunks=settings.max_output_chunks,
+        )
+        for chunk in chunks:
+            message = await context.bot.send_message(
+                chat_id=session.chat_id,
+                text=chunk,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            session.remember_message(message.message_id)
+
+    session.remember_message(session.message_id)
+    session.search_selector_ranges.clear()
+    ranges = [
+        (
+            start,
+            min(
+                start + SEARCH_SELECTOR_RESULTS_PER_MESSAGE,
+                len(session.search_results),
+            ),
+        )
+        for start in range(
+            0,
+            len(session.search_results),
+            SEARCH_SELECTOR_RESULTS_PER_MESSAGE,
+        )
+    ] or [(0, 0)]
+    for start, end in ranges:
+        include_controls = end == len(session.search_results)
+        controls = await context.bot.send_message(
+            chat_id=session.chat_id,
+            text=_search_results_text(session, start=start, end=end),
+            reply_markup=_search_results_keyboard(
+                session,
+                start=start,
+                end=end,
+                include_controls=include_controls,
+            ),
+            disable_web_page_preview=True,
+        )
+        session.search_selector_ranges[controls.message_id] = (start, end)
+        session.remember_message(controls.message_id)
+        if include_controls:
+            session.message_id = controls.message_id
 
 
 async def _post_scripture(
@@ -1054,7 +1132,7 @@ async def _report_command_error(
     request_id: str,
     chat_id: int,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
+) -> int | None:
     message, expected = _safe_error_message(error, request_id)
     log = LOGGER.info if expected else LOGGER.error
     causes = _error_cause_types(error)
@@ -1065,7 +1143,39 @@ async def _report_command_error(
         type(error).__name__,
         f"; causes={','.join(causes)}" if causes else "",
     )
-    await context.bot.send_message(chat_id=chat_id, text=message)
+    sent = await context.bot.send_message(chat_id=chat_id, text=message)
+    message_id = getattr(sent, "message_id", None)
+    if (
+        not isinstance(message_id, int)
+        or isinstance(message_id, bool)
+        or message_id <= 0
+    ):
+        return None
+    return message_id
+
+
+async def _cleanup_interaction(
+    session: InteractionSession,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Remove only the messages recorded for a completed bot workflow."""
+    await safe_delete_messages(
+        context,
+        chat_id=session.chat_id,
+        message_ids=session.cleanup_message_ids(),
+    )
+
+
+def _update_message_id(update: Update) -> int | None:
+    message = getattr(update, "effective_message", None)
+    message_id = getattr(message, "message_id", None)
+    if (
+        not isinstance(message_id, int)
+        or isinstance(message_id, bool)
+        or message_id <= 0
+    ):
+        return None
+    return message_id
 
 
 def _error_cause_types(error: Exception) -> tuple[str, ...]:
@@ -1098,6 +1208,55 @@ async def _edit(
         reply_markup=keyboard,
         disable_web_page_preview=True,
     )
+
+
+async def _edit_search_selection(
+    session: InteractionSession,
+    index: int,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Refresh the selected range and final controls without result paging."""
+    clicked_message = getattr(getattr(update, "callback_query", None), "message", None)
+    clicked_id = getattr(clicked_message, "message_id", None)
+    if not isinstance(clicked_id, int) or isinstance(clicked_id, bool):
+        clicked_id = next(
+            (
+                message_id
+                for message_id, (start, end) in session.search_selector_ranges.items()
+                if start <= index < end
+            ),
+            session.message_id,
+        )
+
+    message_ids = {
+        message_id
+        for message_id in (clicked_id, session.message_id)
+        if isinstance(message_id, int)
+        and not isinstance(message_id, bool)
+        and message_id > 0
+    }
+    if not message_ids:
+        raise RobotInputError("Search selection controls are unavailable.")
+
+    for message_id in message_ids:
+        start, end = session.search_selector_ranges.get(
+            message_id,
+            (0, len(session.search_results)),
+        )
+        include_controls = message_id == session.message_id
+        await context.bot.edit_message_text(
+            chat_id=session.chat_id,
+            message_id=message_id,
+            text=_search_results_text(session, start=start, end=end),
+            reply_markup=_search_results_keyboard(
+                session,
+                start=start,
+                end=end,
+                include_controls=include_controls,
+            ),
+            disable_web_page_preview=True,
+        )
 
 
 async def _show_search_dashboard(
@@ -1134,6 +1293,7 @@ async def _prompt_for_reply(
     )
     session.stage = stage
     session.prompt_message_id = message.message_id
+    session.remember_message(message.message_id)
 
 
 def _translation_text(session: InteractionSession, page: int) -> str:
@@ -1483,57 +1643,73 @@ def _search_proximity_keyboard(session: InteractionSession) -> InlineKeyboardMar
     return InlineKeyboardMarkup(rows)
 
 
-def _search_results_text(session: InteractionSession, page: int) -> str:
+def _search_results_text(
+    session: InteractionSession,
+    *,
+    start: int = 0,
+    end: int | None = None,
+) -> str:
     returned = len(session.search_results)
-    page_total = _page_count(returned, SEARCH_PAGE_SIZE)
+    end = returned if end is None else end
     coverage = (
         f"Showing {returned} of {session.search_total} matches"
         if session.search_total > returned
         else f"{session.search_total} matches"
     )
     empty = "\n\nNo verses matched. Change the filters or search words." if returned == 0 else ""
+    selectable = (
+        f"\nReferences {start + 1}–{end} are selectable below."
+        if returned > SEARCH_SELECTOR_RESULTS_PER_MESSAGE
+        else ""
+    )
     return (
         f"Search: {session.search_query}\n"
         f"Translation: {session.search_options.translation.upper()}\n"
         f"{coverage}\n"
-        f"Selected: {len(session.selected)}\n"
-        f"Page {page + 1} of {page_total}\n\n"
-        "Select one or more verses, then choose Post selected."
+        f"Selected: {len(session.selected)}\n\n"
+        "The complete matching verses are shown above. "
+        "Select one or more references below, then choose Post selected."
+        f"{selectable}"
         f"{empty}"
     )
 
 
 def _search_results_keyboard(
     session: InteractionSession,
-    page: int,
+    *,
+    start: int = 0,
+    end: int | None = None,
+    include_controls: bool = True,
 ) -> InlineKeyboardMarkup:
-    items, page = _page(session.search_results, page, SEARCH_PAGE_SIZE)
-    start = page * SEARCH_PAGE_SIZE
-    rows: list[list[InlineKeyboardButton]] = []
-    for offset, item in enumerate(items):
-        index = start + offset
-        marker = "☑" if index in session.selected else "☐"
-        label = _button_label(
-            f"{marker} {item.reference} — {_plain_preview(item.text, 32)}"
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    label,
-                    callback_data=_callback(session, "srt", str(index)),
-                )
-            ]
-        )
-    rows.append(
-        _navigation_row(
-            session,
-            "srp",
-            page,
+    end = (
+        min(
             len(session.search_results),
-            SEARCH_PAGE_SIZE,
+            start + SEARCH_SELECTOR_RESULTS_PER_MESSAGE,
         )
+        if end is None
+        else end
     )
-    if session.search_results:
+    rows: list[list[InlineKeyboardButton]] = []
+    choices: list[InlineKeyboardButton] = []
+    for index in range(start, end):
+        item = session.search_results[index]
+        marker = "☑" if index in session.selected else "☐"
+        label = _button_label(f"{marker} {index + 1}. {item.reference}")
+        choices.append(
+            InlineKeyboardButton(
+                label,
+                callback_data=_callback(
+                    session,
+                    "srt",
+                    f"{session.search_generation}-{index}",
+                ),
+            )
+        )
+    for index in range(0, len(choices), 2):
+        rows.append(
+            choices[index : index + 2]
+        )
+    if include_controls and session.search_results:
         rows.append(
             [
                 InlineKeyboardButton(
@@ -1542,13 +1718,22 @@ def _search_results_keyboard(
                 )
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton("New search", callback_data=_callback(session, "snew")),
-            InlineKeyboardButton("Filters", callback_data=_callback(session, "sdash")),
-        ]
-    )
-    rows.append([InlineKeyboardButton("Cancel", callback_data=_callback(session, "cancel"))])
+    if include_controls:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "New search",
+                    callback_data=_callback(session, "snew"),
+                ),
+                InlineKeyboardButton(
+                    "Filters",
+                    callback_data=_callback(session, "sdash"),
+                ),
+            ]
+        )
+        rows.append(
+            [InlineKeyboardButton("Cancel", callback_data=_callback(session, "cancel"))]
+        )
     return InlineKeyboardMarkup([row for row in rows if row])
 
 
@@ -1899,9 +2084,114 @@ def _button_label(value: str) -> str:
     return value if len(value) <= BUTTON_LABEL_LIMIT else value[: BUTTON_LABEL_LIMIT - 1] + "…"
 
 
-def _plain_preview(value: str, maximum: int) -> str:
-    clean = html.unescape(" ".join(value.split()))
-    return clean if len(clean) <= maximum else clean[: maximum - 1] + "…"
+def _search_result_block(
+    session: InteractionSession,
+    index: int,
+    result: SearchResult,
+) -> str:
+    terms = result.terms or _search_query_terms(session.search_query)
+    verse = _highlight_search_terms(result.text, terms, session.search_options)
+    return f"<b>{index + 1}. {html.escape(result.reference)}</b>\n{verse}"
+
+
+def _search_query_terms(query: str) -> tuple[str, ...]:
+    """Extract bounded word-like terms when an older search result lacks metadata."""
+    return tuple(
+        dict.fromkeys(
+            re.findall(r"[^\W_]+(?:['’][^\W_]+)*", query, flags=re.UNICODE)
+        )
+    )[:64]
+
+
+def _highlight_search_terms(
+    text: str,
+    terms: Sequence[str],
+    options: SearchOptions,
+) -> str:
+    """Escape one verse and bold every matching word without changing its text."""
+    normalized, positions = _normalized_search_value(text, options)
+    if not normalized or not positions:
+        return html.escape(text)
+
+    spans: list[tuple[int, int]] = []
+    for term in terms[:64]:
+        needle, _ = _normalized_search_value(term.strip(), options)
+        if not needle:
+            continue
+        offset = 0
+        while True:
+            match_at = normalized.find(needle, offset)
+            if match_at < 0:
+                break
+            match_end = match_at + len(needle)
+            offset = max(match_end, match_at + 1)
+            if options.match == "whole_word" and (
+                (match_at > 0 and _is_search_word_char(normalized[match_at - 1]))
+                or (
+                    match_end < len(normalized)
+                    and _is_search_word_char(normalized[match_end])
+                )
+            ):
+                continue
+
+            original_start = positions[match_at]
+            original_end = positions[match_end - 1] + 1
+            if options.match == "substring":
+                while original_start > 0 and _is_search_word_char(text[original_start - 1]):
+                    original_start -= 1
+                while original_end < len(text) and _is_search_word_char(text[original_end]):
+                    original_end += 1
+            spans.append((original_start, original_end))
+
+    if not spans:
+        return html.escape(text)
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+
+    parts: list[str] = []
+    cursor = 0
+    for start, end in merged:
+        parts.append(html.escape(text[cursor:start]))
+        parts.append(f"<b>{html.escape(text[start:end])}</b>")
+        cursor = end
+    parts.append(html.escape(text[cursor:]))
+    return "".join(parts)
+
+
+def _normalized_search_value(
+    value: str,
+    options: SearchOptions,
+) -> tuple[str, tuple[int, ...]]:
+    """Normalize search text while retaining positions in the original value."""
+    characters: list[str] = []
+    positions: list[int] = []
+    for index, character in enumerate(value):
+        normalized = (
+            unicodedata.normalize("NFKD", character)
+            if options.diacritics == "insensitive"
+            else character
+        )
+        if options.diacritics == "insensitive":
+            normalized = "".join(
+                item for item in normalized if not unicodedata.category(item).startswith("M")
+            )
+        if not options.case_sensitive:
+            normalized = normalized.casefold()
+        for item in normalized:
+            characters.append(item)
+            positions.append(index)
+    return "".join(characters), tuple(positions)
+
+
+def _is_search_word_char(value: str) -> bool:
+    return bool(value) and (
+        unicodedata.category(value).startswith(("L", "M", "N"))
+        or value in {"'", "’"}
+    )
 
 
 def _display(value: str) -> str:

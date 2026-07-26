@@ -89,6 +89,31 @@ def render_scripture(
     return _pack_blocks(blocks, chunk_limit, max_chunks)
 
 
+def pack_html_blocks(
+    blocks: Iterable[str],
+    *,
+    chunk_limit: int = DEFAULT_CHUNK_LIMIT,
+    max_chunks: int = DEFAULT_MAX_CHUNKS,
+    separator: str = "\n\n",
+) -> list[str]:
+    """Pack complete pre-escaped HTML blocks without truncating their content."""
+    if not 256 <= chunk_limit <= TELEGRAM_TEXT_LIMIT:
+        raise ValueError("chunk_limit must be between 256 and Telegram's text limit.")
+    if not isinstance(max_chunks, int) or isinstance(max_chunks, bool) or not 1 <= max_chunks <= 32:
+        raise ValueError("max_chunks must be an integer between 1 and 32.")
+    if separator not in {"\n", "\n\n"}:
+        raise ValueError("separator must be one or two newlines.")
+    rendered = list(blocks)
+    if not rendered or any(not isinstance(block, str) or not block for block in rendered):
+        raise ScriptureUnavailable("Search rendering received an invalid result block.")
+    return _pack_blocks(
+        rendered,
+        chunk_limit,
+        max_chunks,
+        separator=separator,
+    )
+
+
 def _verse_ranges(verses: Iterable[dict[str, Any]]) -> str:
     try:
         numbers = sorted({int(verse["verse"]) for verse in verses})
@@ -140,7 +165,13 @@ def _split_for_html(text: str, maximum: int) -> list[str]:
     return pieces
 
 
-def _pack_blocks(blocks: list[str], maximum: int, max_chunks: int) -> list[str]:
+def _pack_blocks(
+    blocks: list[str],
+    maximum: int,
+    max_chunks: int,
+    *,
+    separator: str = "\n",
+) -> list[str]:
     chunks: list[str] = []
     current = ""
 
@@ -154,7 +185,7 @@ def _pack_blocks(blocks: list[str], maximum: int, max_chunks: int) -> list[str]:
     for block in blocks:
         if _telegram_length(block) > maximum:
             raise ScriptureUnavailable("A rendered Scripture block exceeded Telegram's limit.")
-        candidate = block if not current else f"{current}\n{block}"
+        candidate = block if not current else f"{current}{separator}{block}"
         if _telegram_length(candidate) <= maximum:
             current = candidate
             continue
