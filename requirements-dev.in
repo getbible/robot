@@ -4,5 +4,5 @@ detect-secrets==1.5.0
 mypy==2.3.0
 pip-audit==2.10.1
 pip-tools==7.6.0
-ruff==0.15.22
+ruff==0.16.0
 types-requests==2.33.0.20260712
