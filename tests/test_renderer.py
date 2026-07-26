@@ -36,6 +36,35 @@ class RendererTestCase(unittest.TestCase):
         self.assertIn("Not &lt;b&gt;condemn&lt;/b&gt; &amp; save.", rendered)
         self.assertNotIn("<script>", rendered)
 
+    def test_consecutive_verses_use_one_newline_without_blank_paragraphs(self) -> None:
+        chunks = render_scripture(
+            {
+                "kjv_62_3": {
+                    "book_name": "1 John",
+                    "abbreviation": "kjv",
+                    "chapter": 3,
+                    "verses": [
+                        {"verse": 10, "text": "Verse ten."},
+                        {"verse": 11, "text": "Verse eleven."},
+                        {"verse": 12, "text": "Verse twelve."},
+                    ],
+                }
+            },
+            "https://getbible.life",
+        )
+
+        self.assertEqual(
+            chunks,
+            [
+                '<b><a href="https://getbible.life/kjv/1%20John/3/10-12">'
+                "1 John 3:10-12</a></b> <code>kjv</code>\n"
+                "<b>10.</b> Verse ten.\n"
+                "<b>11.</b> Verse eleven.\n"
+                "<b>12.</b> Verse twelve."
+            ],
+        )
+        self.assertNotIn("\n\n", chunks[0])
+
     def test_messages_are_split_below_telegram_limit_without_broken_entities(self) -> None:
         chunks = render_scripture(
             self.result("<&>" * 500),

@@ -1,5 +1,7 @@
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from config import ConfigurationError, Settings
@@ -18,6 +20,101 @@ class SettingsTestCase(unittest.TestCase):
             settings = Settings.from_env(load_environment_file=False)
         self.assertEqual(settings.api_base_url, "https://api.getbible.net")
         self.assertEqual(settings.web_base_url, "https://getbible.life")
+
+    def test_search_capacity_defaults_are_safe_and_independent(self) -> None:
+        with patch.dict(os.environ, self.environment(), clear=True):
+            settings = Settings.from_env(load_environment_file=False)
+        self.assertEqual(settings.max_response_bytes, 64 * 1024 * 1024)
+        self.assertEqual(settings.search_max_response_bytes, 4 * 1024 * 1024)
+        self.assertEqual(settings.max_concurrent_searches, 1)
+        self.assertTrue(settings.prewarm_default_translation)
+        self.assertEqual(settings.telegram_delivery_mode, "polling")
+
+    def test_webhook_mode_requires_https_path_and_secret(self) -> None:
+        invalid_webhook_value = "short"
+        valid = self.environment(
+            TELEGRAM_DELIVERY_MODE="webhook",
+            TELEGRAM_WEBHOOK_PUBLIC_URL=(
+                "https://bot.example.com/telegram/production"
+            ),
+            TELEGRAM_WEBHOOK_SECRET_TOKEN="A" * 32,
+            TELEGRAM_WEBHOOK_IP_ADDRESS="1.1.1.1",
+        )
+        with patch.dict(os.environ, valid, clear=True):
+            settings = Settings.from_env(load_environment_file=False)
+        self.assertEqual(settings.telegram_delivery_mode, "webhook")
+        self.assertEqual(settings.webhook_port, 9001)
+        self.assertEqual(settings.webhook_ip_address, "1.1.1.1")
+
+        invalid = (
+            {"TELEGRAM_DELIVERY_MODE": "webhook"},
+            {
+                "TELEGRAM_DELIVERY_MODE": "webhook",
+                "TELEGRAM_WEBHOOK_PUBLIC_URL": "http://bot.example.com/hook",
+                "TELEGRAM_WEBHOOK_SECRET_TOKEN": "A" * 32,
+            },
+            {
+                "TELEGRAM_DELIVERY_MODE": "webhook",
+                "TELEGRAM_WEBHOOK_PUBLIC_URL": "https://bot.example.com/",
+                "TELEGRAM_WEBHOOK_SECRET_TOKEN": "A" * 32,
+            },
+            {
+                "TELEGRAM_DELIVERY_MODE": "webhook",
+                "TELEGRAM_WEBHOOK_PUBLIC_URL": "https://127.0.0.1/hook",
+                "TELEGRAM_WEBHOOK_SECRET_TOKEN": "A" * 32,
+            },
+            {
+                "TELEGRAM_DELIVERY_MODE": "webhook",
+                "TELEGRAM_WEBHOOK_PUBLIC_URL": "https://bot.example.com/.*",
+                "TELEGRAM_WEBHOOK_SECRET_TOKEN": "A" * 32,
+            },
+            {
+                "TELEGRAM_DELIVERY_MODE": "webhook",
+                "TELEGRAM_WEBHOOK_PUBLIC_URL": "https://bot.example.com:9443/hook",
+                "TELEGRAM_WEBHOOK_SECRET_TOKEN": "A" * 32,
+            },
+            {
+                "TELEGRAM_DELIVERY_MODE": "webhook",
+                "TELEGRAM_WEBHOOK_PUBLIC_URL": "https://bot.example.com/hook",
+                "TELEGRAM_WEBHOOK_SECRET_TOKEN": invalid_webhook_value,
+            },
+            {
+                "TELEGRAM_DELIVERY_MODE": "webhook",
+                "TELEGRAM_WEBHOOK_PUBLIC_URL": "https://bot.example.com/hook",
+                "TELEGRAM_WEBHOOK_SECRET_TOKEN": "A" * 32,
+                "TELEGRAM_WEBHOOK_LISTEN": "0.0.0.0",
+            },
+        )
+        for overrides in invalid:
+            with (
+                self.subTest(overrides=overrides),
+                patch.dict(
+                    os.environ,
+                    self.environment(**overrides),
+                    clear=True,
+                ),
+                self.assertRaises(ConfigurationError),
+            ):
+                Settings.from_env(load_environment_file=False)
+
+    def test_help_and_welcome_files_support_normal_multiline_editing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            welcome = root / "welcome.txt"
+            help_file = root / "help.txt"
+            welcome.write_text("Welcome from a file.\nSecond line.\n", encoding="utf-8")
+            help_file.write_text("Detailed help.\n/bible John 3:16\n", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                self.environment(
+                    WELCOME_MESSAGE_FILE=str(welcome),
+                    HELP_MESSAGE_FILE=str(help_file),
+                ),
+                clear=True,
+            ):
+                settings = Settings.from_env(load_environment_file=False)
+        self.assertEqual(settings.welcome_message, "Welcome from a file.\nSecond line.")
+        self.assertEqual(settings.help_message, "Detailed help.\n/bible John 3:16")
 
     def test_conflicting_token_names_fail_closed(self) -> None:
         with (

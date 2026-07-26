@@ -1,0 +1,12 @@
+Welcome to the official GetBible Telegram bot.
+
+Retrieve a passage immediately:
+/bible John 3:16
+
+Open the guided Bible picker:
+/bible
+
+Search Scripture and select the verses to post:
+/search grace
+
+Use /help for the complete guide.

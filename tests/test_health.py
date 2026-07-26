@@ -18,6 +18,7 @@ class _Service:
             "closed": False,
             "metrics": {"scripture_lookups": 2},
             "circuit": {"state": "closed"},
+            "search_circuit": {"state": "open"},
         }
 
 
@@ -81,6 +82,7 @@ class HealthServerTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"getbible_robot_scripture_lookups 2", metrics)
         self.assertIn(b"getbible_robot_rate_limit_rejected 1", metrics)
         self.assertIn(b"getbible_robot_interaction_sessions 0", metrics)
+        self.assertIn(b"getbible_robot_search_circuit_open 1", metrics)
 
         rejected = await self.request("/healthz", method="POST")
         self.assertIn(b"405 Method Not Allowed", rejected)

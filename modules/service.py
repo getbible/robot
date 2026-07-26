@@ -166,7 +166,7 @@ class ScriptureService:
             request_retries=settings.request_retries,
             request_limits=limits,
             search_limits=SearchLimits(
-                max_response_bytes=settings.max_response_bytes,
+                max_response_bytes=settings.search_max_response_bytes,
                 max_query_length=settings.max_input_length,
                 max_limit=settings.search_result_limit,
                 deadline_seconds=settings.search_deadline_seconds,
@@ -197,8 +197,17 @@ class ScriptureService:
             max_workers=settings.max_concurrent_lookups,
             thread_name_prefix="getbible",
         )
+        self._search_executor = ThreadPoolExecutor(
+            max_workers=settings.max_concurrent_searches,
+            thread_name_prefix="getbible-search",
+        )
         self._semaphore = asyncio.Semaphore(settings.max_concurrent_lookups)
+        self._search_semaphore = asyncio.Semaphore(settings.max_concurrent_searches)
         self._circuit = CircuitBreaker(
+            failure_threshold=settings.circuit_failure_threshold,
+            recovery_seconds=settings.circuit_recovery_seconds,
+        )
+        self._search_circuit = CircuitBreaker(
             failure_threshold=settings.circuit_failure_threshold,
             recovery_seconds=settings.circuit_recovery_seconds,
         )
@@ -300,7 +309,7 @@ class ScriptureService:
             limit=self.settings.search_result_limit,
             offset=0,
         )
-        response = await self._repository_call(
+        response = await self._search_call(
             "scripture_searches",
             self._client.search,
             query,
@@ -309,15 +318,28 @@ class ScriptureService:
         )
         return self._search_page(response, query, options.translation)
 
+    async def warm_default_translation(self) -> dict[str, Any]:
+        """Load the default corpus and index before Telegram accepts traffic."""
+        return await self._search_call(
+            "search_warmups",
+            self._client.warm_translation,
+            self.settings.default_translation,
+        )
+
     async def ready(self) -> bool:
         state = await self._circuit.snapshot()
         return not self._closed and state["state"] != "open"
 
     async def snapshot(self) -> dict[str, Any]:
+        repository_circuit, search_circuit = await asyncio.gather(
+            self._circuit.snapshot(),
+            self._search_circuit.snapshot(),
+        )
         state = {
             "closed": self._closed,
             "metrics": self.metrics.snapshot(),
-            "circuit": await self._circuit.snapshot(),
+            "circuit": repository_circuit,
+            "search_circuit": search_circuit,
         }
         try:
             state["librarian"] = self._client.cache_info()
@@ -330,9 +352,15 @@ class ScriptureService:
             return
         self._closed = True
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None,
-            partial(self._executor.shutdown, wait=True, cancel_futures=True),
+        await asyncio.gather(
+            loop.run_in_executor(
+                None,
+                partial(self._executor.shutdown, wait=True, cancel_futures=True),
+            ),
+            loop.run_in_executor(
+                None,
+                partial(self._search_executor.shutdown, wait=True, cancel_futures=True),
+            ),
         )
         self._client.close()
 
@@ -360,16 +388,52 @@ class ScriptureService:
         function: Callable[..., _T],
         *arguments: object,
     ) -> _T:
+        return await self._bounded_call(
+            metric,
+            function,
+            *arguments,
+            executor=self._executor,
+            semaphore=self._semaphore,
+            circuit=self._circuit,
+            queue_metric="queue_rejections",
+        )
+
+    async def _search_call(
+        self,
+        metric: str,
+        function: Callable[..., _T],
+        *arguments: object,
+    ) -> _T:
+        return await self._bounded_call(
+            metric,
+            function,
+            *arguments,
+            executor=self._search_executor,
+            semaphore=self._search_semaphore,
+            circuit=self._search_circuit,
+            queue_metric="search_queue_rejections",
+        )
+
+    async def _bounded_call(
+        self,
+        metric: str,
+        function: Callable[..., _T],
+        *arguments: object,
+        executor: ThreadPoolExecutor,
+        semaphore: asyncio.Semaphore,
+        circuit: CircuitBreaker,
+        queue_metric: str,
+    ) -> _T:
         if self._closed:
             raise ScriptureUnavailable("The Scripture service is closed.")
 
         try:
             await asyncio.wait_for(
-                self._semaphore.acquire(),
+                semaphore.acquire(),
                 timeout=self.settings.queue_timeout,
             )
         except (TimeoutError, asyncio.TimeoutError) as error:
-            self.metrics.increment("queue_rejections")
+            self.metrics.increment(queue_metric)
             raise RobotBusy("The Scripture lookup queue is full.") from error
 
         submitted = False
@@ -377,12 +441,12 @@ class ScriptureService:
         try:
             if self._closed:
                 raise ScriptureUnavailable("The Scripture service is closed.")
-            await self._circuit.before_call()
+            await circuit.before_call()
             loop = asyncio.get_running_loop()
-            raw_future: ConcurrentFuture[Any] = self._executor.submit(function, *arguments)
+            raw_future: ConcurrentFuture[Any] = executor.submit(function, *arguments)
             submitted = True
             raw_future.add_done_callback(
-                lambda _future: loop.call_soon_threadsafe(self._semaphore.release)
+                lambda _future: loop.call_soon_threadsafe(semaphore.release)
             )
             wrapped_future = asyncio.wrap_future(raw_future)
             result = await asyncio.wait_for(
@@ -398,26 +462,26 @@ class ScriptureService:
             SearchValidationError,
             TranslationNotFoundError,
         ):
-            await self._circuit.success()
+            await circuit.success()
             raise
         except (TimeoutError, asyncio.TimeoutError) as error:
             self.metrics.increment("lookup_timeouts")
             if wrapped_future is not None:
                 wrapped_future.add_done_callback(_consume_background_result)
-            await self._circuit.failure()
+            await circuit.failure()
             raise ScriptureUnavailable("The Scripture lookup timed out.") from error
         except asyncio.CancelledError:
             if wrapped_future is not None:
                 wrapped_future.add_done_callback(_consume_background_result)
-            await self._circuit.abandoned()
+            await circuit.abandoned()
             raise
         except (RepositoryError, CacheIntegrityError, OSError) as error:
             self.metrics.increment("repository_failures")
-            await self._circuit.failure()
+            await circuit.failure()
             raise ScriptureUnavailable("The Scripture repository is unavailable.") from error
         except Exception as error:
             self.metrics.increment("unexpected_failures")
-            await self._circuit.failure()
+            await circuit.failure()
             LOGGER.error(
                 "Unexpected Scripture service failure (%s)",
                 type(error).__name__,
@@ -425,13 +489,13 @@ class ScriptureService:
             raise ScriptureUnavailable("The Scripture service failed safely.") from error
         else:
             self.metrics.increment(metric)
-            await self._circuit.success()
+            await circuit.success()
             return result
         finally:
             # A timed-out thread keeps its permit until it actually exits. This prevents
             # ThreadPoolExecutor's internal unbounded queue from becoming an attack queue.
             if not submitted:
-                self._semaphore.release()
+                semaphore.release()
 
     def _search_page(
         self,

@@ -154,7 +154,7 @@ def _pack_blocks(blocks: list[str], maximum: int, max_chunks: int) -> list[str]:
     for block in blocks:
         if _telegram_length(block) > maximum:
             raise ScriptureUnavailable("A rendered Scripture block exceeded Telegram's limit.")
-        candidate = block if not current else f"{current}\n\n{block}"
+        candidate = block if not current else f"{current}\n{block}"
         if _telegram_length(candidate) <= maximum:
             current = candidate
             continue

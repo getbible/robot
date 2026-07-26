@@ -4,7 +4,7 @@ IFS=$'\n\t'
 umask 077
 
 PROGRAM="getbible-robot"
-VERSION="2"
+VERSION="3"
 SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
 SCRIPT_DIR=$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)
 
@@ -69,7 +69,9 @@ cleanup() {
         rm -f -- \
             "$(environment_file_for "$INSTALLING_INSTANCE")" \
             "$(metadata_file_for "$INSTALLING_INSTANCE")" \
-            "$(log_file_for "$INSTALLING_INSTANCE")"
+            "$(log_file_for "$INSTALLING_INSTANCE")" \
+            "$(welcome_file_for "$INSTALLING_INSTANCE")" \
+            "$(help_file_for "$INSTALLING_INSTANCE")"
         if [[ -n "$INSTALLING_USER" ]] && id "$INSTALLING_USER" >/dev/null 2>&1; then
             userdel "$INSTALLING_USER" >/dev/null 2>&1 || true
         fi
@@ -98,6 +100,8 @@ Commands:
   doctor      Run non-destructive deployment diagnostics
   repair      Restore secure application access for the service account
   config      Safely edit, validate, and optionally restart configuration
+  delivery    Switch safely between polling and HTTPS webhook delivery
+  content     Edit the welcome or detailed help text
   upgrade     Deploy the exact commit from a reviewed source checkout
   rollback    Return to the immediately previous deployed application
   uninstall   Remove one instance after explicit confirmation
@@ -141,6 +145,21 @@ validate_port() {
     (( value >= 0 && value <= 65535 ))
 }
 
+validate_delivery_mode() {
+    [[ ${1:-} == "polling" || ${1:-} == "webhook" ]]
+}
+
+validate_webhook_url() {
+    local value=${1:-}
+    [[ "$value" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$ ]]
+}
+
+validate_plain_text() {
+    local value=${1:-}
+    local maximum=$2
+    [[ -n "$value" && ${#value} -le maximum && "$value" != *\"* ]]
+}
+
 service_user_for() {
     printf 'gb-%s\n' "$1"
 }
@@ -159,6 +178,14 @@ environment_file_for() {
 
 log_file_for() {
     printf '%s/%s.jsonl\n' "$LOG_ROOT" "$1"
+}
+
+welcome_file_for() {
+    printf '%s/%s.welcome.txt\n' "$ETC_ROOT" "$1"
+}
+
+help_file_for() {
+    printf '%s/%s.help.txt\n' "$ETC_ROOT" "$1"
 }
 
 application_dir_for() {
@@ -274,6 +301,10 @@ resolve_source_dir() {
     [[ -f "${candidate}/.env.template" ]] || die "Source checkout is missing .env.template."
     [[ -f "${candidate}/deploy/getbible-robot@.service" ]] ||
         die "Source checkout is missing deploy/getbible-robot@.service."
+    [[ -f "${candidate}/deploy/welcome.txt" ]] ||
+        die "Source checkout is missing deploy/welcome.txt."
+    [[ -f "${candidate}/deploy/help.txt" ]] ||
+        die "Source checkout is missing deploy/help.txt."
     git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
         die "Source directory is not a Git checkout."
     git -C "$candidate" diff --quiet --ignore-submodules --
@@ -368,6 +399,42 @@ next_health_port() {
     die "No unused automatic health port was found between 8081 and 8181."
 }
 
+next_webhook_port() {
+    local port
+    local used
+    local existing
+    local app_dir
+    local env_file
+    local configured
+    for ((port = 9001; port <= 9101; port++)); do
+        used=0
+        while IFS= read -r existing; do
+            app_dir=$(application_dir_for "$existing")
+            env_file=$(environment_file_for "$existing")
+            if [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]]; then
+                configured=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT")
+                if [[ "$configured" == "$port" ]]; then
+                    used=1
+                    break
+                fi
+            fi
+        done < <(instance_names)
+        if ((used == 0)) && ! ss -ltnH 2>/dev/null | awk '{print $4}' |
+            grep -Eq "(^|:)$port$"; then
+            printf '%s\n' "$port"
+            return
+        fi
+    done
+    die "No unused automatic webhook port was found between 9001 and 9101."
+}
+
+generate_webhook_secret() {
+    "$1" - <<'PY'
+import secrets
+print(secrets.token_urlsafe(32))
+PY
+}
+
 token_from_env_file() {
     local file=$1
     sed -n \
@@ -394,7 +461,7 @@ ensure_unique_token() {
             existing=$(token_from_env_file "$file")
         fi
         if [[ -n "$existing" && "$existing" == "$candidate" ]]; then
-            warn "That Telegram token is already assigned to instance '${instance}'. One token cannot safely run in two polling processes."
+            warn "That Telegram token is already assigned to instance '${instance}'. One bot token cannot safely run in two active instances."
             return 1
         fi
     done < <(instance_names)
@@ -428,6 +495,68 @@ else:
     lines.extend(("", replacement))
 path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
+}
+
+ensure_env_value() {
+    local python_bin=$1
+    local file=$2
+    local key=$3
+    local value=$4
+    if ! grep -Eq "^${key}=" "$file"; then
+        replace_env_value "$python_bin" "$file" "$key" "$value"
+    fi
+}
+
+migrate_instance_configuration() {
+    local source_dir=$1
+    local python_bin=$2
+    local env_file=$3
+    local service_user=$4
+    local instance=$5
+    local welcome_file
+    local help_file
+    local current_limit
+    welcome_file=$(welcome_file_for "$instance")
+    help_file=$(help_file_for "$instance")
+
+    if [[ ! -f "$welcome_file" ]]; then
+        install -o root -g "$service_user" -m 0640 \
+            "${source_dir}/deploy/welcome.txt" "$welcome_file"
+    fi
+    if [[ ! -f "$help_file" ]]; then
+        install -o root -g "$service_user" -m 0640 \
+            "${source_dir}/deploy/help.txt" "$help_file"
+    fi
+    replace_env_value "$python_bin" "$env_file" "WELCOME_MESSAGE_FILE" "$welcome_file"
+    replace_env_value "$python_bin" "$env_file" "HELP_MESSAGE_FILE" "$help_file"
+
+    current_limit=$(
+        sed -n -E 's/^GETBIBLE_MAX_RESPONSE_BYTES="?([0-9]+)"?$/\1/p' \
+            "$env_file" | head -n 1
+    )
+    if [[ -z "$current_limit" || "$current_limit" == "8388608" ]]; then
+        replace_env_value "$python_bin" "$env_file" \
+            "GETBIBLE_MAX_RESPONSE_BYTES" "67108864"
+    fi
+    ensure_env_value "$python_bin" "$env_file" \
+        "SEARCH_MAX_RESPONSE_BYTES" "4194304"
+    ensure_env_value "$python_bin" "$env_file" "MAX_CONCURRENT_SEARCHES" "1"
+    ensure_env_value "$python_bin" "$env_file" "PREWARM_DEFAULT_TRANSLATION" "true"
+    ensure_env_value "$python_bin" "$env_file" "TELEGRAM_DELIVERY_MODE" "polling"
+    ensure_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_PUBLIC_URL" ""
+    ensure_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_LISTEN" "127.0.0.1"
+    ensure_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_PORT" "9001"
+    ensure_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_SECRET_TOKEN" ""
+    ensure_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_IP_ADDRESS" ""
+    ensure_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_MAX_CONNECTIONS" "16"
+    ensure_env_value "$python_bin" "$env_file" "BOT_NAME" "GetBible Robot"
+    ensure_env_value "$python_bin" "$env_file" \
+        "BOT_DESCRIPTION" "Read and search Scripture in Telegram with GetBible."
+    ensure_env_value "$python_bin" "$env_file" \
+        "BOT_SHORT_DESCRIPTION" "Read and search Scripture with GetBible."
+    chown root:root "$env_file"
+    chmod 0600 "$env_file"
+    verify_content_access "$service_user" "$instance"
 }
 
 validate_environment() {
@@ -473,13 +602,106 @@ request = urllib.request.Request(
     f"https://api.telegram.org/bot{token}/getMe",
     headers={"User-Agent": "getbible-robot-setup/1"},
 )
-with urllib.request.urlopen(request, timeout=10) as response:
-    payload = json.load(response)
+try:
+    with urllib.request.urlopen(request, timeout=10) as response:
+        payload = json.load(response)
+except (OSError, ValueError):
+    raise SystemExit("Telegram token verification failed safely.") from None
 if payload.get("ok") is not True:
     raise SystemExit("Telegram rejected the token.")
 result = payload.get("result", {})
 username = result.get("username", "unknown")
 print(f"Telegram token accepted for @{username}.")
+PY
+}
+
+telegram_delivery_status() {
+    local app_dir=$1
+    local env_file=$2
+    "$app_dir/venv/bin/python" - "$env_file" <<'PY'
+import json
+import os
+import sys
+import time
+import urllib.request
+from dotenv import dotenv_values
+
+values = dotenv_values(sys.argv[1])
+os.environ.update({key: value for key, value in values.items() if value is not None})
+from config import Settings
+
+settings = Settings.from_env(load_environment_file=False)
+
+last_result = None
+for attempt in range(5):
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{settings.telegram_api_token}/getWebhookInfo",
+        headers={"User-Agent": "getbible-robot-doctor/1"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+    except (OSError, ValueError):
+        payload = None
+    if isinstance(payload, dict) and payload.get("ok") is True:
+        candidate = payload.get("result")
+        if isinstance(candidate, dict):
+            last_result = candidate
+            actual_url = candidate.get("url", "")
+            expected_url = (
+                "" if settings.telegram_delivery_mode == "polling"
+                else settings.webhook_public_url
+            )
+            if actual_url == expected_url:
+                break
+    if attempt < 4:
+        time.sleep(1)
+else:
+    if last_result is None:
+        raise SystemExit("Telegram delivery status could not be retrieved safely.")
+    if settings.telegram_delivery_mode == "polling":
+        raise SystemExit("Telegram still has a webhook while polling mode is configured.")
+    raise SystemExit("Telegram webhook URL does not match this instance.")
+
+if settings.telegram_delivery_mode == "polling":
+    print("Telegram delivery: polling (no webhook registered)")
+else:
+    pending = last_result.get("pending_update_count", 0)
+    error = last_result.get("last_error_message")
+    print(f"Telegram delivery: webhook ({settings.webhook_public_url}, pending={pending})")
+    if error:
+        print(f"Telegram last webhook error: {error}")
+PY
+}
+
+delete_telegram_webhook() {
+    local app_dir=$1
+    local env_file=$2
+    "$app_dir/venv/bin/python" - "$env_file" <<'PY'
+import json
+import os
+import sys
+import urllib.request
+import urllib.parse
+from dotenv import dotenv_values
+
+values = dotenv_values(sys.argv[1])
+token = values.get("TELEGRAM_API_TOKEN")
+if not token:
+    raise SystemExit("Telegram token is missing.")
+body = urllib.parse.urlencode({"drop_pending_updates": "false"}).encode()
+request = urllib.request.Request(
+    f"https://api.telegram.org/bot{token}/deleteWebhook",
+    data=body,
+    headers={"User-Agent": "getbible-robot-uninstall/1"},
+)
+try:
+    with urllib.request.urlopen(request, timeout=10) as response:
+        payload = json.load(response)
+except (OSError, ValueError):
+    raise SystemExit("Telegram webhook removal failed safely.") from None
+if payload.get("ok") is not True:
+    raise SystemExit("Telegram rejected webhook removal.")
 PY
 }
 
@@ -553,6 +775,13 @@ verify_service_account_access() {
         exec "$app_dir/venv/bin/python" -c \
             "from config import Settings; assert Settings is not None"
     ' getbible-robot-preflight "$app_dir"
+}
+
+verify_content_access() {
+    local service_user=$1
+    local instance=$2
+    runuser --user "$service_user" -- test -r "$(welcome_file_for "$instance")"
+    runuser --user "$service_user" -- test -r "$(help_file_for "$instance")"
 }
 
 prepare_application() {
@@ -718,6 +947,31 @@ cmd_install() {
         break
     done
 
+    local bot_name
+    local bot_description
+    local bot_short_description
+    while true; do
+        bot_name=$(prompt "Telegram bot display name" "GetBible Robot")
+        validate_plain_text "$bot_name" 64 && break
+        warn "The bot display name must contain 1-64 characters and no double quote."
+    done
+    while true; do
+        bot_short_description=$(
+            prompt "Telegram bot short description" \
+                "Read and search Scripture with GetBible."
+        )
+        validate_plain_text "$bot_short_description" 120 && break
+        warn "The short description must contain 1-120 characters and no double quote."
+    done
+    while true; do
+        bot_description=$(
+            prompt "Telegram bot description" \
+                "Read and search Scripture in Telegram with GetBible."
+        )
+        validate_plain_text "$bot_description" 512 && break
+        warn "The description must contain 1-512 characters and no double quote."
+    done
+
     local translation
     while true; do
         translation=$(prompt "Default GetBible translation" "kjv")
@@ -725,6 +979,41 @@ cmd_install() {
         validate_translation "$translation" && break
         warn "Translation must use 1-30 lowercase letters, numbers, underscores, or hyphens."
     done
+
+    local delivery_mode
+    while true; do
+        delivery_mode=$(prompt "Telegram delivery mode (polling/webhook)" "polling")
+        delivery_mode=${delivery_mode,,}
+        validate_delivery_mode "$delivery_mode" && break
+        warn "Choose polling or webhook."
+    done
+
+    local webhook_public_url=""
+    local webhook_ip_address=""
+    local webhook_port="9001"
+    local webhook_secret=""
+    if [[ "$delivery_mode" == "webhook" ]]; then
+        printf '\nWebhook mode requires a public HTTPS URL. Telegram connects to that URL;\n'
+        printf 'your reverse proxy forwards the URL path to this instance on loopback.\n'
+        while true; do
+            webhook_public_url=$(
+                prompt "Public HTTPS webhook URL" \
+                    "https://bot.example.com/telegram/${instance}"
+            )
+            validate_webhook_url "$webhook_public_url" && break
+            warn "Use a complete HTTPS URL with a private path and no query or fragment."
+        done
+        webhook_port=$(next_webhook_port)
+        webhook_port=$(prompt "Loopback webhook listener port" "$webhook_port")
+        validate_port "$webhook_port" && [[ "$webhook_port" != "0" ]] ||
+            die "Webhook port must be an integer between 1 and 65535."
+        if ss -ltnH 2>/dev/null | awk '{print $4}' |
+            grep -Eq "(^|:)$webhook_port$"; then
+            die "Webhook port ${webhook_port} is already listening."
+        fi
+        webhook_ip_address=$(prompt "Optional fixed public IP for Telegram" "")
+        webhook_secret=$(generate_webhook_secret "$python_bin")
+    fi
 
     local suggested_port
     local health_port
@@ -755,7 +1044,13 @@ cmd_install() {
     fi
 
     local start_now="yes"
-    confirm "Enable and start this instance after validation?" yes || start_now="no"
+    if [[ "$delivery_mode" == "webhook" ]] &&
+        ! confirm "Is the public HTTPS reverse-proxy route already configured?" no; then
+        warn "The instance will be installed but not started. Configure HTTPS, then run '${PROGRAM} start ${instance}'."
+        start_now="no"
+    else
+        confirm "Enable and start this instance after validation?" yes || start_now="no"
+    fi
 
     printf '\nPlanned isolated instance:\n'
     printf '  Instance:       %s\n' "$instance"
@@ -766,6 +1061,12 @@ cmd_install() {
     printf '  State/home:     %s/%s\n' "$STATE_ROOT" "$instance"
     printf '  JSON log:       %s/%s.jsonl\n' "$LOG_ROOT" "$instance"
     printf '  Audit mode:     %s\n' "$audit_mode"
+    printf '  Delivery:       %s\n' "$delivery_mode"
+    if [[ "$delivery_mode" == "webhook" ]]; then
+        printf '  Public webhook: %s\n' "$webhook_public_url"
+        printf '  Proxy target:   http://127.0.0.1:%s%s\n' \
+            "$webhook_port" "$(printf '%s' "$webhook_public_url" | sed -E 's#^https://[^/]+##')"
+    fi
     printf '  Health:         127.0.0.1:%s\n\n' "$health_port"
     confirm "Create this instance?" yes || die "Installation cancelled."
 
@@ -778,10 +1079,14 @@ cmd_install() {
     local app_dir="${app_parent}/app"
     local env_file
     local log_file
+    local welcome_file
+    local help_file
     local created_at
     local nologin_shell
     env_file=$(environment_file_for "$instance")
     log_file=$(log_file_for "$instance")
+    welcome_file=$(welcome_file_for "$instance")
+    help_file=$(help_file_for "$instance")
     created_at=$(date --utc +'%Y-%m-%dT%H:%M:%SZ')
     nologin_shell=$(command -v nologin || true)
     [[ -n "$nologin_shell" ]] || die "No nologin shell is installed."
@@ -801,10 +1106,24 @@ cmd_install() {
         "$state_dir" "$cache_dir"
     install -d -o root -g root -m 0755 "$app_parent"
     install -o "$service_user" -g "$service_user" -m 0640 /dev/null "$log_file"
+    install -o root -g "$service_user" -m 0640 \
+        "${source_dir}/deploy/welcome.txt" "$welcome_file"
+    install -o root -g "$service_user" -m 0640 \
+        "${source_dir}/deploy/help.txt" "$help_file"
 
     install -o root -g root -m 0600 "${source_dir}/.env.template" "$env_file"
     replace_env_value "$python_bin" "$env_file" "TELEGRAM_API_TOKEN" "$token"
+    replace_env_value "$python_bin" "$env_file" "TELEGRAM_DELIVERY_MODE" "$delivery_mode"
+    replace_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_PUBLIC_URL" "$webhook_public_url"
+    replace_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_PORT" "$webhook_port"
+    replace_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_SECRET_TOKEN" "$webhook_secret"
+    replace_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_IP_ADDRESS" "$webhook_ip_address"
+    replace_env_value "$python_bin" "$env_file" "BOT_NAME" "$bot_name"
+    replace_env_value "$python_bin" "$env_file" "BOT_DESCRIPTION" "$bot_description"
+    replace_env_value "$python_bin" "$env_file" "BOT_SHORT_DESCRIPTION" "$bot_short_description"
     replace_env_value "$python_bin" "$env_file" "TRANSLATION" "$translation"
+    replace_env_value "$python_bin" "$env_file" "WELCOME_MESSAGE_FILE" "$welcome_file"
+    replace_env_value "$python_bin" "$env_file" "HELP_MESSAGE_FILE" "$help_file"
     replace_env_value "$python_bin" "$env_file" "HEALTH_PORT" "$health_port"
     replace_env_value "$python_bin" "$env_file" "DELETE_COMMAND_MESSAGES" "$delete_commands"
     replace_env_value "$python_bin" "$env_file" "INSTANCE_NAME" "$instance"
@@ -814,6 +1133,7 @@ cmd_install() {
     prepare_application \
         "$source_dir" "$source_url" "$sha" "$app_dir" "$python_bin" \
         "$service_user" "$env_file"
+    verify_content_access "$service_user" "$instance"
     write_metadata "$instance" "$service_user" "$health_port" "$sha" "$source_url" "$created_at"
 
     if confirm "Verify this token with Telegram now?" yes; then
@@ -835,6 +1155,8 @@ cmd_install() {
             record_operation install "$instance" failed-readiness
             die "The instance started but did not become ready. Run '${PROGRAM} doctor ${instance}'."
         fi
+        telegram_delivery_status "$app_dir" "$env_file" ||
+            die "The instance started, but Telegram delivery validation failed."
     fi
 
     record_operation install "$instance" ok
@@ -905,11 +1227,16 @@ cmd_status() {
     local service
     local app_dir
     local log_file
+    local env_file
+    local delivery_mode
+    local webhook_public_url
+    local webhook_port
     local active
     local enabled
     service=$(service_name_for "$ACTIVE_INSTANCE")
     app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
     log_file=$(log_file_for "$ACTIVE_INSTANCE")
+    env_file=$(environment_file_for "$ACTIVE_INSTANCE")
     active=$(systemctl is-active "$service" 2>/dev/null || true)
     enabled=$(systemctl is-enabled "$service" 2>/dev/null || true)
     printf 'Instance:      %s\n' "$ACTIVE_INSTANCE"
@@ -922,6 +1249,20 @@ cmd_status() {
         printf 'Python:        unavailable\n'
     fi
     printf 'Health port:   %s\n' "$ACTIVE_PORT"
+    if [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]]; then
+        delivery_mode=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_DELIVERY_MODE")
+        printf 'Delivery:      %s\n' "${delivery_mode:-polling}"
+        if [[ "$delivery_mode" == "webhook" ]]; then
+            webhook_public_url=$(
+                dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PUBLIC_URL"
+            )
+            webhook_port=$(
+                dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT"
+            )
+            printf 'Webhook URL:   %s\n' "$webhook_public_url"
+            printf 'Webhook local: 127.0.0.1:%s\n' "$webhook_port"
+        fi
+    fi
     printf 'JSON log:      %s\n' "$log_file"
     printf 'Created:       %s\n' "$ACTIVE_CREATED_AT"
     if [[ "$ACTIVE_PORT" != "0" ]]; then
@@ -988,10 +1329,15 @@ cmd_doctor() {
     local app_dir
     local env_file
     local log_file
+    local welcome_file
+    local help_file
+    local content_file
     service=$(service_name_for "$ACTIVE_INSTANCE")
     app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
     env_file=$(environment_file_for "$ACTIVE_INSTANCE")
     log_file=$(log_file_for "$ACTIVE_INSTANCE")
+    welcome_file=$(welcome_file_for "$ACTIVE_INSTANCE")
+    help_file=$(help_file_for "$ACTIVE_INSTANCE")
 
     printf 'Running diagnostics for %s...\n' "$ACTIVE_INSTANCE"
     id "$ACTIVE_USER" >/dev/null 2>&1 || {
@@ -1012,6 +1358,16 @@ cmd_doctor() {
     }
     [[ "$(stat -c '%U:%G:%a' "$log_file" 2>/dev/null || true)" == "${ACTIVE_USER}:${ACTIVE_USER}:640" ]] || {
         warn "JSON log must be owned by ${ACTIVE_USER}:${ACTIVE_USER} with mode 0640."
+        ((failures += 1))
+    }
+    for content_file in "$welcome_file" "$help_file"; do
+        [[ "$(stat -c '%U:%G:%a' "$content_file" 2>/dev/null || true)" == "root:${ACTIVE_USER}:640" ]] || {
+            warn "Content file must be root:${ACTIVE_USER} mode 0640: ${content_file}"
+            ((failures += 1))
+        }
+    done
+    verify_content_access "$ACTIVE_USER" "$ACTIVE_INSTANCE" || {
+        warn "The service account cannot read the welcome/help content files."
         ((failures += 1))
     }
     if [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]]; then
@@ -1041,6 +1397,13 @@ cmd_doctor() {
         curl --fail --silent --show-error \
             "http://127.0.0.1:${ACTIVE_PORT}/readyz" >/dev/null ||
             ((failures += 1))
+    fi
+    if systemctl is-active --quiet "$service" &&
+        [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]]; then
+        telegram_delivery_status "$app_dir" "$env_file" || {
+            warn "Telegram delivery mode does not match the registered webhook state."
+            ((failures += 1))
+        }
     fi
     if ((failures > 0)); then
         record_operation doctor "$ACTIVE_INSTANCE" "failed-${failures}"
@@ -1083,6 +1446,167 @@ cmd_repair() {
     cmd_status "$ACTIVE_INSTANCE"
 }
 
+cmd_delivery() {
+    require_root
+    require_tty
+    select_instance "${1:-}"
+    local env_file
+    local app_dir
+    local backup
+    local current_mode
+    local requested_mode
+    local webhook_public_url
+    local webhook_port
+    local webhook_ip_address
+    local webhook_secret
+    local service
+    local was_active
+    env_file=$(environment_file_for "$ACTIVE_INSTANCE")
+    app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
+    service=$(service_name_for "$ACTIVE_INSTANCE")
+    current_mode=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_DELIVERY_MODE")
+    current_mode=${current_mode:-polling}
+
+    while true; do
+        requested_mode=$(
+            prompt "Telegram delivery mode (polling/webhook)" "$current_mode"
+        )
+        requested_mode=${requested_mode,,}
+        validate_delivery_mode "$requested_mode" && break
+        warn "Choose polling or webhook."
+    done
+
+    backup=$(mktemp "${ETC_ROOT}/.${ACTIVE_INSTANCE}.env.XXXXXX")
+    cp -a "$env_file" "$backup"
+    if [[ "$requested_mode" == "webhook" ]]; then
+        webhook_public_url=$(
+            dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PUBLIC_URL"
+        )
+        webhook_public_url=$(
+            prompt "Public HTTPS webhook URL" \
+                "${webhook_public_url:-https://bot.example.com/telegram/${ACTIVE_INSTANCE}}"
+        )
+        validate_webhook_url "$webhook_public_url" || {
+            rm -f "$backup"
+            die "Use a complete HTTPS URL with a private path and no query or fragment."
+        }
+        webhook_port=$(
+            dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT"
+        )
+        if [[ -z "$webhook_port" || "$webhook_port" == "0" ]]; then
+            webhook_port=$(next_webhook_port)
+        fi
+        webhook_port=$(prompt "Loopback webhook listener port" "$webhook_port")
+        validate_port "$webhook_port" && [[ "$webhook_port" != "0" ]] || {
+            rm -f "$backup"
+            die "Webhook port must be an integer between 1 and 65535."
+        }
+        webhook_ip_address=$(
+            dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_IP_ADDRESS"
+        )
+        webhook_ip_address=$(
+            prompt "Optional fixed public IP for Telegram" "$webhook_ip_address"
+        )
+        webhook_secret=$(
+            dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_SECRET_TOKEN"
+        )
+        if [[ -z "$webhook_secret" ]] ||
+            confirm "Rotate the webhook verification secret?" no; then
+            webhook_secret=$(generate_webhook_secret "$app_dir/venv/bin/python")
+        fi
+        replace_env_value "$app_dir/venv/bin/python" "$env_file" \
+            "TELEGRAM_WEBHOOK_PUBLIC_URL" "$webhook_public_url"
+        replace_env_value "$app_dir/venv/bin/python" "$env_file" \
+            "TELEGRAM_WEBHOOK_PORT" "$webhook_port"
+        replace_env_value "$app_dir/venv/bin/python" "$env_file" \
+            "TELEGRAM_WEBHOOK_IP_ADDRESS" "$webhook_ip_address"
+        replace_env_value "$app_dir/venv/bin/python" "$env_file" \
+            "TELEGRAM_WEBHOOK_SECRET_TOKEN" "$webhook_secret"
+        printf 'Configure the public HTTPS route before restarting:\n'
+        printf '  %s -> http://127.0.0.1:%s%s\n' \
+            "$webhook_public_url" "$webhook_port" \
+            "$(printf '%s' "$webhook_public_url" | sed -E 's#^https://[^/]+##')"
+        if ! confirm "Is that HTTPS reverse-proxy route ready?" no; then
+            cp -a "$backup" "$env_file"
+            rm -f "$backup"
+            die "Delivery mode was not changed."
+        fi
+    fi
+
+    replace_env_value "$app_dir/venv/bin/python" "$env_file" \
+        "TELEGRAM_DELIVERY_MODE" "$requested_mode"
+    chown root:root "$env_file"
+    chmod 0600 "$env_file"
+    if ! validate_environment "$app_dir" "$env_file"; then
+        cp -a "$backup" "$env_file"
+        rm -f "$backup"
+        die "Delivery configuration was invalid; the previous file was restored."
+    fi
+
+    was_active=$(systemctl is-active "$service" 2>/dev/null || true)
+    if [[ "$was_active" == "active" ]]; then
+        if ! systemctl restart "$service" || ! wait_for_readiness "$ACTIVE_PORT"; then
+            warn "New delivery mode failed; restoring the previous configuration."
+            cp -a "$backup" "$env_file"
+            systemctl restart "$service" || true
+            wait_for_readiness "$ACTIVE_PORT" || true
+            rm -f "$backup"
+            die "Delivery mode change was rolled back."
+        fi
+        telegram_delivery_status "$app_dir" "$env_file"
+    fi
+    rm -f "$backup"
+    record_operation delivery "$ACTIVE_INSTANCE" "$requested_mode"
+    cmd_status "$ACTIVE_INSTANCE"
+}
+
+cmd_content() {
+    require_root
+    require_tty
+    select_instance "${1:-}"
+    local kind=${2:-}
+    local file
+    local backup
+    local editor
+    local app_dir
+    local env_file
+    app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
+    env_file=$(environment_file_for "$ACTIVE_INSTANCE")
+
+    if [[ -z "$kind" ]]; then
+        kind=$(prompt "Content to edit (welcome/help)" "help")
+    fi
+    case "${kind,,}" in
+        welcome) file=$(welcome_file_for "$ACTIVE_INSTANCE") ;;
+        help) file=$(help_file_for "$ACTIVE_INSTANCE") ;;
+        *) die "Content must be welcome or help." ;;
+    esac
+
+    backup=$(mktemp "${ETC_ROOT}/.${ACTIVE_INSTANCE}.${kind}.XXXXXX")
+    cp -a "$file" "$backup"
+    editor=${EDITOR:-editor}
+    if ! "$editor" "$file"; then
+        cp -a "$backup" "$file"
+        rm -f "$backup"
+        die "Editor failed; the previous content was restored."
+    fi
+    chown "root:${ACTIVE_USER}" "$file"
+    chmod 0640 "$file"
+    if ! runuser --user "$ACTIVE_USER" -- test -r "$file" ||
+        ! validate_environment "$app_dir" "$env_file"; then
+        cp -a "$backup" "$file"
+        rm -f "$backup"
+        die "Content was invalid; the previous file was restored."
+    fi
+    rm -f "$backup"
+    record_operation content "$ACTIVE_INSTANCE" "${kind,,}"
+    if confirm "Restart ${ACTIVE_INSTANCE} and synchronize Telegram now?" yes; then
+        cmd_restart "$ACTIVE_INSTANCE"
+    else
+        printf 'Content is valid but will apply only after restart.\n'
+    fi
+}
+
 cmd_config() {
     require_root
     require_tty
@@ -1108,16 +1632,22 @@ cmd_config() {
     local edited_log_file
     local edited_port
     local edited_token
+    local edited_welcome_file
+    local edited_help_file
     edited_instance=$(dotenv_value "$app_dir" "$env_file" "INSTANCE_NAME")
     edited_log_file=$(dotenv_value "$app_dir" "$env_file" "LOG_FILE")
     edited_port=$(dotenv_value "$app_dir" "$env_file" "HEALTH_PORT")
     edited_token=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_API_TOKEN")
+    edited_welcome_file=$(dotenv_value "$app_dir" "$env_file" "WELCOME_MESSAGE_FILE")
+    edited_help_file=$(dotenv_value "$app_dir" "$env_file" "HELP_MESSAGE_FILE")
     if [[ "$edited_instance" != "$ACTIVE_INSTANCE" ||
         "$edited_log_file" != "$(log_file_for "$ACTIVE_INSTANCE")" ||
-        "$edited_port" != "$ACTIVE_PORT" ]]; then
+        "$edited_port" != "$ACTIVE_PORT" ||
+        "$edited_welcome_file" != "$(welcome_file_for "$ACTIVE_INSTANCE")" ||
+        "$edited_help_file" != "$(help_file_for "$ACTIVE_INSTANCE")" ]]; then
         cp -a "$backup" "$env_file"
         rm -f "$backup"
-        die "INSTANCE_NAME, LOG_FILE, and HEALTH_PORT are manager-owned; the previous file was restored."
+        die "INSTANCE_NAME, LOG_FILE, HEALTH_PORT, and content-file paths are manager-owned; the previous file was restored."
     fi
     if [[ -n "$edited_token" ]] &&
         ! ensure_unique_token "$edited_token" "$ACTIVE_INSTANCE"; then
@@ -1183,6 +1713,8 @@ cmd_upgrade() {
     confirm "Build and deploy this exact reviewed commit?" yes ||
         die "Upgrade cancelled."
 
+    migrate_instance_configuration \
+        "$source_dir" "$python_bin" "$env_file" "$ACTIVE_USER" "$ACTIVE_INSTANCE"
     [[ ! -e "$next_dir" ]] || safe_remove_tree "$next_dir"
     UPGRADE_NEXT=$next_dir
     prepare_application \
@@ -1275,11 +1807,13 @@ cmd_uninstall() {
     local service
     local env_file
     local log_file
+    local app_dir
     local preserve_log="yes"
     service=$(service_name_for "$ACTIVE_INSTANCE")
     env_file=$(environment_file_for "$ACTIVE_INSTANCE")
     log_file=$(log_file_for "$ACTIVE_INSTANCE")
-    warn "This removes instance '${ACTIVE_INSTANCE}', its code, environment file, cache, state, service account, and Telegram polling service."
+    app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
+    warn "This removes instance '${ACTIVE_INSTANCE}', its code, environment file, content, cache, state, service account, and Telegram delivery service."
     read -r -p "Type the exact instance name to continue: " confirmation
     [[ "$confirmation" == "$ACTIVE_INSTANCE" ]] || die "Confirmation did not match."
     if confirm "Delete the retained JSON log too?" no; then
@@ -1288,11 +1822,19 @@ cmd_uninstall() {
     confirm "Permanently uninstall ${ACTIVE_INSTANCE}?" no ||
         die "Uninstall cancelled."
 
+    if [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]]; then
+        delete_telegram_webhook "$app_dir" "$env_file" ||
+            warn "Telegram webhook removal failed. Rotate the token through @BotFather if this instance will not be restored."
+    fi
     systemctl disable --now "$service" 2>/dev/null || true
     safe_remove_tree "${INSTANCE_ROOT}/${ACTIVE_INSTANCE}"
     rm -rf --one-file-system -- "${CACHE_ROOT:?}/${ACTIVE_INSTANCE}"
     rm -rf --one-file-system -- "${STATE_ROOT:?}/${ACTIVE_INSTANCE}"
-    rm -f -- "$env_file" "$(metadata_file_for "$ACTIVE_INSTANCE")"
+    rm -f -- \
+        "$env_file" \
+        "$(metadata_file_for "$ACTIVE_INSTANCE")" \
+        "$(welcome_file_for "$ACTIVE_INSTANCE")" \
+        "$(help_file_for "$ACTIVE_INSTANCE")"
     if id "$ACTIVE_USER" >/dev/null 2>&1; then
         userdel "$ACTIVE_USER"
     fi
@@ -1319,10 +1861,21 @@ cmd_self_test() {
     validate_port "0" || ((failed += 1))
     validate_port "65535" || ((failed += 1))
     ! validate_port "65536" || ((failed += 1))
+    validate_delivery_mode "polling" || ((failed += 1))
+    validate_delivery_mode "webhook" || ((failed += 1))
+    ! validate_delivery_mode "streaming" || ((failed += 1))
+    validate_webhook_url "https://bot.example.com/telegram/production" ||
+        ((failed += 1))
+    ! validate_webhook_url "http://bot.example.com/telegram/production" ||
+        ((failed += 1))
+    ! validate_webhook_url "https://bot.example.com/.*" ||
+        ((failed += 1))
     validate_token_shape "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi" ||
         ((failed += 1))
     ! validate_token_shape "replace-with-a-real-bot-token" || ((failed += 1))
     [[ -f "$UNIT_SOURCE" ]] || ((failed += 1))
+    [[ -f "${SCRIPT_DIR}/deploy/welcome.txt" ]] || ((failed += 1))
+    [[ -f "${SCRIPT_DIR}/deploy/help.txt" ]] || ((failed += 1))
     if ((failed > 0)); then
         die "Manager self-test failed with ${failed} error(s)."
     fi
@@ -1349,9 +1902,11 @@ GetBible Robot operations
  10) Diagnostics
  11) Repair application access
  12) Edit configuration
- 13) Upgrade
- 14) Roll back
- 15) Uninstall
+ 13) Switch polling/webhook delivery
+ 14) Edit welcome/help content
+ 15) Upgrade
+ 16) Roll back
+ 17) Uninstall
   0) Exit
 EOF
         read -r -p "Selection: " selection
@@ -1368,9 +1923,11 @@ EOF
             10) cmd_doctor ;;
             11) cmd_repair ;;
             12) cmd_config ;;
-            13) cmd_upgrade ;;
-            14) cmd_rollback ;;
-            15) cmd_uninstall ;;
+            13) cmd_delivery ;;
+            14) cmd_content ;;
+            15) cmd_upgrade ;;
+            16) cmd_rollback ;;
+            17) cmd_uninstall ;;
             0) return ;;
             *) warn "Unknown selection." ;;
         esac
@@ -1393,6 +1950,8 @@ main() {
         doctor) cmd_doctor "$@" ;;
         repair) cmd_repair "$@" ;;
         config) cmd_config "$@" ;;
+        delivery) cmd_delivery "$@" ;;
+        content) cmd_content "$@" ;;
         upgrade) cmd_upgrade "$@" ;;
         rollback) cmd_rollback "$@" ;;
         uninstall) cmd_uninstall "$@" ;;

@@ -22,6 +22,7 @@ Common causes:
 - instance name is invalid or already exists;
 - derived `gb-<instance>` account already exists unmanaged;
 - token shape is invalid or token belongs to another local instance;
+- webhook public URL, loopback port, fixed IP, or secret is invalid;
 - health port is already listening;
 - hashed dependency installation or `pip check` fails;
 - target configuration fails validation;
@@ -43,12 +44,48 @@ Typical causes:
 
 - Telegram rejected or revoked the token;
 - another host/process is polling with the same token;
+- the configured webhook URL does not reach the exact loopback path;
 - outbound DNS, TCP 443, system time, or CA trust is broken;
 - selected health port became occupied;
 - file ownership was changed after setup;
 - GetBible API or Telegram initialization is unavailable.
 
 Do not put the token into a support ticket. Rotate it through `@BotFather` when in doubt.
+
+## Repeated Telegram `Conflict` errors
+
+Telegram permits only one active `getUpdates` poller for a bot token. The robot
+now treats `Conflict` as an operational stop condition: it logs one critical
+message, exits with status 75, and systemd does not restart that status.
+
+Find and stop the other process or host before restarting:
+
+```bash
+sudo systemctl list-units --type=service --all | grep -Ei 'getbible|telegram'
+sudo pgrep -af 'bot\.py|getbible.*robot'
+sudo getbible-robot status production
+```
+
+If webhook delivery is preferred, prepare the public HTTPS route and run:
+
+```bash
+sudo getbible-robot delivery production
+```
+
+Do not “fix” the conflict by allowing both processes to restart.
+
+## Webhook is registered but updates do not arrive
+
+```bash
+sudo getbible-robot doctor production
+sudo getbible-robot status production
+sudo getbible-robot logs production 200
+```
+
+Confirm DNS, certificate chain, inbound public port, reverse-proxy route, and
+the exact path printed by the manager. The local webhook port must remain bound
+to `127.0.0.1`; Telegram connects to the reverse proxy, not that port directly.
+See [Telegram delivery](WEBHOOKS.md).
 
 ## Service fails with `status=200/CHDIR`
 
@@ -114,7 +151,19 @@ Inspect circuit, repository failure, and timeout metrics. After `CIRCUIT_RECOVER
 
 `RobotBusy` means bounded worker capacity was not acquired within `LOOKUP_QUEUE_TIMEOUT`. A timed-out synchronous worker deliberately retains its permit until the real thread exits, preventing an unbounded executor queue.
 
-Measure upstream latency and worker pressure. Do not raise concurrency, timeouts, result sizes, or message budgets until the workload and memory impact are tested.
+Search work and direct references use independent pools and circuits. A large
+first search may download and index a full translation; with
+`PREWARM_DEFAULT_TRANSLATION=true`, this cost occurs once during startup for the
+default translation. Later searches reuse the bounded cache.
+
+If logs report `RepositoryResponseTooLarge`, compare the actual corpus size with
+`GETBIBLE_MAX_RESPONSE_BYTES`. The production default is 64 MiB; do not lower it
+to the old 8 MiB value, which cannot hold KJV. Search result construction remains
+separately limited by `SEARCH_MAX_RESPONSE_BYTES`.
+
+Measure upstream latency, memory, and the applicable worker pool. Do not raise
+concurrency, timeouts, result sizes, or message budgets until the impact is
+tested.
 
 ## Interactive panel expired
 

@@ -158,6 +158,14 @@ chown() {
     :
 }
 
+telegram_delivery_status() {
+    printf 'Telegram delivery fixture: synchronized\n'
+}
+
+delete_telegram_webhook() {
+    :
+}
+
 runuser() {
     [[ ${1:-} == "--user" && -n ${2:-} ]] ||
         fail "unexpected runuser arguments: $*"
@@ -195,6 +203,12 @@ stat() {
                 local instance
                 instance=$(basename "$3" .jsonl)
                 printf 'gb-%s:gb-%s:640\n' "$instance" "$instance"
+                ;;
+            "$ETC_ROOT"/*.welcome.txt|"$ETC_ROOT"/*.help.txt)
+                local instance
+                instance=$(basename "$3")
+                instance=${instance%%.*}
+                printf 'root:gb-%s:640\n' "$instance"
                 ;;
             *)
                 command stat "$@"
@@ -307,6 +321,8 @@ create_source_fixture() {
     cp -- "$ROOT/setup.sh" "$SOURCE_DIR/setup.sh"
     cp -- "$ROOT/deploy/getbible-robot@.service" \
         "$SOURCE_DIR/deploy/getbible-robot@.service"
+    cp -- "$ROOT/deploy/welcome.txt" "$SOURCE_DIR/deploy/welcome.txt"
+    cp -- "$ROOT/deploy/help.txt" "$SOURCE_DIR/deploy/help.txt"
     cp -- "$ROOT/.env.template" "$SOURCE_DIR/.env.template"
     printf 'print("fixture")\n' >"$SOURCE_DIR/bot.py"
     printf 'class Settings:\n    pass\n' >"$SOURCE_DIR/config.py"
@@ -321,19 +337,24 @@ create_source_fixture() {
 install_instance() {
     local instance=$1
     local token=$2
-    cmd_install --source "$SOURCE_DIR" <<EOF
-
-$instance
-$token
-$token
-
-0
-
-
-
-
-n
-EOF
+    cmd_install --source "$SOURCE_DIR" < <(
+        printf '%s\n' \
+            "" \
+            "$instance" \
+            "$token" \
+            "$token" \
+            "" \
+            "" \
+            "" \
+            "" \
+            "" \
+            "0" \
+            "" \
+            "" \
+            "" \
+            "" \
+            "n"
+    )
 }
 
 commit_fixture_version() {
@@ -358,6 +379,10 @@ assert_file "$(metadata_file_for alpha)"
 assert_file "$(metadata_file_for beta)"
 assert_file "$(environment_file_for alpha)"
 assert_file "$(environment_file_for beta)"
+assert_file "$(welcome_file_for alpha)"
+assert_file "$(help_file_for alpha)"
+assert_file "$(welcome_file_for beta)"
+assert_file "$(help_file_for beta)"
 assert_file "$(log_file_for alpha)"
 assert_file "$(log_file_for beta)"
 assert_file "$MANAGER_PATH"
@@ -374,6 +399,12 @@ assert_contains "$(environment_file_for alpha)" 'INSTANCE_NAME="alpha"'
 assert_contains "$(environment_file_for beta)" 'INSTANCE_NAME="beta"'
 assert_contains "$(environment_file_for alpha)" 'AUDIT_LOG_MODE="metadata"'
 assert_contains "$(environment_file_for beta)" 'HEALTH_PORT="0"'
+assert_contains "$(environment_file_for alpha)" 'TELEGRAM_DELIVERY_MODE="polling"'
+assert_contains "$(environment_file_for alpha)" \
+    'GETBIBLE_MAX_RESPONSE_BYTES="67108864"'
+assert_contains "$(environment_file_for alpha)" \
+    'SEARCH_MAX_RESPONSE_BYTES="4194304"'
+assert_contains "$(help_file_for alpha)" "/search"
 assert_equal "$(wc -l <"$USERS_FILE")" "2"
 ! ensure_unique_token \
     "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi" \
@@ -463,6 +494,51 @@ n
 EOF
 assert_contains "$(environment_file_for alpha)" 'TRANSLATION="asv"'
 
+CONTENT_EDITOR="${TEST_ROOT}/content-editor"
+cat >"$CONTENT_EDITOR" <<'EOF'
+#!/usr/bin/env bash
+printf '\nFixture operator help.\n' >>"$1"
+EOF
+chmod 0700 "$CONTENT_EDITOR"
+EDITOR="$CONTENT_EDITOR" cmd_content alpha help <<EOF
+n
+EOF
+assert_contains "$(help_file_for alpha)" "Fixture operator help."
+
+cmd_delivery alpha <<EOF
+webhook
+https://bot.example.com/telegram/alpha
+9101
+
+y
+EOF
+assert_contains "$(environment_file_for alpha)" \
+    'TELEGRAM_DELIVERY_MODE="webhook"'
+assert_contains "$(environment_file_for alpha)" \
+    'TELEGRAM_WEBHOOK_PUBLIC_URL="https://bot.example.com/telegram/alpha"'
+assert_contains "$(environment_file_for alpha)" \
+    'TELEGRAM_WEBHOOK_PORT="9101"'
+
+export FAIL_NEXT_START
+FAIL_NEXT_START=$(service_name_for alpha)
+if (
+    cmd_delivery alpha <<EOF
+polling
+EOF
+)
+then
+    fail "a failed delivery restart was reported as successful"
+fi
+unset FAIL_NEXT_START
+assert_contains "$(environment_file_for alpha)" \
+    'TELEGRAM_DELIVERY_MODE="webhook"'
+
+cmd_delivery alpha <<EOF
+polling
+EOF
+assert_contains "$(environment_file_for alpha)" \
+    'TELEGRAM_DELIVERY_MODE="polling"'
+
 SECOND_SHA=$(commit_fixture_version v2)
 cmd_upgrade alpha --source "$SOURCE_DIR" <<EOF
 
@@ -509,6 +585,8 @@ EOF
 assert_absent "$(metadata_file_for beta)"
 assert_absent "$(environment_file_for beta)"
 assert_absent "$(application_dir_for beta)"
+assert_absent "$(welcome_file_for beta)"
+assert_absent "$(help_file_for beta)"
 assert_absent "$(log_file_for beta)"
 grep -Fxq -- "gb-alpha" "$USERS_FILE" || fail "alpha account was removed"
 ! grep -Fxq -- "gb-beta" "$USERS_FILE" || fail "beta account was retained"

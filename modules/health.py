@@ -108,6 +108,11 @@ class HealthServer:
             "getbible_robot_circuit_open "
             f"{1 if circuit['state'] == 'open' else 0}"
         )
+        search_circuit = service["search_circuit"]
+        lines.append(
+            "getbible_robot_search_circuit_open "
+            f"{1 if search_circuit['state'] == 'open' else 0}"
+        )
         body = ("\n".join(lines) + "\n").encode("utf-8")
         await self._write_bytes(writer, 200, body, "text/plain; version=0.0.4")
 

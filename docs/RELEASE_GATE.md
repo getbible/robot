@@ -54,7 +54,12 @@ A robot commit is deployable only when every applicable item below is satisfied.
 
 ## Upstream and concurrency behavior
 
-- Connect, read, retry, response-byte, queue, and overall lookup limits are active.
+- Connect, read, retry, full-corpus byte, search-output byte, queue, and overall
+  lookup limits are active.
+- The full-corpus ceiling holds the largest supported translation with measured
+  headroom; it does not enlarge the search-result or Telegram-output budgets.
+- Search and direct-reference pools/circuits are independent, and a slow search
+  does not consume all direct-reference capacity.
 - Repository stalls return a generic response within the configured outer timeout.
 - Python 3.10 and newer enter the same typed timeout and queue-saturation paths.
 - A timed-out worker retains its permit until the underlying thread actually exits.
@@ -68,6 +73,7 @@ A robot commit is deployable only when every applicable item below is satisfied.
 ## Telegram behavior
 
 - Every Telegram chunk is valid escaped HTML.
+- Consecutive verses render with one newline and no blank paragraph.
 - URL path components are percent encoded.
 - Length is measured in Telegram UTF-16 code units and remains below 4096.
 - The configured maximum output-message count is enforced.
@@ -83,6 +89,12 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - Group replies are accepted only for the exact session owner and bot prompt.
 - Expired, foreign, malformed, and stale callbacks fail safely.
 - Only required Telegram message and callback-query update types are subscribed.
+- Polling and webhook modes each start with only the validated transport
+  arguments and never run together.
+- Duplicate polling produces one critical event, stops the application, exits
+  with status 75, and is not restarted by systemd.
+- Webhook requests require the generated secret and reach only a loopback
+  listener behind public HTTPS.
 
 ## Startup, health, and observability
 
@@ -96,7 +108,8 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - Readiness becomes false when the circuit is open or service is closing.
 - Metrics contain aggregate values only.
 - Logs contain no secrets; message-derived search/reference content is absent unless content audit mode is explicitly enabled.
-- A normal SIGTERM closes health, workers, repository sessions, and polling cleanly.
+- A normal SIGTERM closes health, both worker pools, repository sessions, and
+  the active Telegram transport cleanly.
 
 ## Documentation and operations
 
@@ -104,7 +117,9 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - The setup questionnaire completed successfully on a clean host or clean test image.
 - The hermetic setup lifecycle passes transactional failure cleanup, two-instance isolation, all manager command paths, configuration restoration, upgrade failure restoration, rollback, and isolated uninstall.
 - Two test instances demonstrate distinct accounts, applications, environments, tokens, caches, ports, logs, processes, and state.
-- Instance selection resolves the intended target for list, start, stop, restart, status, runtime, logs, follow, doctor, config, upgrade, rollback, and uninstall.
+- Instance selection resolves the intended target for list, start, stop,
+  restart, status, runtime, logs, follow, doctor, delivery, content, config,
+  upgrade, rollback, and uninstall.
 - Setup rejects duplicate instance names, unmanaged account collisions, reused tokens, dirty source, unsupported Python, invalid ports, and malformed secrets.
 - Every current environment variable appears in the configuration reference and `.env.template`.
 - Required operator documents exist and every relative Markdown link resolves.
