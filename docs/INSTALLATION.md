@@ -79,7 +79,7 @@ For an instance named `production`:
 
 | Purpose | Path | Ownership/access |
 |---|---|---|
-| Application and exact virtual environment | `/opt/getbible-robot/production/app` | `root:root`, service read-only |
+| Application and exact virtual environment | `/opt/getbible-robot/production/app` | `root:gb-production`, mode `0750` directories/`0640` files |
 | Secret environment | `/etc/getbible-robot/production.env` | `root:root`, mode `0600` |
 | Non-secret deployment metadata | `/etc/getbible-robot/instances/production.conf` | `root:root`, mode `0600` |
 | Runtime cache | `/var/cache/getbible-robot/production` | `gb-production`, mode `0700` |
@@ -119,6 +119,8 @@ Before enabling a service, setup:
 - installs `requirements.txt` with `--require-hashes`;
 - runs `pip check`;
 - validates every environment value with the deployed code;
+- makes the code readable only by the matching instance group;
+- enters the application and imports its configuration as the real locked service account;
 - optionally calls Telegram `getMe` without printing the token;
 - verifies the instantiated `systemd` unit;
 - starts the service only after all build checks pass;
