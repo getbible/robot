@@ -212,6 +212,8 @@ class SettingsTestCase(unittest.TestCase):
             settings = Settings.from_env(load_environment_file=False)
         self.assertEqual(settings.instance_name, "local")
         self.assertIsNone(settings.log_file)
+        self.assertIsNone(settings.user_preferences_file)
+        self.assertEqual(settings.user_preference_limit, 100_000)
         self.assertEqual(settings.audit_log_mode, "metadata")
 
     def test_instance_file_and_audit_configuration_is_validated(self) -> None:
@@ -221,6 +223,8 @@ class SettingsTestCase(unittest.TestCase):
             {"INSTANCE_NAME": "BadName"},
             {"INSTANCE_NAME": "bad--name"},
             {"LOG_FILE": "relative.log"},
+            {"USER_PREFERENCES_FILE": "relative.sqlite3"},
+            {"USER_PREFERENCE_LIMIT": "99"},
             {"AUDIT_LOG_MODE": "everything"},
         )
         for overrides in invalid:

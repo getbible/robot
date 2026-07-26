@@ -542,6 +542,9 @@ migrate_instance_configuration() {
         "SEARCH_MAX_RESPONSE_BYTES" "4194304"
     ensure_env_value "$python_bin" "$env_file" "MAX_CONCURRENT_SEARCHES" "1"
     ensure_env_value "$python_bin" "$env_file" "PREWARM_DEFAULT_TRANSLATION" "true"
+    ensure_env_value "$python_bin" "$env_file" \
+        "USER_PREFERENCES_FILE" "${STATE_ROOT}/${instance}/preferences.sqlite3"
+    ensure_env_value "$python_bin" "$env_file" "USER_PREFERENCE_LIMIT" "100000"
     ensure_env_value "$python_bin" "$env_file" "TELEGRAM_DELIVERY_MODE" "polling"
     ensure_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_PUBLIC_URL" ""
     ensure_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_LISTEN" "127.0.0.1"
@@ -1122,6 +1125,9 @@ cmd_install() {
     replace_env_value "$python_bin" "$env_file" "BOT_DESCRIPTION" "$bot_description"
     replace_env_value "$python_bin" "$env_file" "BOT_SHORT_DESCRIPTION" "$bot_short_description"
     replace_env_value "$python_bin" "$env_file" "TRANSLATION" "$translation"
+    replace_env_value "$python_bin" "$env_file" \
+        "USER_PREFERENCES_FILE" "${state_dir}/preferences.sqlite3"
+    replace_env_value "$python_bin" "$env_file" "USER_PREFERENCE_LIMIT" "100000"
     replace_env_value "$python_bin" "$env_file" "WELCOME_MESSAGE_FILE" "$welcome_file"
     replace_env_value "$python_bin" "$env_file" "HELP_MESSAGE_FILE" "$help_file"
     replace_env_value "$python_bin" "$env_file" "HEALTH_PORT" "$health_port"

@@ -12,10 +12,16 @@ from modules.commands import (
     SERVICE_SLOT,
     SETTINGS_SLOT,
     _dispatch_callback,
+    _interaction_callback_unlocked,
     interaction_callback,
     interaction_reply,
 )
-from modules.interactions import InteractionStore, SearchOptions, SearchResult
+from modules.interactions import (
+    InteractionStore,
+    ReferenceSelection,
+    SearchOptions,
+    SearchResult,
+)
 from modules.service import SearchPage
 
 EXPECTED_CALLBACK_ACTIONS = frozenset(
@@ -30,6 +36,9 @@ EXPECTED_CALLBACK_ACTIONS = frozenset(
         "cp",
         "cs",
         "rpost",
+        "radd",
+        "rmore",
+        "rrm",
         "rreset",
         "sb",
         "sbclear",
@@ -61,6 +70,7 @@ EXPECTED_CALLBACK_ACTIONS = frozenset(
         "vback",
         "ve",
         "vep",
+        "vone",
         "vs",
         "vsp",
     }
@@ -233,6 +243,7 @@ class InteractiveFeatureTestCase(unittest.IsolatedAsyncioTestCase):
         source = "\n".join(
             (
                 inspect.getsource(interaction_callback),
+                inspect.getsource(_interaction_callback_unlocked),
                 inspect.getsource(_dispatch_callback),
             )
         )
@@ -278,13 +289,13 @@ class InteractiveFeatureTestCase(unittest.IsolatedAsyncioTestCase):
         await self.dispatch(session, "vsp", "1")
         await self.dispatch(session, "vs", "5")
         self.assertEqual(session.stage, "reference_end")
-        await self.dispatch(session, "vep", "1")
+        await self.dispatch(session, "vep", "0")
         await self.dispatch(session, "ve", "30")
         self.assertEqual(session.stage, "reference_review")
 
         await self.dispatch(session, "vback")
         await self.dispatch(session, "vs", "6")
-        await self.dispatch(session, "ve", "6")
+        await self.dispatch(session, "vone")
         await self.dispatch(session, "rreset")
         self.assertEqual(session.stage, "reference_translation")
         self.assertIsNone(session.book)
@@ -294,6 +305,9 @@ class InteractiveFeatureTestCase(unittest.IsolatedAsyncioTestCase):
         session.chapter = ChapterOption(1, tuple(range(1, 31)))
         session.start_verse = 1
         session.end_verse = 1
+        session.reference_selections = [
+            ReferenceSelection(43, "John", 1, 1, 1)
+        ]
         session.translation = "asv"
         await self.dispatch(session, "rpost")
         self.service.select.assert_awaited()
@@ -442,6 +456,50 @@ class InteractiveFeatureTestCase(unittest.IsolatedAsyncioTestCase):
         await self.dispatch(cancelled, "cancel")
         self.assertIsNone(
             self.store.get(cancelled.token, chat_id=100, user_id=200)
+        )
+
+    async def test_reference_basket_adds_removes_and_continues(self) -> None:
+        session = self.store.create(
+            chat_id=100,
+            user_id=200,
+            kind="reference",
+            stage="reference_review",
+            translation="kjv",
+        )
+        session.message_id = 300
+        session.books = self.books
+        session.book = BookOption(43, "John", "f" * 40)
+        session.chapters = self.chapters
+        session.chapter = ChapterOption(3, tuple(range(1, 31)))
+        session.reference_selections = [
+            ReferenceSelection(43, "John", 3, 5, 7)
+        ]
+
+        await self.dispatch(session, "rmore")
+        self.assertEqual(session.stage, "reference_start")
+        await self.dispatch(session, "vs", "10")
+        await self.dispatch(session, "vone")
+        self.assertEqual(
+            session.reference_selections,
+            [
+                ReferenceSelection(43, "John", 3, 5, 7),
+                ReferenceSelection(43, "John", 3, 10, 10),
+            ],
+        )
+
+        await self.dispatch(session, "rrm", "0")
+        self.assertEqual(
+            session.reference_selections,
+            [ReferenceSelection(43, "John", 3, 10, 10)],
+        )
+
+        await self.dispatch(session, "radd")
+        self.assertEqual(session.stage, "reference_books")
+        self.assertIsNone(session.book)
+        self.assertIsNone(session.chapter)
+        self.assertEqual(
+            session.reference_selections,
+            [ReferenceSelection(43, "John", 3, 10, 10)],
         )
 
     async def test_invalid_expired_and_wrong_owner_controls_fail_closed(self) -> None:

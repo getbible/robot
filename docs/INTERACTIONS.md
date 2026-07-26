@@ -22,7 +22,10 @@ application is required.
 /bible Genesis 1:1-5 aov
 ```
 
-The reference is validated and posted immediately. The configured `TRANSLATION`—`kjv` by default—is used when no trailing translation abbreviation is supplied. `/get` and `/getbible` are aliases and follow the same behavior.
+The reference is validated and posted immediately. The Telegram user's saved
+translation is used when no trailing translation abbreviation is supplied.
+`TRANSLATION`—`kjv` by default—is the fallback until that user chooses another
+translation. `/get` and `/getbible` are aliases and follow the same behavior.
 
 In a group or supergroup, the registered `/bible` command is ephemeral. The
 command stays private to its sender while the resulting Scripture is posted
@@ -36,17 +39,28 @@ has been delivered successfully.
 /bible
 ```
 
-The robot never substitutes a hidden default verse. It opens this short sequence:
+The robot never substitutes a hidden default verse. It opens this sequence:
 
-1. translation, with the configured default already selected and a one-click **Skip — use KJV** action;
+1. translation, with the user's saved or configured default already selected and a one-click **Continue with …** action;
 2. Old Testament, New Testament, or other books actually available in that translation;
 3. book;
 4. chapter;
 5. first verse;
-6. last verse, where choosing the same number selects one verse;
-7. review and **Post Scripture**.
+6. **Add verse N only**, or a later verse to create a range;
+7. basket review, with **Add another from this chapter**, **Add another book/chapter**, and an individual remove action for every entry;
+8. **Post selection**.
 
-Translation and book lists come from the configured GetBible v2 repository. The selected full-book navigation document must match the SHA-1 published in that translation's books index before chapter or verse buttons are constructed.
+The basket accepts a single verse, one range, several non-contiguous verses,
+several ranges, or combinations across chapters and books. Overlapping and
+adjacent selections are merged into compact canonical references only when the
+final request is built. The basket remains bounded by `MAX_REFERENCES`,
+`MAX_VERSES_PER_REFERENCE`, and `MAX_TOTAL_VERSES`.
+
+Translation and book lists come from the configured GetBible v2 repository.
+Choosing a translation in either `/bible` or `/search` saves that choice as the
+user's default for later commands and service restarts. The selected full-book
+navigation document must match the SHA-1 published in that translation's books
+index before chapter or verse buttons are constructed.
 
 In a group or supergroup, this entire sequence remains inside one per-user
 ephemeral panel. Page changes edit that panel rather than sending ordinary chat
@@ -72,7 +86,13 @@ The command text is passed to Librarian 1.2 with its safe defaults:
 - diacritic sensitive;
 - canonical order;
 - no book restriction, exclusions, or proximity;
-- configured default translation.
+- saved user translation, falling back to the configured application default.
+
+For Mandarin, Japanese, Korean, and other detected scripts that do not use
+whitespace word boundaries, an otherwise-default whole-word search is
+automatically changed to substring matching. This avoids treating every
+adjacent ideograph as part of one indivisible word. An explicitly configured
+search remains visible in the dashboard.
 
 The robot displays every returned verse in full inside its own full-width
 selectable button. The words reported by Librarian are visibly marked as
@@ -103,7 +123,11 @@ The filter dashboard exposes the Librarian 1.2 search contract:
 | Exclude | Optional words supplied through a selective reply |
 | Proximity | None or 0–100 intervening words from the offered bounded values |
 
-Choosing proximity automatically selects the Librarian-compatible `all` word mode. Changing translation clears a previous book restriction because book availability is translation-specific. **Reset defaults** returns the dashboard to the configured default translation and Librarian defaults.
+Choosing proximity automatically selects the Librarian-compatible `all` word
+mode. Changing translation clears a previous book restriction because book
+availability is translation-specific and saves the new translation as that
+user's default. **Reset defaults** restores Librarian defaults while retaining
+the user's saved translation.
 
 After selecting **Search words**, the user replies to the bot's prompt. The
 prompt and response are ephemeral in a group or supergroup. The session remains
@@ -193,19 +217,26 @@ remains required to remove manually visible commands and legacy alias messages.
 - `INTERACTION_TTL_SECONDS` expires idle sessions.
 - `INTERACTION_SESSION_LIMIT` provides LRU-bounded process memory under arbitrary user and chat churn.
 - Restarting the process intentionally invalidates every open panel; the user can run the command again.
-- Repository calls still pass through the shared queue, fixed worker pool, timeout, circuit breaker, and user/chat rate limits.
-- Every accepted command, callback, and session-owned prompt reply consumes the inbound user/chat rate budget, including local pagination and selection changes.
+- Repository calls still pass through the shared queue, fixed worker pool,
+  timeout, and circuit breaker.
+- New commands and free-text prompt replies consume the inbound user/chat rate
+  budget. Owner-scoped menu callbacks are serialized per session and do not
+  consume command tokens, so normal translation/book/chapter/result navigation
+  cannot rate-limit itself.
 - Scrolling is native Telegram behavior, and checkmark changes do not consume a
   repository worker.
 - Repeated rate-limit rejections produce at most one Telegram warning per cooldown period.
 - Workflow cleanup records at most 256 exact message IDs per session and runs
   only after successful Scripture delivery or explicit cancellation.
 
-The process stores only short-lived selection state. It does not persist query text, selected verses, user profiles, or chat history.
+The process stores short-lived query and selection state only in memory. The
+per-instance preference database persists only a Telegram user ID, one
+translation code, and an update timestamp; it does not store names, usernames,
+query text, selected verses, or chat history.
 
-## Rollout roadmap
+## Rollout checklist
 
-### Implemented on the feature branch
+### Implemented
 
 - Librarian input policy moved to `getbible>=1.2,<2` with an exact `1.2.0` hashed lock.
 - Explicit `/bible <reference>` compatibility retained.
@@ -217,7 +248,7 @@ The process stores only short-lived selection state. It does not persist query t
 - Deterministic security, service, catalog, interaction, and command regressions added.
 - Per-instance audit events record workflow source, translation, filter modes, result/selection counts, and posting outcome. Exact search terms and final references are present only when `AUDIT_LOG_MODE=content`.
 
-### Required before production merge
+### Required before production rollout
 
 1. Complete the repository CI and CodeQL gates on Python 3.10, 3.11, and 3.12.
 2. Use a dedicated test bot to run the private-chat and group smoke matrix in [Testing](TESTING.md).

@@ -212,6 +212,20 @@ def _log_file() -> str | None:
     return str(path)
 
 
+def _preferences_file() -> str | None:
+    value = _env("USER_PREFERENCES_FILE", "") or ""
+    if not value:
+        return None
+    if len(value) > 4096 or "\x00" in value:
+        raise ConfigurationError("USER_PREFERENCES_FILE contains an invalid path.")
+    path = Path(value)
+    if not path.is_absolute():
+        raise ConfigurationError(
+            "USER_PREFERENCES_FILE must be an absolute path or empty."
+        )
+    return str(path)
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     """All settings are validated once before Telegram polling starts."""
@@ -228,6 +242,8 @@ class Settings:
     bot_description: str
     bot_short_description: str
     default_translation: str
+    user_preferences_file: str | None
+    user_preference_limit: int
     api_base_url: str
     web_base_url: str
     welcome_message: str
@@ -344,6 +360,13 @@ class Settings:
                 120,
             ),
             default_translation=translation,
+            user_preferences_file=_preferences_file(),
+            user_preference_limit=_integer(
+                "USER_PREFERENCE_LIMIT",
+                100_000,
+                100,
+                1_000_000,
+            ),
             api_base_url=_base_url("GETBIBLE_API_BASE_URL", "https://api.getbible.net"),
             web_base_url=_base_url("GETBIBLE_WEB_BASE_URL", "https://getbible.life"),
             welcome_message=_message(

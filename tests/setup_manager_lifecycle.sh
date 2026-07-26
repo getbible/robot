@@ -398,6 +398,9 @@ assert_contains "$RUNUSER_LOG" "gb-beta"
 assert_contains "$(environment_file_for alpha)" 'INSTANCE_NAME="alpha"'
 assert_contains "$(environment_file_for beta)" 'INSTANCE_NAME="beta"'
 assert_contains "$(environment_file_for alpha)" 'AUDIT_LOG_MODE="metadata"'
+assert_contains "$(environment_file_for alpha)" \
+    "USER_PREFERENCES_FILE=\"${STATE_ROOT}/alpha/preferences.sqlite3\""
+assert_contains "$(environment_file_for alpha)" 'USER_PREFERENCE_LIMIT="100000"'
 assert_contains "$(environment_file_for beta)" 'HEALTH_PORT="0"'
 assert_contains "$(environment_file_for alpha)" 'TELEGRAM_DELIVERY_MODE="polling"'
 assert_contains "$(environment_file_for alpha)" \

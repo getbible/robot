@@ -26,6 +26,8 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             max_concurrent_updates=4,
             prewarm_default_translation=True,
             default_translation="kjv",
+            user_preferences_file=None,
+            user_preference_limit=100,
             bot_name="GetBible Robot",
             bot_description="Read and search Scripture in Telegram with GetBible.",
             bot_short_description="Read and search Scripture with GetBible.",
@@ -51,6 +53,7 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             patch.object(bot, "ScriptureService", return_value=Mock()),
             patch.object(bot, "InboundRateLimiter", return_value=Mock()),
             patch.object(bot, "InteractionStore", return_value=Mock()),
+            patch.object(bot, "UserPreferenceStore", return_value=Mock()),
             patch.object(bot, "HealthServer", return_value=Mock()),
         ):
             result = bot.build_application(self.settings())
@@ -80,6 +83,7 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
                 return_value={"abbreviation": "kjv", "verses": 31_102}
             ),
         )
+        preferences = SimpleNamespace(close=Mock())
         settings = self.settings()
         application = SimpleNamespace(
             bot=SimpleNamespace(
@@ -92,6 +96,7 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
                 bot.HEALTH_SLOT: health,
                 bot.SERVICE_SLOT: service,
                 bot.SETTINGS_SLOT: settings,
+                bot.PREFERENCES_SLOT: preferences,
             },
         )
 
@@ -132,6 +137,7 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         await bot._post_shutdown(application)
         health.close.assert_awaited_once()
         service.close.assert_awaited_once()
+        preferences.close.assert_called_once_with()
 
     def test_delivery_runner_selects_polling_or_webhook_exclusively(self) -> None:
         application = SimpleNamespace(

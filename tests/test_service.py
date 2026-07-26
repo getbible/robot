@@ -187,6 +187,18 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(query, ScriptureQuery("John 3:16", "kjv"))
         self.assertEqual(client.translation_calls, [])
 
+    async def test_ordinary_reference_accepts_a_saved_user_default(self) -> None:
+        client = _Client()
+        service = ScriptureService(_settings(), client=client)
+        self.addAsyncCleanup(service.close)
+
+        query = await service.resolve_query(
+            ["John", "3:16"],
+            default_translation="asv",
+        )
+        self.assertEqual(query, ScriptureQuery("John 3:16", "asv"))
+        self.assertEqual(client.translation_calls, [])
+
     async def test_explicit_translation_is_validated_once(self) -> None:
         client = _Client()
         service = ScriptureService(_settings(), client=client)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import threading
 import time
@@ -45,6 +46,17 @@ class SearchResult:
     terms: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class ReferenceSelection:
+    """One verse or contiguous range accumulated by the Bible picker."""
+
+    book_number: int
+    book_name: str
+    chapter: int
+    start_verse: int
+    end_verse: int
+
+
 @dataclass(slots=True)
 class InteractionSession:
     """One user's state machine, keyed by an opaque callback token."""
@@ -65,6 +77,7 @@ class InteractionSession:
     chapter: ChapterOption | None = None
     start_verse: int | None = None
     end_verse: int | None = None
+    reference_selections: list[ReferenceSelection] = field(default_factory=list)
     testament: str = "all"
     search_options: SearchOptions = field(default_factory=SearchOptions)
     search_query: str = ""
@@ -81,6 +94,7 @@ class InteractionSession:
     source_ephemeral_receiver_user_id: int | None = None
     message_thread_id: int | None = None
     workflow_message_ids: set[int] = field(default_factory=set)
+    callback_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     def remember_message(self, message_id: int | None) -> None:
         """Remember one workflow message without allowing unbounded growth."""

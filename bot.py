@@ -27,6 +27,7 @@ from modules.commands import (
     DUPLICATE_POLLER_SLOT,
     INTERACTIONS_SLOT,
     LIMITER_SLOT,
+    PREFERENCES_SLOT,
     SERVICE_SLOT,
     SETTINGS_SLOT,
     bible_command,
@@ -41,6 +42,7 @@ from modules.commands import (
 from modules.errors import ScriptureUnavailable
 from modules.health import HealthServer
 from modules.interactions import InteractionStore
+from modules.preferences import UserPreferenceStore
 from modules.rate_limit import InboundRateLimiter
 from modules.service import ScriptureService
 
@@ -116,6 +118,11 @@ def build_application(settings: Settings) -> Application:
         max_sessions=settings.interaction_session_limit,
         ttl_seconds=settings.interaction_ttl_seconds,
     )
+    preferences = UserPreferenceStore(
+        path=settings.user_preferences_file,
+        default_translation=settings.default_translation,
+        max_users=settings.user_preference_limit,
+    )
     health = HealthServer(
         host=settings.health_host,
         port=settings.health_port,
@@ -136,6 +143,7 @@ def build_application(settings: Settings) -> Application:
     application.bot_data[SERVICE_SLOT] = service
     application.bot_data[LIMITER_SLOT] = limiter
     application.bot_data[INTERACTIONS_SLOT] = interactions
+    application.bot_data[PREFERENCES_SLOT] = preferences
     application.bot_data[HEALTH_SLOT] = health
 
     application.add_handler(CommandHandler("start", start_command))
@@ -207,8 +215,10 @@ async def _post_init(application: Application) -> None:
 async def _post_shutdown(application: Application) -> None:
     health: HealthServer = application.bot_data[HEALTH_SLOT]
     service: ScriptureService = application.bot_data[SERVICE_SLOT]
+    preferences: UserPreferenceStore = application.bot_data[PREFERENCES_SLOT]
     await health.close()
     await service.close()
+    preferences.close()
     LOGGER.info("GetBible Robot shut down cleanly")
 
 

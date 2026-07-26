@@ -48,9 +48,11 @@ from modules.errors import (
 from modules.interactions import (
     InteractionSession,
     InteractionStore,
+    ReferenceSelection,
     SearchOptions,
     SearchResult,
 )
+from modules.preferences import UserPreferenceStore
 from modules.rate_limit import InboundRateLimiter
 from modules.renderer import render_scripture
 from modules.service import ScriptureQuery, ScriptureService
@@ -62,6 +64,7 @@ SETTINGS_SLOT = "settings"
 SERVICE_SLOT = "scripture_service"
 LIMITER_SLOT = "inbound_rate_limiter"
 INTERACTIONS_SLOT = "interaction_store"
+PREFERENCES_SLOT = "user_preference_store"
 DUPLICATE_POLLER_SLOT = "duplicate_poller_detected"
 
 TRANSLATION_PAGE_SIZE = 6
@@ -86,6 +89,9 @@ CALLBACK_ACTIONS = frozenset(
         "cp",
         "cs",
         "rpost",
+        "radd",
+        "rmore",
+        "rrm",
         "rreset",
         "sb",
         "sbclear",
@@ -117,6 +123,7 @@ CALLBACK_ACTIONS = frozenset(
         "vback",
         "ve",
         "vep",
+        "vone",
         "vs",
         "vsp",
     }
@@ -144,6 +151,38 @@ def _identity(update: Update) -> tuple[int, int] | None:
         else update.effective_chat.id
     )
     return update.effective_chat.id, user_id
+
+
+def _preference_store(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> UserPreferenceStore | None:
+    value = context.application.bot_data.get(PREFERENCES_SLOT)
+    return value if isinstance(value, UserPreferenceStore) else None
+
+
+def _preferred_translation(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    application_default: str,
+) -> str:
+    store = _preference_store(context)
+    return (
+        store.translation_for(user_id)
+        if store is not None
+        else application_default
+    )
+
+
+def _save_preferred_translation(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    user_id: int,
+    translation: str,
+) -> None:
+    store = _preference_store(context)
+    if store is not None:
+        store.set_translation(user_id, translation)
 
 
 async def _allow_command(
@@ -255,6 +294,11 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     source_ephemeral_message_id = _update_ephemeral_message_id(update)
     source_ephemeral_receiver_user_id = _update_ephemeral_receiver_user_id(update)
     message_thread_id = _update_message_thread_id(update)
+    preferred_translation = _preferred_translation(
+        context,
+        user_id=user_id,
+        application_default=settings.default_translation,
+    )
     try:
         if not await _allow_command(
             update,
@@ -270,7 +314,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             user_id=user_id,
             kind="search",
             stage="search_dashboard",
-            translation=settings.default_translation,
+            translation=preferred_translation,
         )
         session.ephemeral = ephemeral
         session.message_thread_id = message_thread_id
@@ -322,6 +366,11 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     source_ephemeral_message_id = _update_ephemeral_message_id(update)
     source_ephemeral_receiver_user_id = _update_ephemeral_receiver_user_id(update)
     message_thread_id = _update_message_thread_id(update)
+    preferred_translation = _preferred_translation(
+        context,
+        user_id=user_id,
+        application_default=settings.default_translation,
+    )
 
     try:
         if not await _allow_command(
@@ -336,7 +385,10 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if context.args:
             if not ephemeral:
                 await send_typing(update, context)
-            query = await service.resolve_query(context.args)
+            query = await service.resolve_query(
+                context.args,
+                default_translation=preferred_translation,
+            )
             await _post_scripture(
                 chat_id,
                 query,
@@ -352,12 +404,17 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if not ephemeral:
             await send_typing(update, context)
         translations = await service.translations()
+        selected_translation = _available_translation(
+            translations,
+            preferred_translation,
+            settings.default_translation,
+        )
         session = interactions.create(
             chat_id=chat_id,
             user_id=user_id,
             kind="reference",
             stage="reference_translation",
-            translation=settings.default_translation,
+            translation=selected_translation,
         )
         session.ephemeral = ephemeral
         session.message_thread_id = message_thread_id
@@ -392,6 +449,31 @@ async def interaction_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
+    """Serialize controls belonging to one owner-scoped interaction."""
+    callback = update.callback_query
+    identity = _identity(update)
+    if callback is None or not isinstance(callback.data, str) or identity is None:
+        return
+    match = _CALLBACK_RE.fullmatch(callback.data)
+    if match is not None and match.group(2) in CALLBACK_ACTIONS:
+        chat_id, user_id = identity
+        interactions = _components(context)[3]
+        session = interactions.get(
+            match.group(1),
+            chat_id=chat_id,
+            user_id=user_id,
+        )
+        if session is not None:
+            async with session.callback_lock:
+                await _interaction_callback_unlocked(update, context)
+            return
+    await _interaction_callback_unlocked(update, context)
+
+
+async def _interaction_callback_unlocked(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
     """Route one authenticated opaque callback to its bounded session."""
     callback = update.callback_query
     identity = _identity(update)
@@ -402,7 +484,7 @@ async def interaction_callback(
         await callback.answer("This control is invalid.", show_alert=True)
         return
 
-    _, service, limiter, interactions = _components(context)
+    _, service, _, interactions = _components(context)
     chat_id, user_id = identity
     token, action, value = match.groups()
     if action not in CALLBACK_ACTIONS:
@@ -414,14 +496,6 @@ async def interaction_callback(
             "This selection expired. Run /bible or /search again.",
             show_alert=True,
         )
-        return
-
-    if not await _allow_command(
-        update,
-        context,
-        limiter,
-        session=session,
-    ):
         return
 
     if (
@@ -649,7 +723,13 @@ async def _dispatch_callback(
     if action in {"tr", "tc"}:
         if action == "tr":
             _select_translation(session, value)
+            _save_preferred_translation(
+                context,
+                user_id=session.user_id,
+                translation=session.translation,
+            )
         if session.kind == "reference":
+            session.reference_selections.clear()
             await _open_reference_books(session, service, context)
         else:
             session.search_options = replace(
@@ -782,9 +862,21 @@ async def _dispatch_callback(
             _verse_end_keyboard(session, 0),
         )
         return
+    if action == "vone":
+        _require_kind(session, "reference")
+        start = _required_start(session)
+        _add_reference_selection(session, start, start, settings)
+        session.stage = "reference_review"
+        await _edit(
+            session,
+            context,
+            _reference_review_text(session),
+            _reference_review_keyboard(session),
+        )
+        return
     if action == "vep":
         _require_kind(session, "reference")
-        verses = _ending_verses(session)
+        verses = _range_ending_verses(session)
         page = _bounded_page(value, len(verses), VERSE_PAGE_SIZE)
         await _edit(
             session,
@@ -795,7 +887,13 @@ async def _dispatch_callback(
         return
     if action == "ve":
         _require_kind(session, "reference")
-        session.end_verse = _verse_by_number(_ending_verses(session), value)
+        end = _verse_by_number(_range_ending_verses(session), value)
+        _add_reference_selection(
+            session,
+            _required_start(session),
+            end,
+            settings,
+        )
         session.stage = "reference_review"
         await _edit(
             session,
@@ -816,7 +914,7 @@ async def _dispatch_callback(
         return
     if action == "rpost":
         _require_kind(session, "reference")
-        reference = _reference_selection(session)
+        reference = _reference_basket_reference(session)
         query = ScriptureQuery(reference, session.translation)
         await _edit(
             session,
@@ -850,6 +948,71 @@ async def _dispatch_callback(
         interactions.remove(session.token)
         await _cleanup_interaction(session, context)
         return
+    if action == "rmore":
+        _require_kind(session, "reference")
+        _required_chapter(session)
+        session.start_verse = None
+        session.end_verse = None
+        session.stage = "reference_start"
+        await _edit(
+            session,
+            context,
+            _verse_start_text(session, 0),
+            _verse_start_keyboard(session, 0),
+        )
+        return
+    if action == "radd":
+        _require_kind(session, "reference")
+        session.testament = _default_testament(session.books)
+        session.book = None
+        session.chapter = None
+        session.start_verse = None
+        session.end_verse = None
+        session.stage = "reference_books"
+        await _edit(
+            session,
+            context,
+            _books_text(session, 0),
+            _books_keyboard(session, 0),
+        )
+        return
+    if action == "rrm":
+        _require_kind(session, "reference")
+        index = _bounded_integer(
+            value,
+            0,
+            max(0, len(session.reference_selections) - 1),
+        )
+        if not session.reference_selections:
+            raise RobotInputError("There is no Scripture selection to remove.")
+        session.reference_selections.pop(index)
+        if session.reference_selections:
+            await _edit(
+                session,
+                context,
+                _reference_review_text(session),
+                _reference_review_keyboard(session),
+            )
+            return
+        session.start_verse = None
+        session.end_verse = None
+        if session.chapter is not None:
+            session.stage = "reference_start"
+            await _edit(
+                session,
+                context,
+                _verse_start_text(session, 0),
+                _verse_start_keyboard(session, 0),
+            )
+        else:
+            session.stage = "reference_books"
+            await _edit(
+                session,
+                context,
+                _books_text(session, 0),
+                _books_keyboard(session, 0),
+            )
+        return
     if action == "rreset":
         _require_kind(session, "reference")
         session.stage = "reference_translation"
@@ -857,6 +1020,7 @@ async def _dispatch_callback(
         session.chapter = None
         session.start_verse = None
         session.end_verse = None
+        session.reference_selections.clear()
         await _edit(
             session,
             context,
@@ -1039,10 +1203,15 @@ async def _dispatch_callback(
         )
         return
     if action == "sreset":
-        session.search_options = SearchOptions(
-            translation=settings.default_translation,
+        preferred_translation = _preferred_translation(
+            context,
+            user_id=session.user_id,
+            application_default=settings.default_translation,
         )
-        session.translation = settings.default_translation
+        session.search_options = SearchOptions(
+            translation=preferred_translation,
+        )
+        session.translation = preferred_translation
         session.books = ()
         session.search_results = ()
         session.search_page = 0
@@ -1245,6 +1414,14 @@ async def _run_search(
 ) -> None:
     if not query:
         raise RobotInputError("Search words are required.")
+    if (
+        session.search_options.match == "whole_word"
+        and _contains_unsegmented_script(query)
+    ):
+        session.search_options = replace(
+            session.search_options,
+            match="substring",
+        )
     page = await service.search(query, session.search_options)
     session.search_query = page.query
     session.search_total = page.total
@@ -1748,8 +1925,9 @@ def _translation_text(session: InteractionSession, page: int) -> str:
     purpose = "Bible" if session.kind == "reference" else "search"
     return (
         f"Choose a translation for this {purpose}.\n\n"
-        f"Selected: {current} ({session.translation})\n"
-        "Continue to use the selected translation, or choose another below.\n"
+        f"Your default: {current} ({session.translation})\n"
+        "Continue with it, or choose another translation and save that as "
+        "your personal default.\n"
         f"Page {page + 1} of {_page_count(len(session.translations), TRANSLATION_PAGE_SIZE)}"
     )
 
@@ -1762,7 +1940,7 @@ def _translation_keyboard(
     rows = [
         [
             InlineKeyboardButton(
-                f"Skip — use {session.translation.upper()}",
+                f"Continue with {session.translation.upper()}",
                 callback_data=_callback(session, "tc"),
             )
         ]
@@ -1895,18 +2073,27 @@ def _verse_end_text(session: InteractionSession, page: int) -> str:
     book = _required_book(session)
     chapter = _required_chapter(session)
     start = _required_start(session)
-    verses = _ending_verses(session)
+    verses = _range_ending_verses(session)
     return (
-        f"{book.name} {chapter.number}:{start} — choose the last verse\n\n"
-        "Choose the same verse for a single-verse selection.\n"
+        f"{book.name} {chapter.number}:{start} — single verse or range?\n\n"
+        "Add this verse by itself, or choose the final verse of a range.\n"
         f"Page {page + 1} of {_page_count(len(verses), VERSE_PAGE_SIZE)}"
     )
 
 
 def _verse_end_keyboard(session: InteractionSession, page: int) -> InlineKeyboardMarkup:
-    verses = _ending_verses(session)
+    start = _required_start(session)
+    verses = _range_ending_verses(session)
     items, page = _page(verses, page, VERSE_PAGE_SIZE)
     rows = [
+        [
+            InlineKeyboardButton(
+                f"Add verse {start} only",
+                callback_data=_callback(session, "vone"),
+            )
+        ]
+    ]
+    rows.extend(
         [
             InlineKeyboardButton(
                 str(verse),
@@ -1915,7 +2102,7 @@ def _verse_end_keyboard(session: InteractionSession, page: int) -> InlineKeyboar
             for verse in items[index : index + 5]
         ]
         for index in range(0, len(items), 5)
-    ]
+    )
     rows.append(_navigation_row(session, "vep", page, len(verses), VERSE_PAGE_SIZE))
     rows.append(
         [
@@ -1930,21 +2117,48 @@ def _verse_end_keyboard(session: InteractionSession, page: int) -> InlineKeyboar
 
 
 def _reference_review_text(session: InteractionSession) -> str:
+    selections = "\n".join(
+        f"{index + 1}. {_reference_selection_label(selection)}"
+        for index, selection in enumerate(session.reference_selections)
+    )
     return (
-        "Ready to post this Scripture:\n\n"
-        f"{_reference_selection(session)}\n"
+        "Scripture selection\n\n"
+        f"{selections}\n\n"
+        f"Combined: {_reference_basket_reference(session)}\n"
         f"Translation: {session.translation.upper()}"
     )
 
 
 def _reference_review_keyboard(session: InteractionSession) -> InlineKeyboardMarkup:
+    remove_rows = [
+        [
+            InlineKeyboardButton(
+                _button_label(
+                    f"Remove {index + 1}: "
+                    f"{_reference_selection_label(selection)}"
+                ),
+                callback_data=_callback(session, "rrm", str(index)),
+            )
+        ]
+        for index, selection in enumerate(session.reference_selections)
+    ]
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Post Scripture", callback_data=_callback(session, "rpost"))],
+            *remove_rows,
             [
-                InlineKeyboardButton("Change range", callback_data=_callback(session, "vback")),
-                InlineKeyboardButton("Start over", callback_data=_callback(session, "rreset")),
+                InlineKeyboardButton(
+                    "Add another from this chapter",
+                    callback_data=_callback(session, "rmore"),
+                )
             ],
+            [
+                InlineKeyboardButton(
+                    "Add another book/chapter",
+                    callback_data=_callback(session, "radd"),
+                )
+            ],
+            [InlineKeyboardButton("Post selection", callback_data=_callback(session, "rpost"))],
+            [InlineKeyboardButton("Start over", callback_data=_callback(session, "rreset"))],
             [InlineKeyboardButton("Cancel", callback_data=_callback(session, "cancel"))],
         ]
     )
@@ -2353,6 +2567,20 @@ def _select_translation(session: InteractionSession, code: str) -> None:
     session.translation = code
 
 
+def _available_translation(
+    translations: tuple[TranslationOption, ...],
+    preferred: str,
+    application_default: str,
+) -> str:
+    available = {item.code for item in translations}
+    for candidate in (preferred, application_default):
+        if candidate in available:
+            return candidate
+    if not translations:
+        raise RobotInputError("No safe Bible translations are available.")
+    return translations[0].code
+
+
 def _translation_name(
     translations: tuple[TranslationOption, ...],
     code: str,
@@ -2476,6 +2704,11 @@ def _ending_verses(session: InteractionSession) -> tuple[int, ...]:
     return tuple(verse for verse in _session_verses(session) if verse >= start)
 
 
+def _range_ending_verses(session: InteractionSession) -> tuple[int, ...]:
+    start = _required_start(session)
+    return tuple(verse for verse in _session_verses(session) if verse > start)
+
+
 def _reference_selection(session: InteractionSession) -> str:
     book = _required_book(session)
     chapter = _required_chapter(session)
@@ -2485,6 +2718,118 @@ def _reference_selection(session: InteractionSession) -> str:
         raise RobotInputError("Choose an ending verse.")
     verses = str(start) if start == end else f"{start}-{end}"
     return f"{book.name} {chapter.number}:{verses}"
+
+
+def _add_reference_selection(
+    session: InteractionSession,
+    start: int,
+    end: int,
+    settings: Settings,
+) -> None:
+    book = _required_book(session)
+    chapter = _required_chapter(session)
+    if end < start:
+        raise RobotInputError("The end of a range cannot precede its first verse.")
+    candidate = ReferenceSelection(
+        book_number=book.number,
+        book_name=book.name,
+        chapter=chapter.number,
+        start_verse=start,
+        end_verse=end,
+    )
+    session.start_verse = start
+    session.end_verse = end
+    appended = candidate not in session.reference_selections
+    if appended:
+        session.reference_selections.append(candidate)
+    try:
+        groups = _normalized_reference_groups(session.reference_selections)
+        if len(groups) > settings.max_references:
+            raise RequestLimitError(
+                f"A selection cannot contain more than "
+                f"{settings.max_references} reference groups."
+            )
+        verse_limit = getattr(
+            settings,
+            "max_verses_per_reference",
+            settings.max_total_verses,
+        )
+        for intervals in groups.values():
+            group_total = sum(
+                end_value - start_value + 1
+                for start_value, end_value in intervals
+            )
+            if group_total > verse_limit:
+                raise RequestLimitError(
+                    "One reference group exceeds the safe verse limit."
+                )
+        total = sum(
+            end_value - start_value + 1
+            for intervals in groups.values()
+            for start_value, end_value in intervals
+        )
+        if total > settings.max_total_verses:
+            raise RequestLimitError(
+                f"A selection cannot contain more than "
+                f"{settings.max_total_verses} verses."
+            )
+    except Exception:
+        if appended:
+            session.reference_selections.pop()
+        raise
+
+
+def _normalized_reference_groups(
+    selections: Sequence[ReferenceSelection],
+) -> OrderedDict[tuple[int, str, int], tuple[tuple[int, int], ...]]:
+    grouped: OrderedDict[tuple[int, str, int], list[tuple[int, int]]] = OrderedDict()
+    for selection in selections:
+        key = (
+            selection.book_number,
+            selection.book_name,
+            selection.chapter,
+        )
+        grouped.setdefault(key, []).append(
+            (selection.start_verse, selection.end_verse)
+        )
+
+    normalized: OrderedDict[
+        tuple[int, str, int],
+        tuple[tuple[int, int], ...],
+    ] = OrderedDict()
+    for key, intervals in grouped.items():
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(intervals):
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        normalized[key] = tuple(merged)
+    return normalized
+
+
+def _reference_selection_label(selection: ReferenceSelection) -> str:
+    verses = (
+        str(selection.start_verse)
+        if selection.start_verse == selection.end_verse
+        else f"{selection.start_verse}-{selection.end_verse}"
+    )
+    return f"{selection.book_name} {selection.chapter}:{verses}"
+
+
+def _reference_basket_reference(session: InteractionSession) -> str:
+    if not session.reference_selections:
+        raise RobotInputError("Select at least one verse before posting.")
+    references: list[str] = []
+    for (_, book_name, chapter), intervals in _normalized_reference_groups(
+        session.reference_selections
+    ).items():
+        verses = ",".join(
+            str(start) if start == end else f"{start}-{end}"
+            for start, end in intervals
+        )
+        references.append(f"{book_name} {chapter}:{verses}")
+    return ";".join(references)
 
 
 def _cycle_search_option(session: InteractionSession, name: str) -> None:
@@ -2765,6 +3110,19 @@ def _normalized_search_value(
             characters.append(item)
             positions.append(index)
     return "".join(characters), tuple(positions)
+
+
+def _contains_unsegmented_script(value: str) -> bool:
+    """Detect scripts where whitespace-delimited whole-word matching is unsafe."""
+    return any(
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x3040 <= codepoint <= 0x30FF
+        or 0xAC00 <= codepoint <= 0xD7AF
+        or 0x20000 <= codepoint <= 0x323AF
+        for codepoint in map(ord, value)
+    )
 
 
 def _is_search_word_char(value: str) -> bool:

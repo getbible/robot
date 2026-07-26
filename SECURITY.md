@@ -16,4 +16,13 @@ A Telegram token must never be committed or passed on a command line. The setup 
 
 ## Data handling
 
-Metadata audit mode does not persist user messages, references, search terms, favorites, profiles, user IDs, or chat IDs. Content audit mode is an explicit operator choice that additionally stores normalized search terms and final references in the restricted per-instance JSONL log; it still excludes tokens, identities, verse bodies, and repository payloads. Deployers who enable it are responsible for disclosure, access control, retention, backup, and deletion appropriate to user-provided content. Telegram and the configured GetBible API remain independent external services with their own data practices.
+Metadata audit mode does not persist user messages, references, search terms,
+names, usernames, profiles, or chat IDs. The bounded per-instance preference
+database stores only Telegram user ID, selected translation code, and update
+time so a user's default survives restarts. Content audit mode is an explicit
+operator choice that additionally stores normalized search terms and final
+references in the restricted per-instance JSONL log; it still excludes tokens,
+identities, verse bodies, and repository payloads. Deployers are responsible
+for access, retention, backup, and deletion policy for the preference database
+and for any content-audit log. Telegram and the configured GetBible API remain
+independent external services.

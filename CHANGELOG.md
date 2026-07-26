@@ -24,6 +24,18 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Reliability
 
+- Reworked guided `/bible` into a bounded selection basket. Users can add one
+  verse, a contiguous range, several separate verses/ranges, or selections from
+  other chapters/books; review and remove individual entries; and post the
+  compacted selection once.
+- Added bounded per-instance persistence for each Telegram user's chosen
+  translation. KJV remains the application fallback, while later direct Bible
+  references, guided Bible sessions, and searches reuse the saved choice.
+- Stopped charging ordinary owner-scoped menu callbacks against command token
+  buckets and serialized callbacks per session, preventing normal rapid
+  navigation from rate-limiting or racing itself.
+- Added unsegmented-script detection so default Mandarin/CJK searches use
+  substring matching instead of whitespace-dependent whole-word matching.
 - Moved complete search verses into full-width selectable result buttons instead
   of duplicating them in the panel text above compact reference buttons. Match
   text is visibly bracketed inside each untruncated button, pages contain up to
