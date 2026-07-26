@@ -348,19 +348,20 @@ class Settings:
             web_base_url=_base_url("GETBIBLE_WEB_BASE_URL", "https://getbible.life"),
             welcome_message=_message(
                 "WELCOME_MESSAGE",
-                "Welcome to the official GetBible Telegram bot.\nUse /help for available commands.",
+                "Welcome to the official getBible.net telegram bot.\n"
+                "/help for more info.",
             ),
             help_message=_message(
                 "HELP_MESSAGE",
                 "Available commands:\n\n"
+                "You can use a reference to get verses like:\n"
                 "/bible 1 John 3:16\n"
                 "/bible John 3:16-19;1 John 3:10-17\n"
                 "/bible Gen 1:1-5 codex\n"
-                "/bible Ps 1:1-5 aov\n"
-                "/bible — guided reference picker\n\n"
-                "/search grace — search with safe defaults\n"
-                "/search — configure an interactive search\n"
-                "/help — show this message",
+                "/bible Ps 1:1-5 aov\n\n"
+                "/search grace — search and scroll through complete matching verses\n"
+                "/search — configure search filters\n"
+                "/help — get this help message again",
             ),
             connect_timeout=_number("GETBIBLE_CONNECT_TIMEOUT", 3.05, 0.1, 30.0),
             read_timeout=_number("GETBIBLE_READ_TIMEOUT", 6.0, 0.5, 60.0),

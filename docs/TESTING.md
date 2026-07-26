@@ -101,7 +101,8 @@ The tests cover at least these invariants:
 - ordinary references do not trigger speculative translation lookups;
 - an empty `/bible` never substitutes a hidden default verse;
 - explicit `/bible <reference>` commands still post immediately;
-- `/search <words>` returns selectable previews and never posts before confirmation;
+- `/search <words>` returns complete, highlighted, scrollable verses with every
+  returned reference selectable and never posts before confirmation;
 - full corpus downloads and constructed search output enforce independent byte
   ceilings;
 - slow searches use independent capacity and circuit state, leaving direct
@@ -109,7 +110,9 @@ The tests cover at least these invariants:
 - default-translation prewarming builds the initial search index;
 - empty `/search` exposes Librarian 1.2 filters through a bounded dashboard;
 - every registered command alias and every implemented callback action appears in an explicit test inventory;
-- every translation, testament, book, chapter, verse, pagination, back, reset, cancel, filter, exclusion, proximity, selection, and confirmation control executes through the interaction state machine;
+- every translation, testament, book, chapter, verse, navigation, back, reset,
+  cancel, filter, exclusion, proximity, selection, and confirmation control
+  executes through the interaction state machine;
 - callback sessions require the originating user and chat and expire under TTL/LRU bounds;
 - guided navigation rejects malformed catalogs, oversized responses, redirects, and book checksum mismatches;
 - selected search verses are compressed and revalidated before Librarian retrieval;
@@ -186,7 +189,25 @@ Expected behavior: one real worker remains occupied until it exits, later reques
 
 ### Telegram deletion permissions
 
-Set `DELETE_COMMAND_MESSAGES=true` and test in a group where the bot lacks deletion permission. Scripture must still be delivered; logs may record the non-fatal permission failure.
+In a group where the bot can delete messages, exercise all three completion
+paths:
+
+1. `/bible John 3:16`;
+2. empty `/bible`, complete the picker, then press **Post Scripture**;
+3. `/search grace`, select a result, then press **Post selected**.
+
+For each path, the initiating command and every picker/search prompt and reply
+must remain visible while the workflow is active, then disappear after the
+final Scripture message is delivered. Only the Scripture must remain. Also
+verify that **Cancel** removes the recorded conversation without posting.
+
+Repeat in a group where the bot lacks deletion permission. Scripture must still
+be delivered; the workflow must not raise a user-facing failure merely because
+cleanup was refused. Logs may record the non-fatal permission failure.
+
+`DELETE_COMMAND_MESSAGES=true` additionally covers standalone handled commands
+such as `/start` and `/help`; it does not disable the mandatory successful
+`/bible` and `/search` workflow cleanup.
 
 ## Live Telegram smoke test
 
@@ -233,7 +254,9 @@ Use a separate test bot token and a private test chat. Stop any other polling pr
    ```
 
 7. In the empty `/bible` panel, continue with KJV, choose John 3, select 16 as both first and last verse, review, and post.
-8. Confirm `/search grace` shows selectable results but posts nothing until **Post selected** is pressed.
+8. Confirm `/search grace` shows every returned verse in full, bolds each
+   matching word, scrolls without result pages, and posts nothing until
+   **Post selected** is pressed.
 9. In empty `/search`, change word, match, scope, book, exclusion, and proximity controls; run a search; page, select, deselect, and post multiple results.
 10. In a test group, verify `/bible@TestBotName John 3:16`, empty `/bible@TestBotName`, selective search replies, ownership isolation between two users, and permission-safe command deletion.
 11. Open a returned Scripture link and confirm its host is exactly `getbible.life`.

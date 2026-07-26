@@ -28,9 +28,20 @@ They are configured independently as `GETBIBLE_API_BASE_URL` and `GETBIBLE_WEB_B
 
 `/get` and `/getbible` remain aliases of `/bible`. Telegram-parsed command arguments are used, so `/bible@getBibleRobot John 3:16` works in groups without leaking the bot mention into the reference parser.
 
+The original `/start` handler remains available because Telegram sends that
+command when a user first opens a bot or follows a start link. It is intentionally
+not duplicated in the synchronized command menu; its editable welcome text
+simply points to `/help`.
+
 An explicit `/bible` reference preserves the legacy fast path and posts the complete selection immediately. An empty `/bible` opens a Telegram-native picker with the configured translation preselected, then guides the user through testament, book, chapter, first verse, last verse, and confirmation.
 
-`/search grace` runs Librarian 1.2 search defaults and opens a paginated result panel. Results are never posted automatically: the user selects one or more verses and presses **Post selected**. An empty `/search` first opens the complete search-filter dashboard for translation, word mode, match mode, scope, case, diacritics, ordering, books, exclusions, and proximity. See [Interactive Bible and search workflows](docs/INTERACTIONS.md).
+`/search grace` runs Librarian 1.2 search defaults and displays complete matching
+verses in a scrollable result set with the matched words bolded. Results are
+never posted automatically: the user selects one or more references and presses
+**Post selected**. An empty `/search` first opens the complete search-filter
+dashboard for translation, word mode, match mode, scope, case, diacritics,
+ordering, books, exclusions, and proximity. See
+[Interactive Bible and search workflows](docs/INTERACTIONS.md).
 
 ## Security and reliability controls
 
@@ -54,7 +65,9 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
 - typed user-safe errors and correlation IDs instead of raw exception text;
 - checksum-verified book navigation and structurally validated catalog metadata;
 - escaped Telegram HTML, percent-encoded URL segments, and safe chunk boundaries;
-- optional command deletion that cannot fail a successful lookup;
+- success-aware `/bible` and `/search` cleanup that removes only the recorded
+  command, picker/search panel, prompts, and replies after Scripture is posted,
+  while deletion failures cannot invalidate delivery;
 - validated startup configuration and narrow Telegram update subscriptions;
 - selectable long polling or reverse-proxied HTTPS webhook delivery, with
   duplicate pollers stopped instead of restarted;

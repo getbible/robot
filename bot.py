@@ -155,7 +155,6 @@ async def _post_init(application: Application) -> None:
     settings: Settings = application.bot_data[SETTINGS_SLOT]
     await application.bot.set_my_commands(
         [
-            BotCommand("start", "Welcome and quick-start guidance"),
             BotCommand("bible", "Retrieve Scripture by reference"),
             BotCommand("search", "Search and select Scripture"),
             BotCommand("help", "Show detailed usage guidance"),

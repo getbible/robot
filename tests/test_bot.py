@@ -100,7 +100,7 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         commands = application.bot.set_my_commands.await_args.args[0]
         self.assertEqual(
             [command.command for command in commands],
-            ["start", "bible", "search", "help"],
+            ["bible", "search", "help"],
         )
         application.bot.set_my_name.assert_awaited_once_with(settings.bot_name)
         application.bot.set_my_description.assert_awaited_once_with(

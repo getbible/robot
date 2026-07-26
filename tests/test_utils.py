@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 from telegram.error import BadRequest, NetworkError
 
-from modules.utils import safe_delete_command, send_typing
+from modules.utils import safe_delete_command, safe_delete_messages, send_typing
 
 
 class TelegramUtilityTestCase(unittest.IsolatedAsyncioTestCase):
@@ -54,6 +54,46 @@ class TelegramUtilityTestCase(unittest.IsolatedAsyncioTestCase):
 
         context.bot.send_chat_action.assert_awaited_once()
         context.bot.delete_message.assert_awaited_once()
+
+    async def test_workflow_cleanup_deduplicates_and_ignores_invalid_ids(self) -> None:
+        context = SimpleNamespace(
+            bot=SimpleNamespace(delete_message=AsyncMock())
+        )
+
+        await safe_delete_messages(
+            context,
+            chat_id=100,
+            message_ids=(300, 200, 300, 0, -1, True),
+        )
+
+        self.assertEqual(
+            [call.kwargs for call in context.bot.delete_message.await_args_list],
+            [
+                {"chat_id": 100, "message_id": 300},
+                {"chat_id": 100, "message_id": 200},
+            ],
+        )
+
+    async def test_workflow_cleanup_attempts_every_message_after_failures(self) -> None:
+        context = SimpleNamespace(
+            bot=SimpleNamespace(
+                delete_message=AsyncMock(
+                    side_effect=(
+                        BadRequest("not permitted"),
+                        NetworkError("offline"),
+                        None,
+                    )
+                )
+            )
+        )
+
+        await safe_delete_messages(
+            context,
+            chat_id=100,
+            message_ids=(300, 200, 100),
+        )
+
+        self.assertEqual(context.bot.delete_message.await_count, 3)
 
 
 if __name__ == "__main__":

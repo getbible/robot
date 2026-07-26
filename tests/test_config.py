@@ -116,6 +116,24 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.welcome_message, "Welcome from a file.\nSecond line.")
         self.assertEqual(settings.help_message, "Detailed help.\n/bible John 3:16")
 
+    def test_default_help_preserves_original_copy_with_completed_search(self) -> None:
+        with patch.dict(os.environ, self.environment(), clear=True):
+            settings = Settings.from_env(load_environment_file=False)
+
+        self.assertEqual(
+            settings.welcome_message,
+            "Welcome to the official getBible.net telegram bot.\n"
+            "/help for more info.",
+        )
+        self.assertIn(
+            "You can use a reference to get verses like:",
+            settings.help_message,
+        )
+        self.assertIn("/search grace", settings.help_message)
+        self.assertIn("complete matching verses", settings.help_message)
+        self.assertNotIn("Privacy", settings.help_message)
+        self.assertNotIn("/start", settings.help_message)
+
     def test_conflicting_token_names_fail_closed(self) -> None:
         with (
             patch.dict(

@@ -13,6 +13,7 @@ from typing import Literal
 from .catalog import BookOption, ChapterOption, TranslationOption
 
 InteractionKind = Literal["reference", "search"]
+MAX_WORKFLOW_MESSAGE_IDS = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +42,7 @@ class SearchResult:
     chapter: int
     verse: int
     text: str
+    terms: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -68,7 +70,31 @@ class InteractionSession:
     search_query: str = ""
     search_total: int = 0
     search_results: tuple[SearchResult, ...] = ()
+    search_generation: int = 0
+    search_selector_ranges: dict[int, tuple[int, int]] = field(default_factory=dict)
     selected: set[int] = field(default_factory=set)
+    workflow_message_ids: set[int] = field(default_factory=set)
+
+    def remember_message(self, message_id: int | None) -> None:
+        """Remember one workflow message without allowing unbounded growth."""
+        if (
+            message_id is None
+            or isinstance(message_id, bool)
+            or message_id <= 0
+            or message_id in self.workflow_message_ids
+        ):
+            return
+        if len(self.workflow_message_ids) < MAX_WORKFLOW_MESSAGE_IDS:
+            self.workflow_message_ids.add(message_id)
+
+    def cleanup_message_ids(self) -> tuple[int, ...]:
+        """Return every user/bot message belonging to this workflow."""
+        message_ids = set(self.workflow_message_ids)
+        if self.message_id is not None:
+            message_ids.add(self.message_id)
+        if self.prompt_message_id is not None:
+            message_ids.add(self.prompt_message_id)
+        return tuple(sorted(message_ids, reverse=True))
 
 
 class InteractionStore:

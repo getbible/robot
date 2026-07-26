@@ -583,6 +583,7 @@ class ScriptureService:
             book_number = match.get("book_nr")
             chapter_number = match.get("chapter")
             verse_number = match.get("verse")
+            terms = match.get("terms")
             if (
                 not isinstance(reference, str)
                 or not 1 <= len(reference.strip()) <= self.settings.max_input_length
@@ -595,6 +596,13 @@ class ScriptureService:
                 or not isinstance(verse_number, int)
                 or isinstance(verse_number, bool)
                 or not 1 <= verse_number <= 2000
+                or not isinstance(terms, list)
+                or not 1 <= len(terms) <= 64
+                or any(
+                    not isinstance(term, str)
+                    or not 1 <= len(term.strip()) <= self.settings.max_input_length
+                    for term in terms
+                )
             ):
                 raise ScriptureUnavailable("Librarian returned malformed match metadata.")
             key = (book_number, chapter_number, verse_number)
@@ -617,6 +625,7 @@ class ScriptureService:
                     chapter=chapter_number,
                     verse=verse_number,
                     text=text,
+                    terms=tuple(term.strip() for term in terms),
                 )
             )
 

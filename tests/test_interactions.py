@@ -1,6 +1,9 @@
 import unittest
 
-from modules.interactions import InteractionStore
+from modules.interactions import (
+    MAX_WORKFLOW_MESSAGE_IDS,
+    InteractionStore,
+)
 
 
 class _Clock:
@@ -95,6 +98,33 @@ class InteractionStoreTestCase(unittest.TestCase):
                 user_id=201,
                 prompt_message_id=300,
             )
+        )
+
+    def test_workflow_message_ledger_is_deduplicated_and_bounded(self) -> None:
+        store = InteractionStore(max_sessions=10, ttl_seconds=60)
+        session = store.create(
+            chat_id=100,
+            user_id=200,
+            kind="search",
+            stage="search_dashboard",
+            translation="kjv",
+        )
+        session.message_id = 20
+        session.prompt_message_id = 30
+        session.remember_message(10)
+        session.remember_message(10)
+        session.remember_message(0)
+        session.remember_message(None)
+        for message_id in range(1000, 1000 + MAX_WORKFLOW_MESSAGE_IDS + 10):
+            session.remember_message(message_id)
+
+        self.assertEqual(
+            len(session.workflow_message_ids),
+            MAX_WORKFLOW_MESSAGE_IDS,
+        )
+        self.assertEqual(
+            session.cleanup_message_ids()[-3:],
+            (30, 20, 10),
         )
 
 
