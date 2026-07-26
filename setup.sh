@@ -16,6 +16,7 @@ LOG_ROOT="/var/log/getbible-robot"
 METADATA_ROOT="${ETC_ROOT}/instances"
 UNIT_PATH="/etc/systemd/system/getbible-robot@.service"
 MANAGER_PATH="/usr/local/sbin/getbible-robot"
+LOGROTATE_PATH="/etc/logrotate.d/getbible-robot"
 SETUP_LOG="${LOG_ROOT}/setup.log"
 if [[ -f "${SCRIPT_DIR}/deploy/getbible-robot@.service" ]]; then
     UNIT_SOURCE="${SCRIPT_DIR}/deploy/getbible-robot@.service"
@@ -571,7 +572,7 @@ install_shared_manager() {
 }
 
 install_log_rotation() {
-    cat >"/etc/logrotate.d/getbible-robot" <<EOF
+    cat >"$LOGROTATE_PATH" <<EOF
 ${LOG_ROOT}/*.jsonl {
     daily
     rotate 14
@@ -595,8 +596,8 @@ ${SETUP_LOG} {
     su root root
 }
 EOF
-    chown root:root /etc/logrotate.d/getbible-robot
-    chmod 0644 /etc/logrotate.d/getbible-robot
+    chown root:root "$LOGROTATE_PATH"
+    chmod 0644 "$LOGROTATE_PATH"
 }
 
 wait_for_readiness() {
@@ -1323,4 +1324,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

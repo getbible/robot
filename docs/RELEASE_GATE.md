@@ -16,7 +16,7 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - The exact runtime lock installs with `--require-hashes` on Python 3.10, 3.11, and 3.12.
 - `pip check` succeeds in every runtime environment.
 - Python source, maintenance helpers, and tests compile.
-- `setup.sh` passes `bash -n` and its fail-closed self-test.
+- `setup.sh` passes `bash -n`, its fail-closed self-test, and the hermetic two-instance lifecycle test.
 - Deterministic unit, asynchronous, regression, documentation-contract, audit-contract, and symbol-fuzz tests pass on every supported Python version.
 - Ruff passes without new suppressions added solely for the release.
 - mypy passes with the configured strictness.
@@ -48,6 +48,7 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - An invalid explicit-translation reference is rejected before translation repository access.
 - Per-user and per-chat state remains bounded under identifier churn.
 - Every command, including `/start`, `/help`, `/search`, and unknown commands, consumes both rate-limit budgets.
+- Every public command alias and implemented callback action is present in the enforced feature inventory.
 - Repeated rejected commands produce one cooldown warning rather than one Telegram API call per rejection.
 - Interactive sessions remain owner-scoped and TTL/LRU bounded under user, chat, and callback churn.
 
@@ -101,6 +102,7 @@ A robot commit is deployable only when every applicable item below is satisfied.
 
 - README links to the canonical documentation index.
 - The setup questionnaire completed successfully on a clean host or clean test image.
+- The hermetic setup lifecycle passes transactional failure cleanup, two-instance isolation, all manager command paths, configuration restoration, upgrade failure restoration, rollback, and isolated uninstall.
 - Two test instances demonstrate distinct accounts, applications, environments, tokens, caches, ports, logs, processes, and state.
 - Instance selection resolves the intended target for list, start, stop, restart, status, runtime, logs, follow, doctor, config, upgrade, rollback, and uninstall.
 - Setup rejects duplicate instance names, unmanaged account collisions, reused tokens, dirty source, unsupported Python, invalid ports, and malformed secrets.

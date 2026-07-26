@@ -40,6 +40,8 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Testing and delivery
 
+- Added a hermetic two-instance setup-manager lifecycle covering transactional failure cleanup, operations, configuration restoration, upgrade recovery, rollback, and isolated uninstall.
+- Added an enforced callback-action inventory plus complete reference navigation, search-filter, reply, pagination, reset, cancel, command-registration, lifecycle-hook, and optional Telegram-action regressions.
 - Added setup syntax/self-tests, unit-template contracts, audit privacy tests, JSONL formatter tests, and multi-instance documentation contracts.
 - Added deterministic catalog integrity, interactive ownership/expiry, picker, search-confirmation, and cooldown regressions.
 - Added deterministic parser, service, circuit, timeout, rate-limit, renderer, error, configuration, health, command, and documentation-contract tests.

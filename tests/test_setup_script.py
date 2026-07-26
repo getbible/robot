@@ -5,11 +5,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "setup.sh"
 UNIT = ROOT / "deploy" / "getbible-robot@.service"
+LIFECYCLE = ROOT / "tests" / "setup_manager_lifecycle.sh"
 
 
 class SetupScriptTestCase(unittest.TestCase):
     def test_shell_syntax_and_self_test(self) -> None:
         subprocess.run(["bash", "-n", str(SETUP)], check=True)
+        subprocess.run(["bash", "-n", str(LIFECYCLE)], check=True)
         result = subprocess.run(
             ["bash", str(SETUP), "self-test"],
             check=True,
@@ -17,6 +19,54 @@ class SetupScriptTestCase(unittest.TestCase):
             text=True,
         )
         self.assertIn("Manager self-test passed.", result.stdout)
+
+        help_result = subprocess.run(
+            ["bash", str(SETUP), "help"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for command in (
+            "install",
+            "list",
+            "start",
+            "stop",
+            "restart",
+            "status",
+            "runtime",
+            "logs",
+            "follow",
+            "doctor",
+            "config",
+            "upgrade",
+            "rollback",
+            "uninstall",
+            "menu",
+            "self-test",
+        ):
+            with self.subTest(command=command):
+                self.assertIn(command, help_result.stdout)
+
+        version_result = subprocess.run(
+            ["bash", str(SETUP), "version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("getbible-robot setup manager", version_result.stdout)
+
+    def test_complete_multi_instance_lifecycle(self) -> None:
+        result = subprocess.run(
+            ["bash", str(LIFECYCLE)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertIn(
+            "Setup manager lifecycle test passed.",
+            result.stdout,
+        )
 
     def test_hardened_unit_is_instance_scoped(self) -> None:
         unit = UNIT.read_text(encoding="utf-8")
