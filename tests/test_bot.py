@@ -24,6 +24,11 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
                 "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
             ),
             max_concurrent_updates=4,
+            prewarm_default_translation=True,
+            default_translation="kjv",
+            bot_name="GetBible Robot",
+            bot_description="Read and search Scripture in Telegram with GetBible.",
+            bot_short_description="Read and search Scripture with GetBible.",
         )
 
     def test_every_public_command_alias_and_interaction_handler_is_registered(
@@ -69,12 +74,24 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_startup_and_shutdown_cover_telegram_health_and_service(self) -> None:
         health = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
-        service = SimpleNamespace(close=AsyncMock())
+        service = SimpleNamespace(
+            close=AsyncMock(),
+            warm_default_translation=AsyncMock(
+                return_value={"abbreviation": "kjv", "verses": 31_102}
+            ),
+        )
+        settings = self.settings()
         application = SimpleNamespace(
-            bot=SimpleNamespace(set_my_commands=AsyncMock()),
+            bot=SimpleNamespace(
+                set_my_commands=AsyncMock(),
+                set_my_name=AsyncMock(),
+                set_my_description=AsyncMock(),
+                set_my_short_description=AsyncMock(),
+            ),
             bot_data={
                 bot.HEALTH_SLOT: health,
                 bot.SERVICE_SLOT: service,
+                bot.SETTINGS_SLOT: settings,
             },
         )
 
@@ -83,13 +100,62 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         commands = application.bot.set_my_commands.await_args.args[0]
         self.assertEqual(
             [command.command for command in commands],
-            ["bible", "search", "help"],
+            ["start", "bible", "search", "help"],
         )
+        application.bot.set_my_name.assert_awaited_once_with(settings.bot_name)
+        application.bot.set_my_description.assert_awaited_once_with(
+            settings.bot_description
+        )
+        application.bot.set_my_short_description.assert_awaited_once_with(
+            settings.bot_short_description
+        )
+        service.warm_default_translation.assert_awaited_once()
         health.start.assert_awaited_once()
 
         await bot._post_shutdown(application)
         health.close.assert_awaited_once()
         service.close.assert_awaited_once()
+
+    def test_delivery_runner_selects_polling_or_webhook_exclusively(self) -> None:
+        application = SimpleNamespace(
+            run_polling=Mock(),
+            run_webhook=Mock(),
+        )
+        polling = SimpleNamespace(
+            telegram_delivery_mode="polling",
+            drop_pending_updates=True,
+        )
+        bot.run_application(application, polling)
+        application.run_polling.assert_called_once_with(
+            allowed_updates=bot.ALLOWED_UPDATES,
+            drop_pending_updates=True,
+        )
+        application.run_webhook.assert_not_called()
+
+        application.run_polling.reset_mock()
+        webhook = SimpleNamespace(
+            telegram_delivery_mode="webhook",
+            drop_pending_updates=False,
+            webhook_public_url="https://bot.example.com/telegram/production",
+            webhook_secret_token="A" * 32,
+            webhook_listen="127.0.0.1",
+            webhook_port=9001,
+            webhook_ip_address="1.1.1.1",
+            webhook_max_connections=16,
+        )
+        bot.run_application(application, webhook)
+        application.run_polling.assert_not_called()
+        application.run_webhook.assert_called_once_with(
+            listen="127.0.0.1",
+            port=9001,
+            url_path="telegram/production",
+            webhook_url="https://bot.example.com/telegram/production",
+            ip_address="1.1.1.1",
+            max_connections=16,
+            secret_token="A" * 32,
+            allowed_updates=bot.ALLOWED_UPDATES,
+            drop_pending_updates=False,
+        )
 
 
 if __name__ == "__main__":

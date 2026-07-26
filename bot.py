@@ -6,6 +6,7 @@ import json
 import logging
 import sys
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from telegram import BotCommand
 from telegram.ext import (
@@ -19,6 +20,7 @@ from telegram.ext import (
 
 from config import ConfigurationError, Settings
 from modules.commands import (
+    DUPLICATE_POLLER_SLOT,
     INTERACTIONS_SLOT,
     LIMITER_SLOT,
     SERVICE_SLOT,
@@ -32,6 +34,7 @@ from modules.commands import (
     start_command,
     unknown_command,
 )
+from modules.errors import ScriptureUnavailable
 from modules.health import HealthServer
 from modules.interactions import InteractionStore
 from modules.rate_limit import InboundRateLimiter
@@ -39,6 +42,7 @@ from modules.service import ScriptureService
 
 HEALTH_SLOT = "health_server"
 LOGGER = logging.getLogger(__name__)
+ALLOWED_UPDATES = ("message", "callback_query")
 
 
 class JsonFormatter(logging.Formatter):
@@ -147,13 +151,33 @@ def build_application(settings: Settings) -> Application:
 
 async def _post_init(application: Application) -> None:
     health: HealthServer = application.bot_data[HEALTH_SLOT]
+    service: ScriptureService = application.bot_data[SERVICE_SLOT]
+    settings: Settings = application.bot_data[SETTINGS_SLOT]
     await application.bot.set_my_commands(
         [
+            BotCommand("start", "Welcome and quick-start guidance"),
             BotCommand("bible", "Retrieve Scripture by reference"),
-            BotCommand("search", "Open Scripture search"),
-            BotCommand("help", "Show available commands"),
+            BotCommand("search", "Search and select Scripture"),
+            BotCommand("help", "Show detailed usage guidance"),
         ]
     )
+    await application.bot.set_my_name(settings.bot_name)
+    await application.bot.set_my_description(settings.bot_description)
+    await application.bot.set_my_short_description(settings.bot_short_description)
+    if settings.prewarm_default_translation:
+        try:
+            metadata = await service.warm_default_translation()
+        except ScriptureUnavailable as error:
+            LOGGER.warning(
+                "Default search corpus prewarm failed safely (%s)",
+                type(error).__name__,
+            )
+        else:
+            LOGGER.info(
+                "Default search corpus ready (%s, %s verses)",
+                metadata.get("abbreviation", settings.default_translation),
+                metadata.get("verses", "unknown"),
+            )
     # Readiness must not become true until Telegram initialization has succeeded.
     await health.start()
     LOGGER.info("GetBible Robot initialized")
@@ -165,6 +189,31 @@ async def _post_shutdown(application: Application) -> None:
     await health.close()
     await service.close()
     LOGGER.info("GetBible Robot shut down cleanly")
+
+
+def run_application(application: Application, settings: Settings) -> None:
+    """Run exactly one configured Telegram delivery transport."""
+    if settings.telegram_delivery_mode == "polling":
+        application.run_polling(
+            allowed_updates=ALLOWED_UPDATES,
+            drop_pending_updates=settings.drop_pending_updates,
+        )
+        return
+
+    if settings.webhook_public_url is None or settings.webhook_secret_token is None:
+        raise ConfigurationError("Webhook delivery is missing validated configuration.")
+    url_path = urlsplit(settings.webhook_public_url).path.lstrip("/")
+    application.run_webhook(
+        listen=settings.webhook_listen,
+        port=settings.webhook_port,
+        url_path=url_path,
+        webhook_url=settings.webhook_public_url,
+        ip_address=settings.webhook_ip_address,
+        max_connections=settings.webhook_max_connections,
+        secret_token=settings.webhook_secret_token,
+        allowed_updates=ALLOWED_UPDATES,
+        drop_pending_updates=settings.drop_pending_updates,
+    )
 
 
 def main() -> int:
@@ -188,11 +237,8 @@ def main() -> int:
         )
         return 2
     application = build_application(settings)
-    application.run_polling(
-        allowed_updates=["message", "callback_query"],
-        drop_pending_updates=settings.drop_pending_updates,
-    )
-    return 0
+    run_application(application, settings)
+    return 75 if application.bot_data.get(DUPLICATE_POLLER_SLOT) else 0
 
 
 if __name__ == "__main__":

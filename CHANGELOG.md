@@ -24,6 +24,19 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Reliability
 
+- Raised the bounded full-repository response allowance from 8 MiB to 64 MiB
+  so KJV and larger translations can be loaded, while retaining an independent
+  4 MiB constructed-search-result ceiling.
+- Isolated expensive searches in their own worker pool and circuit, and added
+  optional default-translation prewarming to remove the normal first-search
+  latency from user traffic.
+- Added polling/HTTPS-webhook selection and transactional switching, automatic
+  Telegram webhook registration, duplicate-poller shutdown without restart,
+  and webhook diagnostics.
+- Added per-instance editable welcome/help files plus Bot API command, name,
+  description, and short-description synchronization.
+- Restored compact legacy Scripture formatting with one newline—not a blank
+  paragraph—between adjacent verses.
 - Fixed hardened deployments failing with systemd `200/CHDIR` by granting the locked instance group read/traverse access while retaining root ownership and no access for other users.
 - Added a service-account import preflight to install, upgrade, diagnostics, and the new targeted `repair` operation.
 - Added interactive and direct `list`, `start`, `stop`, `restart`, `status`, `runtime`, `logs`, `follow`, `doctor`, `repair`, `config`, `upgrade`, `rollback`, and `uninstall` operations.

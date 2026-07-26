@@ -24,7 +24,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
+from telegram.error import Conflict, TelegramError
 from telegram.ext import ContextTypes
 
 from config import Settings
@@ -53,6 +53,7 @@ SETTINGS_SLOT = "settings"
 SERVICE_SLOT = "scripture_service"
 LIMITER_SLOT = "inbound_rate_limiter"
 INTERACTIONS_SLOT = "interaction_store"
+DUPLICATE_POLLER_SLOT = "duplicate_poller_detected"
 
 TRANSLATION_PAGE_SIZE = 6
 BOOK_PAGE_SIZE = 10
@@ -921,6 +922,16 @@ async def error_handler(
     """Last-resort boundary; raw exceptions are never reflected to Telegram."""
     incident_id = secrets.token_hex(4)
     error = context.error
+    if isinstance(error, Conflict):
+        application = context.application
+        if not application.bot_data.get(DUPLICATE_POLLER_SLOT):
+            application.bot_data[DUPLICATE_POLLER_SLOT] = True
+            LOGGER.critical(
+                "Telegram polling conflict: another process is using this bot token; "
+                "stopping this instance"
+            )
+            application.stop_running()
+        return
     LOGGER.error(
         "Unhandled update failure %s (%s)",
         incident_id,

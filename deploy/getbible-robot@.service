@@ -19,6 +19,7 @@ ExecStartPre=/opt/getbible-robot/%i/app/venv/bin/python -c "from config import S
 ExecStart=/opt/getbible-robot/%i/app/venv/bin/python /opt/getbible-robot/%i/app/bot.py
 
 Restart=on-failure
+RestartPreventExitStatus=75
 RestartSec=5s
 TimeoutStartSec=90
 TimeoutStopSec=30

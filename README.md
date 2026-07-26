@@ -44,7 +44,11 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
 - rejection-notification cooldowns that prevent Telegram API amplification;
 - owner-scoped, TTL/LRU-bounded interactive sessions and opaque callback tokens;
 - a fixed worker pool and global lookup semaphore;
-- queue, connect, read, overall lookup, retry, and response-byte limits;
+- separate reference/search worker pools and circuit breakers, so expensive
+  corpus work cannot occupy every direct-reference worker;
+- queue, connect, read, overall lookup, retry, corpus-byte, and search-output limits;
+- optional default-translation prewarming to pay the first-search cost before
+  readiness rather than during a user's request;
 - timed-out workers retain capacity until their underlying threads actually exit;
 - an upstream circuit breaker with one half-open recovery probe;
 - typed user-safe errors and correlation IDs instead of raw exception text;
@@ -52,6 +56,8 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
 - escaped Telegram HTML, percent-encoded URL segments, and safe chunk boundaries;
 - optional command deletion that cannot fail a successful lookup;
 - validated startup configuration and narrow Telegram update subscriptions;
+- selectable long polling or reverse-proxied HTTPS webhook delivery, with
+  duplicate pollers stopped instead of restarted;
 - per-instance JSONL/journal logs with metadata-only auditing by default and explicit content opt-in;
 - loopback-only health and readiness endpoints;
 - isolated locked service accounts and restartable, capability-free, filesystem-protected `systemd` instances;
@@ -108,13 +114,15 @@ git checkout --detach <reviewed-commit-sha>
 sudo ./setup.sh install
 ```
 
-The manager creates a separate locked Linux account, exact hashed environment, root-only token file, cache, state, JSONL log, rotation policy, health port, and hardened systemd service for every named instance. Tokens are entered with terminal echo disabled and are never accepted as command-line arguments.
+The manager creates a separate locked Linux account, exact hashed environment, root-only token and editable content files, cache, state, JSONL log, rotation policy, health port, and hardened systemd service for every named instance. Tokens are entered with terminal echo disabled and are never accepted as command-line arguments. The questionnaire lets each instance choose polling or an HTTPS webhook and configures its Telegram command menu and profile text.
 
 ```bash
 sudo getbible-robot list
 sudo getbible-robot status production
 sudo getbible-robot logs production
 sudo getbible-robot doctor production
+sudo getbible-robot delivery production
+sudo EDITOR=nano getbible-robot content production help
 ```
 
 Run `sudo getbible-robot` without arguments for an interactive operations menu. Follow [Installation](docs/INSTALLATION.md) for the complete production contract.
@@ -137,6 +145,7 @@ Use `sudo getbible-robot runtime <instance>` to resolve and query the correct po
 - [Installation](docs/INSTALLATION.md)
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Interactive Bible and search workflows](docs/INTERACTIONS.md)
+- [Polling and webhook delivery](docs/WEBHOOKS.md)
 - [Testing and live smoke checks](docs/TESTING.md)
 - [Upgrading and rollback](docs/UPGRADING.md)
 - [Uninstalling](docs/UNINSTALL.md)

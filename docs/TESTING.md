@@ -81,7 +81,14 @@ bash setup.sh self-test
 bash tests/setup_manager_lifecycle.sh
 ```
 
-The lifecycle harness is hermetic: it redirects all managed paths into a temporary root and substitutes only host boundaries such as systemd and account management. It executes the real questionnaire and manager logic for two instances, including transactional cleanup, duplicate-token rejection, selectors, lifecycle commands, diagnostics, configuration restoration, upgrades, automatic failed-upgrade restoration, manual rollback, and isolated uninstall. It never contacts Telegram or changes the host.
+The lifecycle harness is hermetic: it redirects all managed paths into a
+temporary root and substitutes only host boundaries such as systemd, Telegram,
+and account management. It executes the real questionnaire and manager logic
+for two instances, including transactional cleanup, duplicate-token rejection,
+content-file permissions/editing, polling-to-webhook-to-polling switching,
+selectors, lifecycle commands, diagnostics, configuration restoration,
+upgrades, automatic failed-upgrade restoration, manual rollback, and isolated
+uninstall. It never contacts Telegram or changes the host.
 
 The CI quality job creates an isolated `ci` service fixture and verifies `getbible-robot@ci.service`, then performs an isolated hashed install, Ruff, mypy, robot/Librarian Bandit scans, strict source-aware dependency auditing, secret scanning, and manager tests. CodeQL runs separately. A deployable commit must have both permanent gate statuses green.
 
@@ -95,6 +102,11 @@ The tests cover at least these invariants:
 - an empty `/bible` never substitutes a hidden default verse;
 - explicit `/bible <reference>` commands still post immediately;
 - `/search <words>` returns selectable previews and never posts before confirmation;
+- full corpus downloads and constructed search output enforce independent byte
+  ceilings;
+- slow searches use independent capacity and circuit state, leaving direct
+  references available;
+- default-translation prewarming builds the initial search index;
 - empty `/search` exposes Librarian 1.2 filters through a bounded dashboard;
 - every registered command alias and every implemented callback action appears in an explicit test inventory;
 - every translation, testament, book, chapter, verse, pagination, back, reset, cancel, filter, exclusion, proximity, selection, and confirmation control executes through the interaction state machine;
@@ -111,6 +123,10 @@ The tests cover at least these invariants:
 - Telegram limits are measured in UTF-16 code units, including emoji and other astral text;
 - user-facing errors never echo raw exceptions, paths, URLs, tokens, or hostile input;
 - deletion permission failures do not turn a successful lookup into a failed command;
+- consecutive verses use exactly one newline with no blank paragraph;
+- polling and webhook startup pass only the validated transport options;
+- a Telegram polling conflict stops once and records the non-restarting state;
+- Bot API command/profile synchronization and safe prewarm failure are covered;
 - the complete released Librarian lock is included in strict dependency auditing;
 - all required operator documents and relative links remain valid;
 - all public links use `https://getbible.life` and data access uses `https://api.getbible.net`.
@@ -118,7 +134,9 @@ The tests cover at least these invariants:
 - setup shell syntax and the manager's fail-closed validators pass;
 - the setup questionnaire installs two isolated instances in a temporary host fixture;
 - failed installation is cleaned transactionally without retaining an account, secret, cache, state, or application;
-- list, selection, start, stop, restart, status, runtime, logs, follow, doctor, configuration, upgrade, rollback, menu, and uninstall manager paths execute;
+- list, selection, start, stop, restart, status, runtime, logs, follow, doctor,
+  delivery, content, configuration, upgrade, rollback, menu, and uninstall
+  manager paths execute;
 - invalid configuration is restored, a failed upgrade restores the active application, and uninstalling one instance leaves the other intact;
 - metadata audit mode omits query/reference content;
 - content audit mode includes only the deliberately permitted normalized fields;

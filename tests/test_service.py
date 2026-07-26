@@ -1,8 +1,10 @@
+import asyncio
 import os
+import threading
 import time
 import unittest
 from dataclasses import replace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from getbible import ReferenceValidationError, RequestLimitError
 
@@ -13,11 +15,25 @@ from modules.service import CircuitBreaker, ScriptureQuery, ScriptureService
 
 
 class _Client:
-    def __init__(self, *, delay: float = 0.0, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        delay: float = 0.0,
+        fail: bool = False,
+        search_delay: float = 0.0,
+        search_fail: bool = False,
+        search_started: threading.Event | None = None,
+        search_release: threading.Event | None = None,
+    ) -> None:
         self.delay = delay
         self.fail = fail
+        self.search_delay = search_delay
+        self.search_fail = search_fail
+        self.search_started = search_started
+        self.search_release = search_release
         self.translation_calls: list[str] = []
         self.search_calls: list[tuple[str, str, object]] = []
+        self.warm_calls: list[str] = []
         self.closed = False
 
     def valid_translation(self, code: str) -> bool:
@@ -39,6 +55,14 @@ class _Client:
         }
 
     def search(self, query: str, translation: str, criteria: object) -> dict:
+        if self.search_started is not None:
+            self.search_started.set()
+        if self.search_release is not None:
+            self.search_release.wait(timeout=1)
+        if self.search_delay:
+            time.sleep(self.search_delay)
+        if self.search_fail:
+            raise OSError("search corpus unavailable")
         self.search_calls.append((query, translation, criteria))
         return {
             "query": {"total": 1},
@@ -62,6 +86,16 @@ class _Client:
                     "chapter": 3,
                     "verse": 16,
                 }
+            ],
+        }
+
+    def warm_translation(self, translation: str) -> dict:
+        self.warm_calls.append(translation)
+        return {
+            "abbreviation": translation,
+            "verses": 31_102,
+            "indexes": [
+                {"case_sensitive": False, "diacritics": "sensitive"}
             ],
         }
 
@@ -108,6 +142,25 @@ class CircuitBreakerTestCase(unittest.IsolatedAsyncioTestCase):
 
 
 class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_librarian_receives_independent_corpus_and_search_limits(
+        self,
+    ) -> None:
+        settings = _settings(
+            GETBIBLE_MAX_RESPONSE_BYTES=str(64 * 1024 * 1024),
+            SEARCH_MAX_RESPONSE_BYTES=str(4 * 1024 * 1024),
+        )
+        client = MagicMock()
+        with patch("modules.service.GetBible", return_value=client) as constructor:
+            service = ScriptureService(settings)
+        self.addAsyncCleanup(service.close)
+
+        arguments = constructor.call_args.kwargs
+        self.assertEqual(arguments["max_response_bytes"], 64 * 1024 * 1024)
+        self.assertEqual(
+            arguments["search_limits"].max_response_bytes,
+            4 * 1024 * 1024,
+        )
+
     async def test_empty_reference_is_never_replaced_with_a_default(self) -> None:
         service = ScriptureService(_settings(), client=_Client())
         self.addAsyncCleanup(service.close)
@@ -163,6 +216,63 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.items[0].reference, "John 3:16")
         self.assertEqual(page.items[0].text, "For God so loved the world.")
         self.assertEqual(len(client.search_calls), 1)
+
+    async def test_default_translation_prewarm_uses_search_capacity(self) -> None:
+        client = _Client()
+        service = ScriptureService(_settings(), client=client)
+        self.addAsyncCleanup(service.close)
+
+        metadata = await service.warm_default_translation()
+
+        self.assertEqual(metadata["abbreviation"], "kjv")
+        self.assertEqual(client.warm_calls, ["kjv"])
+        self.assertEqual(service.metrics.snapshot()["search_warmups"], 1)
+
+    async def test_slow_search_does_not_consume_lightweight_lookup_capacity(self) -> None:
+        search_started = threading.Event()
+        search_release = threading.Event()
+        client = _Client(
+            search_started=search_started,
+            search_release=search_release,
+        )
+        settings = replace(
+            _settings(),
+            max_concurrent_lookups=1,
+            max_concurrent_searches=1,
+        )
+        service = ScriptureService(settings, client=client)
+        self.addAsyncCleanup(service.close)
+
+        search = asyncio.create_task(
+            service.search("loved", SearchOptions(translation="kjv"))
+        )
+        started = await asyncio.to_thread(search_started.wait, 1)
+        self.assertTrue(started)
+        selected = await service.select(ScriptureQuery("John 3:16", "kjv"))
+        self.assertFalse(search.done())
+        search_release.set()
+        await search
+
+        self.assertIn("kjv_43_3", selected)
+
+    async def test_search_circuit_failure_does_not_disable_direct_scripture(self) -> None:
+        client = _Client(search_fail=True)
+        settings = replace(
+            _settings(),
+            circuit_failure_threshold=1,
+            circuit_recovery_seconds=60.0,
+        )
+        service = ScriptureService(settings, client=client)
+        self.addAsyncCleanup(service.close)
+
+        with self.assertRaises(ScriptureUnavailable):
+            await service.search("loved", SearchOptions(translation="kjv"))
+        selected = await service.select(ScriptureQuery("John 3:16", "kjv"))
+        snapshot = await service.snapshot()
+
+        self.assertIn("kjv_43_3", selected)
+        self.assertEqual(snapshot["circuit"]["state"], "closed")
+        self.assertEqual(snapshot["search_circuit"]["state"], "open")
 
     async def test_timeout_opens_circuit_and_followup_fails_fast(self) -> None:
         client = _Client(delay=0.05)

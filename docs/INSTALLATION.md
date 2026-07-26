@@ -44,14 +44,22 @@ On Debian, Ubuntu, Fedora, or another `dnf` host, the manager offers to install 
 1. confirmation of the exact reviewed commit and Python interpreter;
 2. an instance/user-space name;
 3. the Telegram token, entered twice with terminal echo disabled;
-4. the default GetBible translation, with KJV selected by default;
-5. a unique loopback health/metrics port;
-6. metadata-only or content audit logging;
-7. whether handled Telegram command messages should be deleted;
-8. whether the service should be enabled and started;
-9. optional live token verification through Telegram.
+4. the Telegram display name, short description, and description;
+5. the default GetBible translation, with KJV selected by default;
+6. polling or HTTPS webhook delivery;
+7. for webhook mode, the public URL, local loopback port, optional fixed public
+   IP, and confirmation that the reverse proxy is ready;
+8. a unique loopback health/metrics port;
+9. metadata-only or content audit logging;
+10. whether handled Telegram command messages should be deleted;
+11. whether the service should be enabled and started;
+12. optional live token verification through Telegram.
 
-The token is never accepted as a command-line argument, printed, added to setup logs, or copied into instance metadata. Setup also rejects a token already assigned to another local instance because Telegram long polling must have only one active process per token.
+The token is never accepted as a command-line argument, printed, added to setup logs, or copied into instance metadata. Setup also rejects a token already assigned to another local instance. One token represents one bot and must not be active in multiple local instances, regardless of whether it uses polling or a webhook.
+
+Polling requires only outbound HTTPS. Webhook mode requires public HTTPS through
+a reverse proxy; the application listener remains on loopback. See
+[Telegram delivery](WEBHOOKS.md) before choosing webhook mode.
 
 ## Instance and account names
 
@@ -81,6 +89,7 @@ For an instance named `production`:
 |---|---|---|
 | Application and exact virtual environment | `/opt/getbible-robot/production/app` | `root:gb-production`, mode `0750` directories/`0640` files |
 | Secret environment | `/etc/getbible-robot/production.env` | `root:root`, mode `0600` |
+| Welcome/help content | `/etc/getbible-robot/production.{welcome,help}.txt` | `root:gb-production`, mode `0640` |
 | Non-secret deployment metadata | `/etc/getbible-robot/instances/production.conf` | `root:root`, mode `0600` |
 | Runtime cache | `/var/cache/getbible-robot/production` | `gb-production`, mode `0700` |
 | State/home | `/var/lib/getbible-robot/production` | `gb-production`, mode `0700` |
@@ -124,6 +133,9 @@ Before enabling a service, setup:
 - optionally calls Telegram `getMe` without printing the token;
 - verifies the instantiated `systemd` unit;
 - starts the service only after all build checks pass;
+- synchronizes the Bot API command list and configured profile metadata;
+- verifies that Telegram's registered webhook state matches the selected
+  polling/webhook mode;
 - waits for `/readyz` when health checks are enabled.
 
 Partial installation failures before unit verification are cleaned up transactionally. A service that starts but does not become ready is retained for diagnosis through `getbible-robot doctor` and `getbible-robot logs`.
@@ -134,6 +146,13 @@ Partial installation failures before unit verification are cleaned up transactio
 sudo getbible-robot status production
 sudo getbible-robot doctor production
 sudo getbible-robot logs production 100
+```
+
+For webhook mode, also validate the public route and Telegram registration:
+
+```bash
+sudo getbible-robot status production
+sudo getbible-robot doctor production
 ```
 
 Then use a private conversation with the dedicated bot:
@@ -184,4 +203,6 @@ bash scripts/run-checks.sh
 
 To run a live development bot, copy `.env.template` to `.env`, use a dedicated test token, keep `INSTANCE_NAME=local`, leave `LOG_FILE` empty or choose a writable absolute path, and select an unused loopback `HEALTH_PORT`.
 
-Never run two polling processes with the same Telegram token.
+Never run two active processes with the same Telegram token. A polling conflict
+causes the robot to stop with a non-restarting exit status instead of repeatedly
+fighting the other poller.

@@ -1,6 +1,8 @@
 # Configuration
 
-GetBible Robot validates all configuration before Telegram polling begins. Invalid security-sensitive values fail startup instead of silently falling back.
+GetBible Robot validates all configuration before Telegram update delivery
+begins. Invalid security-sensitive values fail startup instead of silently
+falling back.
 
 Each production instance reads `/etc/getbible-robot/<instance>.env`. Local development may use a `.env` file in the checkout. Environment variables already present in the process take precedence over `.env` values.
 
@@ -14,6 +16,25 @@ Each production instance reads `/etc/getbible-robot/<instance>.env`. Local devel
 Store the token outside Git with restrictive permissions. Revoke and replace it immediately through `@BotFather` if disclosure is suspected.
 
 `setup.sh` accepts tokens only through a hidden interactive prompt, stores each file as `root:root` mode `0600`, and rejects reuse by another local instance.
+
+## Telegram delivery and profile
+
+| Variable | Default | Validation | Purpose |
+|---|---:|---|---|
+| `TELEGRAM_DELIVERY_MODE` | `polling` | `polling` or `webhook` | Selects exactly one Bot API update transport |
+| `TELEGRAM_WEBHOOK_PUBLIC_URL` | empty | Required in webhook mode; HTTPS URL with a non-root private path and no credentials/query/fragment; explicit public port is 80, 88, 443, or 8443 | URL registered with Telegram |
+| `TELEGRAM_WEBHOOK_LISTEN` | `127.0.0.1` | Loopback only | Private application listener behind the reverse proxy |
+| `TELEGRAM_WEBHOOK_PORT` | `9001` | `1024`–`65535` | Per-instance local listener port |
+| `TELEGRAM_WEBHOOK_SECRET_TOKEN` | empty | Required in webhook mode; 32–256 safe token characters | Authenticates Telegram's webhook header |
+| `TELEGRAM_WEBHOOK_IP_ADDRESS` | empty | Empty or globally routable IPv4/IPv6 | Optional fixed address sent to Telegram |
+| `TELEGRAM_WEBHOOK_MAX_CONNECTIONS` | `16` | `1`–`100` | Maximum simultaneous Telegram webhook connections |
+| `BOT_NAME` | `GetBible Robot` | 1–64 characters | Bot API display name synchronized at startup |
+| `BOT_DESCRIPTION` | built-in text | 1–512 characters | Bot API description synchronized at startup |
+| `BOT_SHORT_DESCRIPTION` | built-in text | 1–120 characters | Bot API short description synchronized at startup |
+
+The public reverse proxy terminates TLS and forwards the exact private URL path
+to the loopback listener. Do not expose `TELEGRAM_WEBHOOK_PORT` directly. See
+[Telegram delivery](WEBHOOKS.md).
 
 ## Instance identity and audit logging
 
@@ -46,10 +67,15 @@ Content mode additionally records normalized search terms and final Scripture re
 | `GETBIBLE_WEB_BASE_URL` | `https://getbible.life` | Same URL rules | Base for every clickable link shown in Telegram |
 | `WELCOME_MESSAGE` | built-in text | Non-empty; at most 4096 characters | `/start` response |
 | `HELP_MESSAGE` | built-in text | Non-empty; at most 4096 characters | `/help` response |
+| `WELCOME_MESSAGE_FILE` | empty | Empty or readable absolute UTF-8 path; takes precedence over `WELCOME_MESSAGE` | Editable multi-line `/start` content |
+| `HELP_MESSAGE_FILE` | empty | Empty or readable absolute UTF-8 path; takes precedence over `HELP_MESSAGE` | Editable multi-line `/help` content |
 
 The API and website variables are intentionally different. The API value is used only for data access. The website value is used only for user-facing links. An empty `/bible` uses `TRANSLATION` as the preselected translation and opens the guided picker; it never substitutes a default verse.
 
-Literal `\n` sequences in message settings are converted to newlines.
+Literal `\n` sequences in inline message settings are converted to newlines.
+Production setup creates restricted per-instance content files. Edit them with
+`sudo EDITOR=nano getbible-robot content <instance> welcome|help`; do not move
+their manager-owned paths in the environment file.
 
 ## Repository and worker timeouts
 
@@ -58,7 +84,7 @@ Literal `\n` sequences in message settings are converted to newlines.
 | `GETBIBLE_CONNECT_TIMEOUT` | `3.05` seconds | `0.1`–`30` | TCP/TLS connection timeout |
 | `GETBIBLE_READ_TIMEOUT` | `6` seconds | `0.5`–`60` | Per-response read timeout |
 | `GETBIBLE_REQUEST_RETRIES` | `1` | `0`–`5` | Retries for Librarian and navigation-catalog GET requests |
-| `GETBIBLE_MAX_RESPONSE_BYTES` | `8388608` | `1024`–`134217728` | Maximum accepted repository response body |
+| `GETBIBLE_MAX_RESPONSE_BYTES` | `67108864` (64 MiB) | `1024`–`134217728` | Maximum accepted full repository/corpus response body |
 | `LOOKUP_TIMEOUT` | `20` seconds | `1`–`90` | Overall asynchronous wait for one lookup |
 | `LOOKUP_QUEUE_TIMEOUT` | `2` seconds | `0.1`–`30` | Maximum wait for bounded worker capacity |
 
@@ -75,12 +101,25 @@ A lookup timeout does not pretend that its worker thread stopped. The capacity p
 | `MAX_OUTPUT_CHUNKS` | `8` | `1`–`32` | Maximum Telegram messages produced by one command |
 | `SEARCH_RESULT_LIMIT` | `50` | `1`–`200` | Maximum selectable matches retained from one Librarian search |
 | `SEARCH_DEADLINE_SECONDS` | `5` | `0.1`–`30` | Librarian's cooperative per-search execution deadline |
-| `MAX_CONCURRENT_LOOKUPS` | `4` | `1`–`32` | Worker threads and simultaneous repository operations |
+| `SEARCH_MAX_RESPONSE_BYTES` | `4194304` (4 MiB) | `65536`–`16777216` | Maximum constructed Librarian search result, separate from corpus downloads |
+| `MAX_CONCURRENT_LOOKUPS` | `4` | `1`–`32` | Direct-reference/catalog worker threads and permits |
+| `MAX_CONCURRENT_SEARCHES` | `1` | `1`–`8` | Independent expensive-search worker threads and permits |
 | `MAX_CONCURRENT_UPDATES` | `16` | `1`–`64` | Telegram updates processed concurrently |
 
 `MAX_TOTAL_VERSES` may not be lower than `MAX_VERSES_PER_REFERENCE`. Telegram text is measured in UTF-16 code units, not Python characters, before chunks are sent.
 
-Do not increase these values merely to make an abusive request succeed. Load-test memory, API behavior, Telegram output, and the `MemoryMax` service setting before raising production limits.
+On 26 July 2026, the largest published corpus measured by uncompressed
+`Content-Length` was `thai` at 30,950,679 bytes; KJV was 8,862,703 bytes. The
+64 MiB repository cap therefore accommodates the currently observed full
+translations, including larger non-66-book corpora, with bounded headroom.
+It does not permit a 64 MiB search result: `SEARCH_MAX_RESPONSE_BYTES`,
+`SEARCH_RESULT_LIMIT`, and Telegram message limits remain independent. Search
+also has its own single-worker default so corpus parsing/indexing cannot occupy
+the four direct-reference workers.
+
+Do not increase these values merely to make an abusive request succeed.
+Load-test memory, API behavior, Telegram output, and the `MemoryMax` service
+setting before raising production limits.
 
 ## Inbound rate limits
 
@@ -122,6 +161,7 @@ Validation errors and request-limit rejections do not count as upstream failures
 |---|---:|---|---|
 | `DELETE_COMMAND_MESSAGES` | `false` | `true` or `false` | Attempt to delete user commands after handling; permission failures are non-fatal |
 | `DROP_PENDING_UPDATES` | `true` | `true` or `false` | Drop updates accumulated while the bot was offline at startup |
+| `PREWARM_DEFAULT_TRANSLATION` | `true` | `true` or `false` | Load and index the default search corpus before readiness; safe failure does not prevent direct references |
 | `HEALTH_HOST` | `127.0.0.1` | `127.0.0.1`, `::1`, or `localhost` only | Health listener address |
 | `HEALTH_PORT` | `8081` | `0`–`65535`; `0` disables | Health/readiness/metrics port |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level name | Structured JSON log threshold |
@@ -132,12 +172,17 @@ The health listener is deliberately loopback-only. Each running instance require
 
 ```dotenv
 TELEGRAM_API_TOKEN="123456789:replace-with-real-secret"
+TELEGRAM_DELIVERY_MODE="polling"
 INSTANCE_NAME="production"
 LOG_FILE="/var/log/getbible-robot/production.jsonl"
 AUDIT_LOG_MODE="metadata"
 TRANSLATION="kjv"
 GETBIBLE_API_BASE_URL="https://api.getbible.net"
 GETBIBLE_WEB_BASE_URL="https://getbible.life"
+GETBIBLE_MAX_RESPONSE_BYTES="67108864"
+SEARCH_MAX_RESPONSE_BYTES="4194304"
+MAX_CONCURRENT_SEARCHES="1"
+PREWARM_DEFAULT_TRANSLATION="true"
 HEALTH_HOST="127.0.0.1"
 HEALTH_PORT="8081"
 LOG_LEVEL="INFO"

@@ -3,7 +3,8 @@
 ## Request path
 
 ```text
-Telegram message, reply, or callback update
+Telegram long poll or authenticated HTTPS webhook
+  → Telegram message, reply, or callback update
   → registered command or interactive handler
   → per-user and per-chat token buckets
   → strict reference, search, session, and callback validation
@@ -17,7 +18,10 @@ Telegram message, reply, or callback update
   → UTF-16-aware, message-count-bounded Telegram chunks
 ```
 
-Handlers never call synchronous repository code on the event-loop thread. `ScriptureService` owns the Librarian client, fixed executor, semaphore, timeout behavior, circuit state, and aggregate metrics.
+Handlers never call synchronous repository code on the event-loop thread.
+`ScriptureService` owns the Librarian client, separate fixed reference/search
+executors and semaphores, timeout behavior, circuit state, and aggregate
+metrics.
 
 ## Trust boundaries
 
@@ -65,20 +69,32 @@ Selected match metadata is converted back into compressed canonical references. 
 
 Callbacks contain an opaque random token rather than references, queries, or verse text. The in-memory session store validates token, chat, and user together, refreshes an inactivity TTL, and enforces an LRU size limit. Replies are accepted only when they target the exact bot prompt recorded for that session.
 
-Local pagination, filter toggles, and checkmarks do not consume worker capacity. Every accepted callback still consumes the normal per-user and per-chat inbound rate budget. Catalog reads, searches, and final posts additionally use the service semaphore, executor, timeout, and circuit breaker.
+Local pagination, filter toggles, and checkmarks do not consume worker capacity.
+Every accepted callback still consumes the normal per-user and per-chat inbound
+rate budget. Catalog reads and final posts use the reference pool. Searches use
+their own smaller pool and circuit so CPU-heavy corpus work cannot consume every
+direct-reference permit.
 
 ## Concurrency and timeout model
 
-Telegram updates may run concurrently, but all commands and session-owned callbacks or replies first consume user and chat rate-limit tokens. Scripture repository work additionally requires a `ScriptureService` semaphore permit.
+Telegram updates may run concurrently, but all commands and session-owned
+callbacks or replies first consume user and chat rate-limit tokens. Direct
+Scripture/catalog work and searches additionally require permits from their
+separate bounded pools.
 
-The synchronous Librarian call runs in a fixed `ThreadPoolExecutor`. The asynchronous caller has an overall timeout, but Python cannot safely kill a running thread. Consequently:
+Each synchronous Librarian call runs in a fixed `ThreadPoolExecutor`. The
+asynchronous caller has an overall timeout, but Python cannot safely kill a
+running thread. Consequently:
 
 1. a timed-out caller receives a safe temporary-unavailable response;
 2. the underlying thread is allowed to exit normally;
 3. its semaphore permit is released only when the real concurrent future completes;
 4. later requests reach the bounded queue timeout rather than entering the executor's internal unbounded queue.
 
-This distinction prevents repeated upstream stalls from turning cancellation into unlimited queued work.
+This distinction prevents repeated upstream stalls from turning cancellation
+into unlimited queued work. Reference and search failures also maintain
+separate circuit state, so an expensive or invalid search outage does not make
+ordinary `/bible` retrieval unavailable.
 
 ## Circuit breaker
 
@@ -104,9 +120,12 @@ Startup order:
 
 1. validate all configuration;
 2. construct bounded service objects;
-3. initialize Telegram and register bot commands;
-4. start the loopback health listener;
-5. begin polling only message and callback-query updates required by the robot.
+3. initialize Telegram and synchronize the command menu and profile metadata;
+4. optionally load/index the default search translation;
+5. start the loopback health listener;
+6. start exactly one configured transport:
+   - polling, which removes any registered webhook; or
+   - an authenticated webhook on loopback behind public HTTPS.
 
 Shutdown order:
 
@@ -115,6 +134,10 @@ Shutdown order:
 3. stop accepting work and wait for real worker threads;
 4. close Librarian HTTP sessions;
 5. complete Telegram shutdown.
+
+The Bot API does not offer a WebSocket update transport. Polling and webhooks
+are mutually exclusive. A polling `Conflict` stops the instance with a
+non-restarting exit status so duplicate processes do not continue fighting.
 
 The supplied `systemd` template gives every named instance its own locked `gb-<instance>` identity, root-owned application and secret configuration, writable cache and JSONL file, restart behavior, filesystem protection, no capabilities, limited address families, task/file limits, and `MemoryMax`. Instances do not share a token, process, cache, health port, log file, interaction state, or virtual environment.
 

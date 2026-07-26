@@ -38,6 +38,8 @@ class SetupScriptTestCase(unittest.TestCase):
             "follow",
             "doctor",
             "repair",
+            "delivery",
+            "content",
             "config",
             "upgrade",
             "rollback",

@@ -26,6 +26,37 @@ Start and restart wait for the configured loopback readiness endpoint. If `HEALT
 
 Never run a second process with the same Telegram token.
 
+## Polling, webhook, and bot content
+
+Show the selected mode:
+
+```bash
+sudo getbible-robot status production
+sudo getbible-robot doctor production
+```
+
+Switch modes through the transactional manager:
+
+```bash
+sudo getbible-robot delivery production
+```
+
+Webhook mode is an outgoing Telegram HTTPS webhook, not a WebSocket. Configure
+the public TLS reverse proxy first; the robot remains bound to loopback. Polling
+removes the registered webhook during startup. A detected duplicate poller exits
+with status 75 and is not restarted by systemd.
+
+Edit the multi-line welcome or help content:
+
+```bash
+sudo EDITOR=nano getbible-robot content production welcome
+sudo EDITOR=nano getbible-robot content production help
+```
+
+Use `config` for `BOT_NAME`, `BOT_DESCRIPTION`, and
+`BOT_SHORT_DESCRIPTION`. Restarting synchronizes those values and the command
+menu through Telegram's Bot API. See [Telegram delivery](WEBHOOKS.md).
+
 ## Logs
 
 Show a bounded recent window:
@@ -71,10 +102,12 @@ The non-destructive diagnostic checks:
 - root-only environment permissions;
 - per-instance log ownership;
 - complete configuration validation;
+- readable, manager-owned welcome/help content;
 - installed dependency consistency;
 - deployed Git commit against metadata;
 - instantiated unit verification;
 - systemd status;
+- Telegram webhook registration matching the configured delivery mode;
 - health and readiness when running.
 
 Use `runtime` for operational counters and `doctor` for an evidence-backed pass/fail deployment check.
@@ -120,6 +153,7 @@ Alert on:
 - an open upstream circuit;
 - lookup timeouts, repository failures, queue rejections, or unexpected failures;
 - sustained rate-limit rejection;
+- a duplicate-poller exit or webhook pending/error growth;
 - interactive session evictions or saturation;
 - memory approaching `MemoryMax`;
 - task or file-descriptor pressure;
@@ -152,6 +186,11 @@ Do not use a copied virtual environment as a substitute for the matching commit 
 
 ## Capacity
 
-Increase bounds only after measuring memory, worker occupancy, Telegram output count, API latency, circuit behavior, and interaction state under representative load. Hard complexity limits also apply to administrators. A timed-out synchronous lookup intentionally retains its worker permit until the underlying thread exits.
+Increase bounds only after measuring memory, worker occupancy, Telegram output
+count, API latency, circuit behavior, and interaction state under representative
+load. Full corpus downloads and returned search results have separate byte
+budgets. Search uses an independent pool so slow index work cannot occupy all
+direct-reference workers. A timed-out synchronous operation intentionally
+retains its own permit until the underlying thread exits.
 
 Interactive state is process-local, bounded, and ephemeral. Restarting one instance expires only that instance's unfinished panels.

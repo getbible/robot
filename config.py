@@ -6,6 +6,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -21,6 +22,10 @@ _INSTANCE_RE = re.compile(r"[a-z][a-z0-9-]{0,22}[a-z0-9]\Z")
 _TELEGRAM_TOKEN_RE = re.compile(r"[0-9]{6,12}:[A-Za-z0-9_-]{30,64}\Z")
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _AUDIT_LOG_MODES = frozenset({"metadata", "content"})
+_DELIVERY_MODES = frozenset({"polling", "webhook"})
+_WEBHOOK_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
+_WEBHOOK_PATH_RE = re.compile(r"/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\Z")
+_TELEGRAM_WEBHOOK_PORTS = frozenset({80, 88, 443, 8443})
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -76,10 +81,113 @@ def _base_url(name: str, default: str) -> str:
 
 
 def _message(name: str, default: str) -> str:
-    value = _env(name, default) or ""
+    file_value = _env(f"{name}_FILE", "") or ""
+    if file_value:
+        path = Path(file_value)
+        if not path.is_absolute():
+            raise ConfigurationError(f"{name}_FILE must be an absolute path.")
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as error:
+            raise ConfigurationError(f"{name}_FILE could not be read safely.") from error
+    else:
+        value = _env(name, default) or ""
     value = value.replace(r"\n", "\n")
     if not value or len(value) > 4096:
         raise ConfigurationError(f"{name} must contain between 1 and 4096 characters.")
+    return value
+
+
+def _profile_text(name: str, default: str, maximum: int) -> str:
+    value = _env(name, default) or ""
+    value = value.replace(r"\n", "\n").strip()
+    if not 1 <= len(value) <= maximum:
+        raise ConfigurationError(f"{name} must contain between 1 and {maximum} characters.")
+    return value
+
+
+def _delivery_mode() -> str:
+    value = (_env("TELEGRAM_DELIVERY_MODE", "polling") or "").casefold()
+    if value not in _DELIVERY_MODES:
+        raise ConfigurationError("TELEGRAM_DELIVERY_MODE must be polling or webhook.")
+    return value
+
+
+def _webhook_public_url(delivery_mode: str) -> str | None:
+    raw = _env("TELEGRAM_WEBHOOK_PUBLIC_URL", "") or ""
+    if not raw:
+        if delivery_mode == "webhook":
+            raise ConfigurationError(
+                "TELEGRAM_WEBHOOK_PUBLIC_URL is required in webhook mode."
+            )
+        return None
+    parts = urlsplit(raw)
+    if (
+        parts.scheme != "https"
+        or not parts.hostname
+        or parts.username
+        or parts.password
+        or parts.query
+        or parts.fragment
+        or _WEBHOOK_PATH_RE.fullmatch(parts.path) is None
+    ):
+        raise ConfigurationError(
+            "TELEGRAM_WEBHOOK_PUBLIC_URL must be an HTTPS URL with an alphanumeric "
+            "private path and without credentials, query, or fragment."
+        )
+    try:
+        port = parts.port
+    except ValueError as error:
+        raise ConfigurationError("TELEGRAM_WEBHOOK_PUBLIC_URL has an invalid port.") from error
+    hostname = parts.hostname.casefold()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise ConfigurationError(
+            "TELEGRAM_WEBHOOK_PUBLIC_URL must use a publicly reachable host."
+        )
+    try:
+        address = ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        if not address.is_global:
+            raise ConfigurationError(
+                "TELEGRAM_WEBHOOK_PUBLIC_URL must use a publicly routable address."
+            )
+    if port is not None and port not in _TELEGRAM_WEBHOOK_PORTS:
+        raise ConfigurationError(
+            "Telegram webhook URLs may explicitly use only ports 80, 88, 443, or 8443."
+        )
+    return raw.rstrip("/")
+
+
+def _webhook_ip_address() -> str | None:
+    raw = _env("TELEGRAM_WEBHOOK_IP_ADDRESS", "") or ""
+    if not raw:
+        return None
+    try:
+        address = ip_address(raw)
+    except ValueError as error:
+        raise ConfigurationError(
+            "TELEGRAM_WEBHOOK_IP_ADDRESS must be a valid public IPv4 or IPv6 address."
+        ) from error
+    if not address.is_global:
+        raise ConfigurationError("TELEGRAM_WEBHOOK_IP_ADDRESS must be publicly routable.")
+    return str(address)
+
+
+def _webhook_secret(delivery_mode: str) -> str | None:
+    value = _env("TELEGRAM_WEBHOOK_SECRET_TOKEN", "") or ""
+    if not value:
+        if delivery_mode == "webhook":
+            raise ConfigurationError(
+                "TELEGRAM_WEBHOOK_SECRET_TOKEN is required in webhook mode."
+            )
+        return None
+    if _WEBHOOK_SECRET_RE.fullmatch(value) is None:
+        raise ConfigurationError(
+            "TELEGRAM_WEBHOOK_SECRET_TOKEN must contain 32-256 letters, numbers, "
+            "underscores, or hyphens."
+        )
     return value
 
 
@@ -109,6 +217,16 @@ class Settings:
     """All settings are validated once before Telegram polling starts."""
 
     telegram_api_token: str
+    telegram_delivery_mode: str
+    webhook_public_url: str | None
+    webhook_listen: str
+    webhook_port: int
+    webhook_secret_token: str | None
+    webhook_ip_address: str | None
+    webhook_max_connections: int
+    bot_name: str
+    bot_description: str
+    bot_short_description: str
     default_translation: str
     api_base_url: str
     web_base_url: str
@@ -120,6 +238,7 @@ class Settings:
     queue_timeout: float
     request_retries: int
     max_response_bytes: int
+    search_max_response_bytes: int
     max_input_length: int
     max_references: int
     max_verses_per_reference: int
@@ -128,6 +247,7 @@ class Settings:
     search_result_limit: int
     search_deadline_seconds: float
     max_concurrent_lookups: int
+    max_concurrent_searches: int
     max_concurrent_updates: int
     user_rate_capacity: int
     user_rate_refill_per_second: float
@@ -142,6 +262,7 @@ class Settings:
     circuit_recovery_seconds: float
     delete_command_messages: bool
     drop_pending_updates: bool
+    prewarm_default_translation: bool
     health_host: str
     health_port: int
     instance_name: str
@@ -174,6 +295,14 @@ class Settings:
         if audit_log_mode not in _AUDIT_LOG_MODES:
             raise ConfigurationError("AUDIT_LOG_MODE must be metadata or content.")
 
+        delivery_mode = _delivery_mode()
+        webhook_listen = _env("TELEGRAM_WEBHOOK_LISTEN", "127.0.0.1") or ""
+        if webhook_listen not in _LOCAL_HOSTS:
+            raise ConfigurationError(
+                "TELEGRAM_WEBHOOK_LISTEN must be localhost or a loopback address. "
+                "Terminate public HTTPS at a reverse proxy."
+            )
+
         log_name = (_env("LOG_LEVEL", "INFO") or "").upper()
         log_level = getattr(logging, log_name, None)
         if not isinstance(log_level, int):
@@ -194,6 +323,26 @@ class Settings:
 
         return cls(
             telegram_api_token=token,
+            telegram_delivery_mode=delivery_mode,
+            webhook_public_url=_webhook_public_url(delivery_mode),
+            webhook_listen=webhook_listen,
+            webhook_port=_integer("TELEGRAM_WEBHOOK_PORT", 9001, 1024, 65_535),
+            webhook_secret_token=_webhook_secret(delivery_mode),
+            webhook_ip_address=_webhook_ip_address(),
+            webhook_max_connections=_integer(
+                "TELEGRAM_WEBHOOK_MAX_CONNECTIONS", 16, 1, 100
+            ),
+            bot_name=_profile_text("BOT_NAME", "GetBible Robot", 64),
+            bot_description=_profile_text(
+                "BOT_DESCRIPTION",
+                "Read and search Scripture in Telegram with GetBible.",
+                512,
+            ),
+            bot_short_description=_profile_text(
+                "BOT_SHORT_DESCRIPTION",
+                "Read and search Scripture with GetBible.",
+                120,
+            ),
             default_translation=translation,
             api_base_url=_base_url("GETBIBLE_API_BASE_URL", "https://api.getbible.net"),
             web_base_url=_base_url("GETBIBLE_WEB_BASE_URL", "https://getbible.life"),
@@ -219,7 +368,16 @@ class Settings:
             queue_timeout=_number("LOOKUP_QUEUE_TIMEOUT", 2.0, 0.1, 30.0),
             request_retries=_integer("GETBIBLE_REQUEST_RETRIES", 1, 0, 5),
             max_response_bytes=_integer(
-                "GETBIBLE_MAX_RESPONSE_BYTES", 8 * 1024 * 1024, 1024, 128 * 1024 * 1024
+                "GETBIBLE_MAX_RESPONSE_BYTES",
+                64 * 1024 * 1024,
+                1024,
+                128 * 1024 * 1024,
+            ),
+            search_max_response_bytes=_integer(
+                "SEARCH_MAX_RESPONSE_BYTES",
+                4 * 1024 * 1024,
+                64 * 1024,
+                16 * 1024 * 1024,
             ),
             max_input_length=max_input_length,
             max_references=max_references,
@@ -231,6 +389,7 @@ class Settings:
                 "SEARCH_DEADLINE_SECONDS", 5.0, 0.1, 30.0
             ),
             max_concurrent_lookups=_integer("MAX_CONCURRENT_LOOKUPS", 4, 1, 32),
+            max_concurrent_searches=_integer("MAX_CONCURRENT_SEARCHES", 1, 1, 8),
             max_concurrent_updates=_integer("MAX_CONCURRENT_UPDATES", 16, 1, 64),
             user_rate_capacity=_integer("USER_RATE_CAPACITY", 4, 1, 100),
             user_rate_refill_per_second=_number(
@@ -259,6 +418,7 @@ class Settings:
             ),
             delete_command_messages=_boolean("DELETE_COMMAND_MESSAGES", False),
             drop_pending_updates=_boolean("DROP_PENDING_UPDATES", True),
+            prewarm_default_translation=_boolean("PREWARM_DEFAULT_TRANSLATION", True),
             health_host=health_host,
             health_port=_integer("HEALTH_PORT", 8081, 0, 65_535),
             instance_name=_instance_name(),

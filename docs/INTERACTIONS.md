@@ -98,6 +98,10 @@ The robot groups selected verses by book and chapter, compresses contiguous vers
 
 **New search** retains the current filters. **Filters** returns to the dashboard. **Cancel** closes the session.
 
+Rendered verses are compact: the linked reference header is followed by one
+line per verse, and adjacent verses use a single newline rather than blank
+paragraphs.
+
 ## Session and callback safety
 
 - Callback data contains only an opaque random session token, an action, and a bounded numeric or translation identifier.
@@ -132,7 +136,9 @@ The process stores only short-lived selection state. It does not persist query t
 2. Use a dedicated test bot to run the private-chat and group smoke matrix in [Testing](TESTING.md).
 3. Verify real BotFather privacy-mode behavior for selective replies in at least one group.
 4. Exercise a right-to-left translation and a translation with non-66-book coverage.
-5. Confirm the configured API permits the largest supported book navigation response within `GETBIBLE_MAX_RESPONSE_BYTES`.
+5. Confirm the largest supported full translation remains below
+   `GETBIBLE_MAX_RESPONSE_BYTES`, while search output remains independently
+   bounded by `SEARCH_MAX_RESPONSE_BYTES`.
 6. Rehearse rollback to the previous reviewed robot commit.
 
 ### Follow-up after stable rollout
