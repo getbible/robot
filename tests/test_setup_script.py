@@ -77,10 +77,15 @@ class SetupScriptTestCase(unittest.TestCase):
     def test_official_caddy_repository_installation(self) -> None:
         result = subprocess.run(
             ["bash", str(CADDY_INSTALLATION)],
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
             timeout=30,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
         )
         self.assertIn("Caddy installation test passed.", result.stdout)
 
