@@ -26,6 +26,10 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   deterministic multi-instance routes, complete validation, byte-preserving
   rollback, public certificate/content verification, and isolated route
   removal on disable or uninstall.
+- Fixed fresh Ubuntu/Debian installations by completing interrupted package
+  configuration, repairing incomplete dependencies, and bootstrapping Caddy's
+  official signed APT repository before installing the package. DNF hosts now
+  enable Caddy's official COPR repository as well.
 
 ### Security
 
