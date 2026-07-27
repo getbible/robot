@@ -1,3 +1,4 @@
+import stat
 import subprocess
 import unittest
 from pathlib import Path
@@ -11,6 +12,9 @@ MINIAPP_READINESS = ROOT / "tests" / "miniapp_readiness.sh"
 
 
 class SetupScriptTestCase(unittest.TestCase):
+    def test_setup_entrypoint_is_committed_executable(self) -> None:
+        self.assertTrue(SETUP.stat().st_mode & stat.S_IXUSR)
+
     def test_shell_syntax_and_self_test(self) -> None:
         subprocess.run(["bash", "-n", str(SETUP)], check=True)
         subprocess.run(["bash", "-n", str(LIFECYCLE)], check=True)
@@ -46,6 +50,7 @@ class SetupScriptTestCase(unittest.TestCase):
             "miniapp",
             "content",
             "config",
+            "update",
             "upgrade",
             "rollback",
             "uninstall",
@@ -128,6 +133,22 @@ class SetupScriptTestCase(unittest.TestCase):
         self.assertNotIn("--token ", script)
         self.assertIn('read -r -s -p "Telegram Bot API token: "', script)
         self.assertIn("ensure_unique_token", script)
+
+    def test_root_manager_does_not_write_the_operator_git_index(self) -> None:
+        script = SETUP.read_text(encoding="utf-8")
+        self.assertIn("git_source_read()", script)
+        self.assertIn(
+            'GIT_OPTIONAL_LOCKS=0 git -C "$directory" "$@"',
+            script,
+        )
+        self.assertIn(
+            'target_sha=$(git_source_read "$source_dir" rev-parse HEAD)',
+            script,
+        )
+        self.assertIn(
+            'git_source_read "$candidate" diff --quiet',
+            script,
+        )
 
     def test_mini_app_manager_enforces_https_and_loopback(self) -> None:
         script = SETUP.read_text(encoding="utf-8")

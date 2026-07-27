@@ -112,7 +112,15 @@ class MiniAppStaticHandler(StaticFileHandler):
         if path in {"", "index.html"}:
             self.set_header("Cache-Control", "no-store, max-age=0")
         else:
-            self.set_header("Cache-Control", "public, max-age=3600")
+            # Telegram's embedded browser may keep the WebView cache between
+            # launches. Revalidate every packaged asset so an atomic instance
+            # upgrade cannot combine a new index with stale JavaScript, locale
+            # catalogs, styles, or branding. Tornado's content ETag still lets
+            # unchanged files return 304 without downloading the body again.
+            self.set_header(
+                "Cache-Control",
+                "no-cache, max-age=0, must-revalidate",
+            )
 
 
 class MiniAppServer:

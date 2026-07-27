@@ -173,6 +173,13 @@ editing English copy, update the canonical catalog and every localized catalog;
 `miniapp/tests/static.test.mjs` rejects missing keys or damaged interpolation
 placeholders.
 
+Telegram may retain its embedded browser cache between launches. The Mini App
+therefore serves `index.html` with `no-store` and requires revalidation of every
+packaged JavaScript, CSS, catalog, and image response. A normal
+`getbible-robot update` deployment restarts the static server with the complete
+new Git tree, preventing new HTML from being combined with assets from the
+previous deployment.
+
 Ancient and low-resource translation codes that do not have a stable modern UI
 locale use the nearest usable modern interface catalog or English. For example,
 Ancient Greek uses the Greek catalog, Biblical Hebrew uses Hebrew, Dari uses
@@ -219,6 +226,15 @@ Then verify the opening gate, home hero, top bar, protected/expired state,
 search keyboard behavior, and light/dark themes on a narrow phone viewport.
 Deploy the reviewed source through the normal instance upgrade command; do not
 edit files inside `/opt/getbible-robot/<instance>/app` by hand.
+
+On the normal production checkout:
+
+```bash
+cd ~/robot
+git switch master
+git pull --ff-only
+sudo ./setup.sh update production --source "$PWD"
+```
 
 ## Verification
 

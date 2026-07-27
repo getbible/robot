@@ -13,6 +13,37 @@ Upgrade one instance from a clean checkout of the exact reviewed target commit. 
 
 ## Upgrade
 
+For the normal server checkout, update `master` and deploy the complete
+application in place:
+
+```bash
+cd ~/robot
+git switch master
+git pull --ff-only
+git status --short
+sudo ./setup.sh update production --source "$PWD"
+```
+
+`git status --short` must print nothing. The `update` command is an alias for
+the transactional `upgrade` operation and is also available as **Update /
+upgrade deployment** in the interactive maintenance menu. It replaces the
+entire installed application tree, including `miniapp/`, its interface
+catalogs, styles, and images. It then restarts the instance and verifies both
+Robot readiness and the configured Mini App HTTPS route.
+
+The repository owns `setup.sh` as an executable file. Run it directly; a fresh
+checkout must not require `chmod`. Although the manager itself runs through
+`sudo`, it inspects the operator-owned source checkout with Git's optional
+locks disabled. The deployment must not refresh or change ownership of
+`.git/index`.
+
+The Mini App revalidates every packaged asset when Telegram opens it, so the
+new deployment cannot reuse JavaScript, CSS, locale catalogs, or branding from
+the previous commit. Close any Mini App view that was already open during the
+upgrade and launch `/bible` or `/search` again.
+
+For a separately reviewed checkout pinned to an exact commit:
+
 ```bash
 git clone https://github.com/getbible/robot.git robot-upgrade
 cd robot-upgrade
@@ -41,7 +72,8 @@ The manager:
 9. stops only the selected instance;
 10. atomically replaces `app` and retains `app.previous`;
 11. starts the service and waits for readiness;
-12. automatically restores the prior application if readiness fails.
+12. verifies the configured Mini App listener and public HTTPS route;
+13. automatically restores the prior application if readiness fails.
 
 Source, virtual environment, and lock are always moved as one application tree. The service never combines code from one commit with a lock from another.
 
