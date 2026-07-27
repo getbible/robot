@@ -60,8 +60,9 @@ https://bot.example.com/getbible/production
 
 Create the public DNS `A` and/or `AAAA` record before running setup, and direct
 public TCP ports `80` and `443` to this host. The manager verifies that the
-hostname resolves publicly, installs only the distribution's Caddy package
-when Caddy is absent, assigns a unique loopback port beginning at `9201`, and
+hostname resolves publicly and, when Caddy is absent, installs Caddy through
+its official signed APT repository on Debian/Ubuntu or official COPR repository
+on DNF hosts. It assigns a unique loopback port beginning at `9201` and
 configures Caddy automatic HTTPS. Polling remains the recommended Telegram
 delivery mode and does not affect the Mini App HTTPS listener.
 
