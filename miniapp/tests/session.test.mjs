@@ -96,7 +96,7 @@ test("matching reload resumes while a new launch always exchanges", async () => 
   assert.equal(exchanged, 1);
 });
 
-test("authorization rejection clears the stale stored session", async () => {
+test("authorization rejection clears stale storage and exchanges the launch", async () => {
   const storage = new MemoryStorage();
   const context = await sessionContext("signed-init-data", "launch-one");
   assert.equal(
@@ -107,23 +107,31 @@ test("authorization rejection clears the stale stored session", async () => {
   const authorizationError = Object.assign(new Error("expired"), {
     status: 401,
   });
-  await assert.rejects(
-    openBoundSession(
-      {
-        createSession: async () => assert.fail("must attempt resume"),
-        resumeSession: async () => {
-          throw authorizationError;
-        },
+  const replacementToken = "qrstuvwxyzABCDEF";
+  const payload = await openBoundSession(
+    {
+      createSession: async (launchToken) => {
+        assert.equal(launchToken, "launch-one");
+        return {
+          session_token: replacementToken,
+          entrypoint: { route: "search" },
+        };
       },
-      {
-        initData: "signed-init-data",
-        launchToken: "launch-one",
-        storage,
+      resumeSession: async () => {
+        throw authorizationError;
       },
-    ),
-    authorizationError,
+    },
+    {
+      initData: "signed-init-data",
+      launchToken: "launch-one",
+      storage,
+    },
   );
-  assert.equal(readBoundSession(storage, context), null);
+  assert.equal(payload.session_token, replacementToken);
+  assert.deepEqual(readBoundSession(storage, context), {
+    token: replacementToken,
+    context,
+  });
 });
 
 test("malformed, mismatched, and explicitly cleared records cannot resume", async () => {

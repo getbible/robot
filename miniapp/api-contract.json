@@ -20,7 +20,7 @@
   "paths": {
     "/session": {
       "post": {
-        "summary": "Create a short-lived Mini App session",
+        "summary": "Create or safely recover a short-lived Mini App session",
         "security": [],
         "requestBody": {
           "required": true,
@@ -46,6 +46,16 @@
           }
         },
         "responses": {
+          "200": {
+            "description": "A reopened Telegram WebView was rebound to its still-active owner/chat session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NewSession"
+                }
+              }
+            }
+          },
           "201": {
             "description": "Validated Telegram session and initial application state",
             "content": {

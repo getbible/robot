@@ -30,6 +30,15 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   configuration, repairing incomplete dependencies, and bootstrapping Caddy's
   official signed APT repository before installing the package. DNF hosts now
   enable Caddy's official COPR repository as well.
+- Polished the mobile Mini App by fitting the supplied upright GetBible icon in
+  the header, dismissing the phone keyboard for both form-button and keyboard
+  Search submissions, recovering an active owner/chat-bound session when
+  Telegram recreates the WebView, and replacing expired-launch reload loops
+  with explicit close-and-restart guidance.
+- Retained both sides of an ephemeral group launch so a completed Mini App
+  workflow removes the user's "Only visible to GetBibleBot" command as well as
+  the bot's "Only visible to you" launch response. Immediate cleanup remains in
+  place, and final cleanup retries each row independently and non-fatally.
 
 ### Security
 

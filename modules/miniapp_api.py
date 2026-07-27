@@ -152,6 +152,7 @@ class MiniAppApi:
             [MiniAppLaunch, tuple[ScriptureQuery, ...]],
             Awaitable[Sequence[int] | None],
         ],
+        cleanup_launch: Callable[[MiniAppLaunch], Awaitable[None]] | None = None,
         ingress_limiter: MiniAppIngressLimiter | None = None,
         replay_guard: TelegramInitDataReplayGuard | None = None,
         page_size: int = 10,
@@ -178,6 +179,7 @@ class MiniAppApi:
         self._launches = launches
         self._validator = validator
         self._post_scripture = post_scripture
+        self._cleanup_launch = cleanup_launch
         self._replay_guard = replay_guard or TelegramInitDataReplayGuard(
             ttl_seconds=300,
             max_entries=20_000,
@@ -378,11 +380,31 @@ class MiniAppApi:
 
         if self._replay_guard.contains(init_data):
             raise MiniAppReplayError("Telegram authorization was replayed.")
-        if (
-            launch_token is not None
-            and self._launches.peek(launch_token, user_id=principal.user_id) is None
-        ):
-            raise MiniAppAuthenticationError("Invalid Mini App launch.")
+        recovery_session: MiniAppSession | None = None
+        if launch_token is not None:
+            expired_launch = self._launches.take_expired(
+                launch_token,
+                user_id=principal.user_id,
+            )
+            if expired_launch is None:
+                expired_launch = self._sessions.take_expired_launch(
+                    launch_token,
+                    user_id=principal.user_id,
+                )
+            if expired_launch is not None:
+                await self._cleanup_expired_launch(expired_launch)
+                raise MiniAppAuthenticationError("Invalid Mini App launch.")
+            pending_launch = self._launches.peek(
+                launch_token,
+                user_id=principal.user_id,
+            )
+            if pending_launch is None:
+                recovery_session = self._sessions.find_by_launch(
+                    launch_token,
+                    user_id=principal.user_id,
+                )
+                if recovery_session is None:
+                    raise MiniAppAuthenticationError("Invalid Mini App launch.")
 
         await self._limiter.acquire(
             user_id=principal.user_id,
@@ -390,6 +412,25 @@ class MiniAppApi:
         )
         translation = self._preferences.translation_for(principal.user_id)
         translations = await self._service.translations()
+        init_data_digest = hashlib.sha256(init_data.encode("utf-8")).digest()
+
+        if recovery_session is not None:
+            self._replay_guard.claim(init_data)
+            try:
+                if not self._sessions.rebind(
+                    recovery_session,
+                    principal,
+                    init_data_digest=init_data_digest,
+                ):
+                    raise MiniAppAuthenticationError("Invalid Mini App launch.")
+                return await self._session_bootstrap(
+                    recovery_session,
+                    status=200,
+                    translations=translations,
+                )
+            except BaseException:
+                self._replay_guard.release(init_data)
+                raise
 
         consumed_launch: MiniAppLaunch | None = None
         if launch_token is None:
@@ -422,7 +463,7 @@ class MiniAppApi:
                 principal,
                 translation=translation,
                 launch=launch,
-                init_data_digest=hashlib.sha256(init_data.encode("utf-8")).digest(),
+                init_data_digest=init_data_digest,
             )
             return await self._session_bootstrap(
                 session,
@@ -436,6 +477,18 @@ class MiniAppApi:
             if consumed_launch is not None:
                 self._launches.restore(consumed_launch)
             raise
+
+    async def _cleanup_expired_launch(self, launch: MiniAppLaunch) -> None:
+        """Remove stale Telegram launch rows without affecting auth failure."""
+        if self._cleanup_launch is None:
+            return
+        try:
+            await self._cleanup_launch(launch)
+        except Exception:
+            LOGGER.warning(
+                "Expired Mini App launch messages could not be cleaned up",
+                exc_info=True,
+            )
 
     async def _session_bootstrap(
         self,

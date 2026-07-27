@@ -36,6 +36,10 @@ GetBible therefore makes unauthenticated browser access inert:
   deliberately restricted to the authenticated user's private bot chat;
 - authenticated sessions have a short absolute lifetime that API activity
   cannot extend indefinitely;
+- if Telegram recreates a WebView and loses its browser session record, a fresh
+  signed `initData` value may rebind only to the still-active session carrying
+  the same opaque launch token, user, chat, and chat instance; the absolute
+  session lifetime is not extended;
 - expired, replayed, missing, mismatched, or malformed authorization fails
   closed before Scripture lookup or posting;
 - submitted verse text is never authoritative—the server resolves selected
@@ -146,6 +150,46 @@ Keep the authentication and launch windows short. Lengthening them increases
 the useful replay window and is not a remedy for incorrect clocks. Maintain
 accurate host time with a trusted time-synchronization service.
 
+## Branding and look and feel
+
+The Mini App's presentation is contained in `miniapp/`; changing its branding
+does not require changes to Telegram authentication, Scripture lookup, or
+posting code.
+
+| Element | Source | Notes |
+|---|---|---|
+| Upright Bible | `miniapp/assets/getbible-upright.png` | Used by the opening gate, protected/expired gate, top bar, and home hero |
+| Browser icon | `miniapp/assets/favicon.png` | PNG favicon declared in `miniapp/index.html` |
+| Hero background | `miniapp/assets/ocean-light-hero.webp` | Optimized WebP referenced by `miniapp/styles.css` |
+| Wordmark and tagline | `miniapp/index.html` | Keep `getBible.Life` and “The words of eternal life” as real text |
+| Colors and themes | `miniapp/styles.css` | Light tokens are in `:root`; dark overrides are in `:root[data-theme="dark"]` |
+| Component sizing and layout | `miniapp/styles.css` | Brand, gate, hero, navigation, cards, and responsive rules live here |
+
+To replace the Bible icon, use a transparent PNG with a clean, uncropped
+boundary and preserve the `getbible-upright.png` filename. The current source
+has a portrait aspect ratio; CSS uses contained sizing at each placement, so do
+not add baked-in padding or crop the artwork. If the filename changes, update
+all four references in `miniapp/index.html` and the branding assertion in
+`miniapp/tests/static.test.mjs`.
+
+Theme colors should be changed through the custom properties at the top of
+`miniapp/styles.css`. Preserve the `--tg-theme-*` fallbacks so Telegram light
+and dark themes remain authoritative for page, surface, text, button, and
+separator colors. Use the `--brand*` variables for GetBible-specific accents
+instead of hard-coding the same color across individual components.
+
+After any presentation change, run:
+
+```bash
+cd miniapp
+npm test
+```
+
+Then verify the opening gate, home hero, top bar, protected/expired state,
+search keyboard behavior, and light/dark themes on a narrow phone viewport.
+Deploy the reviewed source through the normal instance upgrade command; do not
+edit files inside `/opt/getbible-robot/<instance>/app` by hand.
+
 ## Verification
 
 After starting or upgrading:
@@ -167,9 +211,16 @@ private conversation with the bot:
 3. filter and page without creating chat messages;
 4. select several complete verse cards, review them, and post once;
 5. confirm the server posts only resolved Scripture, in the originating chat;
-6. retry an expired launch and confirm it fails closed and asks for a fresh
-   launch;
-7. open the public URL in an ordinary browser and confirm no data or action API
+6. submit a search with the phone keyboard's Search key and confirm the
+   keyboard closes before the results appear;
+7. close and reopen the same launch before its absolute session timeout and
+   confirm the active selection is safely recovered;
+8. after posting in a group, confirm both the "Only visible to GetBibleBot"
+   command and the "Only visible to you" launch response are removed;
+9. retry a genuinely expired launch and confirm it fails closed, explains that
+   `/bible` or `/search` must be sent again, and offers a close action instead
+   of a reload loop;
+10. open the public URL in an ordinary browser and confirm no data or action API
    is available.
 
 For group rollout, repeat through the configured Main Mini App/deep-link path
@@ -180,7 +231,8 @@ Scripture is posted to the intended chat and topic.
 
 - **Ordinary browser shows the shell:** expected; confirm protected APIs remain
   inaccessible. The shell is not the security boundary.
-- **Authorization rejected:** launch again from the bot, verify host time, and
+- **Authorization rejected:** close the expired Mini App and send `/bible` or
+  `/search` again. If a new launch is also rejected, verify host time and
   confirm the instance token matches the bot that opened the app.
 - **DNS preflight fails:** create/fix the public `A`/`AAAA` record before
   enabling the Mini App.

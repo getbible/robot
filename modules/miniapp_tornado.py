@@ -129,6 +129,7 @@ class MiniAppServer:
             [MiniAppLaunch, tuple[ScriptureQuery, ...]],
             Awaitable[Sequence[int] | None],
         ],
+        cleanup_launch: Callable[[MiniAppLaunch], Awaitable[None]] | None = None,
         static_root: Path | None = None,
     ) -> None:
         if not settings.mini_app_enabled or settings.mini_app_public_url is None:
@@ -158,6 +159,7 @@ class MiniAppServer:
             validator=validator,
             public_url=self._public_url,
             post_scripture=post_scripture,
+            cleanup_launch=cleanup_launch,
             replay_guard=TelegramInitDataReplayGuard(
                 ttl_seconds=settings.mini_app_init_data_max_age_seconds,
                 max_entries=max(100, settings.mini_app_session_limit * 2),
@@ -228,6 +230,8 @@ class MiniAppServer:
         message_thread_id: int | None = None,
         initial_route: MiniAppRoute = "home",
         initial_query: str = "",
+        source_ephemeral_message_id: int | None = None,
+        source_ephemeral_receiver_user_id: int | None = None,
     ) -> MiniAppLaunch:
         """Create one short-lived command handoff without putting content in a URL."""
         if initial_route not in {"home", "bible", "search"}:
@@ -238,6 +242,10 @@ class MiniAppServer:
             message_thread_id=message_thread_id,
             initial_route=initial_route,
             initial_query=initial_query,
+            source_ephemeral_message_id=source_ephemeral_message_id,
+            source_ephemeral_receiver_user_id=(
+                source_ephemeral_receiver_user_id
+            ),
         )
 
     def web_url(self, launch: MiniAppLaunch) -> str:

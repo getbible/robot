@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { UI_CATALOGS } from "../lib/i18n.js";
@@ -39,12 +39,18 @@ test("does not persist Telegram launch data or bearer tokens beyond sessionStora
   assert.match(session, /subtle\.digest\("SHA-256"/);
 });
 
-test("references the optimized hero and exact getBible.Life brand", async () => {
+test("references the optimized hero and consistent getBible.Life brand", async () => {
   const css = await readFile(new URL("styles.css", root), "utf8");
   const html = await readFile(new URL("index.html", root), "utf8");
 
   assert.match(css, /ocean-light-hero\.webp/);
-  assert.match(html, /getbible-mark\.png/);
+  assert.equal(
+    [...html.matchAll(/getbible-upright\.png/g)].length,
+    4,
+  );
+  assert.doesNotMatch(html, /getbible-(?:book|mark)\.png/);
+  await assert.rejects(access(new URL("assets/getbible-book.png", root)));
+  await assert.rejects(access(new URL("assets/getbible-mark.png", root)));
   assert.match(html, /getBible<span>\.Life/);
   assert.doesNotMatch(html, /GetBible|GETBIBLE|getBible\.life/);
   assert.doesNotMatch(html, /GETBIBLE\.NET/);

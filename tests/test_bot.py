@@ -1,7 +1,7 @@
 import logging
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from telegram.error import BadRequest
 from telegram.ext import CommandHandler
@@ -259,7 +259,7 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             message_id=321,
         )
 
-    async def test_successful_group_post_cleans_ephemeral_launch_prompt(
+    async def test_successful_group_post_cleans_prompt_and_source_command(
         self,
     ) -> None:
         telegram_bot = SimpleNamespace(
@@ -274,17 +274,32 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             initial_query="John",
             created_at=0,
             prompt_ephemeral_message_id=654,
+            source_ephemeral_message_id=250,
+            source_ephemeral_receiver_user_id=999,
         )
 
         await bot._cleanup_mini_app_launch_prompt(telegram_bot, launch)
 
-        telegram_bot.do_api_request.assert_awaited_once_with(
-            "deleteEphemeralMessage",
-            api_kwargs={
-                "chat_id": -100,
-                "receiver_user_id": 42,
-                "ephemeral_message_id": 654,
-            },
+        self.assertEqual(
+            telegram_bot.do_api_request.await_args_list,
+            [
+                call(
+                    "deleteEphemeralMessage",
+                    api_kwargs={
+                        "chat_id": -100,
+                        "receiver_user_id": 42,
+                        "ephemeral_message_id": 654,
+                    },
+                ),
+                call(
+                    "deleteEphemeralMessage",
+                    api_kwargs={
+                        "chat_id": -100,
+                        "receiver_user_id": 999,
+                        "ephemeral_message_id": 250,
+                    },
+                ),
+            ],
         )
 
     async def test_mini_app_post_callback_cleans_prompt_after_scripture(

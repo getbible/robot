@@ -19,10 +19,15 @@ PUBLIC_URL = "https://robot.example/getbible"
 ORIGIN = "https://robot.example"
 
 
-def _init_data(user_id: int = 42, *, start_param: str | None = None) -> str:
+def _init_data(
+    user_id: int = 42,
+    *,
+    start_param: str | None = None,
+    query_id: str = "query-id",
+) -> str:
     fields = {
         "auth_date": "1700000000",
-        "query_id": "query-id",
+        "query_id": query_id,
         "user": json.dumps({"id": user_id, "first_name": "Grace"}, separators=(",", ":")),
     }
     if start_param is not None:
@@ -67,6 +72,14 @@ class _Limiter:
 
     async def acquire(self, *, user_id: int, chat_id: int, cost: float = 1.0) -> None:
         self.calls.append((user_id, chat_id))
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
 
 
 class _Service:
@@ -167,9 +180,19 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.service = _Service()
         self.preferences = _Preferences()
         self.limiter = _Limiter()
-        self.sessions = MiniAppSessionStore(max_sessions=10, ttl_seconds=600)
-        self.launches = MiniAppLaunchStore(max_launches=10, ttl_seconds=300)
+        self.clock = _Clock()
+        self.sessions = MiniAppSessionStore(
+            max_sessions=10,
+            ttl_seconds=600,
+            clock=self.clock,
+        )
+        self.launches = MiniAppLaunchStore(
+            max_launches=10,
+            ttl_seconds=300,
+            clock=self.clock,
+        )
         self.posted: list[tuple[object, tuple[ScriptureQuery, ...]]] = []
+        self.cleaned_launches: list[object] = []
         self.post_error: Exception | None = None
 
         async def post_scripture(
@@ -180,6 +203,9 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             if self.post_error is not None:
                 raise self.post_error
             return (101,)
+
+        async def cleanup_launch(launch: object) -> None:
+            self.cleaned_launches.append(launch)
 
         self.api = MiniAppApi(
             service=self.service,
@@ -193,6 +219,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             ),
             public_url=PUBLIC_URL,
             post_scripture=post_scripture,
+            cleanup_launch=cleanup_launch,
         )
         self.active_init_data = _init_data()
 
@@ -280,6 +307,92 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(replay.status, 409)
+
+    async def test_reopened_webview_recovers_the_active_owner_bound_session(
+        self,
+    ) -> None:
+        launch = self.launches.create_launch(
+            user_id=42,
+            target_chat_id=42,
+            initial_route="bible",
+        )
+        first_init_data = _init_data(
+            start_param=launch.token,
+            query_id="first-query",
+        )
+        first = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": first_init_data},
+            )
+        )
+        first_payload = json.loads(first.body)
+        self.assertEqual(first.status, 201)
+
+        self.active_init_data = _init_data(
+            start_param=launch.token,
+            query_id="reopened-query",
+        )
+        reopened = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": self.active_init_data},
+            )
+        )
+        reopened_payload = json.loads(reopened.body)
+        self.assertEqual(reopened.status, 200)
+        self.assertEqual(
+            reopened_payload["session_token"],
+            first_payload["session_token"],
+        )
+        self.assertEqual(
+            reopened_payload["entrypoint"],
+            {"route": "bible", "query": ""},
+        )
+
+        resumed = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/session",
+                token=reopened_payload["session_token"],
+                origin=None,
+            )
+        )
+        self.assertEqual(resumed.status, 200)
+
+    async def test_expired_session_cleans_stale_launch_rows_before_rejection(
+        self,
+    ) -> None:
+        launch = self.launches.create_launch(
+            user_id=42,
+            target_chat_id=-100,
+            initial_route="search",
+            source_ephemeral_message_id=250,
+            source_ephemeral_receiver_user_id=999,
+        )
+        self.launches.remember_prompt(
+            launch,
+            ephemeral_message_id=901,
+        )
+        await self.exchange(launch_token=launch.token)
+        self.clock.value = 601
+        expired_init_data = _init_data(
+            start_param=launch.token,
+            query_id="expired-reopen",
+        )
+
+        response = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": expired_init_data},
+            )
+        )
+
+        self.assertEqual(response.status, 401)
+        self.assertEqual(self.cleaned_launches, [launch])
 
     async def test_valid_init_data_cannot_be_exchanged_twice(self) -> None:
         raw = _init_data()
