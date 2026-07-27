@@ -71,6 +71,58 @@ test("has English catalog coverage for every marked interface and accessibility 
   assert.ok(keys.length >= 60);
 });
 
+test("ships complete localized catalogs for every GetBible translation language", () => {
+  const englishKeys = Object.keys(UI_CATALOGS.en).sort();
+  const expectedLocales = [
+    "af", "ar", "br", "ch", "chr", "cop", "cs", "cu", "da", "de", "el",
+    "en", "enm", "eo", "es", "et", "eu", "fi", "fr", "gd", "got", "grc",
+    "gv", "hbo", "he", "hr", "hu", "hy", "it", "ja", "ko", "la", "lt",
+    "lv", "mg", "mi", "mlf", "mn", "my", "nb", "nd", "nl", "nn", "pl",
+    "pon", "pot", "ppk", "prs", "pt", "rmq", "ro", "ru", "sn", "sq", "sr",
+    "sv", "sw", "syr", "th", "tl", "tlh", "tpi", "tr", "tsg", "uk", "vi",
+    "zh", "zh-hans", "zh-hant",
+  ];
+
+  assert.deepEqual(Object.keys(UI_CATALOGS).sort(), expectedLocales);
+  for (const [locale, catalog] of Object.entries(UI_CATALOGS)) {
+    assert.deepEqual(Object.keys(catalog).sort(), englishKeys, locale);
+    for (const key of englishKeys) {
+      assert.equal(typeof catalog[key], "string", `${locale}:${key}`);
+      assert.notEqual(catalog[key].trim(), "", `${locale}:${key}`);
+      assert.deepEqual(
+        [...catalog[key].matchAll(/\{([a-z_]+)\}/g)].map((match) => match[1]).sort(),
+        [...UI_CATALOGS.en[key].matchAll(/\{([a-z_]+)\}/g)]
+          .map((match) => match[1])
+          .sort(),
+        `${locale}:${key}`,
+      );
+    }
+  }
+});
+
+test("updates landing copy and rerenders immediately when translation changes", async () => {
+  const html = await readFile(new URL("index.html", root), "utf8");
+  const app = await readFile(new URL("app.js", root), "utf8");
+
+  assert.equal(UI_CATALOGS.en["home.eyebrow"], "The Holy Word of God");
+  assert.equal(UI_CATALOGS.en["home.title"], "Read, find, and share His Word.");
+  assert.equal(
+    UI_CATALOGS.en["home.body"],
+    "Gather all the Scripture you need, then post them together.",
+  );
+  assert.match(html, />The Holy Word of God</);
+  assert.match(html, />Read, find, and share His Word\.</);
+  assert.doesNotMatch(app, /Scripture, beautifully close|Move quietly through Scripture/);
+  assert.match(
+    app,
+    /filterTranslation\.addEventListener\("change",[\s\S]*?syncInterfaceLocale\(/,
+  );
+  assert.match(
+    app,
+    /function renderLocalizedState\(\)[\s\S]*?renderSearch\(\)[\s\S]*?renderBible\(\)[\s\S]*?renderSelection\(\)/,
+  );
+});
+
 test("ships parseable OpenAPI JSON at the documented relative root", async () => {
   const raw = await readFile(new URL("api-contract.json", root), "utf8");
   const contract = JSON.parse(raw);

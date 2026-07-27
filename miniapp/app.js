@@ -63,6 +63,30 @@ const state = {
   posting: false,
 };
 
+const ERROR_MESSAGE_KEYS = Object.freeze({
+  authorization_replayed: "error.session_invalid",
+  forbidden: "error.forbidden",
+  internal_error: "common.request_failed",
+  invalid_request: "common.request_failed",
+  invalid_response: "error.invalid_response",
+  invalid_selection: "error.selection_changed",
+  invalid_session_response: "error.session_invalid",
+  invalid_session_token: "error.session_invalid",
+  method_not_allowed: "error.forbidden",
+  network_error: "error.network",
+  not_found: "error.not_found",
+  post_outcome_locked: "error.post_locked",
+  rate_limited: "error.rate_limited",
+  request_timeout: "error.timeout",
+  request_too_large: "error.request_too_large",
+  scripture_request_failed: "common.request_failed",
+  scripture_temporarily_unavailable: "error.scripture_unavailable",
+  search_not_found: "error.search_expired",
+  session_not_ready: "error.session_invalid",
+  translations_unavailable: "gate.translations_unavailable",
+  unauthorized: "error.session_invalid",
+});
+
 const elements = mapElements({
   boot: "boot-screen",
   bootMessage: "boot-message",
@@ -127,27 +151,27 @@ async function boot() {
   elements.boot.hidden = false;
   elements.accessDenied.hidden = true;
   elements.app.hidden = true;
-  elements.bootMessage.textContent = "Opening getBible.Life…";
-  elements.accessRetry.textContent = "Try again";
+  elements.bootMessage.textContent = i18n.t("gate.opening");
+  elements.accessRetry.textContent = i18n.t("gate.retry");
   accessAction = () => window.location.reload();
 
   if (!bridge.initialize()) {
     showAccessDenied(
-      "This scripture experience is available only through the getBible.Life bot.",
+      i18n.t("gate.body"),
     );
     return;
   }
 
   api = new MiniAppApi(bridge.initData);
   try {
-    elements.bootMessage.textContent = "Securing your Telegram session…";
+    elements.bootMessage.textContent = i18n.t("gate.securing");
     const payload = await openBoundSession(api, {
       initData: bridge.initData,
       launchToken: bridge.launchToken,
     });
     const session = normalizeSession(payload);
     if (session.translations.length === 0) {
-      throw new ApiError("No Bible translations are currently available.", {
+      throw new ApiError(i18n.t("gate.translations_unavailable"), {
         code: "translations_unavailable",
         retryable: true,
       });
@@ -180,8 +204,8 @@ async function boot() {
     }
     const message =
       error instanceof ApiError
-        ? error.message
-        : "getBible.Life could not verify this Telegram session.";
+        ? localizedErrorMessage(error)
+        : i18n.t("gate.verify_failed");
     showAccessDenied(message);
   }
 }
@@ -230,6 +254,8 @@ function attachListeners() {
   });
   elements.filtersDialog.addEventListener("close", () => {
     filterDraft = null;
+    syncInterfaceLocale(state.filters.translation);
+    renderLocalizedState();
     syncBackAction();
   });
   elements.filtersDialog.addEventListener("click", (event) => {
@@ -255,6 +281,8 @@ function attachListeners() {
       },
       state.filters.translation,
     );
+    syncInterfaceLocale(elements.filterTranslation.value);
+    renderLocalizedState();
     void loadFilterBooks(elements.filterTranslation.value);
   });
   elements.filtersForm.addEventListener("change", (event) => {
@@ -274,6 +302,7 @@ function attachListeners() {
       state.bible.translation,
     );
     syncTranslationControls();
+    renderLocalizedState();
     void savePreferences();
     void loadBibleBooks();
   });
@@ -297,7 +326,7 @@ function loadHeroAsset() {
 function showAccessDenied(
   message,
   {
-    actionLabel = "Try again",
+    actionLabel = i18n.t("common.try_again"),
     onAction = () => window.location.reload(),
   } = {},
 ) {
@@ -312,9 +341,9 @@ function showAccessDenied(
 
 function showExpiredAccess() {
   showAccessDenied(
-    "This launch is no longer active. Close getBible.Life, then send /bible or /search to the bot to start again.",
+    i18n.t("gate.expired"),
     {
-      actionLabel: "Close getBible.Life",
+      actionLabel: i18n.t("gate.close"),
       onAction: () => bridge.close(),
     },
   );
@@ -375,8 +404,7 @@ function populateTranslations() {
 function syncTranslationControls() {
   const code = state.filters.translation;
   const translation = state.translations.find((item) => item.code === code);
-  i18n.setLocale(translation?.lang ?? "en", translation?.direction ?? "ltr");
-  i18n.apply();
+  syncInterfaceLocale(code);
   elements.filterTranslation.value = code;
   elements.bibleTranslation.value = state.bible.translation;
   elements.translationShortcut.textContent = code.toUpperCase();
@@ -392,11 +420,24 @@ function syncTranslationControls() {
   elements.filterCount.textContent = String(count);
 }
 
+function syncInterfaceLocale(code) {
+  const translation = state.translations.find((item) => item.code === code);
+  i18n.setLocale(translation?.lang ?? "en", translation?.direction ?? "ltr");
+  i18n.apply();
+}
+
+function renderLocalizedState() {
+  renderSearch();
+  renderBible();
+  renderBasketStatus();
+  renderSelection();
+}
+
 async function runSearch(rawQuery) {
   const query = rawQuery.trim();
   if (!query) {
     elements.searchQuery.focus();
-    announce("Enter words or a phrase to search.");
+    announce(i18n.t("search.enter_query"));
     return;
   }
   bridge.dismissKeyboard();
@@ -424,11 +465,7 @@ async function runSearch(rawQuery) {
       hasMore: result.has_more,
       results: result.results,
     };
-    announce(
-      result.total === 1
-        ? "One verse found."
-        : `${result.total} verses found.`,
-    );
+    announce(i18n.plural("search.found", result.total));
   } catch (error) {
     state.search.status = "error";
     state.search.error = safeError(error);
@@ -447,7 +484,7 @@ async function loadNextSearchPage() {
   }
   state.search.loadingMore = true;
   elements.loadMore.disabled = true;
-  elements.loadMore.textContent = "Loading…";
+  elements.loadMore.textContent = i18n.t("common.loading");
   try {
     const result = normalizeSearchPage(
       await api.searchPage(state.search.searchId, state.search.page + 1),
@@ -457,7 +494,7 @@ async function loadNextSearchPage() {
     state.search.total = result.total;
     state.search.hasMore = result.has_more;
     state.search.results = uniqueVerses(state.search.results, result.results);
-    announce(`${result.results.length} more verses loaded.`);
+    announce(i18n.plural("search.more_loaded", result.results.length));
   } catch (error) {
     toast(safeError(error).message);
     handleSessionError(error);
@@ -501,9 +538,9 @@ function renderSearch() {
   if (search.status === "error") {
     renderState(elements.searchState, {
       icon: "!",
-      title: "Search did not complete",
+      title: i18n.t("search.failed"),
       message: search.error.message,
-      action: search.error.retryable ? "Try again" : null,
+      action: search.error.retryable ? i18n.t("common.try_again") : null,
       onAction: search.error.retryable
         ? () => void runSearch(search.query)
         : null,
@@ -513,14 +550,14 @@ function renderSearch() {
 
   elements.searchSummaryTitle.textContent = `“${search.query}”`;
   elements.searchSummaryMeta.textContent =
-    `${formatCount(search.total, "verse")} · ` +
+    `${formatVerseCount(search.total)} · ` +
     translationName(state.filters.translation);
   if (search.status === "empty") {
     renderState(elements.searchState, {
       icon: "⌕",
-      title: "No verses found",
-      message: "Try fewer words, a broader scope, or different filters.",
-      action: "Change filters",
+      title: i18n.t("search.no_results"),
+      message: i18n.t("search.no_results_hint"),
+      action: i18n.t("search.change_filters"),
       onAction: () => void openFilters(),
     });
     return;
@@ -532,7 +569,9 @@ function renderSearch() {
   }
   elements.loadMore.hidden = !search.hasMore;
   elements.loadMore.disabled = search.loadingMore;
-  elements.loadMore.textContent = search.loadingMore ? "Loading…" : "Load more";
+  elements.loadMore.textContent = search.loadingMore
+    ? i18n.t("common.loading")
+    : i18n.t("search.load_more");
 }
 
 async function openFilters() {
@@ -584,6 +623,7 @@ function applyFilters() {
   );
   state.bible.translation = state.filters.translation;
   syncTranslationControls();
+  renderLocalizedState();
   closeFilters();
   void savePreferences();
   if (state.search.query) {
@@ -605,7 +645,7 @@ function resetFilters() {
 
 async function loadFilterBooks(translation) {
   state.filterBooksStatus = "loading";
-  elements.filterBooks.replaceChildren(paragraph("Loading books…"));
+  elements.filterBooks.replaceChildren(paragraph(i18n.t("filters.loading_books")));
   try {
     const books = await getBooks(translation);
     state.filterBooksStatus = "ready";
@@ -637,7 +677,7 @@ function renderFilterBooks(books, selectedBooks = state.filters.books) {
     fragment.append(label);
   }
   elements.filterBooks.replaceChildren(
-    books.length > 0 ? fragment : paragraph("No books are available."),
+    books.length > 0 ? fragment : paragraph(i18n.t("filters.no_books")),
   );
 }
 
@@ -672,9 +712,10 @@ async function savePreferences() {
         state.filters.translation,
       );
       syncTranslationControls();
+      renderLocalizedState();
     }
   } catch (error) {
-    toast("Your choice works now, but could not be saved for next time.");
+    toast(i18n.t("translation.save_failed"));
     handleSessionError(error);
   }
 }
@@ -799,16 +840,16 @@ function renderBible() {
   populateSelect(
     elements.bibleBook,
     bible.books,
-    "Choose a book",
+    i18n.t("bible.choose_book"),
     bible.selectedBook?.number,
   );
   elements.bibleBook.disabled = bible.books.length === 0;
   populateSelect(
     elements.bibleChapter,
     bible.chapters,
-    "Choose a chapter",
+    i18n.t("bible.choose_chapter"),
     bible.selectedChapter?.number,
-    (chapter) => `Chapter ${chapter.number}`,
+    (chapter) => i18n.t("bible.chapter_number", { number: chapter.number }),
   );
   elements.bibleChapter.disabled = bible.chapters.length === 0;
   elements.bibleVerses.replaceChildren();
@@ -822,9 +863,9 @@ function renderBible() {
   if (bible.status === "error") {
     renderState(elements.bibleState, {
       icon: "!",
-      title: "Scripture did not load",
+      title: i18n.t("bible.load_failed"),
       message: bible.error.message,
-      action: bible.error.retryable ? "Try again" : null,
+      action: bible.error.retryable ? i18n.t("common.try_again") : null,
       onAction: bible.error.retryable ? retryBible : null,
     });
     return;
@@ -832,8 +873,8 @@ function renderBible() {
   if (bible.status === "empty") {
     renderState(elements.bibleState, {
       icon: "◌",
-      title: "No verses available",
-      message: "Choose another chapter or translation.",
+      title: i18n.t("bible.no_verses"),
+      message: i18n.t("bible.no_verses_hint"),
     });
     return;
   }
@@ -841,11 +882,13 @@ function renderBible() {
     renderState(elements.bibleState, {
       icon: "▤",
       title:
-        bible.status === "choose_chapter" ? "Choose a chapter" : "Choose a book",
+        bible.status === "choose_chapter"
+          ? i18n.t("bible.choose_chapter")
+          : i18n.t("bible.choose_book"),
       message:
         bible.status === "choose_chapter"
-          ? "Select a chapter to read and choose its verses."
-          : "Start with any available book in this translation.",
+          ? i18n.t("bible.choose_chapter_hint")
+          : i18n.t("bible.choose_book_hint"),
     });
     return;
   }
@@ -853,7 +896,7 @@ function renderBible() {
   elements.bibleHeading.hidden = false;
   elements.bibleTranslationLabel.textContent = translationName(bible.translation);
   elements.bibleReference.textContent = bible.reference;
-  elements.bibleVerseCount.textContent = formatCount(bible.verses.length, "verse");
+  elements.bibleVerseCount.textContent = formatVerseCount(bible.verses.length);
   const selected = selectedIds();
   for (const verse of bible.verses) {
     elements.bibleVerses.append(createVerseCard(verse, selected));
@@ -939,8 +982,8 @@ async function toggleBasketItem(selectionId) {
     bridge.notifySelection();
     announce(
       removing
-        ? "Verse removed from your selection."
-        : "Verse added to your selection.",
+        ? i18n.t("selection.verse_removed")
+        : i18n.t("selection.verse_added"),
     );
   } catch (error) {
     toast(safeError(error).message);
@@ -968,10 +1011,7 @@ function refreshSelectionVisuals() {
 function renderAll() {
   updateConnectionState();
   syncTranslationControls();
-  renderSearch();
-  renderBible();
-  renderBasketStatus();
-  renderSelection();
+  renderLocalizedState();
 }
 
 function renderBasketStatus() {
@@ -979,9 +1019,11 @@ function renderBasketStatus() {
   elements.navSelectionCount.hidden = count === 0;
   elements.navSelectionCount.textContent = String(Math.min(count, 99));
   elements.homeSelection.hidden = count === 0;
-  elements.homeSelectionTitle.textContent =
-    count === 1 ? "One verse selected" : `${count} verses selected`;
-  elements.homeSelectionMeta.textContent = "Review, reorder, and post together";
+  elements.homeSelectionTitle.textContent = i18n.plural(
+    "home.selection",
+    count,
+  );
+  elements.homeSelectionMeta.textContent = i18n.t("home.selection_hint");
   elements.clearSelection.hidden = count === 0;
   bridge.setClosingConfirmation(count > 0);
 }
@@ -993,12 +1035,12 @@ function renderSelection() {
   elements.postSelection.hidden = items.length === 0;
   elements.postSelection.disabled = items.length === 0 || state.posting;
   elements.postSelection.textContent = state.posting
-    ? "Posting…"
-    : `Post ${formatCount(items.length, "verse")}`;
+    ? i18n.t("selection.posting")
+    : i18n.plural("selection.post", items.length);
   elements.selectionSummary.textContent =
     items.length === 0
-      ? "No verses selected yet."
-      : `${formatCount(items.length, "verse")} in posting order`;
+      ? i18n.t("selection.none")
+      : i18n.plural("selection.order", items.length);
   elements.selectionList.replaceChildren();
 
   items.forEach((verse, index) => {
@@ -1097,7 +1139,7 @@ async function clearBasket() {
     return;
   }
   const confirmed = await bridge.confirm(
-    "Remove every verse from your current selection?",
+    i18n.t("selection.clear_confirm"),
   );
   if (!confirmed) {
     return;
@@ -1106,7 +1148,7 @@ async function clearBasket() {
     const payload = await api.clearBasket();
     state.basket = normalizeBasket(payload?.basket ?? payload).items;
     refreshSelectionVisuals();
-    announce("Selection cleared.");
+    announce(i18n.t("selection.cleared"));
   } catch (error) {
     toast(safeError(error).message);
     handleSessionError(error);
@@ -1127,7 +1169,7 @@ async function postBasket() {
       : [];
     bridge.notifySuccess();
     refreshSelectionVisuals();
-    toast("Posted to Telegram.");
+    toast(i18n.t("selection.posted"));
     window.setTimeout(() => {
       clearBoundSession();
       api.clearSession();
@@ -1137,9 +1179,9 @@ async function postBasket() {
     const safe = safeError(error);
     renderState(elements.postState, {
       icon: "!",
-      title: "Your verses were not posted",
+      title: i18n.t("selection.post_failed"),
       message: safe.message,
-      action: safe.retryable ? "Try again" : null,
+      action: safe.retryable ? i18n.t("common.try_again") : null,
       onAction: safe.retryable ? () => void postBasket() : null,
     });
     bridge.notifyError();
@@ -1181,7 +1223,7 @@ function renderSkeletons(container, count) {
     fragment.append(skeleton);
   }
   container.replaceChildren(fragment);
-  announce("Loading Scripture.");
+  announce(i18n.t("common.loading_scripture"));
 }
 
 function populateSelect(select, items, placeholder, selected, label = (item) => item.name) {
@@ -1233,18 +1275,22 @@ function handleSessionError(error) {
 function safeError(error) {
   if (error instanceof ApiError) {
     return {
-      message: error.message,
+      message: localizedErrorMessage(error),
       retryable: error.retryable,
     };
   }
   return {
-    message: "getBible.Life could not complete that request.",
+    message: i18n.t("common.request_failed"),
     retryable: true,
   };
 }
 
-function formatCount(count, singular) {
-  return `${count} ${count === 1 ? singular : `${singular}s`}`;
+function localizedErrorMessage(error) {
+  return i18n.t(ERROR_MESSAGE_KEYS[error.code] ?? "common.request_failed");
+}
+
+function formatVerseCount(count) {
+  return i18n.plural("verse.count", count);
 }
 
 function announce(message) {

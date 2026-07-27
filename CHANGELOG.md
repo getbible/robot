@@ -39,6 +39,11 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   workflow removes the user's "Only visible to GetBibleBot" command as well as
   the bot's "Only visible to you" launch response. Immediate cleanup remains in
   place, and final cleanup retries each row independently and non-fatally.
+- Updated the home hero to “The Holy Word of God” and “Read, find, and share
+  His Word,” added complete same-origin interface catalogs for every language
+  tag in the GetBible translation inventory, and made translation changes
+  immediately rerender static, generated, accessibility, plural, error, and
+  right-to-left interface state without reloading the Mini App.
 
 ### Security
 

@@ -150,6 +150,36 @@ Keep the authentication and launch windows short. Lengthening them increases
 the useful replay window and is not a remedy for incorrect clocks. Maintain
 accurate host time with a trusted time-synchronization service.
 
+## Interface localization
+
+The Mini App follows the language of the selected Bible translation. The
+translation metadata returned by the session API supplies its BCP-47 `lang`
+value and text direction. Selecting another translation updates the document
+language, left-to-right or right-to-left direction, static labels,
+placeholders, accessibility labels, and generated search, Bible, and selection
+state immediately; a page reload is not required.
+
+The localization sources are:
+
+| Source | Purpose |
+|---|---|
+| `miniapp/lib/messages.en.js` | Canonical English interface catalog and message keys |
+| `miniapp/lib/locales.js` | Committed, same-origin catalogs for all language tags in the GetBible translation inventory |
+| `miniapp/lib/i18n.js` | Locale resolution, interpolation, plural selection, document language/direction, and DOM application |
+
+The browser does not contact a translation service. Every interface catalog is
+packaged with the application and served under the same Mini App origin. When
+editing English copy, update the canonical catalog and every localized catalog;
+`miniapp/tests/static.test.mjs` rejects missing keys or damaged interpolation
+placeholders.
+
+Ancient and low-resource translation codes that do not have a stable modern UI
+locale use the nearest usable modern interface catalog or English. For example,
+Ancient Greek uses the Greek catalog, Biblical Hebrew uses Hebrew, Dari uses
+Persian, and Middle English uses modern English. This affects controls only;
+the selected Scripture text is always returned unchanged in its own
+translation.
+
 ## Branding and look and feel
 
 The Mini App's presentation is contained in `miniapp/`; changing its branding

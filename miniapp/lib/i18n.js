@@ -1,97 +1,9 @@
+import { TRANSLATED_MESSAGES } from "./locales.js";
+import { ENGLISH_MESSAGES } from "./messages.en.js";
+
 export const UI_CATALOGS = Object.freeze({
-  en: Object.freeze({
-    "gate.opening": "Opening getBible.Life…",
-    "gate.protected": "Protected Mini App",
-    "gate.title": "Open getBible.Life from Telegram",
-    "gate.body":
-      "This scripture experience is available only through the getBible.Life bot.",
-    "gate.retry": "Try again",
-    "nav.label": "getBible.Life",
-    "nav.home": "Home",
-    "nav.search": "Search",
-    "nav.bible": "Bible",
-    "nav.selected": "Selected",
-    "home.eyebrow": "Scripture, beautifully close",
-    "home.title": "Read, find, and share the Word.",
-    "home.body":
-      "Move quietly through Scripture, gather the verses you need, then post them together.",
-    "home.search": "Search Scripture",
-    "home.search_hint": "Find words, phrases, and themes",
-    "home.browse": "Browse the Bible",
-    "home.browse_hint": "Choose a book, chapter, and verses",
-    "home.review": "Review",
-    "search.eyebrow": "Find Scripture",
-    "search.title": "Search the Word",
-    "search.body":
-      "Find a verse, select it where you read it, and build one clean post.",
-    "search.label": "Search Scripture",
-    "search.placeholder": "Search words or a phrase",
-    "search.submit": "Search",
-    "search.options": "Search options",
-    "search.filters": "Filters",
-    "search.sort_label": "Sort results",
-    "search.sort_canonical": "Bible order",
-    "search.sort_relevance": "Relevance",
-    "search.clear": "Clear",
-    "search.results_label": "Scripture search results",
-    "search.load_more": "Load more",
-    "bible.eyebrow": "Browse Scripture",
-    "bible.title": "Choose a passage",
-    "bible.body": "Open a chapter, then tap every verse you want to include.",
-    "bible.navigation": "Bible navigation",
-    "bible.translation": "Translation",
-    "bible.book": "Book",
-    "bible.chapter": "Chapter",
-    "bible.choose_book": "Choose a book",
-    "bible.choose_chapter": "Choose a chapter",
-    "bible.verses_label": "Chapter verses",
-    "selection.eyebrow": "Your selection",
-    "selection.title": "Ready to post",
-    "selection.none": "No verses selected yet.",
-    "selection.clear": "Clear",
-    "selection.empty_title": "Your selected verses will appear here",
-    "selection.empty_body":
-      "Browse or search, then tap the full verse card to add it.",
-    "selection.browse": "Browse the Bible",
-    "selection.order_label": "Selected verses in posting order",
-    "selection.post": "Post selected verses",
-    "filters.eyebrow": "Search settings",
-    "filters.title": "Filter results",
-    "filters.close": "Close filters",
-    "filters.words": "Words",
-    "filters.all": "All",
-    "filters.any": "Any",
-    "filters.phrase": "Phrase",
-    "filters.match": "Match",
-    "filters.whole_word": "Whole word",
-    "filters.substring": "Substring",
-    "filters.scope": "Scope",
-    "filters.old": "Old",
-    "filters.new": "New",
-    "filters.other": "Other",
-    "filters.books": "Books",
-    "filters.select_all": "Select all",
-    "filters.books_help": "Leave every book unchecked to search all books.",
-    "filters.case": "Case sensitive",
-    "filters.case_hint": "Match upper and lowercase exactly",
-    "filters.diacritics": "Ignore diacritics",
-    "filters.diacritics_hint": "Treat accented characters as equal",
-    "filters.exclude": "Exclude words",
-    "filters.exclude_placeholder": "Optional, separated by spaces",
-    "filters.proximity": "Maximum words apart",
-    "filters.proximity_placeholder": "No limit",
-    "filters.proximity_hint": "Available when matching all words.",
-    "filters.reset": "Reset",
-    "filters.apply": "Show results",
-    "connection.offline": "You’re offline. Reconnect to continue.",
-    "translation.change_aria":
-      "Change default translation, currently {translation}",
-    "verse.add_aria": "Add {reference}: {text}",
-    "verse.remove_aria": "Remove {reference}: {text}",
-    "selection.move_earlier": "Move {reference} earlier",
-    "selection.move_later": "Move {reference} later",
-    "selection.remove_aria": "Remove {reference}",
-  }),
+  en: ENGLISH_MESSAGES,
+  ...TRANSLATED_MESSAGES,
 });
 
 export class I18n {
@@ -128,6 +40,23 @@ export class I18n {
     return template.replace(/\{([a-z_]+)\}/gi, (match, name) =>
       Object.hasOwn(values, name) ? String(values[name]) : match,
     );
+  }
+
+  plural(key, count, values = {}) {
+    const [supportedLocale] = Intl.PluralRules.supportedLocalesOf([
+      this.#locale,
+    ]);
+    const category = new Intl.PluralRules(
+      supportedLocale ?? this.#fallback,
+    ).select(count);
+    const localizedKey = `${key}_${category}`;
+    const fallbackKey = `${key}_other`;
+    const hasLocalizedKey = Object.hasOwn(
+      this.#catalogs[this.#locale] ?? {},
+      localizedKey,
+    );
+    const resolvedKey = hasLocalizedKey ? localizedKey : fallbackKey;
+    return this.t(resolvedKey, { ...values, count });
   }
 
   apply(root = document) {
