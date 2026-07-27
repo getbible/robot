@@ -8,15 +8,20 @@ TEST_ROOT=$(mktemp -d)
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 
 FAKE_BIN="${TEST_ROOT}/bin"
+TOOLS_BIN="${TEST_ROOT}/tools"
 COMMAND_LOG="${TEST_ROOT}/commands.log"
 APT_STATE="${TEST_ROOT}/apt-repaired"
-mkdir -p "$FAKE_BIN"
+mkdir -p "$FAKE_BIN" "$TOOLS_BIN"
 : >"$COMMAND_LOG"
+
+for tool in chmod cp dirname grep install mktemp readlink rm stat tail wc; do
+    ln -s -- "$(command -v "$tool")" "${TOOLS_BIN}/${tool}"
+done
 
 write_stub() {
     local name=$1
     shift
-    printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail' "$@" >"${FAKE_BIN}/${name}"
+    printf '%s\n' '#!/bin/bash' 'set -Eeuo pipefail' "$@" >"${FAKE_BIN}/${name}"
     chmod 0755 "${FAKE_BIN}/${name}"
 }
 
@@ -73,7 +78,7 @@ write_stub systemctl \
 write_stub ss 'exit 0'
 
 export APT_STATE COMMAND_LOG FAKE_BIN
-export PATH="${FAKE_BIN}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH="${FAKE_BIN}:${TOOLS_BIN}"
 command -v caddy >/dev/null 2>&1 &&
     {
         printf 'Caddy installation fixture requires a host without Caddy.\n' >&2
