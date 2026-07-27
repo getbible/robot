@@ -6,12 +6,14 @@ ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "setup.sh"
 UNIT = ROOT / "deploy" / "getbible-robot@.service"
 LIFECYCLE = ROOT / "tests" / "setup_manager_lifecycle.sh"
+CADDY_INSTALLATION = ROOT / "tests" / "caddy_installation.sh"
 
 
 class SetupScriptTestCase(unittest.TestCase):
     def test_shell_syntax_and_self_test(self) -> None:
         subprocess.run(["bash", "-n", str(SETUP)], check=True)
         subprocess.run(["bash", "-n", str(LIFECYCLE)], check=True)
+        subprocess.run(["bash", "-n", str(CADDY_INSTALLATION)], check=True)
         result = subprocess.run(
             ["bash", str(SETUP), "self-test"],
             check=True,
@@ -72,6 +74,16 @@ class SetupScriptTestCase(unittest.TestCase):
             result.stdout,
         )
 
+    def test_official_caddy_repository_installation(self) -> None:
+        result = subprocess.run(
+            ["bash", str(CADDY_INSTALLATION)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertIn("Caddy installation test passed.", result.stdout)
+
     def test_hardened_unit_is_instance_scoped(self) -> None:
         unit = UNIT.read_text(encoding="utf-8")
         required = {
@@ -109,6 +121,10 @@ class SetupScriptTestCase(unittest.TestCase):
         self.assertIn("The Mini App and webhook listeners require different ports.", script)
         self.assertIn("The Mini App and health listeners require different ports.", script)
         self.assertIn("preflight_mini_app_dns", script)
+        self.assertIn("repair_apt_package_state", script)
+        self.assertIn("install_caddy_with_apt", script)
+        self.assertIn("caddy-stable-archive-keyring.gpg", script)
+        self.assertIn("dl.cloudsmith.io/public/caddy/stable", script)
         self.assertIn("render_caddy_routes", script)
         self.assertIn("caddy validate --config", script)
         self.assertIn("rollback_caddy_transaction", script)
