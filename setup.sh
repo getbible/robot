@@ -118,6 +118,7 @@ Commands:
   delivery    Switch safely between polling and HTTPS webhook delivery
   miniapp     Configure the authenticated Telegram Mini App HTTPS route
   content     Edit the welcome or detailed help text
+  update      Deploy the current reviewed checkout (alias for upgrade)
   upgrade     Deploy the exact commit from a reviewed source checkout
   rollback    Return to the immediately previous deployed application
   uninstall   Remove one instance after explicit confirmation
@@ -313,15 +314,25 @@ select_python() {
     die "A supported Python 3.10, 3.11, or 3.12 interpreter is required."
 }
 
+git_source_read() {
+    local directory=$1
+    shift
+    # The manager runs as root, but the reviewed checkout belongs to the
+    # operator. Prevent read-only source inspection from refreshing or locking
+    # that checkout's index as root.
+    GIT_OPTIONAL_LOCKS=0 git -C "$directory" "$@"
+}
+
 resolve_source_dir() {
     local requested=${1:-}
     local candidate
     if [[ -n "$requested" ]]; then
         candidate=$(readlink -f "$requested")
-    elif git -C "$SCRIPT_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
-        candidate=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
-    elif git -C "$PWD" rev-parse --show-toplevel >/dev/null 2>&1; then
-        candidate=$(git -C "$PWD" rev-parse --show-toplevel)
+    elif git_source_read "$SCRIPT_DIR" rev-parse --show-toplevel \
+        >/dev/null 2>&1; then
+        candidate=$(git_source_read "$SCRIPT_DIR" rev-parse --show-toplevel)
+    elif git_source_read "$PWD" rev-parse --show-toplevel >/dev/null 2>&1; then
+        candidate=$(git_source_read "$PWD" rev-parse --show-toplevel)
     else
         die "Run install/upgrade from a GetBible Robot Git checkout or pass --source DIR."
     fi
@@ -336,17 +347,20 @@ resolve_source_dir() {
         die "Source checkout is missing deploy/welcome.txt."
     [[ -f "${candidate}/deploy/help.txt" ]] ||
         die "Source checkout is missing deploy/help.txt."
-    git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    git_source_read "$candidate" rev-parse --is-inside-work-tree \
+        >/dev/null 2>&1 ||
         die "Source directory is not a Git checkout."
-    git -C "$candidate" diff --quiet --ignore-submodules --
-    git -C "$candidate" diff --cached --quiet --ignore-submodules --
+    git_source_read "$candidate" diff --quiet --ignore-submodules --
+    git_source_read "$candidate" diff --cached --quiet --ignore-submodules --
     printf '%s\n' "$candidate"
 }
 
 source_url_for() {
     local source_dir=$1
     local url
-    url=$(git -C "$source_dir" remote get-url origin 2>/dev/null || true)
+    url=$(
+        git_source_read "$source_dir" remote get-url origin 2>/dev/null || true
+    )
     if [[ -z "$url" ]]; then
         url="https://github.com/getbible/robot.git"
     fi
@@ -1514,7 +1528,7 @@ cmd_install() {
     local python_bin
     source_dir=$(resolve_source_dir "$source_request")
     source_url=$(source_url_for "$source_dir")
-    sha=$(git -C "$source_dir" rev-parse HEAD)
+    sha=$(git_source_read "$source_dir" rev-parse HEAD)
     python_bin=$(select_python)
 
     printf '\nGetBible Robot secure instance setup\n'
@@ -2647,7 +2661,7 @@ cmd_upgrade() {
     local service
     source_dir=$(resolve_source_dir "$source_request")
     source_url=$(source_url_for "$source_dir")
-    target_sha=$(git -C "$source_dir" rev-parse HEAD)
+    target_sha=$(git_source_read "$source_dir" rev-parse HEAD)
     python_bin=$(select_python)
     app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
     next_dir="${INSTANCE_ROOT}/${ACTIVE_INSTANCE}/app.next"
@@ -2690,6 +2704,8 @@ cmd_upgrade() {
         verify_mini_app_instance "$app_dir" "$env_file"; then
         record_operation upgrade "$ACTIVE_INSTANCE" ok
         printf 'Upgrade succeeded. app.previous is retained for one-step rollback.\n'
+        printf 'The complete application tree, including Mini App assets, now runs commit %s.\n' \
+            "$target_sha"
         cmd_status "$ACTIVE_INSTANCE"
         return
     fi
@@ -2883,7 +2899,7 @@ GetBible Robot operations
  13) Switch polling/webhook delivery
  14) Configure Telegram Mini App
  15) Edit welcome/help content
- 16) Upgrade
+ 16) Update / upgrade deployment
  17) Roll back
  18) Uninstall
   0) Exit
@@ -2933,7 +2949,7 @@ main() {
         delivery) cmd_delivery "$@" ;;
         miniapp) cmd_miniapp "$@" ;;
         content) cmd_content "$@" ;;
-        upgrade) cmd_upgrade "$@" ;;
+        update|upgrade) cmd_upgrade "$@" ;;
         rollback) cmd_rollback "$@" ;;
         uninstall) cmd_uninstall "$@" ;;
         menu) cmd_menu "$@" ;;
