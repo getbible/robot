@@ -99,6 +99,22 @@ confirm() {
     :
 }
 
+install() {
+    local args=()
+    while (($# > 0)); do
+        case "$1" in
+            -o|-g)
+                shift 2
+                ;;
+            *)
+                args+=("$1")
+                shift
+                ;;
+        esac
+    done
+    command install "${args[@]}"
+}
+
 ensure_caddy_available
 
 [[ -x "${FAKE_BIN}/caddy" ]]
