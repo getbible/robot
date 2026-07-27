@@ -26,7 +26,10 @@ sudo getbible-robot stop production
 sudo getbible-robot restart production
 ```
 
-Start and restart wait for the configured loopback readiness endpoint. If `HEALTH_PORT=0`, only the service transition is checked.
+`start` enables the selected unit so it survives reboot, starts it, and waits
+for the configured loopback readiness endpoint. `restart` preserves current
+enablement. When the Mini App is enabled, both commands also verify its local
+shell and public certificate/route/content before reporting success.
 
 Never run a second process with the same Telegram token.
 
@@ -73,8 +76,10 @@ sudo getbible-robot doctor production
 
 The Mini App listener remains on `127.0.0.1` and uses a port separate from the
 health and webhook listeners. Its public HTTPS route is required even when
-Telegram updates use polling. See [Mini App deployment](MINI_APP.md) for secure
-reverse-proxy, BotFather, authentication, and verification requirements.
+Telegram updates use polling. The manager installs/configures the host Caddy
+service transactionally and removes the public route when the Mini App is
+disabled. See [Mini App deployment](MINI_APP.md) for DNS, Caddy, BotFather,
+authentication, and verification requirements.
 
 ## Logs
 
@@ -128,6 +133,9 @@ The non-destructive diagnostic checks:
 - systemd status;
 - Telegram webhook registration matching the configured delivery mode;
 - enabled Mini App listener presence on its exact IPv4 loopback address;
+- generated Caddy route equality, full Caddyfile validation, and Caddy service
+  enablement/activity;
+- local Mini App shell plus public TLS, routing, and response-content checks;
 - health and readiness when running.
 
 Use `runtime` for operational counters and `doctor` for an evidence-backed pass/fail deployment check.
@@ -162,7 +170,10 @@ The manager:
 5. automatically restores the prior file if validation fails;
 6. offers to restart the selected instance.
 
-See [Configuration](CONFIGURATION.md) before changing any bound. Never copy one instance's token or environment file over another.
+Mini App enablement, URL, listen address, and port are manager-owned; change
+them only through `getbible-robot miniapp`. See
+[Configuration](CONFIGURATION.md) before changing any other bound. Never copy
+one instance's token or environment file over another.
 
 ## Monitoring
 

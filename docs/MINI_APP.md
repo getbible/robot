@@ -32,12 +32,17 @@ GetBible therefore makes unauthenticated browser access inert:
   `initData`;
 - the server validates the signed user identity and authentication timestamp;
 - a short-lived, user-bound launch token ties the browser session to the bot
-  workflow and originating chat context;
+  workflow and originating chat context; a generic Main Mini App launch is
+  deliberately restricted to the authenticated user's private bot chat;
+- authenticated sessions have a short absolute lifetime that API activity
+  cannot extend indefinitely;
 - expired, replayed, missing, mismatched, or malformed authorization fails
   closed before Scripture lookup or posting;
 - submitted verse text is never authoritative—the server resolves selected
   identifiers again before posting;
-- state and selection bounds are enforced server-side;
+- state, selection, and final output-message bounds are enforced server-side;
+- final posts are completely resolved and rendered before their first Telegram
+  send, and known partial sends are rolled back best-effort;
 - Telegram theme values are presentation hints, never authorization.
 
 Do not add an IP allowlist for Telegram clients, trust `Referer` or
@@ -53,12 +58,19 @@ provide a public URL such as:
 https://bot.example.com/getbible/production
 ```
 
-The manager assigns a unique loopback port beginning at `9201`. Configure the
-HTTPS route before allowing setup to start the instance. Polling remains a
-valid and recommended Telegram delivery mode; it does not remove the need for
-the Mini App HTTPS route.
+Create the public DNS `A` and/or `AAAA` record before running setup, and direct
+public TCP ports `80` and `443` to this host. The manager verifies that the
+hostname resolves publicly, installs only the distribution's Caddy package
+when Caddy is absent, assigns a unique loopback port beginning at `9201`, and
+configures Caddy automatic HTTPS. Polling remains the recommended Telegram
+delivery mode and does not affect the Mini App HTTPS listener.
 
-## Configure an existing instance
+Setup refuses to continue when DNS is absent/private, Caddy is inactive while
+another process owns port `80` or `443`, an existing Caddy configuration
+conflicts, or the final public certificate/route/content probe fails. It never
+uses a downloaded shell installer or a curl-pipe package installation.
+
+## Manage an installed instance
 
 Use the transactional manager instead of editing listener settings directly:
 
@@ -68,87 +80,34 @@ sudo getbible-robot status production
 sudo getbible-robot doctor production
 ```
 
-`miniapp` backs up the environment, validates the public HTTPS URL and
-loopback port, prevents a webhook/Mini App port collision, restarts only the
-selected instance, and restores the previous configuration if readiness
-fails. Disabling the Mini App retains its URL and port for a later safe
-re-enable.
+`miniapp` backs up the environment and Caddy files, validates DNS, the public
+HTTPS URL, loopback port, complete generated Caddy configuration, service
+reload, local shell, public certificate, route, and response content. Any
+failure restores the environment and both Caddy files byte-for-byte, reloads
+the prior Caddy configuration, and restores the prior robot service state.
+Disabling removes the public route while retaining its URL and reserved port
+for a later safe re-enable.
 
-## Reverse-proxy examples
+## Setup-managed Caddy
 
-The examples preserve the complete public path prefix. Replace the host, path,
-and assigned port with the values printed by setup.
-
-### Caddy
-
-```caddyfile
-bot.example.com {
-    @getbible path /getbible/production*
-    reverse_proxy @getbible 127.0.0.1:9201
-}
-```
-
-### Nginx
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name bot.example.com;
-
-    client_max_body_size 64k;
-
-    location = /getbible/production {
-        return 308 /getbible/production/;
-    }
-
-    location ^~ /getbible/production/ {
-        proxy_pass http://127.0.0.1:9201;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Request-ID $request_id;
-        proxy_connect_timeout 3s;
-        proxy_read_timeout 30s;
-        proxy_send_timeout 30s;
-    }
-}
-```
-
-### Traefik
-
-Route the prefix without `StripPrefix`:
+The supported production path uses the host's `caddy.service`. The manager
+adds one marked import to `/etc/caddy/Caddyfile` and writes deterministic,
+non-secret routes to:
 
 ```text
-Host(`bot.example.com`) && PathPrefix(`/getbible/production`)
+/etc/caddy/getbible-robot.caddy
 ```
 
-Forward it to:
+Do not edit the marked import or generated route file. Existing unrelated
+Caddyfile content is preserved. Every candidate is checked with `caddy
+validate` before a zero-downtime reload. Duplicate and path-overlapping routes
+are rejected, and multiple Robot instances receive separate reserved loopback
+ports. Caddy is retained on uninstall because it may serve other Robot
+instances or unrelated sites; only the selected instance's route is removed.
 
-```text
-http://127.0.0.1:9201
-```
-
-When Traefik runs in a container, container loopback is not host loopback. On
-Linux, run only the Traefik proxy with host networking so its
-`127.0.0.1:9201` target is the host's loopback listener. Use Traefik's file
-provider when practical; it does not require mounting the Docker control
-socket. A bridge-network `host-gateway` address cannot reach a service bound
-only to host loopback.
-
-Do not solve that mismatch by changing `MINI_APP_LISTEN` to `0.0.0.0`.
-A fully containerized Robot is a separate deployment profile: place Traefik
-and the Robot on a private internal network, publish ports only from Traefik,
-use container secrets and a read-only/rootless Robot, and explicitly validate
-the non-loopback container bind. The supplied manager intentionally implements
-the narrower host-systemd/loopback boundary; it does not silently weaken that
-boundary when Docker is detected.
-
-The application emits its own restrictive security headers. A reverse proxy
-must not weaken or overwrite its content-security policy, frame policy,
-referrer policy, MIME-sniffing protection, or cache controls. Apply edge rate
-limits and a small request-body limit, but keep application authentication and
-server-side bounds enabled.
+The application continues to emit its own restrictive security and cache
+headers. Caddy terminates public TLS and forwards the complete path prefix
+without weakening the loopback or application-authentication boundary.
 
 ## Telegram configuration
 
@@ -168,13 +127,13 @@ final server-resolved selection.
 
 | Variable | Default | Production rule |
 |---|---:|---|
-| `MINI_APP_ENABLED` | `false` | Enable only after HTTPS routing is ready |
+| `MINI_APP_ENABLED` | `false` | Managed through `getbible-robot miniapp` |
 | `MINI_APP_PUBLIC_URL` | empty | Absolute HTTPS URL; no credentials, query, or fragment |
 | `MINI_APP_LISTEN` | `127.0.0.1` | Manager-owned; never bind publicly |
-| `MINI_APP_PORT` | `9201` | Unique per instance and different from the webhook port |
+| `MINI_APP_PORT` | `9201` | Manager-owned, reserved per configured instance, and different from health/webhook ports |
 | `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | `300` | `30`–`900`; maximum Telegram authentication age |
 | `MINI_APP_LAUNCH_TTL_SECONDS` | `300` | `30`–`900`; lifetime of the user-bound launch token |
-| `MINI_APP_SESSION_TTL_SECONDS` | `900` | Idle server session lifetime |
+| `MINI_APP_SESSION_TTL_SECONDS` | `900` | Absolute server session lifetime |
 | `MINI_APP_SESSION_LIMIT` | `2000` | Maximum bounded active Mini App sessions |
 | `MINI_APP_MAX_SELECTIONS` | `100` | Maximum selected verse items before final normalization |
 
@@ -190,6 +149,8 @@ After starting or upgrading:
 sudo getbible-robot status production
 sudo getbible-robot doctor production
 sudo ss -ltnp | grep ':9201'
+sudo systemctl status caddy.service --no-pager
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 sudo getbible-robot logs production 200
 ```
 
@@ -216,10 +177,12 @@ Scripture is posted to the intended chat and topic.
   inaccessible. The shell is not the security boundary.
 - **Authorization rejected:** launch again from the bot, verify host time, and
   confirm the instance token matches the bot that opened the app.
-- **404 for scripts or API calls:** preserve the entire configured prefix in
-  the reverse proxy.
-- **502 or connection refused:** confirm the service is active and the proxy
-  targets the assigned loopback port.
+- **DNS preflight fails:** create/fix the public `A`/`AAAA` record before
+  enabling the Mini App.
+- **Caddy validation or reload fails:** resolve the reported conflict in the
+  existing Caddyfile; the manager has already restored the previous files.
+- **502 or connection refused:** run `doctor` and confirm both the Robot and
+  Caddy services are active; do not bind the Robot publicly.
 - **Mini App works privately but not from a group:** verify the Main Mini App
   URL and direct-link setting in BotFather.
 - **`doctor` reports no listener:** check configuration validation, port

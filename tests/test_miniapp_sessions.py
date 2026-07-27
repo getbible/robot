@@ -55,6 +55,52 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
         clock.value = 61
         self.assertIsNone(launches.consume(expired.token, user_id=7))
 
+    def test_launch_prompt_is_retained_for_post_success_cleanup(self) -> None:
+        launches = MiniAppLaunchStore(max_launches=2, ttl_seconds=60)
+        private_launch = launches.create_launch(user_id=7, target_chat_id=7)
+        updated = launches.remember_prompt(private_launch, message_id=101)
+
+        self.assertEqual(updated.prompt_message_id, 101)
+        self.assertIsNone(updated.prompt_ephemeral_message_id)
+        self.assertIs(
+            launches.consume(private_launch.token, user_id=7),
+            updated,
+        )
+
+        ephemeral_launch = launches.create_launch(
+            user_id=7,
+            target_chat_id=-100,
+        )
+        updated_ephemeral = launches.remember_prompt(
+            ephemeral_launch,
+            ephemeral_message_id=202,
+        )
+        self.assertEqual(updated_ephemeral.prompt_ephemeral_message_id, 202)
+        with self.assertRaises(ValueError):
+            launches.remember_prompt(
+                updated_ephemeral,
+                message_id=1,
+                ephemeral_message_id=2,
+            )
+
+    def test_prompt_attachment_survives_launch_exchange_race(self) -> None:
+        launches = MiniAppLaunchStore(max_launches=2, ttl_seconds=60)
+        launch = launches.create_launch(user_id=7, target_chat_id=-100)
+        consumed = launches.consume(launch.token, user_id=7)
+        self.assertIs(consumed, launch)
+
+        store = MiniAppSessionStore(max_sessions=2, ttl_seconds=60)
+        session = store.create(
+            _principal(7),
+            translation="kjv",
+            launch=consumed,
+            init_data_digest=b"x" * 32,
+        )
+        updated = launches.remember_prompt(launch, ephemeral_message_id=303)
+
+        self.assertIs(updated, launch)
+        self.assertEqual(session.launch.prompt_ephemeral_message_id, 303)
+
     def test_session_searches_and_basket_are_bounded_and_owner_scoped(
         self,
     ) -> None:
@@ -90,17 +136,40 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
             query="loved",
             translation="kjv",
             total=1,
-            items=(item,),
+            items=(
+                SearchResult(
+                    reference=item.reference,
+                    book_number=item.book_number,
+                    book_name=item.book_name,
+                    chapter=item.chapter,
+                    verse=item.verse,
+                    text=item.text,
+                    terms=("loved",),
+                ),
+            ),
         )
         second = store.remember_search(
             session,
             query="world",
             translation="kjv",
             total=1,
-            items=(item,),
+            items=(
+                SearchResult(
+                    reference=item.reference,
+                    book_number=item.book_number,
+                    book_name=item.book_name,
+                    chapter=item.chapter,
+                    verse=item.verse,
+                    text=item.text,
+                    terms=("world",),
+                ),
+            ),
         )
         self.assertIsNone(store.search(session, first.token))
         self.assertIs(store.search(session, second.token), second)
+        self.assertEqual(first.items[0].terms, ("loved",))
+        self.assertEqual(second.items[0].terms, ("world",))
+        self.assertEqual(first.items[0].token, second.items[0].token)
 
         store.add_to_basket(session, second.items[0].token)
         self.assertEqual(store.basket(session), (second.items[0],))
@@ -135,8 +204,48 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
         self.assertEqual(store.snapshot()["evicted"], 1)
 
         second = next(iter(store._sessions.values()))
+        clock.value = 59
+        self.assertIs(store.get(second.token), second)
         clock.value = 61
         self.assertIsNone(store.get(second.token))
+
+    def test_post_attempts_are_basket_bound_and_failed_retries_remain_closed(
+        self,
+    ) -> None:
+        clock = _Clock()
+        launches = MiniAppLaunchStore(
+            max_launches=10,
+            ttl_seconds=60,
+            clock=clock,
+        )
+        store = MiniAppSessionStore(
+            max_sessions=2,
+            ttl_seconds=60,
+            clock=clock,
+        )
+        session = store.create(
+            _principal(7),
+            translation="kjv",
+            launch=launches.create_launch(user_id=7, target_chat_id=7),
+            init_data_digest=b"x" * 32,
+        )
+        digest = b"a" * 32
+        attempt, created = store.begin_post(session, "abcdef0123456789", digest)
+        self.assertTrue(created)
+        self.assertEqual(attempt.state, "pending")
+
+        same, created = store.begin_post(session, "fedcba9876543210", digest)
+        self.assertFalse(created)
+        self.assertIs(same, attempt)
+
+        store.fail_post(session, "abcdef0123456789", digest)
+        self.assertEqual(attempt.state, "failed")
+        with self.assertRaisesRegex(ValueError, "different basket"):
+            store.begin_post(
+                session,
+                "abcdef0123456789",
+                b"b" * 32,
+            )
 
     def test_launch_url_helpers_never_embed_chat_or_query_content(self) -> None:
         token = "abcdefghijklmnop"

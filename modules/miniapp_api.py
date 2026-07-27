@@ -37,6 +37,7 @@ from .miniapp_auth import (
 from .miniapp_sessions import (
     MiniAppLaunch,
     MiniAppLaunchStore,
+    MiniAppPostAttempt,
     MiniAppSearch,
     MiniAppSelection,
     MiniAppSession,
@@ -364,12 +365,6 @@ class MiniAppApi:
             raise MiniAppApiInputError("Session request contains unsupported fields.")
         init_data = _required_text(payload, "init_data", 8 * 1024)
         principal = self._validator.validate(init_data)
-        self._replay_guard.claim(init_data)
-        await self._limiter.acquire(
-            user_id=principal.user_id,
-            chat_id=principal.rate_limit_chat_id,
-        )
-        translation = self._preferences.translation_for(principal.user_id)
         supplied_launch = payload.get("launch_token")
         if supplied_launch is not None and not isinstance(supplied_launch, str):
             raise MiniAppApiInputError("launch_token must be text.")
@@ -380,8 +375,25 @@ class MiniAppApi:
         ):
             raise MiniAppAuthenticationError("Invalid Mini App launch.")
         launch_token = supplied_launch or principal.start_param
+
+        if self._replay_guard.contains(init_data):
+            raise MiniAppReplayError("Telegram authorization was replayed.")
+        if (
+            launch_token is not None
+            and self._launches.peek(launch_token, user_id=principal.user_id) is None
+        ):
+            raise MiniAppAuthenticationError("Invalid Mini App launch.")
+
+        await self._limiter.acquire(
+            user_id=principal.user_id,
+            chat_id=principal.rate_limit_chat_id,
+        )
+        translation = self._preferences.translation_for(principal.user_id)
+        translations = await self._service.translations()
+
+        consumed_launch: MiniAppLaunch | None = None
         if launch_token is None:
-            launch: MiniAppLaunch | None = MiniAppLaunch(
+            launch = MiniAppLaunch(
                 token="generic-private",
                 user_id=principal.user_id,
                 target_chat_id=principal.user_id,
@@ -391,28 +403,52 @@ class MiniAppApi:
                 created_at=time.monotonic(),
             )
         else:
-            launch = self._launches.consume(
+            if self._replay_guard.contains(init_data):
+                raise MiniAppReplayError("Telegram authorization was replayed.")
+            self._replay_guard.claim(init_data)
+            consumed_launch = self._launches.consume(
                 launch_token,
                 user_id=principal.user_id,
             )
-            if launch is None:
+            if consumed_launch is None:
+                self._replay_guard.release(init_data)
                 raise MiniAppAuthenticationError("Invalid Mini App launch.")
-        assert launch is not None
-        session = self._sessions.create(
-            principal,
-            translation=translation,
-            launch=launch,
-            init_data_digest=hashlib.sha256(init_data.encode("utf-8")).digest(),
-        )
-        return await self._session_bootstrap(session, status=201)
+            launch = consumed_launch
+        if launch_token is None:
+            self._replay_guard.claim(init_data)
+        session: MiniAppSession | None = None
+        try:
+            session = self._sessions.create(
+                principal,
+                translation=translation,
+                launch=launch,
+                init_data_digest=hashlib.sha256(init_data.encode("utf-8")).digest(),
+            )
+            return await self._session_bootstrap(
+                session,
+                status=201,
+                translations=translations,
+            )
+        except BaseException:
+            if session is not None:
+                self._sessions.revoke(session.token)
+            self._replay_guard.release(init_data)
+            if consumed_launch is not None:
+                self._launches.restore(consumed_launch)
+            raise
 
     async def _session_bootstrap(
         self,
         session: MiniAppSession,
         *,
         status: int = 200,
+        translations: Sequence[TranslationOption] | None = None,
     ) -> MiniAppHttpResponse:
-        translations = await self._service.translations()
+        options = (
+            tuple(translations)
+            if translations is not None
+            else await self._service.translations()
+        )
         return self._response(
             status,
             {
@@ -424,7 +460,7 @@ class MiniAppApi:
                     "route": session.launch.initial_route,
                     "query": session.launch.initial_query,
                 },
-                "translations": [_translation_payload(option) for option in translations],
+                "translations": [_translation_payload(option) for option in options],
                 "basket": self._basket_payload(session),
             },
         )
@@ -434,7 +470,7 @@ class MiniAppApi:
         match = _BEARER_RE.fullmatch(authorization)
         if match is None:
             raise MiniAppAuthenticationError("Invalid Mini App session.")
-        session = self._sessions.get(match.group(1))
+        session = self._sessions.get(match.group(1), touch=False)
         if session is None:
             raise MiniAppAuthenticationError("Invalid Mini App session.")
         raw_init_data = _header(request.headers, "x-telegram-init-data")
@@ -455,6 +491,8 @@ class MiniAppApi:
             user_id=session.user_id,
             chat_id=session.chat_id,
         )
+        if not self._sessions.touch(session):
+            raise MiniAppAuthenticationError("Invalid Mini App session.")
         return session
 
     async def _translations(self, session: MiniAppSession) -> MiniAppHttpResponse:
@@ -713,31 +751,43 @@ class MiniAppApi:
         if re.fullmatch(r"[A-Fa-f0-9-]{16,64}", idempotency_key) is None:
             raise MiniAppApiInputError("idempotency_key is invalid.")
         async with session.post_lock:
-            previous = self._sessions.post_result(session, idempotency_key)
-            if previous is not None:
-                return self._response(
-                    200,
-                    {
-                        "status": "posted",
-                        "message_ids": list(previous),
-                        "idempotent_replay": True,
-                    },
-                )
             selections = self._sessions.basket(session)
+            previous = self._sessions.post_attempt(session, idempotency_key)
+            if previous is not None and not selections:
+                return self._post_attempt_response(previous)
             if not selections:
                 raise MiniAppApiInputError("The Scripture basket is empty.")
-            resolved = [(selection.reference, selection.translation) for selection in selections]
-            queries = await self._resolve_grouped_queries(resolved)
-            raw_message_ids = await self._post_scripture(session.launch, queries)
-            message_ids = tuple(raw_message_ids or ())
-            if not message_ids or any(
-                isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0
-                for message_id in message_ids
-            ):
-                raise ScriptureUnavailable("The Telegram post response was invalid.")
-            self._sessions.remember_post_result(
+            basket_digest = _basket_digest(selections)
+            attempt, created = self._sessions.begin_post(
                 session,
                 idempotency_key,
+                basket_digest,
+            )
+            if not created:
+                return self._post_attempt_response(attempt)
+            resolved = [(selection.reference, selection.translation) for selection in selections]
+            try:
+                queries = await self._resolve_grouped_queries(resolved)
+                raw_message_ids = await self._post_scripture(session.launch, queries)
+                message_ids = tuple(raw_message_ids or ())
+                if not message_ids or any(
+                    isinstance(message_id, bool)
+                    or not isinstance(message_id, int)
+                    or message_id <= 0
+                    for message_id in message_ids
+                ):
+                    raise ScriptureUnavailable("The Telegram post response was invalid.")
+            except BaseException:
+                self._sessions.fail_post(
+                    session,
+                    idempotency_key,
+                    basket_digest,
+                )
+                raise
+            self._sessions.complete_post(
+                session,
+                idempotency_key,
+                basket_digest,
                 message_ids,
             )
             self._sessions.clear_basket(session)
@@ -749,6 +799,28 @@ class MiniAppApi:
                     "idempotent_replay": False,
                 },
             )
+
+    def _post_attempt_response(
+        self,
+        attempt: MiniAppPostAttempt,
+    ) -> MiniAppHttpResponse:
+        if attempt.state == "completed":
+            return self._response(
+                200,
+                {
+                    "status": "posted",
+                    "message_ids": list(attempt.message_ids),
+                    "idempotent_replay": True,
+                },
+            )
+        return self._error_response(
+            409,
+            "post_outcome_locked",
+            (
+                "This basket already has an incomplete posting attempt. "
+                "Review the target chat before creating a new selection."
+            ),
+        )
 
     async def _resolve_grouped_queries(
         self,
@@ -1074,6 +1146,27 @@ def _selection_payload(item: MiniAppSelection) -> dict[str, object]:
         "text": item.text,
         "terms": list(item.terms),
     }
+
+
+def _basket_digest(items: Sequence[MiniAppSelection]) -> bytes:
+    """Bind an idempotency attempt to the exact authoritative posting order."""
+    payload = [
+        {
+            "reference": item.reference,
+            "translation": item.translation,
+            "book": item.book_number,
+            "chapter": item.chapter,
+            "verse": item.verse,
+        }
+        for item in items
+    ]
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.blake2s(encoded, digest_size=32).digest()
 
 
 def _number_ranges(numbers: Sequence[int]) -> str:

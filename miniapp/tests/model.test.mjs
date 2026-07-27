@@ -5,6 +5,7 @@ import { resolveLocale } from "../lib/i18n.js";
 import {
   DEFAULT_FILTERS,
   activeFilterCount,
+  entrypointIntent,
   moveItem,
   normalizeBasket,
   normalizeBooks,
@@ -13,6 +14,7 @@ import {
   normalizeScripture,
   normalizeSearch,
   normalizeSession,
+  resolveBibleEntrypoint,
   routeName,
   uniqueVerses,
 } from "../lib/model.js";
@@ -164,6 +166,41 @@ test("reorders immutable basket arrays and deduplicates appended pages", () => {
 test("falls back unknown routes to the protected home screen", () => {
   assert.equal(routeName("bible"), "bible");
   assert.equal(routeName("https://example.com"), "home");
+});
+
+test("keeps Bible fragments separate from executable search entrypoints", () => {
+  assert.deepEqual(entrypointIntent({ route: "bible", query: "John 3" }), {
+    route: "bible",
+    search_query: "",
+    bible_reference: "John 3",
+  });
+  assert.deepEqual(entrypointIntent({ route: "search", query: "grace" }), {
+    route: "search",
+    search_query: "grace",
+    bible_reference: "",
+  });
+});
+
+test("resolves incomplete Bible entrypoints without treating them as searches", () => {
+  const books = [
+    { number: 43, name: "John" },
+    { number: 62, name: "1 John" },
+  ];
+
+  assert.deepEqual(resolveBibleEntrypoint("John", books, ["kjv"]), {
+    book_number: 43,
+    chapter: null,
+  });
+  assert.deepEqual(resolveBibleEntrypoint("John 3 kjv", books, ["kjv"]), {
+    book_number: 43,
+    chapter: 3,
+  });
+  assert.deepEqual(resolveBibleEntrypoint("1 John", books, ["kjv"]), {
+    book_number: 62,
+    chapter: null,
+  });
+  assert.equal(resolveBibleEntrypoint("John 3:16", books, ["kjv"]), null);
+  assert.equal(resolveBibleEntrypoint("unknown", books, ["kjv"]), null);
 });
 
 test("resolves interface locales by exact locale, base language, then English", () => {

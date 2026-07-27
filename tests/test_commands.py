@@ -33,7 +33,7 @@ from modules.commands import (
     unknown_command,
 )
 from modules.ephemeral import TELEGRAM_TEXT_LIMIT, telegram_text_length
-from modules.errors import RobotRateLimited, ScriptureUnavailable
+from modules.errors import RobotInputError, RobotRateLimited, ScriptureUnavailable
 from modules.interactions import (
     InteractionSession,
     InteractionStore,
@@ -218,6 +218,10 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             "https://bot.example/getbible/?launch=opaque",
         )
         self.assertNotIn("grace", button.web_app.url)
+        mini_app.remember_prompt.assert_called_once_with(
+            mini_app.create_launch.return_value,
+            message_id=300,
+        )
 
     async def test_group_search_results_are_ephemeral_until_post(self) -> None:
         limiter = _Limiter()
@@ -414,6 +418,10 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "full-text verse",
             context.bot.send_message.await_args.kwargs["text"],
+        )
+        mini_app.remember_prompt.assert_called_once_with(
+            mini_app.create_launch.return_value,
+            message_id=300,
         )
 
     async def test_group_bible_picker_is_ephemeral_until_post(self) -> None:
@@ -614,6 +622,84 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         context.bot.delete_message.assert_awaited_once_with(
             chat_id=100,
             message_id=250,
+        )
+
+    async def test_incomplete_bible_reference_opens_bible_mini_app_entrypoint(
+        self,
+    ) -> None:
+        context = self.context(_Limiter())
+        service = SimpleNamespace(
+            resolve_query=AsyncMock(
+                side_effect=RobotInputError("reference is incomplete")
+            ),
+            select=AsyncMock(),
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        mini_app = Mock(spec=MiniAppServer)
+        mini_app.create_launch.return_value = SimpleNamespace(token="opaque")
+        mini_app.web_url.return_value = (
+            "https://bot.example/getbible/?launch=opaque"
+        )
+        context.application.bot_data[MINI_APP_SLOT] = mini_app
+        context.args = ["John"]
+        update = self.update()
+        update.effective_chat.type = "private"
+        update.effective_message = SimpleNamespace(
+            chat_id=100,
+            message_id=250,
+        )
+
+        await bible_command(update, context)
+
+        service.resolve_query.assert_awaited_once_with(
+            ["John"],
+            default_translation="kjv",
+        )
+        service.select.assert_not_awaited()
+        mini_app.create_launch.assert_called_once_with(
+            user_id=200,
+            target_chat_id=100,
+            message_thread_id=None,
+            initial_route="bible",
+            initial_query="John",
+        )
+        self.assertIn(
+            "Complete this Scripture reference",
+            context.bot.send_message.await_args.kwargs["text"],
+        )
+        context.bot.delete_message.assert_awaited_once_with(
+            chat_id=100,
+            message_id=250,
+        )
+
+    async def test_malformed_bible_reference_does_not_become_a_mini_app_launch(
+        self,
+    ) -> None:
+        context = self.context(_Limiter())
+        service = SimpleNamespace(
+            resolve_query=AsyncMock(
+                side_effect=RobotInputError("reference is malformed")
+            ),
+            select=AsyncMock(),
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        mini_app = Mock(spec=MiniAppServer)
+        context.application.bot_data[MINI_APP_SLOT] = mini_app
+        context.args = ["John", "3:16!"]
+        update = self.update()
+        update.effective_chat.type = "private"
+        update.effective_message = SimpleNamespace(
+            chat_id=100,
+            message_id=250,
+        )
+
+        await bible_command(update, context)
+
+        service.select.assert_not_awaited()
+        mini_app.create_launch.assert_not_called()
+        self.assertIn(
+            "could not understand",
+            context.bot.send_message.await_args.kwargs["text"],
         )
 
     async def test_selected_translation_becomes_the_users_next_default(

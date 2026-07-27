@@ -99,9 +99,16 @@ sudo getbible-robot logs production 200
 sudo ss -ltnp | grep ':9201'
 ```
 
-The assigned port must listen only on `127.0.0.1`. Confirm the reverse proxy
-preserves the complete `MINI_APP_PUBLIC_URL` prefix and does not route it to the
-health or webhook port.
+The assigned port must listen only on `127.0.0.1`. `doctor` also confirms that
+the generated route matches every enabled instance, the complete Caddyfile
+validates, `caddy.service` is enabled and active, and the public HTTPS URL has a
+valid certificate and returns the expected Mini App shell.
+
+If setup reports a DNS error, create or correct the public `A`/`AAAA` record
+and ensure inbound TCP `80` and `443` reach this host. If Caddy validation or
+reload fails, inspect the reported unmanaged Caddyfile conflict; the manager
+restores the previous Caddyfile and generated route automatically. Do not edit
+the marked import or `/etc/caddy/getbible-robot.caddy`.
 
 An ordinary browser may retrieve the application shell; that is not a security
 failure. Protected data and action APIs must reject missing, expired,

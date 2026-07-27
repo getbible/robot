@@ -11,6 +11,8 @@ The command displays the exact target, requires typing its instance name, asks w
 It then:
 
 - disables and stops `getbible-robot@production.service`;
+- removes only that instance's setup-managed Caddy route, validates the complete
+  Caddy configuration, and reloads Caddy;
 - removes that instance's application and virtual environments;
 - removes its root-only environment and metadata;
 - removes its cache and state/home;
@@ -18,7 +20,34 @@ It then:
 - optionally removes its JSON log;
 - reloads systemd and clears the failed service state.
 
-The shared manager, unit template, rotation configuration, and every other instance remain available.
+The shared manager, unit template, rotation configuration, Caddy service, and
+every other instance remain available. If Caddy validation or reload fails,
+the prior Caddy files are restored and the instance is not removed.
+
+## Replace an old installation with a fresh production install
+
+This release does not migrate an older Robot installation or carry its runtime
+state into production. If the old installation appears in
+`sudo getbible-robot list`, remove that exact selected instance first:
+
+```bash
+sudo getbible-robot stop old-production
+sudo getbible-robot uninstall old-production
+sudo getbible-robot list
+```
+
+The two confirmations are deliberately instance-specific; there is no broad
+“remove all” path. Verify the selected service, application, environment,
+cache, state, account, and managed Caddy route are absent using the checks
+below. Then install from a clean reviewed checkout with
+`sudo ./setup.sh install` and enter the production settings anew. Do not copy
+the old environment, virtual environment, state database, or generated Caddy
+route into the fresh instance.
+
+If an installation is too old to appear in the manager's instance list, do not
+guess at paths or use a recursive cleanup command. Inventory its exact unit,
+process account, application/configuration paths, and proxy route first, stop
+that exact unit, and remove only the verified targets before fresh setup.
 
 ## Temporary disablement
 

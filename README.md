@@ -99,8 +99,8 @@ See [Architecture](docs/ARCHITECTURE.md) and [the release gate](docs/RELEASE_GAT
 - Linux with `systemd` for the supplied production unit.
 - A Telegram bot token from `@BotFather`.
 - Outbound HTTPS access to Telegram and `https://api.getbible.net`.
-- A public HTTPS reverse-proxy route when the Mini App is enabled; Telegram
-  update delivery may still use polling.
+- Public DNS plus inbound TCP `80`/`443` when the Mini App is enabled; setup
+  manages host Caddy automatic HTTPS while Telegram updates may keep polling.
 
 ## Dependency policy
 
@@ -151,7 +151,8 @@ policy, health port, and hardened systemd service for every named instance.
 Tokens are entered with terminal echo disabled and are never accepted as
 command-line arguments. The questionnaire lets each instance choose polling or
 an HTTPS webhook, configures the optional same-instance Mini App on a separate
-loopback port, and synchronizes its Telegram command menu and profile text.
+loopback port, transactionally manages its Caddy automatic-HTTPS route, and
+synchronizes its Telegram command menu and profile text.
 
 ```bash
 sudo getbible-robot list

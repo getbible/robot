@@ -9,7 +9,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -20,7 +20,7 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
 MiniAppRoute = Literal["home", "bible", "search"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class MiniAppLaunch:
     """One command-created launch target bound to its Telegram user and chat."""
 
@@ -31,6 +31,8 @@ class MiniAppLaunch:
     initial_route: MiniAppRoute
     initial_query: str
     created_at: float
+    prompt_message_id: int | None = None
+    prompt_ephemeral_message_id: int | None = None
 
 
 class MiniAppLaunchStore:
@@ -109,6 +111,66 @@ class MiniAppLaunchStore:
             if launch is None or launch.user_id != user_id:
                 return None
             self._launches.pop(token, None)
+            return launch
+
+    def peek(self, token: str, *, user_id: int) -> MiniAppLaunch | None:
+        """Validate a launch without consuming it during exchange preflight."""
+        if _TOKEN_RE.fullmatch(token) is None:
+            return None
+        with self._guard:
+            self._purge_locked()
+            launch = self._launches.get(token)
+            if launch is None or launch.user_id != user_id:
+                return None
+            return launch
+
+    def restore(self, launch: MiniAppLaunch) -> None:
+        """Restore a consumed launch after a local session-creation failure."""
+        with self._guard:
+            self._purge_locked()
+            if (
+                self._clock() - launch.created_at < self._ttl
+                and launch.token not in self._launches
+            ):
+                self._launches[launch.token] = launch
+                while len(self._launches) > self._max_launches:
+                    self._launches.popitem(last=False)
+
+    def remember_prompt(
+        self,
+        launch: MiniAppLaunch,
+        *,
+        message_id: int | None = None,
+        ephemeral_message_id: int | None = None,
+    ) -> MiniAppLaunch:
+        """Attach exactly one bot-created launch prompt for later cleanup."""
+        values = (message_id, ephemeral_message_id)
+        if sum(value is not None for value in values) != 1 or any(
+            value is not None
+            and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+            )
+            for value in values
+        ):
+            raise ValueError("Exactly one valid launch prompt identifier is required.")
+        with self._guard:
+            self._purge_locked()
+            current = self._launches.get(launch.token)
+            if current is not None and current is not launch:
+                raise ValueError("Mini App launch identity does not match.")
+            if (
+                launch.prompt_message_id is not None
+                or launch.prompt_ephemeral_message_id is not None
+            ):
+                raise ValueError("Mini App launch already has a prompt.")
+            # Mutate the issued object in place. If the user exchanged the
+            # launch after Telegram returned the prompt but before this method
+            # acquired the lock, the newly created session holds this same
+            # object and observes the prompt identifiers for later cleanup.
+            launch.prompt_message_id = message_id
+            launch.prompt_ephemeral_message_id = ephemeral_message_id
             return launch
 
     def _purge_locked(self) -> None:
@@ -190,6 +252,19 @@ class MiniAppSelection:
     terms: tuple[str, ...] = ()
 
 
+MiniAppPostState = Literal["pending", "completed", "failed"]
+
+
+@dataclass(slots=True)
+class MiniAppPostAttempt:
+    """Basket-bound final-post state used to prevent duplicate retries."""
+
+    idempotency_key: str
+    basket_digest: bytes
+    state: MiniAppPostState = "pending"
+    message_ids: tuple[int, ...] = ()
+
+
 @dataclass(slots=True)
 class MiniAppSession:
     """One opaque browser session bound to one authenticated Telegram user."""
@@ -207,7 +282,7 @@ class MiniAppSession:
     searches: OrderedDict[str, MiniAppSearch] = field(default_factory=OrderedDict)
     available_selections: OrderedDict[str, MiniAppSelection] = field(default_factory=OrderedDict)
     basket: list[MiniAppSelection] = field(default_factory=list)
-    post_results: OrderedDict[str, tuple[int, ...]] = field(default_factory=OrderedDict)
+    post_attempts: OrderedDict[str, MiniAppPostAttempt] = field(default_factory=OrderedDict)
     post_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
@@ -277,7 +352,7 @@ class MiniAppSessionStore:
                 self._evicted += 1
             return session
 
-    def get(self, token: str) -> MiniAppSession | None:
+    def get(self, token: str, *, touch: bool = True) -> MiniAppSession | None:
         if _TOKEN_RE.fullmatch(token) is None:
             return None
         with self._guard:
@@ -285,9 +360,20 @@ class MiniAppSessionStore:
             session = self._sessions.get(token)
             if session is None:
                 return None
-            session.touched_at = self._clock()
-            self._sessions.move_to_end(token)
+            if touch:
+                session.touched_at = self._clock()
+                self._sessions.move_to_end(token)
             return session
+
+    def touch(self, session: MiniAppSession) -> bool:
+        """Mark an authenticated absolute-lifetime session as recently used."""
+        with self._guard:
+            self._purge_locked()
+            if self._sessions.get(session.token) is not session:
+                return False
+            session.touched_at = self._clock()
+            self._sessions.move_to_end(session.token)
+            return True
 
     def revoke(self, token: str) -> None:
         with self._guard:
@@ -422,31 +508,84 @@ class MiniAppSessionStore:
                 raise ValueError("Mini App session is no longer active.")
             session.basket.clear()
 
-    def post_result(
+    def post_attempt(
         self,
         session: MiniAppSession,
         idempotency_key: str,
-    ) -> tuple[int, ...] | None:
+    ) -> MiniAppPostAttempt | None:
         with self._guard:
             if self._sessions.get(session.token) is not session:
                 return None
-            result = session.post_results.get(idempotency_key)
-            if result is not None:
-                session.post_results.move_to_end(idempotency_key)
-            return result
+            attempt = session.post_attempts.get(idempotency_key)
+            if attempt is not None:
+                session.post_attempts.move_to_end(idempotency_key)
+            return attempt
 
-    def remember_post_result(
+    def begin_post(
         self,
         session: MiniAppSession,
         idempotency_key: str,
+        basket_digest: bytes,
+    ) -> tuple[MiniAppPostAttempt, bool]:
+        """Reserve one authoritative basket before any Telegram send starts."""
+        with self._guard:
+            if self._sessions.get(session.token) is not session:
+                raise ValueError("Mini App session is no longer active.")
+            existing = session.post_attempts.get(idempotency_key)
+            if existing is not None:
+                session.post_attempts.move_to_end(idempotency_key)
+                if existing.basket_digest != basket_digest:
+                    raise ValueError("Idempotency key belongs to a different basket.")
+                return existing, False
+            for attempt in session.post_attempts.values():
+                if attempt.basket_digest == basket_digest:
+                    return attempt, False
+            attempt = MiniAppPostAttempt(
+                idempotency_key=idempotency_key,
+                basket_digest=basket_digest,
+            )
+            session.post_attempts[idempotency_key] = attempt
+            while len(session.post_attempts) > 16:
+                session.post_attempts.popitem(last=False)
+            return attempt, True
+
+    def complete_post(
+        self,
+        session: MiniAppSession,
+        idempotency_key: str,
+        basket_digest: bytes,
         message_ids: Sequence[int],
     ) -> None:
         with self._guard:
             if self._sessions.get(session.token) is not session:
                 raise ValueError("Mini App session is no longer active.")
-            session.post_results[idempotency_key] = tuple(message_ids)
-            while len(session.post_results) > 16:
-                session.post_results.popitem(last=False)
+            attempt = session.post_attempts.get(idempotency_key)
+            if (
+                attempt is None
+                or attempt.basket_digest != basket_digest
+                or attempt.state != "pending"
+            ):
+                raise ValueError("Mini App post reservation is invalid.")
+            attempt.state = "completed"
+            attempt.message_ids = tuple(message_ids)
+
+    def fail_post(
+        self,
+        session: MiniAppSession,
+        idempotency_key: str,
+        basket_digest: bytes,
+    ) -> None:
+        """Keep an indeterminate attempt closed against duplicate retries."""
+        with self._guard:
+            if self._sessions.get(session.token) is not session:
+                return
+            attempt = session.post_attempts.get(idempotency_key)
+            if (
+                attempt is not None
+                and attempt.basket_digest == basket_digest
+                and attempt.state == "pending"
+            ):
+                attempt.state = "failed"
 
     def search(self, session: MiniAppSession, token: str) -> MiniAppSearch | None:
         if _TOKEN_RE.fullmatch(token) is None:
@@ -477,7 +616,7 @@ class MiniAppSessionStore:
         expired_sessions = [
             token
             for token, session in self._sessions.items()
-            if now - session.touched_at >= self._ttl
+            if now - session.created_at >= self._ttl
         ]
         for token in expired_sessions:
             self._sessions.pop(token, None)
@@ -498,8 +637,22 @@ class MiniAppSessionStore:
     ) -> MiniAppSelection:
         for existing in session.available_selections.values():
             if existing.reference == reference and existing.translation == translation:
+                current = replace(
+                    existing,
+                    book_number=book_number,
+                    book_name=book_name,
+                    chapter=chapter,
+                    verse=verse,
+                    text=text,
+                    terms=terms,
+                )
+                session.available_selections[existing.token] = current
+                session.basket[:] = [
+                    current if item.token == existing.token else item
+                    for item in session.basket
+                ]
                 session.available_selections.move_to_end(existing.token)
-                return existing
+                return current
         token = self._new_token(session.available_selections, size=18)
         selection = MiniAppSelection(
             token=token,

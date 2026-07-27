@@ -4,7 +4,7 @@ IFS=$'\n\t'
 umask 077
 
 PROGRAM="getbible-robot"
-VERSION="4"
+VERSION="5"
 SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
 SCRIPT_DIR=$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)
 
@@ -18,6 +18,11 @@ UNIT_PATH="/etc/systemd/system/getbible-robot@.service"
 MANAGER_PATH="/usr/local/sbin/getbible-robot"
 LOGROTATE_PATH="/etc/logrotate.d/getbible-robot"
 SETUP_LOG="${LOG_ROOT}/setup.log"
+CADDY_ROOT="/etc/caddy"
+CADDYFILE="${CADDY_ROOT}/Caddyfile"
+CADDY_ROUTES="${CADDY_ROOT}/getbible-robot.caddy"
+CADDY_IMPORT_BEGIN="# BEGIN getbible-robot managed routes"
+CADDY_IMPORT_END="# END getbible-robot managed routes"
 if [[ -f "${SCRIPT_DIR}/deploy/getbible-robot@.service" ]]; then
     UNIT_SOURCE="${SCRIPT_DIR}/deploy/getbible-robot@.service"
 else
@@ -35,6 +40,9 @@ INSTALLING_INSTANCE=""
 INSTALLING_USER=""
 INSTALL_TRANSACTION=0
 UPGRADE_NEXT=""
+CADDY_TRANSACTION_DIR=""
+CADDY_WAS_ACTIVE=""
+CADDY_WAS_ENABLED=""
 
 info() {
     printf '==> %s\n' "$*"
@@ -75,6 +83,9 @@ cleanup() {
         if [[ -n "$INSTALLING_USER" ]] && id "$INSTALLING_USER" >/dev/null 2>&1; then
             userdel "$INSTALLING_USER" >/dev/null 2>&1 || true
         fi
+    fi
+    if [[ -n "$CADDY_TRANSACTION_DIR" ]]; then
+        rollback_caddy_transaction || true
     fi
 }
 trap cleanup EXIT
@@ -422,6 +433,7 @@ next_webhook_port() {
     local app_dir
     local env_file
     local configured
+    local configured_url
     for ((port = 9001; port <= 9101; port++)); do
         used=0
         while IFS= read -r existing; do
@@ -451,7 +463,6 @@ next_mini_app_port() {
     local app_dir
     local env_file
     local configured
-    local configured_enabled
     local configured_delivery
     local configured_health
     local configured_webhook
@@ -462,8 +473,8 @@ next_mini_app_port() {
             env_file=$(environment_file_for "$existing")
             if [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]]; then
                 configured=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
-                configured_enabled=$(
-                    dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED"
+                configured_url=$(
+                    dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL"
                 )
                 configured_health=$(dotenv_value "$app_dir" "$env_file" "HEALTH_PORT")
                 configured_delivery=$(
@@ -472,7 +483,8 @@ next_mini_app_port() {
                 configured_webhook=$(
                     dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT"
                 )
-                if [[ "$configured_enabled" == "true" && "$configured" == "$port" ]] ||
+                if [[ -n "$configured_url" && -n "$configured" && "$configured" != "0" &&
+                    "$configured" == "$port" ]] ||
                     [[ "$configured_health" != "0" && "$configured_health" == "$port" ]] ||
                     [[ "$configured_delivery" == "webhook" &&
                         "$configured_webhook" == "$port" ]]; then
@@ -488,6 +500,36 @@ next_mini_app_port() {
         fi
     done
     die "No unused automatic Mini App port was found between 9201 and 9301."
+}
+
+mini_app_port_conflicts() {
+    local selected_instance=$1
+    local selected_port=$2
+    local existing
+    local app_dir
+    local env_file
+    local metadata_file
+    local value
+    while IFS= read -r existing; do
+        [[ "$existing" == "$selected_instance" ]] && continue
+        metadata_file=$(metadata_file_for "$existing")
+        value=$(sed -n -E 's/^HEALTH_PORT=([^[:space:]]+)$/\1/p' "$metadata_file" |
+            head -n 1)
+        if [[ "$value" != "0" && "$value" == "$selected_port" ]]; then
+            return 0
+        fi
+        app_dir=$(application_dir_for "$existing")
+        env_file=$(environment_file_for "$existing")
+        [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]] || continue
+        if [[ -n "$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")" ]]; then
+            value=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
+            [[ -z "$value" || "$value" == "0" || "$value" != "$selected_port" ]] ||
+                return 0
+        fi
+        value=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT")
+        [[ -z "$value" || "$value" == "0" || "$value" != "$selected_port" ]] || return 0
+    done < <(instance_names)
+    return 1
 }
 
 generate_webhook_secret() {
@@ -664,6 +706,371 @@ from dotenv import dotenv_values
 value = dotenv_values(sys.argv[1]).get(sys.argv[2])
 print("" if value is None else value)
 PY
+}
+
+preflight_mini_app_dns() {
+    local python_bin=$1
+    local public_url=$2
+    "$python_bin" - "$public_url" <<'PY'
+from __future__ import annotations
+
+import ipaddress
+import socket
+import sys
+from urllib.parse import urlsplit
+
+hostname = urlsplit(sys.argv[1]).hostname
+if not hostname:
+    raise SystemExit("The Mini App URL has no hostname.")
+try:
+    records = socket.getaddrinfo(
+        hostname,
+        443,
+        type=socket.SOCK_STREAM,
+    )
+except socket.gaierror:
+    raise SystemExit(
+        f"DNS does not resolve {hostname}. Create its public A/AAAA record first."
+    ) from None
+addresses = sorted({record[4][0] for record in records})
+if not addresses:
+    raise SystemExit(
+        f"DNS does not resolve {hostname}. Create its public A/AAAA record first."
+    )
+if not any(ipaddress.ip_address(address).is_global for address in addresses):
+    raise SystemExit(
+        f"DNS for {hostname} does not resolve to a public address."
+    )
+print(f"DNS preflight: {hostname} -> {', '.join(addresses)}")
+PY
+}
+
+ensure_caddy_available() {
+    if ! command -v caddy >/dev/null 2>&1; then
+        confirm "Install Caddy for managed Mini App HTTPS now?" yes ||
+            die "Caddy is required for setup-managed Mini App HTTPS."
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install --yes caddy
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install --assumeyes caddy
+        else
+            die "Install the distribution's Caddy package and rerun this command."
+        fi
+    fi
+    command -v caddy >/dev/null 2>&1 ||
+        die "The distribution package did not provide the caddy command."
+
+    install -d -o root -g root -m 0755 "$CADDY_ROOT"
+    if ! systemctl is-active --quiet caddy.service; then
+        local port
+        for port in 80 443; do
+            if ss -ltnH 2>/dev/null | awk '{print $4}' |
+                grep -Eq "(^|:)$port$"; then
+                die "TCP port ${port} is already occupied while Caddy is inactive."
+            fi
+        done
+    fi
+}
+
+snapshot_caddy_file() {
+    local path=$1
+    local label=$2
+    local destination=$3
+    if [[ -e "$path" ]]; then
+        cp -a -- "$path" "${destination}/${label}"
+        : >"${destination}/${label}.exists"
+    fi
+}
+
+restore_caddy_file() {
+    local path=$1
+    local label=$2
+    local source=$3
+    if [[ -f "${source}/${label}.exists" ]]; then
+        cp -a -- "${source}/${label}" "$path"
+    else
+        rm -f -- "$path"
+    fi
+}
+
+ensure_caddy_import() {
+    local begin_count=0
+    local end_count=0
+    local expected
+    local actual
+    touch "$CADDYFILE"
+    begin_count=$(grep -Fxc -- "$CADDY_IMPORT_BEGIN" "$CADDYFILE" || true)
+    end_count=$(grep -Fxc -- "$CADDY_IMPORT_END" "$CADDYFILE" || true)
+    if [[ "$begin_count" == "0" && "$end_count" == "0" ]]; then
+        {
+            [[ ! -s "$CADDYFILE" ]] || printf '\n'
+            printf '%s\n' "$CADDY_IMPORT_BEGIN"
+            printf 'import %s\n' "$CADDY_ROUTES"
+            printf '%s\n' "$CADDY_IMPORT_END"
+        } >>"$CADDYFILE"
+    elif [[ "$begin_count" == "1" && "$end_count" == "1" ]]; then
+        expected=$(
+            printf '%s\nimport %s\n%s' \
+                "$CADDY_IMPORT_BEGIN" "$CADDY_ROUTES" "$CADDY_IMPORT_END"
+        )
+        actual=$(
+            awk \
+                -v begin="$CADDY_IMPORT_BEGIN" \
+                -v end="$CADDY_IMPORT_END" \
+                '$0 == begin {capture = 1} capture {print} $0 == end {exit}' \
+                "$CADDYFILE"
+        )
+        [[ "$actual" == "$expected" ]] ||
+            die "The managed Caddy import block was modified; restore it before retrying."
+    else
+        die "The Caddyfile contains duplicate or incomplete GetBible managed markers."
+    fi
+    chown root:root "$CADDYFILE"
+    chmod 0644 "$CADDYFILE"
+}
+
+render_caddy_routes() {
+    local destination=$1
+    local excluded_instance=${2:-}
+    local input
+    local instance
+    local app_dir
+    local env_file
+    local enabled
+    local public_url
+    local port
+    local python_bin
+    input=$(mktemp)
+    while IFS= read -r instance; do
+        [[ "$instance" == "$excluded_instance" ]] && continue
+        app_dir=$(application_dir_for "$instance")
+        env_file=$(environment_file_for "$instance")
+        [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]] || continue
+        enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
+        [[ "$enabled" == "true" ]] || continue
+        public_url=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")
+        port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
+        validate_mini_app_url "$public_url" ||
+            die "Instance ${instance} has an invalid managed Mini App URL."
+        validate_port "$port" && ((port >= 1024)) ||
+            die "Instance ${instance} has an invalid managed Mini App port."
+        printf '%s\t%s\t%s\n' "$instance" "$public_url" "$port" >>"$input"
+    done < <(instance_names | sort)
+
+    python_bin=$(select_python)
+    "$python_bin" - "$input" "$destination" <<'PY'
+from __future__ import annotations
+
+from collections import defaultdict
+from pathlib import Path
+import re
+import sys
+from urllib.parse import urlsplit
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+routes: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
+seen: list[tuple[str, str, str]] = []
+
+for raw_line in source.read_text(encoding="utf-8").splitlines():
+    if not raw_line:
+        continue
+    instance, public_url, raw_port = raw_line.split("\t")
+    parts = urlsplit(public_url)
+    host = parts.netloc.casefold()
+    path = parts.path.rstrip("/")
+    for previous_instance, previous_host, previous_path in seen:
+        if host != previous_host:
+            continue
+        overlaps = (
+            path == previous_path
+            or not path
+            or not previous_path
+            or path.startswith(previous_path + "/")
+            or previous_path.startswith(path + "/")
+        )
+        if overlaps:
+            raise SystemExit(
+                "Managed Mini App routes overlap: "
+                f"{previous_instance} ({previous_host}{previous_path or '/'}) and "
+                f"{instance} ({host}{path or '/'})."
+            )
+    seen.append((instance, host, path))
+    routes[host].append((instance, path, int(raw_port)))
+
+lines = [
+    "# Generated by getbible-robot. Do not edit.",
+    "# Contains public routes only; no tokens or user data.",
+]
+for host in sorted(routes):
+    lines.extend(("", f"{host} {{"))
+    host_routes = sorted(routes[host], key=lambda item: (-len(item[1]), item[0]))
+    for instance, path, port in host_routes:
+        matcher = "gb_" + re.sub(r"[^A-Za-z0-9_]", "_", instance)
+        if path:
+            lines.extend(
+                (
+                    f"    @{matcher} path {path} {path}/*",
+                    f"    handle @{matcher} {{",
+                    f"        reverse_proxy 127.0.0.1:{port}",
+                    "    }",
+                )
+            )
+        else:
+            lines.extend(
+                (
+                    "    handle {",
+                    f"        reverse_proxy 127.0.0.1:{port}",
+                    "    }",
+                )
+            )
+    lines.append("}")
+destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+    rm -f -- "$input"
+}
+
+rollback_caddy_transaction() {
+    local transaction=${CADDY_TRANSACTION_DIR:-}
+    if [[ -z "$transaction" || ! -d "$transaction" ]]; then
+        return 0
+    fi
+    restore_caddy_file "$CADDYFILE" caddyfile "$transaction"
+    restore_caddy_file "$CADDY_ROUTES" routes "$transaction"
+    if [[ "$CADDY_WAS_ACTIVE" == "active" ]]; then
+        caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null
+        systemctl reload caddy.service
+    else
+        systemctl stop caddy.service >/dev/null 2>&1 || true
+    fi
+    if [[ "$CADDY_WAS_ENABLED" == "enabled" ]]; then
+        systemctl enable caddy.service >/dev/null
+    else
+        systemctl disable caddy.service >/dev/null 2>&1 || true
+    fi
+    rm -rf --one-file-system -- "$transaction"
+    CADDY_TRANSACTION_DIR=""
+    CADDY_WAS_ACTIVE=""
+    CADDY_WAS_ENABLED=""
+}
+
+begin_caddy_transaction() {
+    local excluded_instance=${1:-}
+    local candidate
+    [[ -z "$CADDY_TRANSACTION_DIR" ]] ||
+        die "A managed Caddy transaction is already active."
+    ensure_caddy_available
+    CADDY_TRANSACTION_DIR=$(mktemp -d)
+    CADDY_WAS_ACTIVE=$(systemctl is-active caddy.service 2>/dev/null || true)
+    CADDY_WAS_ENABLED=$(systemctl is-enabled caddy.service 2>/dev/null || true)
+    snapshot_caddy_file "$CADDYFILE" caddyfile "$CADDY_TRANSACTION_DIR"
+    snapshot_caddy_file "$CADDY_ROUTES" routes "$CADDY_TRANSACTION_DIR"
+    candidate="${CADDY_TRANSACTION_DIR}/routes.candidate"
+    if ! (render_caddy_routes "$candidate" "$excluded_instance"); then
+        rollback_caddy_transaction
+        return 1
+    fi
+    install -o root -g root -m 0644 "$candidate" "$CADDY_ROUTES"
+    if ! (ensure_caddy_import) ||
+        ! caddy validate --config "$CADDYFILE" --adapter caddyfile; then
+        warn "Managed Caddy configuration validation failed; restoring the previous files."
+        rollback_caddy_transaction
+        return 1
+    fi
+    if [[ "$CADDY_WAS_ACTIVE" == "active" ]]; then
+        if ! systemctl reload caddy.service; then
+            warn "Caddy reload failed; restoring the previous files."
+            rollback_caddy_transaction
+            return 1
+        fi
+    elif ! systemctl enable --now caddy.service; then
+        warn "Caddy did not start; restoring the previous files."
+        rollback_caddy_transaction
+        return 1
+    fi
+}
+
+commit_caddy_transaction() {
+    if [[ -z "$CADDY_TRANSACTION_DIR" || ! -d "$CADDY_TRANSACTION_DIR" ]]; then
+        return 0
+    fi
+    rm -rf --one-file-system -- "$CADDY_TRANSACTION_DIR"
+    CADDY_TRANSACTION_DIR=""
+    CADDY_WAS_ACTIVE=""
+    CADDY_WAS_ENABLED=""
+}
+
+mini_app_local_url() {
+    local app_dir=$1
+    local env_file=$2
+    "$app_dir/venv/bin/python" - "$env_file" <<'PY'
+import sys
+from urllib.parse import urlsplit
+from dotenv import dotenv_values
+
+values = dotenv_values(sys.argv[1])
+public = urlsplit(values["MINI_APP_PUBLIC_URL"])
+port = int(values["MINI_APP_PORT"])
+path = public.path.rstrip("/")
+print(f"http://127.0.0.1:{port}{path}/")
+PY
+}
+
+probe_mini_app_url() {
+    local url=$1
+    local body
+    body=$(curl --fail --silent --show-error --location --max-time 10 "$url") ||
+        return 1
+    grep -Fq '<title>getBible.Life</title>' <<<"$body"
+}
+
+verify_mini_app_local() {
+    local app_dir=$1
+    local env_file=$2
+    probe_mini_app_url "$(mini_app_local_url "$app_dir" "$env_file")"
+}
+
+verify_mini_app_public() {
+    local app_dir=$1
+    local env_file=$2
+    local attempts=${3:-45}
+    local public_url
+    local index
+    public_url=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")
+    public_url="${public_url%/}/"
+    for ((index = 1; index <= attempts; index++)); do
+        if probe_mini_app_url "$public_url"; then
+            return
+        fi
+        ((index == attempts)) || sleep 2
+    done
+    return 1
+}
+
+verify_mini_app_instance() {
+    local app_dir=$1
+    local env_file=$2
+    local attempts=${3:-45}
+    if [[ "$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")" != "true" ]]; then
+        return 0
+    fi
+    verify_mini_app_local "$app_dir" "$env_file" &&
+        verify_mini_app_public "$app_dir" "$env_file" "$attempts"
+}
+
+verify_managed_caddy_routes() {
+    local candidate
+    candidate=$(mktemp)
+    if ! (render_caddy_routes "$candidate") ||
+        ! cmp --silent "$candidate" "$CADDY_ROUTES" ||
+        ! caddy validate --config "$CADDYFILE" --adapter caddyfile ||
+        ! systemctl is-active --quiet caddy.service ||
+        ! systemctl is-enabled --quiet caddy.service; then
+        rm -f -- "$candidate"
+        return 1
+    fi
+    rm -f -- "$candidate"
 }
 
 validate_telegram_token_live() {
@@ -1097,8 +1504,8 @@ cmd_install() {
     local mini_app_port="9201"
     if confirm "Enable the authenticated Telegram Mini App?" yes; then
         mini_app_enabled="true"
-        printf '\nThe Mini App needs a public HTTPS URL. Your reverse proxy forwards\n'
-        printf 'that URL prefix to a separate loopback-only listener for this instance.\n'
+        printf '\nThe Mini App needs a public HTTPS URL whose DNS already points to this host.\n'
+        printf 'The manager configures Caddy automatic HTTPS and keeps the app on loopback.\n'
         while true; do
             mini_app_public_url=$(
                 prompt "Public HTTPS Mini App URL" \
@@ -1107,6 +1514,7 @@ cmd_install() {
             validate_mini_app_url "$mini_app_public_url" && break
             warn "Use a complete HTTPS URL without credentials, query, or fragment."
         done
+        preflight_mini_app_dns "$python_bin" "$mini_app_public_url"
         mini_app_port=$(next_mini_app_port)
         mini_app_port=$(prompt "Loopback Mini App listener port" "$mini_app_port")
         validate_port "$mini_app_port" && ((mini_app_port >= 1024)) ||
@@ -1152,8 +1560,8 @@ cmd_install() {
     fi
 
     local start_now="yes"
-    if [[ "$delivery_mode" == "webhook" || "$mini_app_enabled" == "true" ]]; then
-        if ! confirm "Are all configured public HTTPS reverse-proxy routes ready?" no; then
+    if [[ "$delivery_mode" == "webhook" ]]; then
+        if ! confirm "Is the configured public HTTPS webhook route ready?" no; then
             warn "The instance will be installed but not started. Configure HTTPS, then run '${PROGRAM} start ${instance}'."
             start_now="no"
         fi
@@ -1185,6 +1593,9 @@ cmd_install() {
     printf '  Health:         127.0.0.1:%s\n\n' "$health_port"
     confirm "Create this instance?" yes || die "Installation cancelled."
 
+    if [[ "$mini_app_enabled" == "true" ]]; then
+        ensure_caddy_available
+    fi
     install_shared_manager "$source_dir"
     install_log_rotation
 
@@ -1270,6 +1681,10 @@ cmd_install() {
     if [[ "$start_now" == "yes" ]]; then
         local service
         service=$(service_name_for "$instance")
+        if [[ "$mini_app_enabled" == "true" ]]; then
+            begin_caddy_transaction ||
+                die "The managed Caddy route could not be applied."
+        fi
         systemctl enable --now "$service"
         if ! wait_for_readiness "$health_port"; then
             systemctl status "$service" --no-pager || true
@@ -1279,6 +1694,12 @@ cmd_install() {
         fi
         telegram_delivery_status "$app_dir" "$env_file" ||
             die "The instance started, but Telegram delivery validation failed."
+        if [[ "$mini_app_enabled" == "true" ]] &&
+            ! verify_mini_app_instance "$app_dir" "$env_file"; then
+            record_operation install "$instance" failed-miniapp-https
+            die "The Mini App failed local or public HTTPS verification; the prior Caddy configuration will be restored."
+        fi
+        commit_caddy_transaction
     fi
 
     record_operation install "$instance" ok
@@ -1289,6 +1710,9 @@ cmd_install() {
     printf '  sudo %s doctor %s\n' "$PROGRAM" "$instance"
     if [[ "$mini_app_enabled" == "true" ]]; then
         printf '  sudo %s miniapp %s\n' "$PROGRAM" "$instance"
+        printf '\nOne Telegram-side step remains:\n'
+        printf '  Set this exact Main Mini App URL in @BotFather: %s\n' \
+            "$mini_app_public_url"
     fi
 }
 
@@ -1318,10 +1742,41 @@ cmd_start() {
     require_root
     select_instance "${1:-}"
     local service
+    local app_dir
+    local env_file
+    local mini_app_enabled
+    local public_url
+    local was_active
+    local was_enabled
     service=$(service_name_for "$ACTIVE_INSTANCE")
-    systemctl start "$service"
-    wait_for_readiness "$ACTIVE_PORT" ||
-        die "Service started but readiness did not succeed."
+    app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
+    env_file=$(environment_file_for "$ACTIVE_INSTANCE")
+    mini_app_enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
+    was_active=$(systemctl is-active "$service" 2>/dev/null || true)
+    was_enabled=$(systemctl is-enabled "$service" 2>/dev/null || true)
+    if [[ "$mini_app_enabled" == "true" ]]; then
+        public_url=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")
+        preflight_mini_app_dns "$app_dir/venv/bin/python" "$public_url"
+        begin_caddy_transaction ||
+            die "The managed Caddy route could not be applied."
+    fi
+    if ! systemctl enable --now "$service" ||
+        ! wait_for_readiness "$ACTIVE_PORT" ||
+        ! verify_mini_app_instance "$app_dir" "$env_file"; then
+        rollback_caddy_transaction
+        if [[ "$was_active" == "active" ]]; then
+            systemctl start "$service" >/dev/null 2>&1 || true
+        else
+            systemctl stop "$service" >/dev/null 2>&1 || true
+        fi
+        if [[ "$was_enabled" == "enabled" ]]; then
+            systemctl enable "$service" >/dev/null 2>&1 || true
+        else
+            systemctl disable "$service" >/dev/null 2>&1 || true
+        fi
+        die "Service start, readiness, or Mini App HTTPS verification failed."
+    fi
+    commit_caddy_transaction
     record_operation start "$ACTIVE_INSTANCE" ok
     cmd_status "$ACTIVE_INSTANCE"
 }
@@ -1338,10 +1793,16 @@ cmd_restart() {
     require_root
     select_instance "${1:-}"
     local service
+    local app_dir
+    local env_file
     service=$(service_name_for "$ACTIVE_INSTANCE")
+    app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
+    env_file=$(environment_file_for "$ACTIVE_INSTANCE")
     systemctl restart "$service"
     wait_for_readiness "$ACTIVE_PORT" ||
         die "Service restarted but readiness did not succeed."
+    verify_mini_app_instance "$app_dir" "$env_file" ||
+        die "Service restarted, but Mini App HTTPS verification failed."
     record_operation restart "$ACTIVE_INSTANCE" ok
     cmd_status "$ACTIVE_INSTANCE"
 }
@@ -1356,7 +1817,6 @@ cmd_status() {
     local delivery_mode
     local webhook_public_url
     local webhook_port
-    local mini_app_enabled
     local mini_app_public_url
     local mini_app_listen
     local mini_app_port
@@ -1563,6 +2023,18 @@ cmd_doctor() {
                 warn "The configured loopback Mini App listener is not active."
                 ((failures += 1))
             fi
+            verify_managed_caddy_routes || {
+                warn "The setup-managed Caddy configuration is missing, stale, invalid, inactive, or disabled."
+                ((failures += 1))
+            }
+            verify_mini_app_local "$app_dir" "$env_file" || {
+                warn "The local Mini App shell did not pass its content check."
+                ((failures += 1))
+            }
+            verify_mini_app_public "$app_dir" "$env_file" 1 || {
+                warn "The public Mini App HTTPS route, certificate, or content check failed."
+                ((failures += 1))
+            }
         fi
     fi
     if ((failures > 0)); then
@@ -1742,6 +2214,7 @@ cmd_miniapp() {
     local webhook_port
     local default_choice="no"
     local was_active
+    local was_enabled
     env_file=$(environment_file_for "$ACTIVE_INSTANCE")
     app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
     service=$(service_name_for "$ACTIVE_INSTANCE")
@@ -1755,8 +2228,16 @@ cmd_miniapp() {
         requested_enabled="true"
     fi
 
-    backup=$(mktemp "${ETC_ROOT}/.${ACTIVE_INSTANCE}.env.XXXXXX")
-    cp -a "$env_file" "$backup"
+    if [[ "$requested_enabled" == "$current_enabled" &&
+        "$requested_enabled" == "false" ]]; then
+        printf 'The Mini App is already disabled.\n'
+        cmd_status "$ACTIVE_INSTANCE"
+        return
+    fi
+
+    if [[ "$requested_enabled" == "false" && "$current_enabled" == "true" ]]; then
+        ensure_caddy_available
+    fi
     if [[ "$requested_enabled" == "true" ]]; then
         while true; do
             public_url=$(
@@ -1766,42 +2247,42 @@ cmd_miniapp() {
             validate_mini_app_url "$public_url" && break
             warn "Use a complete HTTPS URL without credentials, query, or fragment."
         done
-        if [[ "$current_enabled" != "true" || -z "$current_port" || "$current_port" == "0" ]]; then
+        preflight_mini_app_dns "$app_dir/venv/bin/python" "$public_url" ||
+            die "Mini App DNS preflight failed; no configuration was changed."
+        ensure_caddy_available
+        if [[ -z "$current_url" || -z "$current_port" || "$current_port" == "0" ]]; then
             current_port=$(next_mini_app_port)
         fi
         port=$(prompt "Loopback Mini App listener port" "$current_port")
         validate_port "$port" && ((port >= 1024)) || {
-            rm -f "$backup"
             die "Mini App port must be an integer between 1024 and 65535."
         }
         webhook_port=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT")
         if [[ "$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_DELIVERY_MODE")" == "webhook" &&
             "$port" == "$webhook_port" ]]; then
-            rm -f "$backup"
             die "The Mini App and webhook listeners require different ports."
         fi
         if [[ "$ACTIVE_PORT" != "0" && "$port" == "$ACTIVE_PORT" ]]; then
-            rm -f "$backup"
             die "The Mini App and health listeners require different ports."
         fi
-        if [[ "$port" != "$current_port" ]] &&
+        if mini_app_port_conflicts "$ACTIVE_INSTANCE" "$port"; then
+            die "Mini App port ${port} is reserved by another managed instance."
+        fi
+        if [[ "$current_enabled" != "true" || "$port" != "$current_port" ]] &&
             ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$port$"; then
-            rm -f "$backup"
             die "Mini App port ${port} is already listening."
         fi
+    fi
+
+    backup=$(mktemp "${ETC_ROOT}/.${ACTIVE_INSTANCE}.env.XXXXXX")
+    cp -a "$env_file" "$backup"
+    if [[ "$requested_enabled" == "true" ]]; then
         replace_env_value "$app_dir/venv/bin/python" "$env_file" \
             "MINI_APP_PUBLIC_URL" "$public_url"
         replace_env_value "$app_dir/venv/bin/python" "$env_file" \
             "MINI_APP_LISTEN" "127.0.0.1"
         replace_env_value "$app_dir/venv/bin/python" "$env_file" \
             "MINI_APP_PORT" "$port"
-        printf 'Configure this public HTTPS prefix before restarting:\n'
-        printf '  %s -> http://127.0.0.1:%s\n' "$public_url" "$port"
-        if ! confirm "Is that HTTPS reverse-proxy route ready?" no; then
-            cp -a "$backup" "$env_file"
-            rm -f "$backup"
-            die "Mini App configuration was not changed."
-        fi
     fi
 
     replace_env_value "$app_dir/venv/bin/python" "$env_file" \
@@ -1815,19 +2296,62 @@ cmd_miniapp() {
     fi
 
     was_active=$(systemctl is-active "$service" 2>/dev/null || true)
-    if [[ "$was_active" == "active" ]]; then
-        if ! systemctl restart "$service" || ! wait_for_readiness "$ACTIVE_PORT"; then
-            warn "New Mini App configuration failed; restoring the previous configuration."
-            cp -a "$backup" "$env_file"
-            systemctl restart "$service" || true
-            wait_for_readiness "$ACTIVE_PORT" || true
-            rm -f "$backup"
-            die "Mini App change was rolled back."
+    was_enabled=$(systemctl is-enabled "$service" 2>/dev/null || true)
+    if ! begin_caddy_transaction; then
+        cp -a "$backup" "$env_file"
+        rm -f "$backup"
+        die "Managed Caddy configuration failed; the previous environment was restored."
+    fi
+
+    local changed_ok="true"
+    if [[ "$requested_enabled" == "true" ]]; then
+        if [[ "$was_active" == "active" ]]; then
+            systemctl restart "$service" || changed_ok="false"
+        else
+            systemctl enable --now "$service" || changed_ok="false"
+        fi
+        if [[ "$changed_ok" == "true" ]] &&
+            ! wait_for_readiness "$ACTIVE_PORT"; then
+            changed_ok="false"
+        fi
+        if [[ "$changed_ok" == "true" ]] &&
+            ! verify_mini_app_instance "$app_dir" "$env_file"; then
+            changed_ok="false"
+        fi
+    elif [[ "$was_active" == "active" ]]; then
+        if ! systemctl restart "$service" ||
+            ! wait_for_readiness "$ACTIVE_PORT"; then
+            changed_ok="false"
         fi
     fi
+
+    if [[ "$changed_ok" != "true" ]]; then
+        warn "New Mini App configuration failed; restoring the previous configuration."
+        cp -a "$backup" "$env_file"
+        rollback_caddy_transaction
+        if [[ "$was_active" == "active" ]]; then
+            systemctl restart "$service" >/dev/null 2>&1 || true
+            wait_for_readiness "$ACTIVE_PORT" || true
+        else
+            systemctl stop "$service" >/dev/null 2>&1 || true
+        fi
+        if [[ "$was_enabled" == "enabled" ]]; then
+            systemctl enable "$service" >/dev/null 2>&1 || true
+        else
+            systemctl disable "$service" >/dev/null 2>&1 || true
+        fi
+        rm -f "$backup"
+        die "Mini App change was rolled back."
+    fi
+    commit_caddy_transaction
     rm -f "$backup"
     record_operation miniapp "$ACTIVE_INSTANCE" "$requested_enabled"
     cmd_status "$ACTIVE_INSTANCE"
+    if [[ "$requested_enabled" == "true" ]]; then
+        printf '\nOne Telegram-side step remains:\n'
+        printf '  Set this exact Main Mini App URL in @BotFather: %s\n' \
+            "$public_url"
+    fi
 }
 
 cmd_content() {
@@ -1904,6 +2428,8 @@ cmd_config() {
     local edited_token
     local edited_welcome_file
     local edited_help_file
+    local edited_mini_app_enabled
+    local edited_mini_app_public_url
     local edited_mini_app_listen
     local edited_mini_app_port
     local edited_webhook_port
@@ -1914,6 +2440,10 @@ cmd_config() {
     edited_token=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_API_TOKEN")
     edited_welcome_file=$(dotenv_value "$app_dir" "$env_file" "WELCOME_MESSAGE_FILE")
     edited_help_file=$(dotenv_value "$app_dir" "$env_file" "HELP_MESSAGE_FILE")
+    edited_mini_app_enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
+    edited_mini_app_public_url=$(
+        dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL"
+    )
     edited_mini_app_listen=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_LISTEN")
     edited_mini_app_port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
     edited_webhook_port=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT")
@@ -1923,10 +2453,13 @@ cmd_config() {
         "$edited_port" != "$ACTIVE_PORT" ||
         "$edited_welcome_file" != "$(welcome_file_for "$ACTIVE_INSTANCE")" ||
         "$edited_help_file" != "$(help_file_for "$ACTIVE_INSTANCE")" ||
-        "$edited_mini_app_listen" != "127.0.0.1" ]]; then
+        "$edited_mini_app_enabled" != "$(dotenv_value "$app_dir" "$backup" "MINI_APP_ENABLED")" ||
+        "$edited_mini_app_public_url" != "$(dotenv_value "$app_dir" "$backup" "MINI_APP_PUBLIC_URL")" ||
+        "$edited_mini_app_listen" != "127.0.0.1" ||
+        "$edited_mini_app_port" != "$(dotenv_value "$app_dir" "$backup" "MINI_APP_PORT")" ]]; then
         cp -a "$backup" "$env_file"
         rm -f "$backup"
-        die "INSTANCE_NAME, LOG_FILE, HEALTH_PORT, MINI_APP_LISTEN, and content-file paths are manager-owned; the previous file was restored."
+        die "INSTANCE_NAME, LOG_FILE, HEALTH_PORT, Mini App routing/listener settings, and content-file paths are manager-owned; the previous file was restored."
     fi
     if [[ "$edited_delivery_mode" == "webhook" &&
         "$edited_mini_app_port" == "$edited_webhook_port" ]]; then
@@ -2021,7 +2554,9 @@ cmd_upgrade() {
         "$source_url" "$ACTIVE_CREATED_AT"
     systemctl daemon-reload
 
-    if systemctl start "$service" && wait_for_readiness "$ACTIVE_PORT"; then
+    if systemctl start "$service" &&
+        wait_for_readiness "$ACTIVE_PORT" &&
+        verify_mini_app_instance "$app_dir" "$env_file"; then
         record_operation upgrade "$ACTIVE_INSTANCE" ok
         printf 'Upgrade succeeded. app.previous is retained for one-step rollback.\n'
         cmd_status "$ACTIVE_INSTANCE"
@@ -2051,10 +2586,12 @@ cmd_rollback() {
     local failed_dir
     local previous_sha
     local service
+    local env_file
     app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
     previous_dir="${INSTANCE_ROOT}/${ACTIVE_INSTANCE}/app.previous"
     failed_dir="${INSTANCE_ROOT}/${ACTIVE_INSTANCE}/app.failed"
     service=$(service_name_for "$ACTIVE_INSTANCE")
+    env_file=$(environment_file_for "$ACTIVE_INSTANCE")
     [[ -d "$previous_dir" ]] || die "No previous application is available."
     previous_sha=$(git -C "$previous_dir" rev-parse HEAD)
     printf 'Rollback %s from %s to %s\n' \
@@ -2069,7 +2606,8 @@ cmd_rollback() {
         "$ACTIVE_INSTANCE" "$ACTIVE_USER" "$ACTIVE_PORT" "$previous_sha" \
         "$ACTIVE_SOURCE_URL" "$ACTIVE_CREATED_AT"
     systemctl start "$service"
-    if ! wait_for_readiness "$ACTIVE_PORT"; then
+    if ! wait_for_readiness "$ACTIVE_PORT" ||
+        ! verify_mini_app_instance "$app_dir" "$env_file"; then
         systemctl stop "$service" || true
         mv -- "$app_dir" "$previous_dir"
         mv -- "$failed_dir" "$app_dir"
@@ -2093,12 +2631,14 @@ cmd_uninstall() {
     local env_file
     local log_file
     local app_dir
+    local mini_app_enabled
     local preserve_log="yes"
     service=$(service_name_for "$ACTIVE_INSTANCE")
     env_file=$(environment_file_for "$ACTIVE_INSTANCE")
     log_file=$(log_file_for "$ACTIVE_INSTANCE")
     app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
-    warn "This removes instance '${ACTIVE_INSTANCE}', its code, environment file, content, cache, state, service account, and Telegram delivery service."
+    mini_app_enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
+    warn "This removes only instance '${ACTIVE_INSTANCE}': its service, managed Mini App route, code, environment, content, cache, state, and service account."
     read -r -p "Type the exact instance name to continue: " confirmation
     [[ "$confirmation" == "$ACTIVE_INSTANCE" ]] || die "Confirmation did not match."
     if confirm "Delete the retained JSON log too?" no; then
@@ -2107,6 +2647,14 @@ cmd_uninstall() {
     confirm "Permanently uninstall ${ACTIVE_INSTANCE}?" no ||
         die "Uninstall cancelled."
 
+    if command -v caddy >/dev/null 2>&1 &&
+        [[ -f "$CADDYFILE" && -f "$CADDY_ROUTES" ]]; then
+        begin_caddy_transaction "$ACTIVE_INSTANCE" ||
+            die "The Mini App route could not be removed; the instance was not uninstalled."
+        commit_caddy_transaction
+    elif [[ "$mini_app_enabled" == "true" ]]; then
+        die "Managed Caddy state is missing; restore it before uninstalling this enabled Mini App."
+    fi
     if [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]]; then
         delete_telegram_webhook "$app_dir" "$env_file" ||
             warn "Telegram webhook removal failed. Rotate the token through @BotFather if this instance will not be restored."

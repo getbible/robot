@@ -64,16 +64,12 @@ sudo getbible-robot rollback production
 
 It displays both commit SHAs, requires explicit confirmation, swaps the complete application trees, starts the selected service, and waits for readiness. If the rollback target itself fails readiness, the original application is restored.
 
-Rollback does not silently replace the environment file. If a target release required a configuration migration, use `getbible-robot config` to restore compatible values from the restricted operational backup before retrying.
+When the Mini App is enabled, rollback verifies both its local listener and
+public HTTPS path before accepting the target.
 
-The Mini App migration is rollback-compatible: existing instances receive
-`MINI_APP_ENABLED=false` plus bounded defaults. The upgrade does not publish a
-new URL or require inbound access. After the upgraded bot is healthy, configure
-the HTTPS route and enable it with:
-
-```bash
-sudo getbible-robot miniapp production
-```
+Rollback does not silently replace the environment file. If a future release
+requires a configuration change, follow that release's documented upgrade
+instructions before retrying.
 
 ## Configuration migrations
 
@@ -84,7 +80,8 @@ sudo getbible-robot miniapp production
 5. Restart and verify readiness.
 6. Retain the prior secret file only according to the approved secret-retention policy.
 
-`INSTANCE_NAME`, `LOG_FILE`, `HEALTH_PORT`, and `MINI_APP_LISTEN` remain
+`INSTANCE_NAME`, `LOG_FILE`, `HEALTH_PORT`, `MINI_APP_ENABLED`,
+`MINI_APP_PUBLIC_URL`, `MINI_APP_LISTEN`, and `MINI_APP_PORT` remain
 manager-owned. Mini App and webhook ports must be unique and must not match.
 
 ## Dependency updates

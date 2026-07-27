@@ -21,14 +21,26 @@ public assets. They contain no bot token, API credential, chat identifier,
 search query, Scripture payload, or authorization secret. Every data or action
 API requires a fresh Telegram-signed `initData` payload, a short-lived
 user-bound launch/session, exact same-origin requests, and server-side request
-bounds. Launch and signed-data replays fail closed.
+bounds. Generic Main Mini App launches are private-user-only, session expiry is
+absolute rather than activity-extended, and launch/signed-data replays fail
+closed.
 
 The browser never supplies authoritative verse text for posting. It selects
 opaque server-held identifiers; the robot resolves and renders the resulting
-references again on the server. The listener remains on loopback behind a
-reviewed HTTPS reverse-proxy route. See
+references again on the server. A final basket is resolved and rendered under
+one global message cap before the first Telegram send; known partial sends are
+rolled back best-effort, while ambiguous attempts remain locked against
+duplicate retries. The listener remains on loopback behind a reviewed HTTPS
+reverse-proxy route. See
 [Telegram Mini App deployment](docs/MINI_APP.md) for the complete production
 contract.
+
+Telegram defines Mini App `initData` authentication as HMAC-SHA-256 with a
+bot-token-derived secret. This is a message-authentication protocol, not
+password storage, so a password KDF such as Argon2 would be incompatible rather
+than safer. The implementation follows Telegram's prescribed key/message order,
+uses constant-time digest comparison, and is pinned by a fixed protocol-vector
+test.
 
 ## Data handling
 

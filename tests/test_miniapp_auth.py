@@ -10,6 +10,12 @@ from modules.miniapp_auth import (
 )
 
 TOKEN = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+FIXED_INIT_DATA = (
+    "auth_date=1700000000"
+    "&query_id=AAHdF6IQAAAAAN0XohDhrOrc"
+    "&user=%7B%22id%22%3A42%2C%22first_name%22%3A%22Grace%22%7D"
+    "&hash=3d3266ed3b1f98d1d7f1623198be3844d6c9046e1a07f33c2679e90621cf3e62"
+)
 
 
 def _init_data(
@@ -65,6 +71,14 @@ class TelegramInitDataValidatorTestCase(unittest.TestCase):
         self.assertEqual(principal.chat_id, -100123)
         self.assertEqual(principal.rate_limit_chat_id, -100123)
         self.assertEqual(principal.start_param, "abcdefghijklmnop")
+
+    def test_fixed_telegram_hmac_protocol_vector(self) -> None:
+        """Catch accidental key/message reversal or a non-protocol hash change."""
+        principal = self.validator.validate(FIXED_INIT_DATA)
+
+        self.assertEqual(principal.user_id, 42)
+        self.assertEqual(principal.query_id, "AAHdF6IQAAAAAN0XohDhrOrc")
+        self.assertEqual(principal.auth_date, 1_700_000_000)
 
     def test_tampering_is_rejected_with_constant_public_error(self) -> None:
         raw = _init_data().replace("Grace", "Mallory")

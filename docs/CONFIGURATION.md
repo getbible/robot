@@ -43,10 +43,10 @@ to the loopback listener. Do not expose `TELEGRAM_WEBHOOK_PORT` directly. See
 | `MINI_APP_ENABLED` | `false` | `true` or `false`; URL required when true | Enables the same-instance Telegram Mini App |
 | `MINI_APP_PUBLIC_URL` | empty | Absolute HTTPS URL; optional fixed path; no credentials, query, or fragment | URL opened by Telegram and routed by the public proxy |
 | `MINI_APP_LISTEN` | `127.0.0.1` | IPv4 loopback only | Private Mini App HTTP listener |
-| `MINI_APP_PORT` | `9201` | `1024`–`65535`; unique and different from the webhook port | Per-instance Mini App listener port |
+| `MINI_APP_PORT` | `9201` | `1024`–`65535`; manager-reserved and different from health/webhook ports | Per-instance Mini App listener port |
 | `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | `300` | `30`–`900` | Maximum accepted age of signed Telegram `initData` |
 | `MINI_APP_LAUNCH_TTL_SECONDS` | `300` | `30`–`900` | Lifetime of the user-bound bot launch token |
-| `MINI_APP_SESSION_TTL_SECONDS` | `900` | `60`–`3600` | Idle lifetime of authenticated server-side Mini App state |
+| `MINI_APP_SESSION_TTL_SECONDS` | `900` | `60`–`3600` | Absolute lifetime of authenticated server-side Mini App state |
 | `MINI_APP_SESSION_LIMIT` | `2000` | `10`–`20000` | Maximum active Mini App sessions |
 | `MINI_APP_MAX_SELECTIONS` | `100` | `1`–`200` | Maximum selected verse items before normalization |
 
@@ -56,9 +56,11 @@ signature-verified Telegram `initData` and a short-lived launch token tied to
 the same user and bot workflow. Never put the bot token or authoritative verse
 text in browser state. See [Mini App deployment](MINI_APP.md).
 
-Production operators should change enabled state, public URL, and assigned port
-through `sudo getbible-robot miniapp <instance>`. `MINI_APP_LISTEN` is
-manager-owned and fixed to loopback.
+`MINI_APP_ENABLED`, `MINI_APP_PUBLIC_URL`, `MINI_APP_LISTEN`, and
+`MINI_APP_PORT` are manager-owned in production. Change them only through
+`sudo getbible-robot miniapp <instance>` so DNS, retained ports, generated
+Caddy routes, validation, reload, public verification, and rollback remain one
+transaction.
 
 ## Instance identity and audit logging
 
@@ -132,7 +134,7 @@ A lookup timeout does not pretend that its worker thread stopped. The capacity p
 | `MAX_REFERENCES` | `8` | `1`–`16` | Maximum semicolon-separated references |
 | `MAX_VERSES_PER_REFERENCE` | `100` | `1`–`200` | Maximum verses selected by one reference |
 | `MAX_TOTAL_VERSES` | `100` | `1`–`200` | Maximum verses in the whole command |
-| `MAX_OUTPUT_CHUNKS` | `8` | `1`–`32` | Maximum Telegram messages produced by one command |
+| `MAX_OUTPUT_CHUNKS` | `8` | `1`–`32` | Maximum Telegram messages produced by one command or final Mini App post |
 | `SEARCH_RESULT_LIMIT` | `50` | `1`–`200` | Maximum selectable matches retained from one Librarian search |
 | `SEARCH_DEADLINE_SECONDS` | `5` | `0.1`–`30` | Librarian's cooperative per-search execution deadline |
 | `SEARCH_MAX_RESPONSE_BYTES` | `4194304` (4 MiB) | `65536`–`16777216` | Maximum constructed Librarian search result, separate from corpus downloads |
