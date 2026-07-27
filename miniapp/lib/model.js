@@ -338,6 +338,71 @@ export function routeName(value, fallback = "home") {
   return ROUTES.has(value) ? value : fallback;
 }
 
+export function entrypointIntent(value) {
+  const entrypoint = normalizeEntrypoint(value);
+  return {
+    route: entrypoint.route,
+    search_query: entrypoint.route === "search" ? entrypoint.query : "",
+    bible_reference: entrypoint.route === "bible" ? entrypoint.query : "",
+  };
+}
+
+export function resolveBibleEntrypoint(value, books, translationCodes = []) {
+  if (typeof value !== "string" || !Array.isArray(books)) {
+    return null;
+  }
+  let source = value.normalize("NFKC").trim().replace(/\s+/g, " ");
+  if (!source || source.length > 512) {
+    return null;
+  }
+  const translations = new Set(
+    translationCodes
+      .filter((code) => typeof code === "string")
+      .map((code) => code.toLocaleLowerCase()),
+  );
+  const finalSpace = source.lastIndexOf(" ");
+  if (finalSpace > 0) {
+    const suffix = source.slice(finalSpace + 1).toLocaleLowerCase();
+    if (translations.has(suffix)) {
+      source = source.slice(0, finalSpace).trim();
+    }
+  }
+
+  const normalizedSource = source.toLocaleLowerCase();
+  const candidates = books
+    .filter(
+      (book) =>
+        isRecord(book) &&
+        boundedInteger(book.number, 1, 200) !== null &&
+        boundedText(book.name, 120),
+    )
+    .map((book) => ({
+      number: book.number,
+      name: book.name.normalize("NFKC").trim().replace(/\s+/g, " "),
+    }))
+    .sort((left, right) => right.name.length - left.name.length);
+  for (const book of candidates) {
+    const normalizedName = book.name.toLocaleLowerCase();
+    if (
+      normalizedSource !== normalizedName &&
+      !normalizedSource.startsWith(`${normalizedName} `)
+    ) {
+      continue;
+    }
+    const remainder = source.slice(book.name.length).trim();
+    if (!remainder) {
+      return { book_number: book.number, chapter: null };
+    }
+    if (/^[1-9][0-9]{0,2}$/.test(remainder)) {
+      return {
+        book_number: book.number,
+        chapter: Number(remainder),
+      };
+    }
+  }
+  return null;
+}
+
 function normalizeEntrypoint(value) {
   if (!isRecord(value)) {
     return { route: "home", query: "", reference: "" };

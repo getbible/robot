@@ -14,12 +14,18 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   safe-area and viewport integration, an ocean-light startup treatment, and
   translation-driven language and right-to-left direction metadata.
 - Added signed Telegram `initData` validation, one-time owner-bound launch
-  tokens, bounded sessions and baskets, same-origin APIs, replay rejection,
-  idempotent posting, a loopback-only web listener, and strict browser security
-  headers. The public shell remains inert without Telegram authorization.
+  tokens, absolute-lifetime bounded sessions and baskets, same-origin APIs,
+  recoverable exchange ordering, replay rejection, basket-bound idempotent
+  posting, a global fail-before-send output cap, best-effort partial-send
+  rollback, a loopback-only web listener, and strict browser security headers.
+  The public shell remains inert without Telegram authorization.
 - Added transactional setup-manager support, reverse-proxy and BotFather
   instructions, diagnostics, configuration validation, API documentation, and
   Python/JavaScript regression coverage for the complete Mini App lifecycle.
+- Added setup-managed Caddy automatic HTTPS with DNS/package preflight,
+  deterministic multi-instance routes, complete validation, byte-preserving
+  rollback, public certificate/content verification, and isolated route
+  removal on disable or uninstall.
 
 ### Security
 

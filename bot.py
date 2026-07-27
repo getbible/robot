@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from telegram import (
+    Bot,
     BotCommand,
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
@@ -18,6 +19,7 @@ from telegram import (
     MenuButtonWebApp,
     WebAppInfo,
 )
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -45,12 +47,13 @@ from modules.commands import (
     start_command,
     unknown_command,
 )
+from modules.ephemeral import delete_ephemeral_text
 from modules.errors import ScriptureUnavailable
 from modules.health import HealthServer
 from modules.interactions import InteractionStore
 from modules.miniapp_sessions import MiniAppLaunch
 from modules.miniapp_tornado import MiniAppServer
-from modules.posting import post_scripture
+from modules.posting import post_scripture_queries
 from modules.preferences import UserPreferenceStore
 from modules.rate_limit import InboundRateLimiter
 from modules.service import ScriptureQuery, ScriptureService
@@ -177,20 +180,18 @@ def build_application(settings: Settings) -> Application:
             launch: MiniAppLaunch,
             queries: tuple[ScriptureQuery, ...],
         ) -> tuple[int, ...]:
-            message_ids: list[int] = []
-            for query in queries:
-                message_ids.extend(
-                    await post_scripture(
-                        bot=application.bot,
-                        chat_id=launch.target_chat_id,
-                        query=query,
-                        settings=settings,
-                        service=service,
-                        source="mini_app",
-                        message_thread_id=launch.message_thread_id,
-                    )
-                )
-            return tuple(message_ids)
+            message_ids = await post_scripture_queries(
+                bot=application.bot,
+                chat_id=launch.target_chat_id,
+                queries=queries,
+                settings=settings,
+                service=service,
+                source="mini_app",
+                message_thread_id=launch.message_thread_id,
+                max_messages=settings.max_output_chunks,
+            )
+            await _cleanup_mini_app_launch_prompt(application.bot, launch)
+            return message_ids
 
         application.bot_data[MINI_APP_SLOT] = MiniAppServer(
             settings=settings,
@@ -213,6 +214,32 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
     application.add_error_handler(error_handler)
     return application
+
+
+async def _cleanup_mini_app_launch_prompt(
+    bot: Bot,
+    launch: MiniAppLaunch,
+) -> None:
+    """Best-effort removal of the prompt that opened a completed Mini App."""
+    try:
+        if launch.prompt_ephemeral_message_id is not None:
+            await delete_ephemeral_text(
+                bot,
+                chat_id=launch.target_chat_id,
+                receiver_user_id=launch.user_id,
+                ephemeral_message_id=launch.prompt_ephemeral_message_id,
+            )
+        elif launch.prompt_message_id is not None:
+            delete_message = getattr(bot, "delete_message", None)
+            if callable(delete_message):
+                await delete_message(
+                    chat_id=launch.target_chat_id,
+                    message_id=launch.prompt_message_id,
+                )
+    except TelegramError:
+        LOGGER.info(
+            "Mini App launch prompt could not be deleted after a successful post"
+        )
 
 
 async def _optional_telegram_call(

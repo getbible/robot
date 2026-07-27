@@ -34,7 +34,8 @@ Running `sudo getbible-robot` without a command opens the operations menu.
 - Outbound HTTPS to Telegram, PyPI during installation, GitHub when cloning, and `https://api.getbible.net` at runtime.
 - `git`, `curl`, `tar`, `logrotate`, `iproute2`, and the matching Python `venv` package.
 - A dedicated Telegram Bot API token from `@BotFather` for each running instance.
-- A public HTTPS URL and reverse proxy when the Telegram Mini App is enabled.
+- Public DNS plus inbound TCP `80`/`443` when the Telegram Mini App is enabled.
+  Setup manages Caddy automatic HTTPS on the host.
 - Administrator access for the bot in every group where private Bible/search
   workflows and clean-chat deletion are required. Bot API 10.2 permits an
   administrator to deliver per-user ephemeral panels even when a catalog or
@@ -54,12 +55,12 @@ On Debian, Ubuntu, Fedora, or another `dnf` host, the manager offers to install 
 6. polling or HTTPS webhook delivery;
 7. for webhook mode, the public URL, local loopback port, optional fixed public
    IP, and confirmation that the reverse proxy is ready;
-8. whether to enable the Telegram Mini App and, when enabled, its public HTTPS
-   URL plus unique loopback port;
+8. whether to enable the Telegram Mini App and, when enabled, its already
+   resolving public HTTPS URL plus unique loopback port;
 9. a unique loopback health/metrics port;
 10. metadata-only or content audit logging;
 11. whether handled Telegram command messages should be deleted;
-12. confirmation that every configured HTTPS reverse-proxy route is ready;
+12. confirmation that any separately managed webhook route is ready;
 13. whether the service should be enabled and started;
 14. optional live token verification through Telegram.
 
@@ -70,9 +71,12 @@ a reverse proxy; the application listener remains on loopback. See
 [Telegram delivery](WEBHOOKS.md) before choosing webhook mode.
 
 The Mini App also requires public HTTPS but is independent of update delivery:
-polling plus a Mini App is a normal production configuration. The Mini App uses
-a separate loopback listener, and its route must preserve the configured path
-prefix. See [Mini App deployment](MINI_APP.md).
+polling plus a Mini App is the normal production configuration. The manager
+installs the distribution's Caddy package when necessary, preserves unrelated
+Caddyfile content, generates the exact path-preserving route, validates and
+reloads Caddy, and verifies the final certificate and response. The Mini App
+application itself remains on a separate loopback listener. See
+[Mini App deployment](MINI_APP.md).
 
 ## Instance and account names
 
@@ -152,7 +156,12 @@ Before enabling a service, setup:
 - verifies that Telegram's registered webhook state matches the selected
   polling/webhook mode;
 - validates a Mini App URL as HTTPS, fixes its listener to IPv4 loopback, and
-  prevents it from sharing a webhook port;
+  prevents it from sharing a health, webhook, or retained instance port;
+- verifies public DNS before modifying Caddy;
+- installs Caddy only through the host package manager, adds one managed import,
+  validates the complete Caddyfile, and reloads it transactionally;
+- verifies both the local Mini App shell and its public certificate, route, and
+  expected response content;
 - waits for `/readyz` when health checks are enabled.
 
 Partial installation failures before unit verification are cleaned up transactionally. A service that starts but does not become ready is retained for diagnosis through `getbible-robot doctor` and `getbible-robot logs`.

@@ -4,6 +4,6 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check app.js && node --check lib/api.js && node --check lib/i18n.js && node --check lib/model.js && node --check lib/telegram.js && node --test tests/*.test.mjs"
+    "check": "node --check app.js && node --check lib/api.js && node --check lib/i18n.js && node --check lib/model.js && node --check lib/session.js && node --check lib/telegram.js && node --test tests/*.test.mjs"
   }
 }

@@ -14,9 +14,10 @@ venv/bin/python -m pip check
 ```
 
 A clean environment matters. A globally installed package can hide a missing
-lock entry or incompatible dependency. Contributors also need a current Node.js
-release with `npm` for the dependency-free Mini App syntax and unit checks;
-Node.js is not required by the production service.
+lock entry or incompatible dependency. Contributors also need Node.js
+22.17.1 with `npm` for the dependency-free Mini App syntax and unit checks,
+matching the pinned CI environment. Node.js is not required by the production
+service.
 
 ## Fast deterministic test cycle
 
@@ -156,6 +157,9 @@ The tests cover at least these invariants:
 - list, selection, start, stop, restart, status, runtime, logs, follow, doctor,
   delivery, Mini App, content, configuration, upgrade, rollback, menu, and
   uninstall manager paths execute;
+- setup-managed Caddy generation is idempotent, disabled instances retain
+  reserved ports, Caddy reload failure restores byte-identical environment and
+  proxy files, and uninstall removes only the selected route;
 - invalid configuration is restored, a failed upgrade restores the active application, and uninstalling one instance leaves the other intact;
 - metadata audit mode omits query/reference content;
 - content audit mode includes only the deliberately permitted normalized fields;

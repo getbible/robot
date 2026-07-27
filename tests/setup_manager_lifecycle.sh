@@ -20,6 +20,9 @@ UNIT_PATH="${TEST_ROOT}/etc/systemd/system/getbible-robot@.service"
 MANAGER_PATH="${TEST_ROOT}/usr/local/sbin/getbible-robot"
 LOGROTATE_PATH="${TEST_ROOT}/etc/logrotate.d/getbible-robot"
 SETUP_LOG="${LOG_ROOT}/setup.log"
+CADDY_ROOT="${TEST_ROOT}/etc/caddy"
+CADDYFILE="${CADDY_ROOT}/Caddyfile"
+CADDY_ROUTES="${CADDY_ROOT}/getbible-robot.caddy"
 UNIT_SOURCE="${ROOT}/deploy/getbible-robot@.service"
 
 USERS_FILE="${TEST_ROOT}/users"
@@ -27,14 +30,19 @@ SERVICES_DIR="${TEST_ROOT}/services"
 SOURCE_DIR="${TEST_ROOT}/source"
 FOLLOW_MARKER="${TEST_ROOT}/follow"
 RUNUSER_LOG="${TEST_ROOT}/runuser"
+CADDY_LOG="${TEST_ROOT}/caddy.log"
+DNS_LOG="${TEST_ROOT}/dns.log"
 SYSTEM_PYTHON=$(command -v python3)
 mkdir -p \
     "$METADATA_ROOT" \
     "$(dirname "$UNIT_PATH")" \
     "$(dirname "$MANAGER_PATH")" \
     "$(dirname "$LOGROTATE_PATH")" \
+    "$CADDY_ROOT" \
     "$SERVICES_DIR"
 : >"$USERS_FILE"
+: >"$CADDY_LOG"
+: >"$DNS_LOG"
 
 fail() {
     printf 'lifecycle assertion failed: %s\n' "$*" >&2
@@ -91,6 +99,23 @@ require_tty() {
 
 install_host_prerequisites() {
     :
+}
+
+preflight_mini_app_dns() {
+    printf '%s\n' "$2" >>"$DNS_LOG"
+    [[ ${FAIL_DNS_PREFLIGHT:-0} != "1" ]]
+}
+
+ensure_caddy_available() {
+    install -d -o root -g root -m 0755 "$CADDY_ROOT"
+}
+
+verify_mini_app_local() {
+    [[ ${FAIL_MINI_APP_LOCAL:-0} != "1" ]]
+}
+
+verify_mini_app_public() {
+    [[ ${FAIL_MINI_APP_PUBLIC:-0} != "1" ]]
 }
 
 select_python() {
@@ -220,7 +245,21 @@ stat() {
 }
 
 ss() {
-    :
+    local instance
+    local app_dir
+    local env_file
+    local port
+    while IFS= read -r instance; do
+        app_dir=$(application_dir_for "$instance")
+        env_file=$(environment_file_for "$instance")
+        [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]] || continue
+        [[ "$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")" == "true" ]] ||
+            continue
+        [[ "$(<"$(service_state_file "$(service_name_for "$instance")")")" == "active" ]] ||
+            continue
+        port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
+        printf 'LISTEN 0 128 127.0.0.1:%s\n' "$port"
+    done < <(instance_names)
 }
 
 tail() {
@@ -238,6 +277,11 @@ systemd-analyze() {
     [[ ${1:-} == "verify" ]] || return 1
 }
 
+caddy() {
+    printf '%s\n' "$*" >>"$CADDY_LOG"
+    [[ ${FAIL_CADDY_VALIDATE:-0} != "1" ]]
+}
+
 systemctl() {
     local command=${1:-}
     shift || true
@@ -246,12 +290,16 @@ systemctl() {
             return
             ;;
         enable)
+            local start_now="false"
             if [[ ${1:-} == "--now" ]]; then
                 shift
+                start_now="true"
             fi
             local service=$1
             : >"$(service_enabled_file "$service")"
-            printf 'active\n' >"$(service_state_file "$service")"
+            if [[ "$start_now" == "true" ]]; then
+                printf 'active\n' >"$(service_state_file "$service")"
+            fi
             ;;
         disable)
             if [[ ${1:-} == "--now" ]]; then
@@ -269,6 +317,14 @@ systemctl() {
                 return 1
             fi
             printf 'active\n' >"$(service_state_file "$service")"
+            ;;
+        reload)
+            local service=$1
+            if [[ ${FAIL_NEXT_RELOAD:-} == "$service" ]]; then
+                unset FAIL_NEXT_RELOAD
+                return 1
+            fi
+            [[ "$(<"$(service_state_file "$service")")" == "active" ]]
             ;;
         stop)
             printf 'inactive\n' >"$(service_state_file "$1")"
@@ -288,11 +344,14 @@ systemctl() {
             return 3
             ;;
         is-enabled)
+            if [[ ${1:-} == "--quiet" ]]; then
+                shift
+            fi
             if [[ -f "$(service_enabled_file "$1")" ]]; then
-                printf 'enabled\n'
+                [[ ${2:-} == "--quiet" ]] || printf 'enabled\n'
                 return
             fi
-            printf 'disabled\n'
+            [[ ${2:-} == "--quiet" ]] || printf 'disabled\n'
             return 1
             ;;
         status)
@@ -409,6 +468,39 @@ assert_contains "$(environment_file_for alpha)" \
 assert_contains "$(environment_file_for alpha)" \
     'SEARCH_MAX_RESPONSE_BYTES="4194304"'
 assert_contains "$(help_file_for alpha)" "/search"
+
+cmd_install --source "$SOURCE_DIR" <<EOF
+
+gamma
+555555555:ABCDEFGHIJKLMNOPQRSTUVWXYZa12345678
+555555555:ABCDEFGHIJKLMNOPQRSTUVWXYZa12345678
+
+
+
+
+
+y
+https://bot.example.com/getbible/gamma
+
+0
+
+
+
+
+n
+EOF
+assert_contains "$(environment_file_for gamma)" 'MINI_APP_ENABLED="true"'
+assert_contains "$CADDY_ROUTES" "path /getbible/gamma /getbible/gamma/*"
+assert_file "$(service_enabled_file "$(service_name_for gamma)")"
+cmd_uninstall gamma <<EOF
+gamma
+y
+y
+EOF
+assert_absent "$(metadata_file_for gamma)"
+! grep -Fq "/getbible/gamma" "$CADDY_ROUTES" ||
+    fail "fresh-install Mini App route survived uninstall"
+
 assert_equal "$(wc -l <"$USERS_FILE")" "2"
 ! ensure_unique_token \
     "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi" \
@@ -455,6 +547,7 @@ cmd_stop alpha
 assert_equal "$(<"$(service_state_file "$(service_name_for alpha)")")" "inactive"
 cmd_start alpha
 assert_equal "$(<"$(service_state_file "$(service_name_for alpha)")")" "active"
+assert_file "$(service_enabled_file "$(service_name_for alpha)")"
 cmd_restart alpha
 assert_equal "$(<"$(service_state_file "$(service_name_for alpha)")")" "active"
 
@@ -498,16 +591,107 @@ n
 EOF
 assert_contains "$(environment_file_for alpha)" 'TRANSLATION="asv"'
 
+MINI_APP_EDITOR="${TEST_ROOT}/mini-app-editor"
+cat >"$MINI_APP_EDITOR" <<'EOF'
+#!/usr/bin/env bash
+sed -i 's/^MINI_APP_PORT=.*/MINI_APP_PORT="9299"/' "$1"
+EOF
+chmod 0700 "$MINI_APP_EDITOR"
+if (
+    EDITOR="$MINI_APP_EDITOR" cmd_config alpha <<EOF
+n
+EOF
+)
+then
+    fail "manager-owned Mini App routing tampering was accepted"
+fi
+assert_contains "$(environment_file_for alpha)" 'MINI_APP_PORT="9201"'
+
+ENV_HASH=$(sha256sum "$(environment_file_for alpha)" | awk '{print $1}')
+export FAIL_DNS_PREFLIGHT
+FAIL_DNS_PREFLIGHT=1
+if (
+    cmd_miniapp alpha <<EOF
+y
+https://bot.example.com/getbible/alpha
+9201
+EOF
+)
+then
+    fail "a failed Mini App DNS preflight was reported as successful"
+fi
+unset FAIL_DNS_PREFLIGHT
+assert_equal "$(sha256sum "$(environment_file_for alpha)" | awk '{print $1}')" "$ENV_HASH"
+
 cmd_miniapp alpha <<EOF
 y
 https://bot.example.com/getbible/alpha
 9201
-y
 EOF
 assert_contains "$(environment_file_for alpha)" 'MINI_APP_ENABLED="true"'
 assert_contains "$(environment_file_for alpha)" \
     'MINI_APP_PUBLIC_URL="https://bot.example.com/getbible/alpha"'
 assert_contains "$(environment_file_for alpha)" 'MINI_APP_PORT="9201"'
+assert_file "$CADDYFILE"
+assert_file "$CADDY_ROUTES"
+assert_contains "$CADDYFILE" "$CADDY_IMPORT_BEGIN"
+assert_contains "$CADDY_ROUTES" "bot.example.com {"
+assert_contains "$CADDY_ROUTES" "path /getbible/alpha /getbible/alpha/*"
+assert_contains "$CADDY_ROUTES" "reverse_proxy 127.0.0.1:9201"
+assert_equal "$(grep -Fc "$CADDY_IMPORT_BEGIN" "$CADDYFILE")" "1"
+assert_file "$(service_enabled_file caddy.service)"
+cmd_doctor alpha
+
+cmd_miniapp alpha <<EOF
+n
+EOF
+assert_contains "$(environment_file_for alpha)" 'MINI_APP_ENABLED="false"'
+assert_equal "$(next_mini_app_port)" "9202"
+
+cmd_miniapp alpha <<EOF
+y
+https://bot.example.com/getbible/alpha
+9201
+EOF
+assert_equal "$(grep -Fc "$CADDY_IMPORT_BEGIN" "$CADDYFILE")" "1"
+assert_equal "$(grep -Fc "reverse_proxy 127.0.0.1:9201" "$CADDY_ROUTES")" "1"
+
+CADDYFILE_HASH=$(sha256sum "$CADDYFILE" | awk '{print $1}')
+CADDY_ROUTES_HASH=$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')
+ENV_HASH=$(sha256sum "$(environment_file_for alpha)" | awk '{print $1}')
+export FAIL_MINI_APP_PUBLIC
+FAIL_MINI_APP_PUBLIC=1
+if (
+    cmd_miniapp alpha <<EOF
+y
+https://bot.example.com/getbible/alpha
+9201
+EOF
+)
+then
+    fail "a failed public Mini App HTTPS probe was reported as successful"
+fi
+unset FAIL_MINI_APP_PUBLIC
+assert_equal "$(sha256sum "$CADDYFILE" | awk '{print $1}')" "$CADDYFILE_HASH"
+assert_equal "$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')" "$CADDY_ROUTES_HASH"
+assert_equal "$(sha256sum "$(environment_file_for alpha)" | awk '{print $1}')" "$ENV_HASH"
+
+export FAIL_NEXT_RELOAD
+FAIL_NEXT_RELOAD=caddy.service
+if (
+    cmd_miniapp alpha <<EOF
+y
+https://bot.example.com/getbible/alpha
+9201
+EOF
+)
+then
+    fail "a failed Caddy reload was reported as successful"
+fi
+unset FAIL_NEXT_RELOAD
+assert_equal "$(sha256sum "$CADDYFILE" | awk '{print $1}')" "$CADDYFILE_HASH"
+assert_equal "$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')" "$CADDY_ROUTES_HASH"
+assert_equal "$(sha256sum "$(environment_file_for alpha)" | awk '{print $1}')" "$ENV_HASH"
 
 cmd_miniapp alpha <<EOF
 n
@@ -599,12 +783,24 @@ EOF
 then
     fail "failed upgraded service was reported as successful"
 fi
+unset FAIL_NEXT_START
 load_instance alpha
 assert_equal "$ACTIVE_SHA" "$FIRST_SHA"
 assert_equal "$(git -C "$(application_dir_for alpha)" rev-parse HEAD)" "$FIRST_SHA"
 [[ "$THIRD_SHA" != "$ACTIVE_SHA" ]] ||
     fail "failed upgrade metadata was retained"
 
+cmd_miniapp alpha <<EOF
+y
+https://bot.example.com/getbible/alpha
+9201
+EOF
+cmd_miniapp beta <<EOF
+y
+https://bot.example.com/getbible/beta
+9202
+EOF
+assert_contains "$CADDY_ROUTES" "path /getbible/beta /getbible/beta/*"
 cmd_uninstall beta <<EOF
 beta
 y
@@ -616,6 +812,9 @@ assert_absent "$(application_dir_for beta)"
 assert_absent "$(welcome_file_for beta)"
 assert_absent "$(help_file_for beta)"
 assert_absent "$(log_file_for beta)"
+! grep -Fq "/getbible/beta" "$CADDY_ROUTES" ||
+    fail "uninstall retained the removed instance's Caddy route"
+assert_contains "$CADDY_ROUTES" "path /getbible/alpha /getbible/alpha/*"
 grep -Fxq -- "gb-alpha" "$USERS_FILE" || fail "alpha account was removed"
 ! grep -Fxq -- "gb-beta" "$USERS_FILE" || fail "beta account was retained"
 assert_file "$(metadata_file_for alpha)"

@@ -74,60 +74,24 @@ Local:  http://127.0.0.1:9001/telegram/production
 
 Do not open port 9001 in the host or cloud firewall.
 
-## Reverse-proxy examples
+## Optional webhook proxy
 
-Replace the hostname, path, and port with the values printed by setup.
-
-### Caddy
+Polling is the standard production choice for this deployment and needs no
+webhook proxy. If an operator deliberately selects webhook delivery, use Caddy
+on a dedicated webhook hostname and replace the hostname, path, and port with
+the values printed by setup:
 
 ```caddyfile
-bot.example.com {
+telegram-bot.example.com {
     reverse_proxy /telegram/production 127.0.0.1:9001
 }
 ```
 
-### Nginx
+The setup-managed Mini App Caddy routes are independent. Do not edit their
+generated file, forward a webhook to the Mini App port, or weaken either
+listener's loopback binding.
 
-```nginx
-server {
-    listen 443 ssl;
-    server_name bot.example.com;
-
-    location = /telegram/production {
-        proxy_pass http://127.0.0.1:9001;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-```
-
-### Traefik labels
-
-The systemd robot is not itself a Docker container. If Traefik can reach the
-host loopback listener through an explicitly configured host route, use a
-router rule equivalent to:
-
-```text
-Host(`bot.example.com`) && Path(`/telegram/production`)
-```
-
-and forward it to:
-
-```text
-http://127.0.0.1:9001
-```
-
-Confirm the actual Traefik-to-host network path before starting the instance;
-do not replace loopback binding with an unrestricted public Python listener.
-
-If the Mini App uses the same hostname, give it a distinct prefix and route it
-to its separately assigned listener:
-
-```text
-https://bot.example.com/getbible/production -> http://127.0.0.1:9201
-```
-
-## Switch an existing instance
+## Change delivery after installation
 
 The manager performs a validated, rollback-capable switch:
 

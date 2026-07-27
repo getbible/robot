@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from urllib.parse import urlencode
 
 from modules.catalog import BookOption, ChapterOption, TranslationOption
+from modules.errors import ScriptureUnavailable
 from modules.interactions import SearchOptions, SearchResult
 from modules.miniapp_api import MiniAppApi, MiniAppHttpRequest
 from modules.miniapp_auth import TelegramInitDataValidator
@@ -35,6 +36,7 @@ def _init_data(user_id: int = 42, *, start_param: str | None = None) -> str:
 class _Preferences:
     def __init__(self) -> None:
         self.values: dict[int, str] = {}
+        self.fail_preferences_once = False
 
     def translation_for(self, user_id: int) -> str:
         return self.values.get(user_id, "kjv")
@@ -43,6 +45,9 @@ class _Preferences:
         self.values[user_id] = translation
 
     def preferences_for(self, user_id: int) -> UserPreferences:
+        if self.fail_preferences_once:
+            self.fail_preferences_once = False
+            raise RuntimeError("temporary preference read failure")
         return UserPreferences(
             self.translation_for(user_id),
             SearchDefaults(),
@@ -75,8 +80,12 @@ class _Service:
         )
         self.selected: list[ScriptureQuery] = []
         self.long_chapter = False
+        self.fail_translations_once = False
 
     async def translations(self) -> tuple[TranslationOption, ...]:
+        if self.fail_translations_once:
+            self.fail_translations_once = False
+            raise ScriptureUnavailable("temporary translation failure")
         return (TranslationOption("kjv", "King James Version", "English"),)
 
     async def books(self, translation: str) -> tuple[BookOption, ...]:
@@ -161,12 +170,15 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.sessions = MiniAppSessionStore(max_sessions=10, ttl_seconds=600)
         self.launches = MiniAppLaunchStore(max_launches=10, ttl_seconds=300)
         self.posted: list[tuple[object, tuple[ScriptureQuery, ...]]] = []
+        self.post_error: Exception | None = None
 
         async def post_scripture(
             launch: object,
             queries: tuple[ScriptureQuery, ...],
         ) -> tuple[int, ...]:
             self.posted.append((launch, queries))
+            if self.post_error is not None:
+                raise self.post_error
             return (101,)
 
         self.api = MiniAppApi(
@@ -288,6 +300,79 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.status, 201)
         self.assertEqual(second.status, 409)
 
+    async def test_invalid_launch_and_bootstrap_failure_do_not_burn_init_data(
+        self,
+    ) -> None:
+        raw = _init_data()
+        invalid_launch = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={
+                    "init_data": raw,
+                    "launch_token": "abcdefghijklmnop",
+                },
+            )
+        )
+        self.assertEqual(invalid_launch.status, 401)
+
+        recovered = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": raw},
+            )
+        )
+        self.assertEqual(recovered.status, 201)
+
+        self.active_init_data = _init_data(user_id=43)
+        self.service.fail_translations_once = True
+        failed_bootstrap = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": self.active_init_data},
+            )
+        )
+        self.assertEqual(failed_bootstrap.status, 503)
+        retried_bootstrap = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": self.active_init_data},
+            )
+        )
+        self.assertEqual(retried_bootstrap.status, 201)
+
+    async def test_consumed_launch_is_restored_when_response_building_fails(
+        self,
+    ) -> None:
+        launch = self.launches.create_launch(
+            user_id=42,
+            target_chat_id=-100,
+            initial_route="search",
+            initial_query="grace",
+        )
+        self.active_init_data = _init_data(start_param=launch.token)
+        self.preferences.fail_preferences_once = True
+        first = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": self.active_init_data},
+            )
+        )
+        self.assertEqual(first.status, 500)
+
+        second = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": self.active_init_data},
+            )
+        )
+        self.assertEqual(second.status, 201)
+
     async def test_session_rejects_a_different_valid_init_data_for_same_user(self) -> None:
         token = await self.exchange()
         self.active_init_data = _init_data(user_id=42, start_param="different-launch")
@@ -396,6 +481,52 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(replay.status, 200)
         self.assertTrue(json.loads(replay.body)["idempotent_replay"])
+
+    async def test_failed_post_attempt_cannot_be_retried_under_a_new_key(
+        self,
+    ) -> None:
+        token = await self.exchange()
+        search = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/search",
+                token=token,
+                body={"query": "loved"},
+            )
+        )
+        selection_id = json.loads(search.body)["items"][0]["selection_id"]
+        await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/basket/items",
+                token=token,
+                body={"selection_id": selection_id},
+            )
+        )
+
+        self.post_error = RuntimeError("ambiguous Telegram failure")
+        first = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/post",
+                token=token,
+                body={"idempotency_key": "abcdef0123456789"},
+            )
+        )
+        self.assertEqual(first.status, 500)
+        self.post_error = None
+
+        retry = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/post",
+                token=token,
+                body={"idempotency_key": "dead-beef-dead-beef"},
+            )
+        )
+        self.assertEqual(retry.status, 409)
+        self.assertEqual(json.loads(retry.body)["error"], "post_outcome_locked")
+        self.assertEqual(len(self.posted), 1)
 
     async def test_full_psalm_119_is_loaded_in_bounded_chunks(self) -> None:
         self.service.long_chapter = True

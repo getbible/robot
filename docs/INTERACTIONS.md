@@ -107,16 +107,20 @@ no group target and posts to the user's private conversation with the bot.
   delivery when command deletion is enabled.
 - Mini App launch prompts are best-effort cleanup items; final Scripture
   messages are never part of that cleanup ledger.
-- Lookup or delivery errors keep the basket available for a bounded retry.
-- An idempotency key prevents a repeated **Post** request from duplicating the
-  final Scripture messages.
+- The complete basket is resolved and rendered under one global output-message
+  limit before the first Telegram send.
+- Known messages from an incomplete send are deleted best-effort. Because a
+  timeout can leave an unknown Telegram outcome, the exact basket attempt is
+  then locked; relaunch or change the basket instead of blindly retrying it.
+- Idempotency is bound to the exact ordered basket. A new key cannot bypass a
+  pending, completed, or failed attempt for the same basket.
 - Process restart intentionally expires in-memory launches, Mini App sessions,
   search results, and baskets.
 
 ## Security and bounds
 
 Every protected API request is tied to signature-verified Telegram `initData`,
-the exact authenticated user, a short-lived server session, same-origin
+the exact authenticated user, an absolute-lifetime server session, same-origin
 policy, rate limits, and server-side content/selection bounds. The bot token
 never reaches the browser.
 

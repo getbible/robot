@@ -7,6 +7,7 @@ from telegram.error import BadRequest
 from telegram.ext import CommandHandler
 
 import bot
+from modules.service import ScriptureQuery
 
 
 class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
@@ -26,6 +27,7 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
                 "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
             ),
             max_concurrent_updates=4,
+            max_output_chunks=8,
             prewarm_default_translation=True,
             default_translation="kjv",
             user_preferences_file=None,
@@ -234,6 +236,123 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             )
         )
         health.start.assert_awaited_once()
+
+    async def test_successful_mini_app_post_cleans_private_launch_prompt(
+        self,
+    ) -> None:
+        telegram_bot = SimpleNamespace(delete_message=AsyncMock())
+        launch = bot.MiniAppLaunch(
+            token="abcdefghijklmnop",
+            user_id=42,
+            target_chat_id=42,
+            message_thread_id=None,
+            initial_route="search",
+            initial_query="grace",
+            created_at=0,
+            prompt_message_id=321,
+        )
+
+        await bot._cleanup_mini_app_launch_prompt(telegram_bot, launch)
+
+        telegram_bot.delete_message.assert_awaited_once_with(
+            chat_id=42,
+            message_id=321,
+        )
+
+    async def test_successful_group_post_cleans_ephemeral_launch_prompt(
+        self,
+    ) -> None:
+        telegram_bot = SimpleNamespace(
+            do_api_request=AsyncMock(return_value=True),
+        )
+        launch = bot.MiniAppLaunch(
+            token="abcdefghijklmnop",
+            user_id=42,
+            target_chat_id=-100,
+            message_thread_id=9,
+            initial_route="bible",
+            initial_query="John",
+            created_at=0,
+            prompt_ephemeral_message_id=654,
+        )
+
+        await bot._cleanup_mini_app_launch_prompt(telegram_bot, launch)
+
+        telegram_bot.do_api_request.assert_awaited_once_with(
+            "deleteEphemeralMessage",
+            api_kwargs={
+                "chat_id": -100,
+                "receiver_user_id": 42,
+                "ephemeral_message_id": 654,
+            },
+        )
+
+    async def test_mini_app_post_callback_cleans_prompt_after_scripture(
+        self,
+    ) -> None:
+        telegram_bot = SimpleNamespace(delete_message=AsyncMock())
+        application = SimpleNamespace(
+            bot=telegram_bot,
+            bot_data={},
+            add_handler=Mock(),
+            add_error_handler=Mock(),
+        )
+        builder = Mock()
+        builder.token.return_value = builder
+        builder.concurrent_updates.return_value = builder
+        builder.post_init.return_value = builder
+        builder.post_shutdown.return_value = builder
+        builder.build.return_value = application
+        settings = self.settings()
+        settings.mini_app_enabled = True
+        service = Mock()
+        mini_app_server = Mock()
+
+        with (
+            patch.object(bot, "ApplicationBuilder", return_value=builder),
+            patch.object(bot, "ScriptureService", return_value=service),
+            patch.object(bot, "InboundRateLimiter", return_value=Mock()),
+            patch.object(bot, "InteractionStore", return_value=Mock()),
+            patch.object(bot, "UserPreferenceStore", return_value=Mock()),
+            patch.object(bot, "HealthServer", return_value=Mock()),
+            patch.object(
+                bot,
+                "MiniAppServer",
+                return_value=mini_app_server,
+            ) as mini_app_constructor,
+            patch.object(
+                bot,
+                "post_scripture_queries",
+                new=AsyncMock(return_value=(101,)),
+            ) as post_scripture,
+        ):
+            bot.build_application(settings)
+            callback = mini_app_constructor.call_args.kwargs["post_scripture"]
+            launch = bot.MiniAppLaunch(
+                token="abcdefghijklmnop",
+                user_id=42,
+                target_chat_id=42,
+                message_thread_id=None,
+                initial_route="search",
+                initial_query="grace",
+                created_at=0,
+                prompt_message_id=321,
+            )
+            result = await callback(
+                launch,
+                (ScriptureQuery("John 3:16", "kjv"),),
+            )
+
+        self.assertEqual(result, (101,))
+        post_scripture.assert_awaited_once()
+        telegram_bot.delete_message.assert_awaited_once_with(
+            chat_id=42,
+            message_id=321,
+        )
+        self.assertIs(
+            application.bot_data[bot.MINI_APP_SLOT],
+            mini_app_server,
+        )
 
     def test_main_logs_unhandled_startup_failure(self) -> None:
         settings = SimpleNamespace(

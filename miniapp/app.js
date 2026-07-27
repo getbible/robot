@@ -3,6 +3,7 @@ import { I18n } from "./lib/i18n.js";
 import {
   DEFAULT_FILTERS,
   activeFilterCount,
+  entrypointIntent,
   moveItem,
   normalizeBasket,
   normalizeBooks,
@@ -12,15 +13,19 @@ import {
   normalizeSearch,
   normalizeSearchPage,
   normalizeSession,
+  resolveBibleEntrypoint,
   routeName,
   uniqueVerses,
 } from "./lib/model.js";
 import { TelegramBridge } from "./lib/telegram.js";
+import {
+  clearBoundSession,
+  openBoundSession,
+} from "./lib/session.js";
 
 const bridge = new TelegramBridge();
 const i18n = new I18n();
 let api = null;
-const SESSION_STORAGE_KEY = "getbible.miniapp.session";
 let filterDraft = null;
 
 const state = {
@@ -47,6 +52,7 @@ const state = {
     chapters: [],
     selectedBook: null,
     selectedChapter: null,
+    entryReference: "",
     reference: "",
     verses: [],
     status: "idle",
@@ -132,13 +138,10 @@ async function boot() {
   api = new MiniAppApi(bridge.initData);
   try {
     elements.bootMessage.textContent = "Securing your Telegram session…";
-    const storedToken = readSessionToken();
-    const payload = storedToken
-      ? await api.resumeSession(storedToken)
-      : await api.createSession(bridge.launchToken);
-    if (!storedToken && typeof payload.session_token === "string") {
-      writeSessionToken(payload.session_token);
-    }
+    const payload = await openBoundSession(api, {
+      initData: bridge.initData,
+      launchToken: bridge.launchToken,
+    });
     const session = normalizeSession(payload);
     if (session.translations.length === 0) {
       throw new ApiError("No Bible translations are currently available.", {
@@ -158,12 +161,14 @@ async function boot() {
     elements.boot.hidden = true;
     elements.app.hidden = false;
     loadHeroAsset();
-    const entrypoint = session.entrypoint;
+    const entrypoint = entrypointIntent(session.entrypoint);
+    if (entrypoint.bible_reference) {
+      state.bible.entryReference = entrypoint.bible_reference;
+    }
     setRoute(entrypoint.route);
-    if (entrypoint.query) {
-      elements.searchQuery.value = entrypoint.query;
-      setRoute("search");
-      await runSearch(entrypoint.query);
+    if (entrypoint.search_query) {
+      elements.searchQuery.value = entrypoint.search_query;
+      await runSearch(entrypoint.search_query);
     }
   } catch (error) {
     const message =
@@ -669,6 +674,18 @@ async function loadBibleBooks() {
   try {
     state.bible.books = await getBooks(state.bible.translation);
     state.bible.status = "choose_book";
+    const entryReference = state.bible.entryReference;
+    state.bible.entryReference = "";
+    const entrypoint = resolveBibleEntrypoint(
+      entryReference,
+      state.bible.books,
+      state.translations.map((translation) => translation.code),
+    );
+    if (entrypoint) {
+      renderBible();
+      await selectBibleBook(entrypoint.book_number, entrypoint.chapter);
+      return;
+    }
   } catch (error) {
     state.bible.status = "error";
     state.bible.error = safeError(error);
@@ -677,8 +694,10 @@ async function loadBibleBooks() {
   renderBible();
 }
 
-async function selectBibleBook() {
-  const number = Number(elements.bibleBook.value);
+async function selectBibleBook(requestedBookNumber = null, requestedChapter = null) {
+  const number = Number.isInteger(requestedBookNumber)
+    ? requestedBookNumber
+    : Number(elements.bibleBook.value);
   const book = state.bible.books.find((item) => item.number === number) ?? null;
   state.bible.selectedBook = book;
   state.bible.selectedChapter = null;
@@ -696,6 +715,14 @@ async function selectBibleBook() {
       await api.chapters(state.bible.translation, book.number),
     );
     state.bible.status = "choose_chapter";
+    if (
+      Number.isInteger(requestedChapter) &&
+      state.bible.chapters.some((chapter) => chapter.number === requestedChapter)
+    ) {
+      renderBible();
+      await selectBibleChapter(requestedChapter);
+      return;
+    }
   } catch (error) {
     state.bible.status = "error";
     state.bible.error = safeError(error);
@@ -704,8 +731,10 @@ async function selectBibleBook() {
   renderBible();
 }
 
-async function selectBibleChapter() {
-  const number = Number(elements.bibleChapter.value);
+async function selectBibleChapter(requestedChapterNumber = null) {
+  const number = Number.isInteger(requestedChapterNumber)
+    ? requestedChapterNumber
+    : Number(elements.bibleChapter.value);
   const chapter =
     state.bible.chapters.find((item) => item.number === number) ?? null;
   state.bible.selectedChapter = chapter;
@@ -1074,7 +1103,7 @@ async function postBasket() {
     refreshSelectionVisuals();
     toast("Posted to Telegram.");
     window.setTimeout(() => {
-      clearSessionToken();
+      clearBoundSession();
       api.clearSession();
       bridge.close();
     }, 850);
@@ -1169,7 +1198,7 @@ function updateConnectionState() {
 
 function handleSessionError(error) {
   if (error instanceof ApiError && [401, 403].includes(error.status)) {
-    clearSessionToken();
+    clearBoundSession();
     api?.clearSession();
     showAccessDenied(
       "Your secure session has expired. Reopen getBible.Life from the Telegram bot.",
@@ -1240,29 +1269,4 @@ function mapElements(mapping) {
     result[key] = element;
   }
   return result;
-}
-
-function readSessionToken() {
-  try {
-    return window.sessionStorage.getItem(SESSION_STORAGE_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function writeSessionToken(token) {
-  try {
-    window.sessionStorage.setItem(SESSION_STORAGE_KEY, token);
-  } catch {
-    // A blocked storage area only removes reload recovery; the in-memory
-    // authenticated session remains valid.
-  }
-}
-
-function clearSessionToken() {
-  try {
-    window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
-  } catch {
-    // The server remains authoritative even when browser storage is blocked.
-  }
 }

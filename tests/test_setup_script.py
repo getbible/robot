@@ -108,6 +108,17 @@ class SetupScriptTestCase(unittest.TestCase):
         self.assertIn("MINI_APP_LAUNCH_TTL_SECONDS", script)
         self.assertIn("The Mini App and webhook listeners require different ports.", script)
         self.assertIn("The Mini App and health listeners require different ports.", script)
+        self.assertIn("preflight_mini_app_dns", script)
+        self.assertIn("render_caddy_routes", script)
+        self.assertIn("caddy validate --config", script)
+        self.assertIn("rollback_caddy_transaction", script)
+        self.assertIn("verify_mini_app_public", script)
+        self.assertIn('systemctl enable --now "$service"', script)
+        self.assertNotIn("Traefik", (ROOT / "docs" / "MINI_APP.md").read_text())
+        uninstall_doc = (ROOT / "docs" / "UNINSTALL.md").read_text()
+        self.assertIn("does not migrate an older Robot installation", uninstall_doc)
+        self.assertIn("no broad", uninstall_doc)
+        self.assertIn("managed Caddy route", uninstall_doc)
 
     def test_real_service_account_access_is_a_release_contract(self) -> None:
         script = SETUP.read_text(encoding="utf-8")

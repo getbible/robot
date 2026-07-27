@@ -127,6 +127,9 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - README links to the canonical documentation index.
 - The setup questionnaire completed successfully on a clean host or clean test image.
 - The hermetic setup lifecycle passes transactional failure cleanup, two-instance isolation, all manager command paths, configuration restoration, upgrade failure restoration, rollback, and isolated uninstall.
+- Managed Caddy routes pass DNS preflight, deterministic generation, complete
+  validation, reload rollback, local/public verification, retained-port
+  isolation, and per-instance uninstall cleanup.
 - Two test instances demonstrate distinct accounts, applications, environments, tokens, caches, ports, logs, processes, and state.
 - Instance selection resolves the intended target for list, start, stop,
   restart, status, runtime, logs, follow, doctor, delivery, Mini App, content,

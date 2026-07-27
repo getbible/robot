@@ -244,6 +244,20 @@ class MiniAppServer:
         """Return the inline/menu Web App URL for one launch."""
         return miniapp_web_url(self._public_url, launch.token)
 
+    def remember_prompt(
+        self,
+        launch: MiniAppLaunch,
+        *,
+        message_id: int | None = None,
+        ephemeral_message_id: int | None = None,
+    ) -> MiniAppLaunch:
+        """Retain the bot-created launch prompt so successful posts can clean it."""
+        return self.launches.remember_prompt(
+            launch,
+            message_id=message_id,
+            ephemeral_message_id=ephemeral_message_id,
+        )
+
     @property
     def public_web_url(self) -> str:
         """Return the trailing-slash URL used for Telegram's generic menu button."""

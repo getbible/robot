@@ -79,6 +79,7 @@ SEARCH_PAGE_SIZE = 30
 MAX_EXCLUSIONS = 32
 BUTTON_LABEL_LIMIT = 60
 _CALLBACK_RE = re.compile(r"gb:([A-Za-z0-9_-]{8,16}):([a-z]{1,8}):([A-Za-z0-9_-]{0,32})\Z")
+_INCOMPLETE_REFERENCE_RE = re.compile(r"[\w\s-]{1,512}\Z")
 _T = TypeVar("_T")
 
 CALLBACK_ACTIONS = frozenset(
@@ -207,7 +208,7 @@ async def _send_mini_app_launch(
         else [[InlineKeyboardButton("Open getBible.Life", url=url)]]
     )
     if _uses_ephemeral_interaction(update):
-        await send_ephemeral_text(
+        ephemeral_message_id = await send_ephemeral_text(
             context.bot,
             chat_id=chat_id,
             receiver_user_id=user_id,
@@ -216,13 +217,20 @@ async def _send_mini_app_launch(
             reply_to_ephemeral_message_id=_update_ephemeral_message_id(update),
             message_thread_id=_update_message_thread_id(update),
         )
+        mini_app.remember_prompt(
+            launch,
+            ephemeral_message_id=ephemeral_message_id,
+        )
         return
-    await context.bot.send_message(
+    message = await context.bot.send_message(
         chat_id=chat_id,
         text=text,
         reply_markup=keyboard,
         message_thread_id=_update_message_thread_id(update),
     )
+    message_id = getattr(message, "message_id", None)
+    if isinstance(message_id, int) and not isinstance(message_id, bool) and message_id > 0:
+        mini_app.remember_prompt(launch, message_id=message_id)
 
 
 def _preferred_translation(
@@ -463,13 +471,31 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             message_thread_id=message_thread_id,
         ):
             return
+        mini_app = _mini_app(context)
         if context.args:
+            raw_reference = " ".join(context.args).strip()
+            try:
+                query = await service.resolve_query(
+                    context.args,
+                    default_translation=preferred_translation,
+                )
+            except (ReferenceValidationError, RobotInputError):
+                if mini_app is None or not _looks_like_incomplete_reference(
+                    raw_reference
+                ):
+                    raise
+                await _send_mini_app_launch(
+                    update,
+                    context,
+                    mini_app,
+                    route="bible",
+                    query=raw_reference,
+                    text="Complete this Scripture reference in getBible.Life.",
+                )
+                await _cleanup_command_source(update, context, chat_id=chat_id)
+                return
             if not ephemeral:
                 await send_typing(update, context)
-            query = await service.resolve_query(
-                context.args,
-                default_translation=preferred_translation,
-            )
             await _post_scripture(
                 chat_id,
                 query,
@@ -482,7 +508,6 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await _cleanup_command_source(update, context, chat_id=chat_id)
             return
 
-        mini_app = _mini_app(context)
         if mini_app is not None:
             await _send_mini_app_launch(
                 update,
@@ -537,6 +562,15 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             reply_to_ephemeral_message_id=source_ephemeral_message_id,
             message_thread_id=message_thread_id,
         )
+
+
+def _looks_like_incomplete_reference(value: str) -> bool:
+    """Recognize a safe book/chapter fragment without accepting malformed syntax."""
+    return bool(
+        value
+        and _INCOMPLETE_REFERENCE_RE.fullmatch(value)
+        and any(character.isalpha() for character in value)
+    )
 
 
 async def interaction_callback(

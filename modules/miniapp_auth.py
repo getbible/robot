@@ -61,6 +61,9 @@ class TelegramInitDataValidator:
             raise ValueError("max_age_seconds must be between 30 and 3600.")
         if not 0 <= future_skew_seconds <= 300:
             raise ValueError("future_skew_seconds must be between 0 and 300.")
+        # Telegram mandates this exact HMAC-SHA-256 key derivation for Mini App
+        # initData. This is protocol authentication, not password storage.
+        # codeql[py/weak-sensitive-data-hashing]
         self._secret_key = hmac.new(
             b"WebAppData",
             bot_token.encode("utf-8"),
@@ -172,19 +175,40 @@ class TelegramInitDataReplayGuard:
 
     def claim(self, raw_init_data: str) -> None:
         """Remember exact validated data once or reject its replay."""
-        digest = hashlib.sha256(raw_init_data.encode("utf-8")).digest()
+        digest = self._digest(raw_init_data)
         now = self._clock()
         with self._guard:
-            expired = [
-                value for value, seen_at in self._digests.items() if now - seen_at >= self._ttl
-            ]
-            for value in expired:
-                self._digests.pop(value, None)
+            self._purge_locked(now)
             if digest in self._digests:
                 raise MiniAppReplayError("Telegram authorization was replayed.")
             self._digests[digest] = now
             while len(self._digests) > self._max_entries:
                 self._digests.popitem(last=False)
+
+    def contains(self, raw_init_data: str) -> bool:
+        """Return whether exact validated data was already claimed."""
+        digest = self._digest(raw_init_data)
+        now = self._clock()
+        with self._guard:
+            self._purge_locked(now)
+            return digest in self._digests
+
+    def release(self, raw_init_data: str) -> None:
+        """Release a claim when session creation fails before a response exists."""
+        digest = self._digest(raw_init_data)
+        with self._guard:
+            self._digests.pop(digest, None)
+
+    def _purge_locked(self, now: float) -> None:
+        expired = [
+            value for value, seen_at in self._digests.items() if now - seen_at >= self._ttl
+        ]
+        for value in expired:
+            self._digests.pop(value, None)
+
+    @staticmethod
+    def _digest(raw_init_data: str) -> bytes:
+        return hashlib.sha256(raw_init_data.encode("utf-8")).digest()
 
 
 def _json_object(value: str | None, label: str) -> dict[str, Any]:

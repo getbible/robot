@@ -29,12 +29,14 @@ test("uses only relative same-origin API paths and no authoritative verse payloa
 test("does not persist Telegram launch data or bearer tokens beyond sessionStorage", async () => {
   const app = await readFile(new URL("app.js", root), "utf8");
   const api = await readFile(new URL("lib/api.js", root), "utf8");
-  const source = `${app}\n${api}`;
+  const session = await readFile(new URL("lib/session.js", root), "utf8");
+  const source = `${app}\n${api}\n${session}`;
 
   assert.doesNotMatch(source, /\blocalStorage\b/);
   assert.doesNotMatch(source, /\bDeviceStorage\b/);
-  assert.match(app, /sessionStorage/);
-  assert.doesNotMatch(app, /setItem\([^,]+,\s*bridge\.initData/);
+  assert.match(session, /sessionStorage/);
+  assert.doesNotMatch(source, /setItem\([^,]+,\s*(?:bridge\.)?initData/);
+  assert.match(session, /subtle\.digest\("SHA-256"/);
 });
 
 test("references the optimized hero and exact getBible.Life brand", async () => {
