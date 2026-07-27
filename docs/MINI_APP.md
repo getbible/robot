@@ -66,6 +66,10 @@ on DNF hosts. It assigns a unique loopback port beginning at `9201` and
 configures Caddy automatic HTTPS. Polling remains the recommended Telegram
 delivery mode and does not affect the Mini App HTTPS listener.
 
+Do not create a public cloud-firewall rule for `9201` or any other assigned
+Mini App port. The Robot binds that listener to `127.0.0.1`; Caddy is the only
+public entry point and proxies the configured HTTPS hostname/path to loopback.
+
 Setup refuses to continue when DNS is absent/private, Caddy is inactive while
 another process owns port `80` or `443`, an existing Caddy configuration
 conflicts, or the final public certificate/route/content probe fails. It never

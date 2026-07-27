@@ -1145,10 +1145,28 @@ probe_mini_app_url() {
     grep -Fq '<title>getBible.Life</title>' <<<"$body"
 }
 
+wait_for_mini_app_url() {
+    local url=$1
+    local attempts=${2:-45}
+    local delay_seconds=${3:-2}
+    local index
+    for ((index = 1; index <= attempts; index++)); do
+        if ((index == attempts)); then
+            probe_mini_app_url "$url" && return
+        elif probe_mini_app_url "$url" 2>/dev/null; then
+            return
+        fi
+        ((index == attempts)) || sleep "$delay_seconds"
+    done
+    return 1
+}
+
 verify_mini_app_local() {
     local app_dir=$1
     local env_file=$2
-    probe_mini_app_url "$(mini_app_local_url "$app_dir" "$env_file")"
+    local attempts=${3:-45}
+    wait_for_mini_app_url \
+        "$(mini_app_local_url "$app_dir" "$env_file")" "$attempts" 1
 }
 
 verify_mini_app_public() {
@@ -1156,16 +1174,9 @@ verify_mini_app_public() {
     local env_file=$2
     local attempts=${3:-45}
     local public_url
-    local index
     public_url=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")
     public_url="${public_url%/}/"
-    for ((index = 1; index <= attempts; index++)); do
-        if probe_mini_app_url "$public_url"; then
-            return
-        fi
-        ((index == attempts)) || sleep 2
-    done
-    return 1
+    wait_for_mini_app_url "$public_url" "$attempts" 2
 }
 
 verify_mini_app_instance() {
@@ -1175,7 +1186,7 @@ verify_mini_app_instance() {
     if [[ "$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")" != "true" ]]; then
         return 0
     fi
-    verify_mini_app_local "$app_dir" "$env_file" &&
+    verify_mini_app_local "$app_dir" "$env_file" "$attempts" &&
         verify_mini_app_public "$app_dir" "$env_file" "$attempts"
 }
 
@@ -2147,7 +2158,7 @@ cmd_doctor() {
                 warn "The setup-managed Caddy configuration is missing, stale, invalid, inactive, or disabled."
                 ((failures += 1))
             }
-            verify_mini_app_local "$app_dir" "$env_file" || {
+            verify_mini_app_local "$app_dir" "$env_file" 1 || {
                 warn "The local Mini App shell did not pass its content check."
                 ((failures += 1))
             }
