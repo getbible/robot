@@ -23,8 +23,9 @@ export async function openBoundSession(
     } catch (error) {
       if (isAuthorizationFailure(error)) {
         clearBoundSession(storage);
+      } else {
+        throw error;
       }
-      throw error;
     }
   }
 

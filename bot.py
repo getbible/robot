@@ -176,6 +176,9 @@ def build_application(settings: Settings) -> Application:
     application.bot_data[PREFERENCES_SLOT] = preferences
     application.bot_data[HEALTH_SLOT] = health
     if getattr(settings, "mini_app_enabled", False):
+        async def cleanup_mini_app_launch(launch: MiniAppLaunch) -> None:
+            await _cleanup_mini_app_launch_prompt(application.bot, launch)
+
         async def post_mini_app_scripture(
             launch: MiniAppLaunch,
             queries: tuple[ScriptureQuery, ...],
@@ -190,7 +193,7 @@ def build_application(settings: Settings) -> Application:
                 message_thread_id=launch.message_thread_id,
                 max_messages=settings.max_output_chunks,
             )
-            await _cleanup_mini_app_launch_prompt(application.bot, launch)
+            await cleanup_mini_app_launch(launch)
             return message_ids
 
         application.bot_data[MINI_APP_SLOT] = MiniAppServer(
@@ -199,6 +202,7 @@ def build_application(settings: Settings) -> Application:
             preferences=preferences,
             limiter=limiter,
             post_scripture=post_mini_app_scripture,
+            cleanup_launch=cleanup_mini_app_launch,
         )
 
     application.add_handler(CommandHandler("start", start_command))
@@ -220,26 +224,47 @@ async def _cleanup_mini_app_launch_prompt(
     bot: Bot,
     launch: MiniAppLaunch,
 ) -> None:
-    """Best-effort removal of the prompt that opened a completed Mini App."""
-    try:
-        if launch.prompt_ephemeral_message_id is not None:
+    """Best-effort removal of both ephemeral rows that opened the Mini App."""
+    if launch.prompt_ephemeral_message_id is not None:
+        try:
             await delete_ephemeral_text(
                 bot,
                 chat_id=launch.target_chat_id,
                 receiver_user_id=launch.user_id,
                 ephemeral_message_id=launch.prompt_ephemeral_message_id,
             )
-        elif launch.prompt_message_id is not None:
-            delete_message = getattr(bot, "delete_message", None)
-            if callable(delete_message):
+        except TelegramError:
+            LOGGER.info(
+                "Mini App launch response could not be deleted after a successful post"
+            )
+    elif launch.prompt_message_id is not None:
+        delete_message = getattr(bot, "delete_message", None)
+        if callable(delete_message):
+            try:
                 await delete_message(
                     chat_id=launch.target_chat_id,
                     message_id=launch.prompt_message_id,
                 )
-    except TelegramError:
-        LOGGER.info(
-            "Mini App launch prompt could not be deleted after a successful post"
-        )
+            except TelegramError:
+                LOGGER.info(
+                    "Mini App launch response could not be deleted after a successful post"
+                )
+
+    if (
+        launch.source_ephemeral_message_id is not None
+        and launch.source_ephemeral_receiver_user_id is not None
+    ):
+        try:
+            await delete_ephemeral_text(
+                bot,
+                chat_id=launch.target_chat_id,
+                receiver_user_id=launch.source_ephemeral_receiver_user_id,
+                ephemeral_message_id=launch.source_ephemeral_message_id,
+            )
+        except TelegramError:
+            LOGGER.info(
+                "Mini App source command could not be deleted after a successful post"
+            )
 
 
 async def _optional_telegram_call(

@@ -65,7 +65,10 @@ The interface exposes the supported Librarian search controls:
 
 Results use contained paging or incremental loading and never create a stream
 of Telegram messages. Selections persist across result pages and Bible
-navigation. Only the final server-resolved post enters the target chat.
+navigation. Submitting through either the visible button or the mobile
+keyboard's Search key blurs the query input before results render so Telegram
+can dismiss the on-screen keyboard. Only the final server-resolved post enters
+the target chat.
 
 ## Translation and interface preferences
 
@@ -101,11 +104,19 @@ no group target and posts to the user's private conversation with the bot.
 
 ## Failure and cleanup behavior
 
-- A malformed, expired, replayed, or user-mismatched launch fails closed.
-- Reopening the bot command creates a fresh launch.
+- When Telegram recreates a WebView, fresh signed `initData` can recover the
+  still-active session only for the same launch token, user, chat, and chat
+  instance. Its absolute expiry is unchanged.
+- A malformed, genuinely expired, replayed, or user-mismatched launch fails
+  closed with an explicit close-and-relaunch instruction.
+- Tapping a recorded expired launch performs one best-effort cleanup of its
+  Telegram rows before rejection. Reopening the bot command creates a fresh
+  launch.
 - Direct `/bible <reference>` commands are deleted only after successful
   delivery when command deletion is enabled.
-- Mini App launch prompts are best-effort cleanup items; final Scripture
+- The initiating ephemeral command and the bot's ephemeral Mini App response
+  are both best-effort cleanup items. Immediate source-command cleanup is
+  retried independently after a successful final post; final Scripture
   messages are never part of that cleanup ledger.
 - The complete basket is resolved and rendered under one global output-message
   limit before the first Telegram send.

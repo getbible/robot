@@ -288,8 +288,12 @@ Use a separate test bot token and a private test chat. Stop any other polling pr
 12. Open the public Mini App URL in an ordinary browser and call protected API
     routes without valid Telegram authorization; no Scripture data, selection,
     launch context, or posting action may be available.
-13. Reuse an expired launch and mismatched user authorization; both must fail
-    closed before lookup or posting and provide a safe fresh-launch path.
+13. Close and reopen a launch with fresh signed Telegram `initData` while its
+    server session remains active; it must recover only for the same user,
+    chat, and chat instance without extending the absolute lifetime. Reuse a
+    genuinely expired launch and mismatched user authorization; both must fail
+    closed before lookup or posting and provide explicit close-and-relaunch
+    guidance rather than a reload loop.
 14. Choose a non-KJV translation, finish or cancel the workflow, restart the
     bot, and confirm the same Telegram user receives that translation by
     default in both `/bible` and `/search`; a different user must still receive
@@ -301,7 +305,11 @@ Use a separate test bot token and a private test chat. Stop any other polling pr
     many requests” response, duplicate post, or state race.
 17. In a test group, verify `/bible@TestBotName John 3:16`, empty
     `/bible@TestBotName`, `/search@TestBotName grace`, ownership isolation
-    between two users, and permission-safe command deletion.
+    between two users, and permission-safe command deletion. Complete one Mini
+    App post and confirm both the initiating "Only visible to GetBibleBot"
+    command and the bot's "Only visible to you" launch response are removed.
+    Submit a search with the phone keyboard's Search key and confirm the
+    keyboard closes before results render.
 18. Open a returned Scripture link and confirm its host is exactly
     `getbible.life`.
 19. Leave the Mini App idle beyond `MINI_APP_SESSION_TTL_SECONDS` and confirm it

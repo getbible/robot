@@ -218,10 +218,13 @@ select:focus-visible {
   gap: 9px;
 }
 
-.brand img {
-  width: 39px;
-  height: auto;
+.brand__icon {
+  width: 30px;
+  height: 40px;
   flex: 0 0 auto;
+  object-fit: contain;
+  object-position: center;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.2));
 }
 
 .brand__copy {

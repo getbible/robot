@@ -19,13 +19,18 @@ class _Clock:
         return self.value
 
 
-def _principal(user_id: int) -> TelegramMiniAppPrincipal:
+def _principal(
+    user_id: int,
+    *,
+    chat_id: int | None = None,
+    chat_instance: str | None = None,
+) -> TelegramMiniAppPrincipal:
     return TelegramMiniAppPrincipal(
         user_id=user_id,
         auth_date=1,
         query_id="query",
-        chat_id=None,
-        chat_instance=None,
+        chat_id=chat_id,
+        chat_instance=chat_instance,
         chat_type=None,
         start_param=None,
     )
@@ -70,17 +75,30 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
         ephemeral_launch = launches.create_launch(
             user_id=7,
             target_chat_id=-100,
+            source_ephemeral_message_id=50,
+            source_ephemeral_receiver_user_id=99,
         )
         updated_ephemeral = launches.remember_prompt(
             ephemeral_launch,
             ephemeral_message_id=202,
         )
         self.assertEqual(updated_ephemeral.prompt_ephemeral_message_id, 202)
+        self.assertEqual(updated_ephemeral.source_ephemeral_message_id, 50)
+        self.assertEqual(
+            updated_ephemeral.source_ephemeral_receiver_user_id,
+            99,
+        )
         with self.assertRaises(ValueError):
             launches.remember_prompt(
                 updated_ephemeral,
                 message_id=1,
                 ephemeral_message_id=2,
+            )
+        with self.assertRaises(ValueError):
+            launches.create_launch(
+                user_id=7,
+                target_chat_id=-100,
+                source_ephemeral_message_id=51,
             )
 
     def test_prompt_attachment_survives_launch_exchange_race(self) -> None:
@@ -100,6 +118,59 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
 
         self.assertIs(updated, launch)
         self.assertEqual(session.launch.prompt_ephemeral_message_id, 303)
+
+    def test_active_session_can_rebind_to_a_reopened_owner_launch(self) -> None:
+        launches = MiniAppLaunchStore(max_launches=2, ttl_seconds=60)
+        launch = launches.create_launch(user_id=7, target_chat_id=7)
+        store = MiniAppSessionStore(max_sessions=2, ttl_seconds=60)
+        principal = _principal(7)
+        session = store.create(
+            principal,
+            translation="kjv",
+            launch=launch,
+            init_data_digest=b"x" * 32,
+        )
+
+        self.assertIs(
+            store.find_by_launch(launch.token, user_id=7),
+            session,
+        )
+        self.assertIsNone(store.find_by_launch(launch.token, user_id=8))
+        self.assertTrue(
+            store.rebind(
+                session,
+                principal,
+                init_data_digest=b"y" * 32,
+            )
+        )
+        self.assertEqual(session.init_data_digest, b"y" * 32)
+
+    def test_rebind_rejects_a_different_signed_chat_context(self) -> None:
+        launches = MiniAppLaunchStore(max_launches=2, ttl_seconds=60)
+        launch = launches.create_launch(user_id=7, target_chat_id=-100)
+        store = MiniAppSessionStore(max_sessions=2, ttl_seconds=60)
+        session = store.create(
+            _principal(7, chat_id=-100, chat_instance="chat-a"),
+            translation="kjv",
+            launch=launch,
+            init_data_digest=b"x" * 32,
+        )
+
+        self.assertFalse(
+            store.rebind(
+                session,
+                _principal(7, chat_id=-200, chat_instance="chat-a"),
+                init_data_digest=b"y" * 32,
+            )
+        )
+        self.assertFalse(
+            store.rebind(
+                session,
+                _principal(7, chat_id=-100, chat_instance="chat-b"),
+                init_data_digest=b"y" * 32,
+            )
+        )
+        self.assertEqual(session.init_data_digest, b"x" * 32)
 
     def test_session_searches_and_basket_are_bounded_and_owner_scoped(
         self,

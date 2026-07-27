@@ -208,6 +208,8 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             message_thread_id=None,
             initial_route="search",
             initial_query="grace and truth",
+            source_ephemeral_message_id=None,
+            source_ephemeral_receiver_user_id=None,
         )
         button = (
             context.bot.send_message.await_args.kwargs["reply_markup"]
@@ -221,6 +223,63 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         mini_app.remember_prompt.assert_called_once_with(
             mini_app.create_launch.return_value,
             message_id=300,
+        )
+
+    async def test_group_mini_app_retains_source_command_for_final_cleanup(
+        self,
+    ) -> None:
+        context = self.context(_Limiter())
+        context.bot.username = "getBibleRobot"
+        context.bot.do_api_request.side_effect = [
+            {"ephemeral_message_id": 901},
+            True,
+        ]
+        context.application.bot_data[SERVICE_SLOT] = SimpleNamespace(
+            search=AsyncMock()
+        )
+        mini_app = Mock(spec=MiniAppServer)
+        mini_app.create_launch.return_value = SimpleNamespace(token="opaque")
+        mini_app.direct_url.return_value = (
+            "https://t.me/getBibleRobot?startapp=opaque"
+        )
+        context.application.bot_data[MINI_APP_SLOT] = mini_app
+        update = self.update()
+        update.effective_chat.type = "supergroup"
+        update.effective_message = SimpleNamespace(
+            message_id=0,
+            message_thread_id=12,
+            api_kwargs={
+                "ephemeral_message_id": 250,
+                "receiver_user": {"id": 999},
+            },
+        )
+
+        await search_command(update, context)
+
+        mini_app.create_launch.assert_called_once_with(
+            user_id=200,
+            target_chat_id=100,
+            message_thread_id=12,
+            initial_route="search",
+            initial_query="",
+            source_ephemeral_message_id=250,
+            source_ephemeral_receiver_user_id=999,
+        )
+        mini_app.remember_prompt.assert_called_once_with(
+            mini_app.create_launch.return_value,
+            ephemeral_message_id=901,
+        )
+        self.assertEqual(
+            [call.args[0] for call in context.bot.do_api_request.await_args_list],
+            ["sendMessage", "deleteEphemeralMessage"],
+        )
+        self.assertEqual(
+            context.bot.do_api_request.await_args_list[1].kwargs["api_kwargs"],
+            {
+                "chat_id": 100,
+                "receiver_user_id": 999,
+                "ephemeral_message_id": 250,
+            },
         )
 
     async def test_group_search_results_are_ephemeral_until_post(self) -> None:
@@ -414,6 +473,8 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             message_thread_id=None,
             initial_route="bible",
             initial_query="",
+            source_ephemeral_message_id=None,
+            source_ephemeral_receiver_user_id=None,
         )
         self.assertIn(
             "full-text verse",
@@ -662,6 +723,8 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             message_thread_id=None,
             initial_route="bible",
             initial_query="John",
+            source_ephemeral_message_id=None,
+            source_ephemeral_receiver_user_id=None,
         )
         self.assertIn(
             "Complete this Scripture reference",

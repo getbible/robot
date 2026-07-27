@@ -184,12 +184,19 @@ async def _send_mini_app_launch(
     if identity is None or update.effective_chat is None:
         return
     chat_id, user_id = identity
+    source_ephemeral_message_id, source_ephemeral_receiver_user_id = (
+        _ephemeral_source_target(update, context)
+    )
+    if source_ephemeral_receiver_user_id is None:
+        source_ephemeral_message_id = None
     launch = mini_app.create_launch(
         user_id=user_id,
         target_chat_id=chat_id,
         message_thread_id=_update_message_thread_id(update),
         initial_route=route,
         initial_query=query,
+        source_ephemeral_message_id=source_ephemeral_message_id,
+        source_ephemeral_receiver_user_id=source_ephemeral_receiver_user_id,
     )
     if update.effective_chat.type == "private":
         url = mini_app.web_url(launch)
@@ -1736,8 +1743,10 @@ async def _cleanup_command_source(
     chat_id: int,
 ) -> None:
     """Remove one successfully completed direct command without risking delivery."""
-    receiver_user_id = _update_ephemeral_receiver_user_id(update)
-    ephemeral_message_id = _update_ephemeral_message_id(update)
+    ephemeral_message_id, receiver_user_id = _ephemeral_source_target(
+        update,
+        context,
+    )
     if receiver_user_id is not None and ephemeral_message_id is not None:
         try:
             await delete_ephemeral_text(
@@ -1805,6 +1814,22 @@ def _update_ephemeral_receiver_user_id(update: Update) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         return None
     return value
+
+
+def _ephemeral_source_target(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> tuple[int | None, int | None]:
+    """Resolve a command's ephemeral ID and its bot receiver for later cleanup."""
+    ephemeral_message_id = _update_ephemeral_message_id(update)
+    if ephemeral_message_id is None:
+        return None, None
+    receiver_user_id = _update_ephemeral_receiver_user_id(update)
+    if receiver_user_id is None:
+        bot_id = getattr(context.bot, "id", None)
+        if isinstance(bot_id, int) and not isinstance(bot_id, bool) and bot_id > 0:
+            receiver_user_id = bot_id
+    return ephemeral_message_id, receiver_user_id
 
 
 def _update_message_thread_id(update: Update) -> int | None:

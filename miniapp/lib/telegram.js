@@ -110,6 +110,20 @@ export class TelegramBridge {
     return Promise.resolve(window.confirm(message));
   }
 
+  dismissKeyboard() {
+    const activeElement = document.activeElement;
+    if (
+      activeElement &&
+      typeof activeElement.matches === "function" &&
+      activeElement.matches(
+        'input, textarea, select, [contenteditable="true"]',
+      ) &&
+      typeof activeElement.blur === "function"
+    ) {
+      activeElement.blur();
+    }
+  }
+
   close() {
     this.#webApp?.close?.();
   }

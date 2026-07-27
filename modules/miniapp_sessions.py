@@ -33,6 +33,8 @@ class MiniAppLaunch:
     created_at: float
     prompt_message_id: int | None = None
     prompt_ephemeral_message_id: int | None = None
+    source_ephemeral_message_id: int | None = None
+    source_ephemeral_receiver_user_id: int | None = None
 
 
 class MiniAppLaunchStore:
@@ -63,6 +65,8 @@ class MiniAppLaunchStore:
         message_thread_id: int | None = None,
         initial_route: MiniAppRoute = "home",
         initial_query: str = "",
+        source_ephemeral_message_id: int | None = None,
+        source_ephemeral_receiver_user_id: int | None = None,
     ) -> MiniAppLaunch:
         if (
             isinstance(user_id, bool)
@@ -81,6 +85,25 @@ class MiniAppLaunchStore:
             raise ValueError("message_thread_id must be a positive integer or None.")
         if initial_route not in {"home", "bible", "search"}:
             raise ValueError("initial_route is invalid.")
+        source_values = (
+            source_ephemeral_message_id,
+            source_ephemeral_receiver_user_id,
+        )
+        if (
+            sum(value is not None for value in source_values) not in {0, 2}
+            or any(
+                value is not None
+                and (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value <= 0
+                )
+                for value in source_values
+            )
+        ):
+            raise ValueError(
+                "Ephemeral source message and receiver IDs must be valid together."
+            )
         query = initial_query.strip()
         if len(query) > 512 or "\x00" in query:
             raise ValueError("initial_query is invalid.")
@@ -95,6 +118,10 @@ class MiniAppLaunchStore:
                 initial_route=initial_route,
                 initial_query=query,
                 created_at=self._clock(),
+                source_ephemeral_message_id=source_ephemeral_message_id,
+                source_ephemeral_receiver_user_id=(
+                    source_ephemeral_receiver_user_id
+                ),
             )
             self._launches[token] = launch
             while len(self._launches) > self._max_launches:
@@ -123,6 +150,28 @@ class MiniAppLaunchStore:
             if launch is None or launch.user_id != user_id:
                 return None
             return launch
+
+    def take_expired(
+        self,
+        token: str,
+        *,
+        user_id: int,
+    ) -> MiniAppLaunch | None:
+        """Remove and return one expired owner launch for message cleanup."""
+        if _TOKEN_RE.fullmatch(token) is None:
+            return None
+        with self._guard:
+            launch = self._launches.get(token)
+            if (
+                launch is not None
+                and launch.user_id == user_id
+                and self._clock() - launch.created_at >= self._ttl
+            ):
+                self._launches.pop(token, None)
+                self._purge_locked()
+                return launch
+            self._purge_locked()
+            return None
 
     def restore(self, launch: MiniAppLaunch) -> None:
         """Restore a consumed launch after a local session-creation failure."""
@@ -364,6 +413,74 @@ class MiniAppSessionStore:
                 session.touched_at = self._clock()
                 self._sessions.move_to_end(token)
             return session
+
+    def find_by_launch(
+        self,
+        launch_token: str,
+        *,
+        user_id: int,
+    ) -> MiniAppSession | None:
+        """Find an active session for a consumed owner-bound launch token."""
+        if _TOKEN_RE.fullmatch(launch_token) is None:
+            return None
+        with self._guard:
+            self._purge_locked()
+            for session in reversed(tuple(self._sessions.values())):
+                if (
+                    session.user_id == user_id
+                    and session.launch.token == launch_token
+                ):
+                    return session
+            return None
+
+    def take_expired_launch(
+        self,
+        launch_token: str,
+        *,
+        user_id: int,
+    ) -> MiniAppLaunch | None:
+        """Remove one expired owner session and return its launch for cleanup."""
+        if _TOKEN_RE.fullmatch(launch_token) is None:
+            return None
+        with self._guard:
+            now = self._clock()
+            for token, session in tuple(self._sessions.items()):
+                if (
+                    session.user_id == user_id
+                    and session.launch.token == launch_token
+                    and now - session.created_at >= self._ttl
+                ):
+                    self._sessions.pop(token, None)
+                    self._expired += 1
+                    self._purge_locked()
+                    return session.launch
+            self._purge_locked()
+            return None
+
+    def rebind(
+        self,
+        session: MiniAppSession,
+        principal: TelegramMiniAppPrincipal,
+        *,
+        init_data_digest: bytes,
+    ) -> bool:
+        """Bind a reopened WebView to the same active user/chat session."""
+        if not isinstance(init_data_digest, bytes) or len(init_data_digest) != 32:
+            raise ValueError("init_data_digest must be a SHA-256 digest.")
+        with self._guard:
+            self._purge_locked()
+            if (
+                self._sessions.get(session.token) is not session
+                or session.user_id != principal.user_id
+                or session.chat_id != principal.rate_limit_chat_id
+                or session.chat_instance != principal.chat_instance
+            ):
+                return False
+            session.query_id = principal.query_id
+            session.init_data_digest = init_data_digest
+            session.touched_at = self._clock()
+            self._sessions.move_to_end(session.token)
+            return True
 
     def touch(self, session: MiniAppSession) -> bool:
         """Mark an authenticated absolute-lifetime session as recently used."""

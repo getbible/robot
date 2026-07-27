@@ -27,6 +27,7 @@ const bridge = new TelegramBridge();
 const i18n = new I18n();
 let api = null;
 let filterDraft = null;
+let accessAction = () => window.location.reload();
 
 const state = {
   route: "home",
@@ -127,6 +128,8 @@ async function boot() {
   elements.accessDenied.hidden = true;
   elements.app.hidden = true;
   elements.bootMessage.textContent = "Opening getBible.Life…";
+  elements.accessRetry.textContent = "Try again";
+  accessAction = () => window.location.reload();
 
   if (!bridge.initialize()) {
     showAccessDenied(
@@ -171,6 +174,10 @@ async function boot() {
       await runSearch(entrypoint.search_query);
     }
   } catch (error) {
+    if (error instanceof ApiError && [401, 409].includes(error.status)) {
+      showExpiredAccess();
+      return;
+    }
     const message =
       error instanceof ApiError
         ? error.message
@@ -180,7 +187,7 @@ async function boot() {
 }
 
 function attachListeners() {
-  elements.accessRetry.addEventListener("click", () => window.location.reload());
+  elements.accessRetry.addEventListener("click", () => accessAction());
   window.addEventListener("online", updateConnectionState);
   window.addEventListener("offline", updateConnectionState);
 
@@ -287,12 +294,30 @@ function loadHeroAsset() {
   image.src = new URL("assets/ocean-light-hero.webp", document.baseURI).href;
 }
 
-function showAccessDenied(message) {
+function showAccessDenied(
+  message,
+  {
+    actionLabel = "Try again",
+    onAction = () => window.location.reload(),
+  } = {},
+) {
   elements.boot.hidden = true;
   elements.app.hidden = true;
   elements.accessDenied.hidden = false;
   elements.accessMessage.textContent = message;
+  elements.accessRetry.textContent = actionLabel;
+  accessAction = onAction;
   bridge.notifyError();
+}
+
+function showExpiredAccess() {
+  showAccessDenied(
+    "This launch is no longer active. Close getBible.Life, then send /bible or /search to the bot to start again.",
+    {
+      actionLabel: "Close getBible.Life",
+      onAction: () => bridge.close(),
+    },
+  );
 }
 
 function setRoute(requestedRoute) {
@@ -374,6 +399,7 @@ async function runSearch(rawQuery) {
     announce("Enter words or a phrase to search.");
     return;
   }
+  bridge.dismissKeyboard();
   state.search = {
     query,
     status: "loading",
@@ -1200,9 +1226,7 @@ function handleSessionError(error) {
   if (error instanceof ApiError && [401, 403].includes(error.status)) {
     clearBoundSession();
     api?.clearSession();
-    showAccessDenied(
-      "Your secure session has expired. Reopen getBible.Life from the Telegram bot.",
-    );
+    showExpiredAccess();
   }
 }
 
