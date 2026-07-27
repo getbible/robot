@@ -7,6 +7,7 @@ SETUP = ROOT / "setup.sh"
 UNIT = ROOT / "deploy" / "getbible-robot@.service"
 LIFECYCLE = ROOT / "tests" / "setup_manager_lifecycle.sh"
 CADDY_INSTALLATION = ROOT / "tests" / "caddy_installation.sh"
+MINIAPP_READINESS = ROOT / "tests" / "miniapp_readiness.sh"
 
 
 class SetupScriptTestCase(unittest.TestCase):
@@ -14,6 +15,7 @@ class SetupScriptTestCase(unittest.TestCase):
         subprocess.run(["bash", "-n", str(SETUP)], check=True)
         subprocess.run(["bash", "-n", str(LIFECYCLE)], check=True)
         subprocess.run(["bash", "-n", str(CADDY_INSTALLATION)], check=True)
+        subprocess.run(["bash", "-n", str(MINIAPP_READINESS)], check=True)
         result = subprocess.run(
             ["bash", str(SETUP), "self-test"],
             check=True,
@@ -89,6 +91,16 @@ class SetupScriptTestCase(unittest.TestCase):
         )
         self.assertIn("Caddy installation test passed.", result.stdout)
 
+    def test_mini_app_startup_waits_for_listener_readiness(self) -> None:
+        result = subprocess.run(
+            ["bash", str(MINIAPP_READINESS)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertIn("Mini App readiness test passed.", result.stdout)
+
     def test_hardened_unit_is_instance_scoped(self) -> None:
         unit = UNIT.read_text(encoding="utf-8")
         required = {
@@ -133,6 +145,7 @@ class SetupScriptTestCase(unittest.TestCase):
         self.assertIn("render_caddy_routes", script)
         self.assertIn("caddy validate --config", script)
         self.assertIn("rollback_caddy_transaction", script)
+        self.assertIn("wait_for_mini_app_url", script)
         self.assertIn("verify_mini_app_public", script)
         self.assertIn('systemctl enable --now "$service"', script)
         self.assertNotIn("Traefik", (ROOT / "docs" / "MINI_APP.md").read_text())

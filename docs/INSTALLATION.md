@@ -36,6 +36,9 @@ Running `sudo getbible-robot` without a command opens the operations menu.
 - A dedicated Telegram Bot API token from `@BotFather` for each running instance.
 - Public DNS plus inbound TCP `80`/`443` when the Telegram Mini App is enabled.
   Setup manages Caddy automatic HTTPS on the host.
+- Do not expose the assigned Mini App port (`9201` by default), webhook port, or
+  health port in the host or cloud firewall. They are private loopback
+  listeners; only Caddy receives public Mini App traffic on `80`/`443`.
 - Administrator access for the bot in every group where private Bible/search
   workflows and clean-chat deletion are required. Bot API 10.2 permits an
   administrator to deliver per-user ephemeral panels even when a catalog or

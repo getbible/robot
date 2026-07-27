@@ -104,6 +104,10 @@ the generated route matches every enabled instance, the complete Caddyfile
 validates, `caddy.service` is enabled and active, and the public HTTPS URL has a
 valid certificate and returns the expected Mini App shell.
 
+The cloud firewall must allow public TCP `80` and `443`, but must not expose
+`9201` or the instance's assigned Mini App port. Requests reach the Mini App
+through Caddy; they never connect to the loopback listener directly.
+
 If setup reports a DNS error, create or correct the public `A`/`AAAA` record
 and ensure inbound TCP `80` and `443` reach this host. If Caddy validation or
 reload fails, inspect the reported unmanaged Caddyfile conflict; the manager
