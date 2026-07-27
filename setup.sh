@@ -4,7 +4,7 @@ IFS=$'\n\t'
 umask 077
 
 PROGRAM="getbible-robot"
-VERSION="5"
+VERSION="6"
 SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
 SCRIPT_DIR=$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)
 
@@ -23,6 +23,10 @@ CADDYFILE="${CADDY_ROOT}/Caddyfile"
 CADDY_ROUTES="${CADDY_ROOT}/getbible-robot.caddy"
 CADDY_IMPORT_BEGIN="# BEGIN getbible-robot managed routes"
 CADDY_IMPORT_END="# END getbible-robot managed routes"
+CADDY_APT_KEYRING="/usr/share/keyrings/caddy-stable-archive-keyring.gpg"
+CADDY_APT_SOURCE="/etc/apt/sources.list.d/caddy-stable.list"
+CADDY_APT_KEY_URL="https://dl.cloudsmith.io/public/caddy/stable/gpg.key"
+CADDY_APT_SOURCE_URL="https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt"
 if [[ -f "${SCRIPT_DIR}/deploy/getbible-robot@.service" ]]; then
     UNIT_SOURCE="${SCRIPT_DIR}/deploy/getbible-robot@.service"
 else
@@ -745,21 +749,137 @@ print(f"DNS preflight: {hostname} -> {', '.join(addresses)}")
 PY
 }
 
+repair_apt_package_state() {
+    if command -v dpkg >/dev/null 2>&1; then
+        info "Completing any pending Debian package configuration."
+        if ! DEBIAN_FRONTEND=noninteractive dpkg --configure --pending; then
+            die "The Debian package manager could not complete pending configuration. Run 'sudo dpkg --configure -a', resolve the reported package error, and rerun setup."
+        fi
+    fi
+
+    if DEBIAN_FRONTEND=noninteractive apt-get check >/dev/null 2>&1; then
+        return
+    fi
+
+    info "Repairing incomplete Debian package dependencies."
+    if ! DEBIAN_FRONTEND=noninteractive apt-get --fix-broken install --yes ||
+        ! DEBIAN_FRONTEND=noninteractive dpkg --configure --pending ||
+        ! DEBIAN_FRONTEND=noninteractive apt-get check; then
+        die "The Debian package manager remains inconsistent. Run 'sudo dpkg --configure -a' and 'sudo apt-get --fix-broken install', resolve the reported error, and rerun setup."
+    fi
+}
+
+install_caddy_with_apt() {
+    local repository_temp
+    local downloaded_key
+    local downloaded_source
+    local generated_keyring
+
+    repair_apt_package_state
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install --yes \
+        apt-transport-https ca-certificates curl \
+        debian-archive-keyring debian-keyring gnupg
+
+    repository_temp=$(mktemp -d)
+    downloaded_key="${repository_temp}/caddy-stable.asc"
+    downloaded_source="${repository_temp}/caddy-stable.list"
+    generated_keyring="${repository_temp}/caddy-stable-archive-keyring.gpg"
+
+    if ! curl \
+        --proto '=https' \
+        --tlsv1.2 \
+        --fail \
+        --silent \
+        --show-error \
+        --location \
+        --output "$downloaded_key" \
+        "$CADDY_APT_KEY_URL"; then
+        rm -rf --one-file-system -- "$repository_temp"
+        die "Could not download the official Caddy repository signing key."
+    fi
+    if ! curl \
+        --proto '=https' \
+        --tlsv1.2 \
+        --fail \
+        --silent \
+        --show-error \
+        --location \
+        --output "$downloaded_source" \
+        "$CADDY_APT_SOURCE_URL"; then
+        rm -rf --one-file-system -- "$repository_temp"
+        die "Could not download the official Caddy APT repository definition."
+    fi
+    if [[ ! -s "$downloaded_key" || ! -s "$downloaded_source" ]] ||
+        ! grep -Fq -- "https://dl.cloudsmith.io/public/caddy/stable/" \
+            "$downloaded_source" ||
+        ! grep -Fq -- "signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg" \
+            "$downloaded_source"; then
+        rm -rf --one-file-system -- "$repository_temp"
+        die "The downloaded Caddy repository metadata was empty or unexpected."
+    fi
+    if ! gpg \
+        --batch \
+        --yes \
+        --dearmor \
+        --output "$generated_keyring" \
+        "$downloaded_key"; then
+        rm -rf --one-file-system -- "$repository_temp"
+        die "The official Caddy repository signing key was invalid."
+    fi
+    if ! install -d -o root -g root -m 0755 \
+        "$(dirname "$CADDY_APT_KEYRING")" \
+        "$(dirname "$CADDY_APT_SOURCE")" ||
+        ! install -o root -g root -m 0644 \
+            "$generated_keyring" "$CADDY_APT_KEYRING" ||
+        ! install -o root -g root -m 0644 \
+            "$downloaded_source" "$CADDY_APT_SOURCE"; then
+        rm -rf --one-file-system -- "$repository_temp"
+        die "Could not install the official Caddy APT repository files."
+    fi
+    rm -rf --one-file-system -- "$repository_temp"
+
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install --yes caddy
+}
+
+install_caddy_with_dnf() {
+    local platform=""
+    if [[ -r /etc/os-release ]]; then
+        platform=$(
+            sed -n \
+                -e 's/^ID=//p' \
+                -e 's/^ID_LIKE=//p' \
+                /etc/os-release |
+                tr -d '"' |
+                tr '\n' ' '
+        )
+    fi
+    if [[ " ${platform,,} " == *" fedora "* ]]; then
+        dnf install --assumeyes dnf5-plugins
+    else
+        dnf install --assumeyes dnf-plugins-core
+    fi
+    dnf copr enable --assumeyes @caddy/caddy
+    dnf install --assumeyes caddy
+}
+
 ensure_caddy_available() {
     if ! command -v caddy >/dev/null 2>&1; then
         confirm "Install Caddy for managed Mini App HTTPS now?" yes ||
             die "Caddy is required for setup-managed Mini App HTTPS."
         if command -v apt-get >/dev/null 2>&1; then
-            apt-get update
-            DEBIAN_FRONTEND=noninteractive apt-get install --yes caddy
+            install_caddy_with_apt
         elif command -v dnf >/dev/null 2>&1; then
-            dnf install --assumeyes caddy
+            install_caddy_with_dnf
         else
-            die "Install the distribution's Caddy package and rerun this command."
+            die "Automatic Caddy installation supports APT and DNF hosts. Install Caddy's official system package and rerun this command."
         fi
     fi
     command -v caddy >/dev/null 2>&1 ||
-        die "The distribution package did not provide the caddy command."
+        die "The official package did not provide the caddy command."
+    systemctl cat caddy.service >/dev/null 2>&1 ||
+        die "The caddy command exists but caddy.service is missing. Install Caddy's official system package and rerun setup."
 
     install -d -o root -g root -m 0755 "$CADDY_ROOT"
     if ! systemctl is-active --quiet caddy.service; then
