@@ -71,11 +71,14 @@ a reverse proxy; the application listener remains on loopback. See
 [Telegram delivery](WEBHOOKS.md) before choosing webhook mode.
 
 The Mini App also requires public HTTPS but is independent of update delivery:
-polling plus a Mini App is the normal production configuration. The manager
-installs the distribution's Caddy package when necessary, preserves unrelated
-Caddyfile content, generates the exact path-preserving route, validates and
-reloads Caddy, and verifies the final certificate and response. The Mini App
-application itself remains on a separate loopback listener. See
+polling plus a Mini App is the normal production configuration. When Caddy is
+absent, the manager completes pending Debian package configuration, repairs
+incomplete APT dependencies, and installs Caddy from its official signed
+Cloudsmith repository. DNF hosts use Caddy's official COPR repository. The
+manager then preserves unrelated Caddyfile content, generates the exact
+path-preserving route, validates and reloads Caddy, and verifies the final
+certificate and response. The Mini App application itself remains on a
+separate loopback listener. See
 [Mini App deployment](MINI_APP.md).
 
 ## Instance and account names
@@ -158,8 +161,9 @@ Before enabling a service, setup:
 - validates a Mini App URL as HTTPS, fixes its listener to IPv4 loopback, and
   prevents it from sharing a health, webhook, or retained instance port;
 - verifies public DNS before modifying Caddy;
-- installs Caddy only through the host package manager, adds one managed import,
-  validates the complete Caddyfile, and reloads it transactionally;
+- installs Caddy through its official signed APT/COPR repository and the host
+  package manager, adds one managed import, validates the complete Caddyfile,
+  and reloads it transactionally;
 - verifies both the local Mini App shell and its public certificate, route, and
   expected response content;
 - waits for `/readyz` when health checks are enabled.
