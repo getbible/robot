@@ -148,6 +148,13 @@ final server-resolved selection.
 | `MINI_APP_MAX_SEARCHES_PER_SESSION` | `2` | Retained searches per session |
 | `MINI_APP_MAX_AVAILABLE_SELECTIONS` | `256` | Retained selectable verses per session |
 | `MINI_APP_MAX_SELECTIONS` | `100` | Maximum selected verse items before final normalization |
+| `MINI_APP_TRUSTED_PROXY_CIDRS` | loopback | Exact proxy peers allowed to supply a forwarded client IP |
+| `MINI_APP_IP_RATE_CAPACITY` | `60` | Per-client authenticated API burst |
+| `MINI_APP_IP_RATE_REFILL_PER_SECOND` | `10` | Per-client sustained API refill |
+| `MINI_APP_SESSION_EXCHANGE_RATE_CAPACITY` | `10` | Per-client unauthenticated exchange burst |
+| `MINI_APP_SESSION_EXCHANGE_RATE_REFILL_PER_SECOND` | `0.2` | Per-client exchange refill |
+| `MINI_APP_NAVIGATION_RATE_COST` | `0.25` | Fractional cost for translation/book/chapter/verse navigation |
+| `MINI_APP_ACCESS_LOG` | `true` | Structured route/status/duration logging; failures are always logged |
 
 Keep the authentication and launch windows short. Lengthening them increases
 the useful replay window and is not a remedy for incorrect clocks. Maintain
@@ -164,6 +171,18 @@ container port and leaves HTTPS and routing to external ingress. Publish each
 `MINI_APP_PORT` only to a private proxy network or host loopback; do not make
 the plain backend port a public edge. Multiple bots in one container must use
 distinct Mini App and health ports. See [Docker deployment](DOCKER.md).
+
+Telegram command traffic does not reveal an end-user IP. Mini App HTTP traffic
+does, but a forwarded address is accepted only from
+`MINI_APP_TRUSTED_PROXY_CIDRS`. Configure the exact external ingress peer or
+network so clients cannot spoof the address used for audit and rate limiting.
+Identity event fields are controlled independently through
+`AUDIT_IDENTITY_MODE`.
+
+Normal authenticated navigation has a fractional request cost so moving
+through translation, book, chapter, and verse screens remains smooth. Session
+exchange and the expensive search, Scripture, and posting operations consume a
+full token.
 
 ## Interface localization
 

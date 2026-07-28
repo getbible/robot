@@ -49,7 +49,7 @@ from modules.commands import (
     start_command,
     unknown_command,
 )
-from modules.ephemeral import delete_ephemeral_text
+from modules.ephemeral import delete_ephemeral_text, send_ephemeral_text
 from modules.errors import ScriptureUnavailable
 from modules.health import HealthServer
 from modules.interactions import InteractionStore
@@ -190,6 +190,11 @@ def build_application(settings: Settings) -> Application:
         chat_refill_per_second=settings.chat_rate_refill_per_second,
         max_entries=settings.rate_limit_cache_size,
         notification_cooldown=settings.rate_limit_notice_cooldown,
+        client_capacity=settings.mini_app_ip_rate_capacity,
+        client_refill_per_second=settings.mini_app_ip_rate_refill_per_second,
+        abuse_rejection_threshold=settings.abuse_rejection_threshold,
+        abuse_window_seconds=settings.abuse_window_seconds,
+        abuse_block_seconds=settings.abuse_block_seconds,
     )
     interactions = InteractionStore(
         max_sessions=settings.interaction_session_limit,
@@ -244,6 +249,27 @@ def build_application(settings: Settings) -> Application:
             await cleanup_mini_app_launch(launch)
             return message_ids
 
+        async def send_abuse_warning(
+            user_id: int,
+            chat_id: int,
+            text: str,
+        ) -> None:
+            if chat_id != user_id:
+                try:
+                    await send_ephemeral_text(
+                        application.bot,
+                        chat_id=chat_id,
+                        receiver_user_id=user_id,
+                        text=text,
+                    )
+                    return
+                except TelegramError:
+                    LOGGER.warning(
+                        "Unable to deliver an ephemeral Mini App abuse warning; "
+                        "trying the user's private chat"
+                    )
+            await application.bot.send_message(chat_id=user_id, text=text)
+
         mini_app = MiniAppServer(
             settings=settings,
             service=service,
@@ -251,9 +277,10 @@ def build_application(settings: Settings) -> Application:
             limiter=limiter,
             post_scripture=post_mini_app_scripture,
             cleanup_launch=cleanup_mini_app_launch,
+            abuse_warning=send_abuse_warning,
         )
         application.bot_data[MINI_APP_SLOT] = mini_app
-        health.set_mini_app_snapshot(mini_app.sessions.snapshot)
+        health.set_mini_app_snapshot(mini_app.snapshot)
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("get", bible_command))

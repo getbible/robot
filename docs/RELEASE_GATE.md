@@ -71,8 +71,16 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - An invalid explicit-translation reference is rejected before translation repository access.
 - Per-user and per-chat state remains bounded under identifier churn.
 - Every command, including `/start`, `/help`, `/search`, and unknown commands, consumes both rate-limit budgets.
+- Authenticated Mini App clients have a separate bounded client budget;
+  lightweight navigation has fractional cost while exchange, search,
+  Scripture, and post operations retain full cost.
+- Forwarded client addresses affect logging and limiting only when the direct
+  peer belongs to an explicitly trusted proxy network.
 - Every public command alias and implemented callback action is present in the enforced feature inventory.
 - Repeated rejected commands produce one cooldown warning rather than one Telegram API call per rejection.
+- Repeated individual user/client exhaustion opens a bounded temporary block
+  and produces one private or per-user-ephemeral warning; chat-only saturation
+  never attributes abuse to one user.
 - Mini App launches and sessions remain owner-scoped and TTL/LRU bounded under
   user, chat, and request churn.
 
@@ -135,7 +143,11 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - Configuration validation fails closed for missing tokens, conflicting aliases, invalid instance/log/audit values, invalid URLs, and inconsistent bounds.
 - Metadata audit mode omits search terms and final references.
 - Content audit mode includes only the documented normalized query/reference fields.
-- No audit mode records a token, Telegram user/chat ID, verse body, or repository payload.
+- Disabled identity mode omits user/chat/client identity; pseudonymous mode
+  records stable keyed identifiers; raw mode records only documented numeric
+  Telegram IDs and resolved Mini App client IPs.
+- No audit mode records a token, name, username, verse body, repository
+  payload, Telegram `initData`, or launch/session credential.
 - Every JSONL event is tagged with the selected instance.
 - Telegram initialization and command registration complete before readiness is exposed.
 - `/healthz`, `/readyz`, and `/metrics` behave as documented on loopback.
@@ -188,8 +200,14 @@ Using a dedicated test bot first, and then a private production-bot chat before 
 - A group mention command parses correctly.
 - Returned links open on `getbible.life`.
 - API failure injection produces generic errors and circuit/readiness behavior.
-- In metadata mode, no token, identity, exception detail, secret path, query, reference, or private message appears in logs or artifacts.
-- In content-mode testing, only synthetic search terms and final references appear; tokens, identities, verse bodies, and repository payloads remain absent.
+- In metadata plus disabled-identity mode, no token, identity, exception detail,
+  secret path, query, reference, or private message appears in logs or
+  artifacts.
+- Pseudonymous and raw identity tests contain only the documented identity
+  fields; raw-mode testing uses synthetic Telegram IDs and client addresses.
+- In content-mode testing, only synthetic search terms and final references
+  appear; tokens, names, usernames, verse bodies, browser authorization data,
+  and repository payloads remain absent.
 
 ## Final rollout decision
 

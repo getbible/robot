@@ -124,6 +124,14 @@ Commands:
   uninstall   Remove one instance after explicit confirmation
   docker-deploy [--multi] [--secure] [--env-file FILE]
               Build and deploy the recommended Docker layout
+  docker-init [--env-file FILE]
+              Create a private, editable Compose environment file
+  docker-config [--env-file FILE] [--no-restart]
+              Edit, validate, and apply the single-bot Compose environment
+  docker-validate [--multi] [--secure] [--env-file FILE]
+              Validate Compose and single-bot application configuration
+  docker-restart [--multi] [--secure] [--env-file FILE]
+              Recreate the Compose workload so direct configuration edits apply
   docker-list List GetBible Robot containers
   docker-status [container]
               Show Docker and supervised bot status
@@ -2927,6 +2935,62 @@ resolve_docker_source_dir() {
     die "Run Docker deployment from a GetBible Robot checkout containing Dockerfile and compose.yaml."
 }
 
+DOCKER_SOURCE_DIR=""
+DOCKER_COMPOSE_FILE=""
+DOCKER_SECURE_OVERLAY=""
+DOCKER_ENV_FILE=""
+DOCKER_MULTI="0"
+declare -a DOCKER_COMPOSE_ARGS=()
+
+prepare_docker_compose() {
+    require_docker_compose
+    DOCKER_SOURCE_DIR=$(resolve_docker_source_dir)
+    DOCKER_COMPOSE_FILE="${DOCKER_SOURCE_DIR}/compose.yaml"
+    DOCKER_SECURE_OVERLAY=""
+    DOCKER_ENV_FILE=""
+    DOCKER_MULTI="0"
+    DOCKER_COMPOSE_ARGS=()
+    while (($#)); do
+        case "$1" in
+            --multi)
+                DOCKER_COMPOSE_FILE="${DOCKER_SOURCE_DIR}/compose.multi.yaml"
+                DOCKER_MULTI="1"
+                shift
+                ;;
+            --secure)
+                DOCKER_SECURE_OVERLAY="${DOCKER_SOURCE_DIR}/compose.secret.yaml"
+                shift
+                ;;
+            --env-file)
+                (($# >= 2)) || die "--env-file requires a file path."
+                DOCKER_ENV_FILE=$(readlink -f "$2")
+                shift 2
+                ;;
+            *)
+                die "Unknown Docker Compose option: $1"
+                ;;
+        esac
+    done
+    [[ -f "$DOCKER_COMPOSE_FILE" &&
+        -f "${DOCKER_SOURCE_DIR}/Dockerfile" ]] ||
+        die "The checkout is missing Docker deployment files."
+    if [[ "$DOCKER_MULTI" == "1" && -n "$DOCKER_SECURE_OVERLAY" ]]; then
+        die "--secure is for the environment-driven single-bot layout."
+    fi
+    if [[ -n "$DOCKER_ENV_FILE" ]]; then
+        [[ -f "$DOCKER_ENV_FILE" ]] ||
+            die "Docker environment file not found: ${DOCKER_ENV_FILE}"
+        DOCKER_COMPOSE_ARGS+=(--env-file "$DOCKER_ENV_FILE")
+    fi
+    DOCKER_COMPOSE_ARGS+=(
+        --project-directory "$DOCKER_SOURCE_DIR"
+        --file "$DOCKER_COMPOSE_FILE"
+    )
+    if [[ -n "$DOCKER_SECURE_OVERLAY" ]]; then
+        DOCKER_COMPOSE_ARGS+=(--file "$DOCKER_SECURE_OVERLAY")
+    fi
+}
+
 docker_container_names() {
     docker ps --all \
         --filter "label=io.getbible.robot.container=true" \
@@ -2973,57 +3037,134 @@ select_docker_container() {
 }
 
 cmd_docker_deploy() {
-    require_docker_compose
+    prepare_docker_compose "$@"
+    info "Validating Docker Compose configuration"
+    docker compose "${DOCKER_COMPOSE_ARGS[@]}" config --quiet || return 1
+    info "Building and deploying GetBible Robot"
+    docker compose "${DOCKER_COMPOSE_ARGS[@]}" up --detach --build
+    docker compose "${DOCKER_COMPOSE_ARGS[@]}" ps
+    printf '\nInitial container output:\n'
+    docker compose "${DOCKER_COMPOSE_ARGS[@]}" logs --no-color --tail 40
+    printf '\nUse ./setup.sh docker-doctor for the complete deployment check.\n'
+}
+
+cmd_docker_init() {
     local source_dir
     source_dir=$(resolve_docker_source_dir)
-    local compose_file="${source_dir}/compose.yaml"
-    local secure_overlay=""
-    local env_file=""
-    local -a compose_args=()
+    local env_file="${source_dir}/.env"
     while (($#)); do
         case "$1" in
-            --multi)
-                compose_file="${source_dir}/compose.multi.yaml"
-                shift
-                ;;
-            --secure)
-                secure_overlay="${source_dir}/compose.secret.yaml"
-                shift
-                ;;
             --env-file)
                 (($# >= 2)) || die "--env-file requires a file path."
-                env_file=$(readlink -f "$2")
+                env_file=$(readlink -m "$2")
                 shift 2
                 ;;
-            *)
-                die "Unknown Docker deploy option: $1"
-                ;;
+            *) die "Unknown Docker init option: $1" ;;
         esac
     done
-    [[ -f "$compose_file" && -f "${source_dir}/Dockerfile" ]] ||
-        die "The checkout is missing Docker deployment files."
-    if [[ "$compose_file" == *"compose.multi.yaml" && -n "$secure_overlay" ]]; then
-        die "--secure is for the environment-driven single-bot layout."
+    if [[ -e "$env_file" ]]; then
+        [[ -f "$env_file" && ! -L "$env_file" ]] ||
+            die "Docker environment path is not a regular file: ${env_file}"
+        chmod 0600 "$env_file"
+        printf 'Docker environment already exists: %s\n' "$env_file"
+        return
     fi
-    if [[ -n "$env_file" ]]; then
-        [[ -f "$env_file" ]] || die "Docker environment file not found: ${env_file}"
-        compose_args+=(--env-file "$env_file")
+    if [[ ! -d "$(dirname "$env_file")" ]]; then
+        install -d -m 0700 "$(dirname "$env_file")"
     fi
-    compose_args+=(
-        --project-directory "$source_dir"
-        --file "$compose_file"
-    )
-    if [[ -n "$secure_overlay" ]]; then
-        compose_args+=(--file "$secure_overlay")
-    fi
+    install -m 0600 \
+        "${source_dir}/docker/examples/compose.env.example" \
+        "$env_file"
+    printf 'Created editable Docker environment: %s\n' "$env_file"
+    printf 'Edit the required token, public URL, proxy networks, and limits before deployment.\n'
+}
+
+cmd_docker_validate() {
+    prepare_docker_compose "$@"
     info "Validating Docker Compose configuration"
-    docker compose "${compose_args[@]}" config --quiet
-    info "Building and deploying GetBible Robot"
-    docker compose "${compose_args[@]}" up --detach --build
-    docker compose "${compose_args[@]}" ps
-    printf '\nInitial container output:\n'
-    docker compose "${compose_args[@]}" logs --no-color --tail 40
-    printf '\nUse ./setup.sh docker-doctor for the complete deployment check.\n'
+    docker compose "${DOCKER_COMPOSE_ARGS[@]}" config --quiet
+    if [[ "$DOCKER_MULTI" == "1" ]]; then
+        printf 'Compose configuration is valid. Each mounted multi-bot instance is validated by the supervisor.\n'
+        return
+    fi
+    info "Building the validation image"
+    docker compose "${DOCKER_COMPOSE_ARGS[@]}" build robot || return 1
+    info "Validating the Robot application environment"
+    docker compose "${DOCKER_COMPOSE_ARGS[@]}" run \
+        --rm \
+        --no-deps \
+        --entrypoint python \
+        robot \
+        -c \
+        'from config import Settings; Settings.from_env(load_environment_file=False)' ||
+        return 1
+    printf 'Docker Compose and Robot application configuration are valid.\n'
+}
+
+cmd_docker_restart() {
+    prepare_docker_compose "$@"
+    info "Validating Docker Compose configuration"
+    docker compose "${DOCKER_COMPOSE_ARGS[@]}" config --quiet || return 1
+    info "Recreating GetBible Robot so configuration changes take effect"
+    docker compose "${DOCKER_COMPOSE_ARGS[@]}" up \
+        --detach \
+        --force-recreate \
+        --no-build
+    docker compose "${DOCKER_COMPOSE_ARGS[@]}" ps
+    printf '\nRecent container output:\n'
+    docker compose "${DOCKER_COMPOSE_ARGS[@]}" logs --no-color --tail 40
+}
+
+cmd_docker_config() {
+    require_tty
+    local source_dir
+    source_dir=$(resolve_docker_source_dir)
+    local env_file="${source_dir}/.env"
+    local restart="1"
+    local -a compose_options=()
+    while (($#)); do
+        case "$1" in
+            --env-file)
+                (($# >= 2)) || die "--env-file requires a file path."
+                env_file=$(readlink -m "$2")
+                compose_options+=(--env-file "$env_file")
+                shift 2
+                ;;
+            --secure)
+                compose_options+=(--secure)
+                shift
+                ;;
+            --no-restart)
+                restart="0"
+                shift
+                ;;
+            *) die "Unknown Docker config option: $1" ;;
+        esac
+    done
+    cmd_docker_init --env-file "$env_file"
+    local backup
+    local editor
+    backup=$(mktemp)
+    cp -- "$env_file" "$backup"
+    chmod 0600 "$backup"
+    editor=${EDITOR:-editor}
+    if ! "$editor" "$env_file"; then
+        cp -- "$backup" "$env_file"
+        rm -f -- "$backup"
+        die "Editor failed; the previous Docker environment was restored."
+    fi
+    chmod 0600 "$env_file"
+    if ! cmd_docker_validate "${compose_options[@]}"; then
+        cp -- "$backup" "$env_file"
+        rm -f -- "$backup"
+        die "Docker configuration validation failed; the previous file was restored."
+    fi
+    rm -f -- "$backup"
+    if [[ "$restart" == "1" ]]; then
+        cmd_docker_restart "${compose_options[@]}"
+    else
+        printf 'Validated Docker configuration saved without restarting the workload.\n'
+    fi
 }
 
 cmd_docker_list() {
@@ -3179,6 +3320,10 @@ GetBible Robot operations
  22) Open shell inside a Docker container
  23) Show Docker logs
  24) Docker diagnostics
+ 25) Initialize editable Docker environment
+ 26) Edit, validate, and apply Docker configuration
+ 27) Validate Docker configuration
+ 28) Recreate Docker workload after direct edits
   0) Exit
 EOF
         read -r -p "Selection: " selection
@@ -3207,6 +3352,10 @@ EOF
             22) cmd_docker_shell ;;
             23) cmd_docker_logs ;;
             24) cmd_docker_doctor ;;
+            25) cmd_docker_init ;;
+            26) cmd_docker_config ;;
+            27) cmd_docker_validate ;;
+            28) cmd_docker_restart ;;
             0) return ;;
             *) warn "Unknown selection." ;;
         esac
@@ -3236,6 +3385,10 @@ main() {
         rollback) cmd_rollback "$@" ;;
         uninstall) cmd_uninstall "$@" ;;
         docker-deploy|docker-update) cmd_docker_deploy "$@" ;;
+        docker-init) cmd_docker_init "$@" ;;
+        docker-config) cmd_docker_config "$@" ;;
+        docker-validate) cmd_docker_validate "$@" ;;
+        docker-restart|docker-apply) cmd_docker_restart "$@" ;;
         docker-list) cmd_docker_list "$@" ;;
         docker-status) cmd_docker_status "$@" ;;
         docker-logs) cmd_docker_logs "$@" ;;

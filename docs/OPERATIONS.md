@@ -15,10 +15,28 @@ docker logs --since 30m getbible-robot
 ```
 
 The status response includes PID, assigned ports, current RSS, the per-child
-memory guard, restart count, last exit, and recent liveness. Configuration and
-secrets are edited on the host or secret-management platform and then applied
-with `reload`; they are not mutated inside the read-only container. See
-[Docker deployment](DOCKER.md).
+memory guard, memory-warning threshold and pressure state, restart count, last
+exit, and recent liveness.
+
+The versioned Compose file plus its private environment file are the Docker
+deployment source of truth. Initialize, edit, validate, and apply them from the
+host:
+
+```bash
+./setup.sh docker-init
+./setup.sh docker-config
+./setup.sh docker-validate
+./setup.sh docker-restart
+```
+
+`docker-config` creates a backup, validates the edited environment, restores it
+on failure, and recreates the container to apply environment and Compose
+resource changes. Direct edits are supported; follow them with
+`docker-validate` and `docker-restart`. A plain `docker restart` does not reload
+environment variables. Configuration and secrets are not mutated inside the
+read-only container. In-container `reload` applies changed mounted multi-bot
+instance files but cannot rewrite host Compose configuration. See [Docker
+deployment](DOCKER.md).
 
 The installed `getbible-robot` manager is the supported interface for routine production operation. Every command accepts an instance name. If it is omitted in an interactive terminal, the manager lists installed instances for selection.
 
@@ -203,24 +221,42 @@ Alert on:
 - readiness unavailable longer than `CIRCUIT_RECOVERY_SECONDS`;
 - an open upstream circuit;
 - lookup timeouts, repository failures, queue rejections, or unexpected failures;
-- sustained rate-limit rejection;
+- sustained rate-limit rejection, abuse blocks, or one identity dominating
+  request volume;
 - a duplicate-poller exit or webhook pending/error growth;
 - Mini App listener loss, authorization failures, expired-launch growth, or
   unexpected public API access without Telegram authorization;
 - interactive session evictions or saturation;
-- memory approaching `MemoryMax`;
+- `instance_memory_pressure`, memory approaching `MemoryMax`, or a child RSS
+  guard restart;
 - task or file-descriptor pressure;
 - log write/rotation failures;
 - a returned link not hosted on `getbible.life`.
 
 Runtime metrics contain aggregates only. Do not expose the loopback listener publicly without an authenticated, access-controlled proxy.
 
+The structured events used for capacity diagnosis are
+`capacity_queue_rejected`, `lookup_timed_out`,
+`upstream_circuit_rejected`, `instance_memory_pressure`,
+`instance_memory_limit_exceeded`, `inbound_rate_limited`, and
+`instance_restart_circuit_open`. Mini App access events include route,
+status, and duration. Depending on `AUDIT_IDENTITY_MODE`, identity fields are
+absent, pseudonymous, or raw Telegram IDs/resolved client IPs.
+
+Telegram command updates never contain the user's IP. For Mini App traffic,
+configure `MINI_APP_TRUSTED_PROXY_CIDRS` to the exact reverse-proxy peers;
+otherwise forwarded addresses are intentionally ignored. Raw identity mode is
+appropriate only where access and retention policy allow personal-data logs.
+
 ## Incident response
 
 1. Stop only the affected instance: `sudo getbible-robot stop <instance>`.
 2. Revoke the token immediately through `@BotFather` if disclosure is possible.
 3. Record `status`, `runtime`, the deployed commit, lock checksum, unit checksum, and a bounded log window.
-4. Determine whether the failure is Telegram, host networking, GetBible API, Librarian, rendering, configuration, or deployment.
+4. Correlate pressure events, request duration/status, aggregate metrics, and
+   the configured identity fields. Determine whether the failure is abusive
+   traffic, legitimate capacity, Telegram, host networking, GetBible API,
+   Librarian, rendering, configuration, or deployment.
 5. Use `rollback` if the immediately previous application is known-good.
 6. Run `doctor`, readiness, and the private smoke test before returning to service.
 7. Add a deterministic regression test before deploying a code fix.
@@ -242,10 +278,11 @@ Do not use a copied virtual environment as a substitute for the matching commit 
 ## Capacity
 
 Increase bounds only after measuring memory, worker occupancy, Telegram output
-count, API latency, circuit behavior, and interaction state under representative
-load. Full corpus downloads and returned search results have separate byte
-budgets. Search uses an independent pool so slow index work cannot occupy all
-direct-reference workers. A timed-out synchronous operation intentionally
-retains its own permit until the underlying thread exits.
+count, API latency, request identity distribution, circuit behavior, and
+interaction state under representative load. Full corpus downloads and
+returned search results have separate byte budgets. Search uses an independent
+pool so slow index work cannot occupy all direct-reference workers. A timed-out
+synchronous operation intentionally retains its own permit until the
+underlying thread exits.
 
 Interactive state is process-local, bounded, and ephemeral. Restarting one instance expires only that instance's unfinished panels.

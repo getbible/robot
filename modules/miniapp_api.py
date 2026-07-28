@@ -10,7 +10,7 @@ import logging
 import math
 import re
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +18,9 @@ from urllib.parse import parse_qs, urlsplit
 
 from getbible import RequestLimitError
 
+from config import Settings
+
+from .audit import audit_event, audit_identity
 from .catalog import BookOption, ChapterOption, TranslationOption
 from .errors import (
     CircuitOpen,
@@ -131,7 +134,11 @@ class MiniAppIngressLimiter:
                 self._buckets.popitem(last=False)
             if bucket.tokens < 1.0:
                 retry_after = (1.0 - bucket.tokens) / self._refill
-                raise RobotRateLimited(retry_after)
+                raise RobotRateLimited(
+                    retry_after,
+                    scopes=("session_exchange",),
+                    client_key=key,
+                )
             bucket.tokens -= 1.0
 
 
@@ -155,6 +162,10 @@ class MiniAppApi:
         cleanup_launch: Callable[[MiniAppLaunch], Awaitable[None]] | None = None,
         ingress_limiter: MiniAppIngressLimiter | None = None,
         replay_guard: TelegramInitDataReplayGuard | None = None,
+        audit_settings: Settings | None = None,
+        abuse_warning: Callable[[int, int, str], Awaitable[None]] | None = None,
+        navigation_rate_cost: float = 0.25,
+        access_log: bool = True,
         page_size: int = 10,
         max_body_bytes: int = 64 * 1024,
     ) -> None:
@@ -172,6 +183,8 @@ class MiniAppApi:
             raise ValueError("page_size must be between 1 and 25.")
         if not 1024 <= max_body_bytes <= 1024 * 1024:
             raise ValueError("max_body_bytes must be between 1024 and 1048576.")
+        if not 0.05 <= navigation_rate_cost <= 1.0:
+            raise ValueError("navigation_rate_cost must be between 0.05 and 1.")
         self._service = service
         self._preferences = preferences
         self._limiter = limiter
@@ -195,10 +208,28 @@ class MiniAppApi:
             r"([A-Za-z0-9_-]{16,128})\Z"
         )
         self._ingress = ingress_limiter or MiniAppIngressLimiter()
+        self._audit_settings = audit_settings
+        self._abuse_warning = abuse_warning
+        self._navigation_rate_cost = navigation_rate_cost
+        self._access_log = access_log
+        self._traffic: Counter[str] = Counter()
         self._page_size = page_size
         self._max_body = max_body_bytes
 
     async def handle(self, request: MiniAppHttpRequest) -> MiniAppHttpResponse:
+        """Handle and account for one request without logging secrets or content."""
+        started_at = time.monotonic()
+        session = self._session_from_request(request)
+        response = await self._handle(request)
+        self._record_access(
+            request,
+            response,
+            session=session,
+            duration_seconds=max(0.0, time.monotonic() - started_at),
+        )
+        return response
+
+    async def _handle(self, request: MiniAppHttpRequest) -> MiniAppHttpResponse:
         """Handle one request and convert all expected failures to safe JSON."""
         method = request.method.upper()
         parts = urlsplit(request.target)
@@ -324,10 +355,16 @@ class MiniAppApi:
         except (OverflowError, ValueError) as error:
             return self._error_response(400, "invalid_request", str(error))
         except RobotRateLimited as error:
+            await self._handle_rate_limit(error)
             return self._error_response(
                 429,
                 "rate_limited",
-                "Too many requests. Please try again shortly.",
+                (
+                    "Repeated requests have been paused. Please stop repeated or "
+                    "automated requests and try again later."
+                    if error.blocked
+                    else "Too many requests. Please try again shortly."
+                ),
                 details={"retry_after": error.retry_after},
                 extra_headers={"Retry-After": str(error.retry_after)},
             )
@@ -409,6 +446,7 @@ class MiniAppApi:
         await self._limiter.acquire(
             user_id=principal.user_id,
             chat_id=principal.rate_limit_chat_id,
+            client_key=request.client_key,
         )
         translation = self._preferences.translation_for(principal.user_id)
         translations = await self._service.translations()
@@ -543,10 +581,160 @@ class MiniAppApi:
         await self._limiter.acquire(
             user_id=session.user_id,
             chat_id=session.chat_id,
+            cost=self._rate_cost(request),
+            client_key=request.client_key,
         )
         if not self._sessions.touch(session):
             raise MiniAppAuthenticationError("Invalid Mini App session.")
         return session
+
+    def snapshot(self) -> dict[str, int]:
+        """Return aggregate API outcomes without retaining request identities."""
+        return {
+            "api_requests": self._traffic["requests"],
+            "api_successes": self._traffic["successes"],
+            "api_client_errors": self._traffic["client_errors"],
+            "api_server_errors": self._traffic["server_errors"],
+            "api_rate_limited": self._traffic["rate_limited"],
+            "api_abuse_blocks": self._traffic["abuse_blocks"],
+        }
+
+    async def _handle_rate_limit(self, error: RobotRateLimited) -> None:
+        self._traffic["rate_limited"] += 1
+        if error.new_block:
+            self._traffic["abuse_blocks"] += 1
+        settings = self._audit_settings
+        if settings is not None:
+            audit_event(
+                LOGGER,
+                settings,
+                "inbound_rate_limited",
+                metadata={
+                    "source": "mini_app",
+                    "retry_after_seconds": error.retry_after,
+                    "temporarily_blocked": error.blocked,
+                    "new_block": error.new_block,
+                    "violation_count": error.violation_count,
+                    "limited_scopes": ",".join(error.scopes),
+                },
+                identity=audit_identity(
+                    settings,
+                    user_id=error.user_id,
+                    chat_id=error.chat_id,
+                    client_ip=error.client_key,
+                ),
+                level=logging.WARNING,
+            )
+        if (
+            not error.new_block
+            or self._abuse_warning is None
+            or error.user_id is None
+            or error.chat_id is None
+        ):
+            return
+        warning = (
+            settings.abuse_warning_message
+            if settings is not None
+            else (
+                "Your requests have been paused because the bot received repeated "
+                "requests too quickly. Please stop repeated or automated requests "
+                "and try again later."
+            )
+        )
+        try:
+            await self._abuse_warning(
+                error.user_id,
+                error.chat_id,
+                f"{warning}\n\nPlease try again in about {error.retry_after} seconds.",
+            )
+        except Exception as warning_error:
+            LOGGER.warning(
+                "Unable to send a Mini App abuse warning (%s)",
+                type(warning_error).__name__,
+            )
+
+    def _record_access(
+        self,
+        request: MiniAppHttpRequest,
+        response: MiniAppHttpResponse,
+        *,
+        session: MiniAppSession | None,
+        duration_seconds: float,
+    ) -> None:
+        self._traffic["requests"] += 1
+        if response.status < 400:
+            self._traffic["successes"] += 1
+        elif response.status < 500:
+            self._traffic["client_errors"] += 1
+        else:
+            self._traffic["server_errors"] += 1
+        settings = self._audit_settings
+        if settings is None or (not self._access_log and response.status < 400):
+            return
+        audit_event(
+            LOGGER,
+            settings,
+            "mini_app_request",
+            metadata={
+                "method": request.method.upper()[:8],
+                "route": self._route_name(request.target),
+                "status": response.status,
+                "duration_ms": round(duration_seconds * 1000, 3),
+            },
+            identity=audit_identity(
+                settings,
+                user_id=session.user_id if session is not None else None,
+                chat_id=session.chat_id if session is not None else None,
+                client_ip=request.client_key,
+            ),
+            level=logging.WARNING if response.status >= 400 else logging.INFO,
+        )
+
+    def _session_from_request(
+        self,
+        request: MiniAppHttpRequest,
+    ) -> MiniAppSession | None:
+        authorization = _header(request.headers, "authorization") or ""
+        match = _BEARER_RE.fullmatch(authorization)
+        if match is None:
+            return None
+        return self._sessions.get(match.group(1), touch=False)
+
+    def _rate_cost(self, request: MiniAppHttpRequest) -> float:
+        path = urlsplit(request.target).path
+        expensive = {
+            f"{self._api_prefix}/scripture",
+            f"{self._api_prefix}/search",
+            f"{self._api_prefix}/post",
+        }
+        if request.method.upper() == "POST" and path in expensive:
+            return 1.0
+        return self._navigation_rate_cost
+
+    def _route_name(self, target: str) -> str:
+        path = urlsplit(target).path
+        prefix = f"{self._api_prefix}/"
+        if not path.startswith(prefix):
+            return "not_found"
+        relative = path[len(prefix) :]
+        if self._search_path_re.fullmatch(path) is not None:
+            return "search_page"
+        if self._basket_item_path_re.fullmatch(path) is not None:
+            return "basket_item"
+        known = {
+            "session",
+            "translations",
+            "books",
+            "chapters",
+            "scripture",
+            "search",
+            "basket",
+            "basket/items",
+            "basket/order",
+            "preferences",
+            "post",
+        }
+        return relative if relative in known else "not_found"
 
     async def _translations(self, session: MiniAppSession) -> MiniAppHttpResponse:
         options = await self._service.translations()

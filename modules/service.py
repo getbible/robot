@@ -31,9 +31,11 @@ from getbible import (
 )
 
 from config import Settings
-from modules.catalog import BookOption, CatalogClient, ChapterOption, TranslationOption
-from modules.errors import CircuitOpen, RobotBusy, RobotInputError, ScriptureUnavailable
-from modules.interactions import SearchOptions, SearchResult
+
+from .audit import audit_event
+from .catalog import BookOption, CatalogClient, ChapterOption, TranslationOption
+from .errors import CircuitOpen, RobotBusy, RobotInputError, ScriptureUnavailable
+from .interactions import SearchOptions, SearchResult
 
 LOGGER = logging.getLogger(__name__)
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
@@ -447,6 +449,17 @@ class ScriptureService:
             )
         except (TimeoutError, asyncio.TimeoutError) as error:
             self.metrics.increment(queue_metric)
+            audit_event(
+                LOGGER,
+                self.settings,
+                "capacity_queue_rejected",
+                metadata={
+                    "operation": metric,
+                    "queue_metric": queue_metric,
+                    "queue_timeout_seconds": self.settings.queue_timeout,
+                },
+                level=logging.WARNING,
+            )
             raise RobotBusy("The Scripture lookup queue is full.") from error
 
         submitted = False
@@ -468,6 +481,13 @@ class ScriptureService:
             )
         except CircuitOpen:
             self.metrics.increment("circuit_rejections")
+            audit_event(
+                LOGGER,
+                self.settings,
+                "upstream_circuit_rejected",
+                metadata={"operation": metric},
+                level=logging.WARNING,
+            )
             raise
         except (
             ReferenceValidationError,
@@ -479,6 +499,16 @@ class ScriptureService:
             raise
         except (TimeoutError, asyncio.TimeoutError) as error:
             self.metrics.increment("lookup_timeouts")
+            audit_event(
+                LOGGER,
+                self.settings,
+                "lookup_timed_out",
+                metadata={
+                    "operation": metric,
+                    "timeout_seconds": self.settings.lookup_timeout,
+                },
+                level=logging.WARNING,
+            )
             if wrapped_future is not None:
                 wrapped_future.add_done_callback(_consume_background_result)
             await circuit.failure()

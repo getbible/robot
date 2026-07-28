@@ -14,9 +14,27 @@ class RobotInputError(RobotError):
 class RobotRateLimited(RobotError):
     """An inbound user or chat budget has been exhausted."""
 
-    def __init__(self, retry_after: float) -> None:
+    def __init__(
+        self,
+        retry_after: float,
+        *,
+        blocked: bool = False,
+        new_block: bool = False,
+        violation_count: int = 0,
+        scopes: tuple[str, ...] = (),
+        user_id: int | None = None,
+        chat_id: int | None = None,
+        client_key: str | None = None,
+    ) -> None:
         super().__init__("Inbound rate limit exceeded.")
         self.retry_after = max(1, int(retry_after + 0.999))
+        self.blocked = blocked
+        self.new_block = new_block
+        self.violation_count = max(0, violation_count)
+        self.scopes = scopes
+        self.user_id = user_id
+        self.chat_id = chat_id
+        self.client_key = client_key
 
 
 class RobotBusy(RobotError):

@@ -62,6 +62,18 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.mini_app_sessions_per_user, 2)
         self.assertEqual(settings.mini_app_max_available_selections, 256)
         self.assertEqual(settings.mini_app_max_selections, 100)
+        self.assertEqual(
+            settings.mini_app_trusted_proxy_cidrs,
+            ("127.0.0.1/32", "::1/128"),
+        )
+        self.assertEqual(settings.mini_app_navigation_rate_cost, 0.25)
+        self.assertEqual(settings.mini_app_ip_rate_capacity, 60)
+        self.assertEqual(settings.mini_app_session_exchange_rate_capacity, 10)
+        self.assertEqual(
+            settings.mini_app_session_exchange_rate_refill_per_second,
+            0.2,
+        )
+        self.assertTrue(settings.mini_app_access_log)
 
     def test_mini_app_configuration_fails_closed(self) -> None:
         invalid = (
@@ -100,6 +112,21 @@ class SettingsTestCase(unittest.TestCase):
                 "MINI_APP_ENABLED": "true",
                 "MINI_APP_PUBLIC_URL": "https://bot.example.com/app",
                 "MINI_APP_INIT_DATA_MAX_AGE_SECONDS": "901",
+            },
+            {
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://bot.example.com/app",
+                "MINI_APP_TRUSTED_PROXY_CIDRS": "not-a-network",
+            },
+            {
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://bot.example.com/app",
+                "MINI_APP_NAVIGATION_RATE_COST": "0",
+            },
+            {
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://bot.example.com/app",
+                "MINI_APP_SESSION_EXCHANGE_RATE_CAPACITY": "0",
             },
         )
         for overrides in invalid:
@@ -355,6 +382,9 @@ class SettingsTestCase(unittest.TestCase):
         self.assertIsNone(settings.user_preferences_file)
         self.assertEqual(settings.user_preference_limit, 10_000)
         self.assertEqual(settings.audit_log_mode, "metadata")
+        self.assertEqual(settings.audit_identity_mode, "pseudonymous")
+        self.assertEqual(settings.abuse_rejection_threshold, 6)
+        self.assertEqual(settings.abuse_block_seconds, 300)
 
     def test_instance_file_and_audit_configuration_is_validated(self) -> None:
         invalid = (
@@ -366,6 +396,9 @@ class SettingsTestCase(unittest.TestCase):
             {"USER_PREFERENCES_FILE": "relative.sqlite3"},
             {"USER_PREFERENCE_LIMIT": "99"},
             {"AUDIT_LOG_MODE": "everything"},
+            {"AUDIT_IDENTITY_MODE": "everything"},
+            {"ABUSE_REJECTION_THRESHOLD": "1"},
+            {"ABUSE_BLOCK_SECONDS": "0"},
         )
         for overrides in invalid:
             with (

@@ -58,9 +58,12 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
 - complete, bounded reference parsing with no silent fallback to a different verse;
 - bounded input length, reference count, verses per reference, and total verses;
 - bounded Telegram message count and UTF-16-aware message sizing;
-- per-user and per-chat token buckets applied to commands and free-text inputs;
-- bounded rate-limit state under arbitrary identifier churn;
-- rejection-notification cooldowns that prevent Telegram API amplification;
+- per-user, per-chat, and Mini App client token buckets, with fractional cost
+  for normal browser navigation;
+- bounded rate-limit and temporary-abuse-block state under arbitrary identifier
+  churn;
+- private/ephemeral abuse notices and cooldowns that prevent Telegram API
+  amplification;
 - owner-scoped, TTL/LRU-bounded interactive and Mini App sessions;
 - fresh Telegram Mini App signature validation plus user-bound, short-lived
   launch authorization for every data/action API;
@@ -86,7 +89,8 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
 - selectable long polling or reverse-proxied HTTPS webhook delivery, with
   duplicate pollers stopped instead of restarted;
 - continuously size-capped per-instance JSONL/journal logs with metadata-only
-  auditing by default and explicit content opt-in;
+  auditing by default, independent disabled/pseudonymous/raw identity controls,
+  trusted-proxy client-IP resolution, and explicit content opt-in;
 - lifecycle-aware health and readiness endpoints with process and Mini App metrics;
 - isolated locked service accounts and restartable, capability-free,
   filesystem-protected `systemd` instances with watchdog, memory-high,
@@ -115,18 +119,21 @@ supervised multi-bot container. See [Docker deployment](docs/DOCKER.md).
 ## Docker quick start
 
 ```bash
-cp docker/examples/compose.env.example .env
-chmod 600 .env
+./setup.sh docker-init
 ${EDITOR:-vi} .env
+./setup.sh docker-validate
 ./setup.sh docker-deploy
 ./setup.sh docker-doctor
 ```
 
 The default Compose model runs one bot in one 256 MiB container and publishes
 only its configured Mini App port. Missing configuration is reported through
-container stdout/stderr. Use `./setup.sh docker-manage` for the in-container
-operations menu or `./setup.sh docker-shell` for a non-root shell. Multi-bot
-mode remains available through `./setup.sh docker-deploy --multi`.
+container stdout/stderr. The versioned `compose.yaml` and private generated
+`.env` expose application, memory, CPU, PID, cache, session, rate, abuse, and
+log controls. Use `./setup.sh docker-config` to edit, validate, and apply
+values, `./setup.sh docker-manage` for the in-container operations menu, or
+`./setup.sh docker-shell` for a non-root shell. Multi-bot mode remains
+available through `./setup.sh docker-deploy --multi`.
 
 ## Dependency policy
 

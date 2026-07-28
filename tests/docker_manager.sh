@@ -70,6 +70,20 @@ export PATH="${FAKE_BIN}:${PATH}"
 export TELEGRAM_API_TOKEN="123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
 export MINI_APP_PUBLIC_URL="https://bot.example.com/getbible/production"
 
+ENV_FILE="${TEST_ROOT}/deployment/robot.env"
+INIT_OUTPUT=$(
+    bash "${ROOT}/setup.sh" docker-init --env-file "$ENV_FILE"
+)
+[[ "$INIT_OUTPUT" == *"Created editable Docker environment"* &&
+    -f "$ENV_FILE" ]] || {
+    printf 'Docker init did not create the editable environment.\n' >&2
+    exit 1
+}
+[[ "$(stat -c '%a' "$ENV_FILE")" == "600" ]] || {
+    printf 'Docker init environment permissions are not private.\n' >&2
+    exit 1
+}
+
 LIST_OUTPUT=$(bash "${ROOT}/setup.sh" docker-list)
 [[ "$LIST_OUTPUT" == *"getbible-robot-production"* ]] || {
     printf 'Docker list did not show the fixture container.\n' >&2
@@ -109,6 +123,22 @@ DEPLOY_OUTPUT=$(bash "${ROOT}/setup.sh" docker-deploy)
     exit 1
 }
 
+VALIDATE_OUTPUT=$(
+    bash "${ROOT}/setup.sh" docker-validate --env-file "$ENV_FILE"
+)
+[[ "$VALIDATE_OUTPUT" == *"application configuration are valid"* ]] || {
+    printf 'Docker validate did not complete the application validation.\n' >&2
+    exit 1
+}
+
+RESTART_OUTPUT=$(
+    bash "${ROOT}/setup.sh" docker-restart --env-file "$ENV_FILE"
+)
+[[ "$RESTART_OUTPUT" == *"configuration changes take effect"* ]] || {
+    printf 'Docker restart did not recreate the workload.\n' >&2
+    exit 1
+}
+
 grep -Fq -- "compose --project-directory ${ROOT} --file ${ROOT}/compose.yaml config --quiet" \
     "$FAKE_DOCKER_LOG" || {
     printf 'Docker deploy did not validate the recommended Compose file.\n' >&2
@@ -117,6 +147,15 @@ grep -Fq -- "compose --project-directory ${ROOT} --file ${ROOT}/compose.yaml con
 grep -Fq -- "compose --project-directory ${ROOT} --file ${ROOT}/compose.yaml up --detach --build" \
     "$FAKE_DOCKER_LOG" || {
     printf 'Docker deploy did not build and start the recommended Compose file.\n' >&2
+    exit 1
+}
+grep -Fq -- "compose --env-file ${ENV_FILE} --project-directory ${ROOT} --file ${ROOT}/compose.yaml build robot" \
+    "$FAKE_DOCKER_LOG" || {
+    printf 'Docker validate did not build the validation image.\n' >&2
+    exit 1
+}
+grep -Fq -- "--force-recreate --no-build" "$FAKE_DOCKER_LOG" || {
+    printf 'Docker restart did not force a configuration-aware recreation.\n' >&2
     exit 1
 }
 

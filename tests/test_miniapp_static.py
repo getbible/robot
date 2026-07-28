@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 
+from modules.miniapp_tornado import ClientAddressResolver
+
 ROOT = Path(__file__).resolve().parents[1]
 TORNADO_ADAPTER = ROOT / "modules" / "miniapp_tornado.py"
 
@@ -16,6 +18,30 @@ class MiniAppStaticCacheTestCase(unittest.TestCase):
             source,
         )
         self.assertNotIn('"public, max-age=3600"', source)
+
+    def test_forwarded_client_address_requires_a_trusted_direct_peer(self) -> None:
+        resolver = ClientAddressResolver(
+            ("127.0.0.1/32", "172.20.0.0/24"),
+        )
+        self.assertEqual(
+            resolver.resolve("198.51.100.10", "192.0.2.1"),
+            "198.51.100.10",
+        )
+        self.assertEqual(
+            resolver.resolve("127.0.0.1", "192.0.2.1"),
+            "192.0.2.1",
+        )
+        self.assertEqual(
+            resolver.resolve(
+                "172.20.0.4",
+                "192.0.2.1, 172.20.0.3",
+            ),
+            "192.0.2.1",
+        )
+        self.assertEqual(
+            resolver.resolve("127.0.0.1", "invalid, 192.0.2.1"),
+            "127.0.0.1",
+        )
 
 
 if __name__ == "__main__":

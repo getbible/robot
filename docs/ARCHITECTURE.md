@@ -143,10 +143,12 @@ After the threshold:
 
 Librarian reference, chapter, book, translation, and search caches are bounded.
 The negative translation cache has a TTL and size limit. Navigation-catalog
-caches, interactive sessions, user/chat token buckets, rejection-notification
-cooldown state, and the durable per-user translation table are all bounded.
+caches, interactive sessions, user/chat/client token buckets, abuse-window and
+temporary-block state, rejection-notification cooldown state, and the durable
+per-user translation table are all bounded.
 
-Arbitrary reference strings, translation names, user IDs, and chat IDs therefore cannot create permanent process growth without limit.
+Arbitrary reference strings, translation names, user IDs, chat IDs, and client
+addresses therefore cannot create permanent process growth without limit.
 
 The small-host profile retains one parsed translation, one search corpus, 256
 chapters, 1000 parsed references, 200 Telegram interactions, 200 Mini App
@@ -209,17 +211,33 @@ are process-local.
 
 Expected failures map to fixed user-safe messages. Unexpected failures receive a random correlation ID; raw exception strings are never reflected to Telegram.
 
-Every structured event is tagged with `INSTANCE_NAME` and is written to journald plus the optional absolute `LOG_FILE`. Metadata audit mode records event names, filter modes, translations, counts, exception class names, and correlation IDs without Telegram message text. Content audit mode is an explicit operator choice that additionally permits normalized search terms and final references. Neither mode records tokens, user/chat IDs, verse bodies, repository payloads, or secret paths. Metrics remain aggregate counters.
+Every structured event is tagged with `INSTANCE_NAME` and is written to
+journald plus the optional absolute `LOG_FILE`. Metadata audit mode records
+event names, filter modes, translations, counts, exception class names, and
+correlation IDs without Telegram message text. Content audit mode is an
+explicit operator choice that additionally permits normalized search terms and
+final references.
+
+The independent identity audit mode is `disabled`, `pseudonymous`, or `raw`.
+Pseudonymous mode uses stable keyed identifiers; raw mode records numeric
+Telegram user/chat IDs and resolved Mini App client IP addresses for abuse
+investigation. Telegram updates never expose user IPs. Mini App forwarding
+headers are accepted only from configured trusted proxy networks, preventing a
+public client from choosing the logged or rate-limited address. No mode records
+tokens, names, usernames, verse bodies, repository payloads, browser
+authorization data, or secret paths. Metrics remain aggregate counters.
 
 ## Privacy
 
 In metadata audit mode the robot does not persist update text, references,
-searches, names, usernames, profiles, or chat history. The restricted
-per-instance preference database stores only Telegram user ID, translation
-code, and update time. In explicitly enabled content audit mode, final
-references and search terms are also persisted to the restricted per-instance
-log for its configured retention period. Short-lived launch, query, and
-selection state otherwise exists only in bounded process memory and expires on
-inactivity or restart. Telegram `initData` is used only for request
+searches, names, usernames, profiles, or chat history. Identity logging is
+configured separately: the default persists only keyed identifiers, while raw
+mode deliberately persists Telegram IDs and Mini App client IPs. The
+restricted per-instance preference database stores only Telegram user ID,
+translation code, and update time. In explicitly enabled content audit mode,
+final references and search terms are also persisted to the restricted
+per-instance log for its configured retention period. Short-lived launch,
+query, and selection state otherwise exists only in bounded process memory and
+expires on inactivity or restart. Telegram `initData` is used only for request
 authentication and is not written to application logs. Telegram and the
 configured GetBible API remain independent external services.

@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from ipaddress import IPv4Address, IPv6Address, ip_address
+from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -22,6 +22,7 @@ _INSTANCE_RE = re.compile(r"[a-z][a-z0-9-]{0,22}[a-z0-9]\Z")
 _TELEGRAM_TOKEN_RE = re.compile(r"[0-9]{6,12}:[A-Za-z0-9_-]{30,64}\Z")
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _AUDIT_LOG_MODES = frozenset({"metadata", "content"})
+_AUDIT_IDENTITY_MODES = frozenset({"disabled", "pseudonymous", "raw"})
 _DELIVERY_MODES = frozenset({"polling", "webhook"})
 _WEBHOOK_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
 _WEBHOOK_PATH_RE = re.compile(r"/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\Z")
@@ -131,6 +132,29 @@ def _message(name: str, default: str) -> str:
     if not value or len(value) > 4096:
         raise ConfigurationError(f"{name} must contain between 1 and 4096 characters.")
     return value
+
+
+def _network_list(name: str, default: str) -> tuple[str, ...]:
+    raw = _env(name, default) or ""
+    if not raw:
+        return ()
+    values: list[str] = []
+    for candidate in raw.split(","):
+        candidate = candidate.strip()
+        if not candidate:
+            raise ConfigurationError(f"{name} contains an empty network.")
+        try:
+            network = ip_network(candidate, strict=False)
+        except ValueError as error:
+            raise ConfigurationError(
+                f"{name} must contain comma-separated IPv4 or IPv6 CIDR networks."
+            ) from error
+        normalized = str(network)
+        if normalized not in values:
+            values.append(normalized)
+    if len(values) > 32:
+        raise ConfigurationError(f"{name} cannot contain more than 32 networks.")
+    return tuple(values)
 
 
 def _profile_text(name: str, default: str, maximum: int) -> str:
@@ -355,6 +379,10 @@ class Settings:
     chat_rate_refill_per_second: float
     rate_limit_cache_size: int
     rate_limit_notice_cooldown: float
+    abuse_rejection_threshold: int
+    abuse_window_seconds: float
+    abuse_block_seconds: float
+    abuse_warning_message: str
     interaction_session_limit: int
     interaction_ttl_seconds: float
     catalog_cache_ttl_seconds: float
@@ -369,6 +397,7 @@ class Settings:
     log_file: str | None
     log_max_bytes: int
     audit_log_mode: str
+    audit_identity_mode: str
     log_level: int
     containerized: bool = False
     mini_app_enabled: bool = False
@@ -386,6 +415,16 @@ class Settings:
     mini_app_body_timeout_seconds: float = 10.0
     mini_app_idle_timeout_seconds: float = 30.0
     mini_app_max_header_bytes: int = 16 * 1024
+    mini_app_trusted_proxy_cidrs: tuple[str, ...] = (
+        "127.0.0.1/32",
+        "::1/128",
+    )
+    mini_app_ip_rate_capacity: int = 60
+    mini_app_ip_rate_refill_per_second: float = 10.0
+    mini_app_session_exchange_rate_capacity: int = 10
+    mini_app_session_exchange_rate_refill_per_second: float = 0.2
+    mini_app_navigation_rate_cost: float = 0.25
+    mini_app_access_log: bool = True
 
     @classmethod
     def from_env(cls, *, load_environment_file: bool = True) -> Settings:
@@ -411,6 +450,13 @@ class Settings:
         audit_log_mode = (_env("AUDIT_LOG_MODE", "metadata") or "").casefold()
         if audit_log_mode not in _AUDIT_LOG_MODES:
             raise ConfigurationError("AUDIT_LOG_MODE must be metadata or content.")
+        audit_identity_mode = (
+            _env("AUDIT_IDENTITY_MODE", "pseudonymous") or ""
+        ).casefold()
+        if audit_identity_mode not in _AUDIT_IDENTITY_MODES:
+            raise ConfigurationError(
+                "AUDIT_IDENTITY_MODE must be disabled, pseudonymous, or raw."
+            )
 
         containerized = _boolean("CONTAINERIZED", False)
         delivery_mode = _delivery_mode()
@@ -572,6 +618,21 @@ class Settings:
             rate_limit_notice_cooldown=_number(
                 "RATE_LIMIT_NOTICE_COOLDOWN", 10.0, 1.0, 300.0
             ),
+            abuse_rejection_threshold=_integer(
+                "ABUSE_REJECTION_THRESHOLD", 6, 2, 100
+            ),
+            abuse_window_seconds=_number(
+                "ABUSE_WINDOW_SECONDS", 60.0, 10.0, 3600.0
+            ),
+            abuse_block_seconds=_number(
+                "ABUSE_BLOCK_SECONDS", 300.0, 10.0, 86_400.0
+            ),
+            abuse_warning_message=_message(
+                "ABUSE_WARNING_MESSAGE",
+                "Your requests have been paused because the bot received repeated "
+                "requests too quickly. Please stop repeated or automated requests "
+                "and try again later.",
+            ),
             interaction_session_limit=_integer(
                 "INTERACTION_SESSION_LIMIT", 200, 10, 20_000
             ),
@@ -599,6 +660,7 @@ class Settings:
                 1024 * 1024 * 1024,
             ),
             audit_log_mode=audit_log_mode,
+            audit_identity_mode=audit_identity_mode,
             log_level=log_level,
             containerized=containerized,
             mini_app_enabled=mini_app_enabled,
@@ -638,4 +700,36 @@ class Settings:
             mini_app_max_header_bytes=_integer(
                 "MINI_APP_MAX_HEADER_BYTES", 16 * 1024, 4096, 64 * 1024
             ),
+            mini_app_trusted_proxy_cidrs=_network_list(
+                "MINI_APP_TRUSTED_PROXY_CIDRS",
+                "127.0.0.1/32,::1/128",
+            ),
+            mini_app_ip_rate_capacity=_integer(
+                "MINI_APP_IP_RATE_CAPACITY", 60, 10, 10_000
+            ),
+            mini_app_ip_rate_refill_per_second=_number(
+                "MINI_APP_IP_RATE_REFILL_PER_SECOND",
+                10.0,
+                0.1,
+                10_000.0,
+            ),
+            mini_app_session_exchange_rate_capacity=_integer(
+                "MINI_APP_SESSION_EXCHANGE_RATE_CAPACITY",
+                10,
+                1,
+                10_000,
+            ),
+            mini_app_session_exchange_rate_refill_per_second=_number(
+                "MINI_APP_SESSION_EXCHANGE_RATE_REFILL_PER_SECOND",
+                0.2,
+                0.01,
+                10_000.0,
+            ),
+            mini_app_navigation_rate_cost=_number(
+                "MINI_APP_NAVIGATION_RATE_COST",
+                0.25,
+                0.05,
+                1.0,
+            ),
+            mini_app_access_log=_boolean("MINI_APP_ACCESS_LOG", True),
         )
