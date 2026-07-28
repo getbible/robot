@@ -69,6 +69,9 @@
           class="translation-chip"
           type="button"
           aria-label="Change default translation"
+          aria-haspopup="dialog"
+          aria-controls="translation-dialog"
+          aria-expanded="false"
         >
           KJV
         </button>
@@ -232,13 +235,10 @@
             <div
               id="bible-picker"
               class="bible-picker"
+              role="group"
               aria-label="Bible navigation"
               data-i18n-aria-label="bible.navigation"
             >
-              <label class="select-control">
-                <span data-i18n="bible.translation">Translation</span>
-                <select id="bible-translation"></select>
-              </label>
               <label class="select-control">
                 <span data-i18n="bible.book">Book</span>
                 <select id="bible-book" disabled>
@@ -263,7 +263,13 @@
             >
               ‹
             </button>
-            <button id="bible-passage" class="reader-toolbar__passage" type="button">
+            <button
+              id="bible-passage"
+              class="reader-toolbar__passage"
+              type="button"
+              aria-controls="bible-picker"
+              aria-expanded="false"
+            >
               <strong id="bible-reference"></strong>
               <span>
                 <span id="bible-translation-label"></span>
@@ -292,6 +298,7 @@
             class="reader-scripture"
             aria-label="Chapter verses"
             data-i18n-aria-label="bible.verses_label"
+            aria-busy="false"
           ></div>
           <button
             id="bible-continue"
@@ -380,12 +387,51 @@
       </nav>
     </div>
 
-    <dialog id="filters-dialog" class="sheet">
+    <dialog
+      id="translation-dialog"
+      class="sheet sheet--translation"
+      aria-labelledby="translation-title"
+    >
+      <div class="sheet__surface sheet__surface--translation">
+        <header class="sheet__header">
+          <div>
+            <p class="eyebrow" data-i18n="bible.eyebrow">Read Scripture</p>
+            <h2 id="translation-title" data-i18n="bible.translation">Translation</h2>
+          </div>
+          <button
+            id="close-translation"
+            class="icon-button"
+            type="button"
+            aria-label="Translation"
+          >
+            ×
+          </button>
+        </header>
+
+        <div class="sheet__content sheet__content--translation">
+          <label class="select-control" for="translation-select">
+            <span data-i18n="bible.translation">Translation</span>
+            <select id="translation-select"></select>
+          </label>
+          <div
+            id="translation-details"
+            class="translation-details"
+            aria-live="polite"
+          ></div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog
+      id="filters-dialog"
+      class="sheet"
+      aria-labelledby="filters-title"
+    >
       <form id="filters-form" class="sheet__surface">
         <header class="sheet__header">
           <div>
             <p class="eyebrow" data-i18n="filters.eyebrow">Search settings</p>
-            <h2 data-i18n="filters.title">Filter results</h2>
+            <h2 id="filters-title" data-i18n="filters.title">Filter results</h2>
           </div>
           <button
             class="icon-button"
@@ -399,11 +445,6 @@
         </header>
 
         <div class="sheet__content">
-          <label class="select-control">
-            <span data-i18n="bible.translation">Translation</span>
-            <select id="filter-translation" name="translation"></select>
-          </label>
-
           <fieldset class="choice-group">
             <legend data-i18n="filters.words">Words</legend>
             <label><input type="radio" name="words" value="all" checked><span data-i18n="filters.all">All</span></label>

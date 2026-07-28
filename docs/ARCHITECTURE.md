@@ -61,7 +61,11 @@ An empty `/bible` does not enter the reference parser and never falls back to a
 configured verse. It creates a short-lived, owner-bound launch and resumes the
 Mini App Bible reader from four stored identifiers: translation, book, chapter,
 and verse. Complete chapters come from the Main API through a bounded,
-hash-verified process cache. The basket can combine separate verses and ranges
+hash-verified process cache. Both the stability of the published hash and the
+digest of the downloaded chapter bytes are verified before content is cached.
+Search and chapter retrieval are read-only; explicit serialized preference
+updates are the sole writer of the global translation and reader position. The
+basket can combine separate verses and ranges
 across chapters/books and compacts overlapping or adjacent intervals before
 final validation. Only the final Librarian-resolved Scripture is posted into
 the originating chat and forum topic.

@@ -1020,7 +1020,7 @@ select:focus-visible {
 .bible-picker {
   display: grid;
   margin-bottom: 16px;
-  grid-template-columns: 1.25fr 1.45fr 0.8fr;
+  grid-template-columns: minmax(0, 1.55fr) minmax(96px, 0.75fr);
   gap: 9px;
 }
 
@@ -1531,6 +1531,44 @@ select:focus-visible {
   overflow: hidden;
 }
 
+.sheet__surface--translation {
+  max-height: min(
+    420px,
+    calc(var(--app-height) - max(var(--safe-top), 12px))
+  );
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.sheet__content--translation {
+  align-content: start;
+}
+
+.translation-details {
+  display: grid;
+  min-height: 72px;
+  padding: 14px 15px;
+  gap: 5px;
+  border: 1px solid var(--separator);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.translation-details strong,
+.translation-details span {
+  overflow-wrap: anywhere;
+}
+
+.translation-details strong {
+  font-size: 0.95rem;
+  line-height: 1.35;
+}
+
+.translation-details span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 620;
+}
+
 .sheet__header {
   display: flex;
   padding: 18px calc(var(--safe-right) + 18px) 14px calc(var(--safe-left) + 18px);
@@ -1864,6 +1902,10 @@ select:focus-visible {
     padding-right: 18px;
     padding-left: 11px;
     grid-template-columns: 34px minmax(0, 1fr);
+  }
+
+  .sheet__surface--translation {
+    width: min(100%, 520px);
   }
 }
 

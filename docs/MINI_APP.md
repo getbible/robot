@@ -192,7 +192,8 @@ authenticated Robot backend. Librarian remains responsible for reference
 parsing, search, direct `/bible <reference>` retrieval, and final
 server-authoritative basket posting.
 
-The chapter client verifies a stable API hash before accepting a response and
+The chapter client verifies that the published hash is stable before and after
+the read and that the downloaded chapter bytes produce that exact hash. It
 retries once if the chapter changes mid-read. Accepted chapters share one
 process-wide, 64-entry least-recently-used cache with a 15-minute freshness
 window, and each upstream chapter body has an independent 1 MiB ceiling. Those
@@ -212,6 +213,14 @@ value and text direction. Selecting another translation updates the document
 language, left-to-right or right-to-left direction, static labels,
 placeholders, accessibility labels, and generated search, Bible, and selection
 state immediately; a page reload is not required.
+
+The header chip is the exclusive translation selector. Search filters do not
+duplicate translation, and the Bible passage picker contains only book and
+chapter. While the Bible reader is open, a translation change invalidates and
+removes the old chapter immediately, then reloads the same canonical book,
+chapter, and nearest visible verse. The selector also displays the bounded
+translation name, language, and abbreviation returned by the existing session
+catalog.
 
 The localization sources are:
 

@@ -13,10 +13,10 @@ import time
 from collections import Counter, OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
-from getbible import RequestLimitError
+from getbible import RequestLimitError, TranslationNotFoundError
 
 from config import Settings
 
@@ -54,6 +54,7 @@ LOGGER = logging.getLogger(__name__)
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
 _BEARER_RE = re.compile(r"Bearer ([A-Za-z0-9_-]{16,128})\Z")
 MAX_MINIAPP_CHAPTER_VERSES = 250
+_PREFERENCE_UNCHANGED = object()
 _SEARCH_ENUMS: dict[str, frozenset[str]] = {
     "words": frozenset({"all", "any", "phrase"}),
     "match": frozenset({"whole_word", "substring"}),
@@ -352,6 +353,12 @@ class MiniAppApi:
             )
         except MiniAppApiInputError as error:
             return self._error_response(400, "invalid_request", str(error))
+        except TranslationNotFoundError:
+            return self._error_response(
+                400,
+                "invalid_request",
+                "translation is not available.",
+            )
         except (OverflowError, ValueError) as error:
             return self._error_response(400, "invalid_request", str(error))
         except RobotRateLimited as error:
@@ -540,13 +547,24 @@ class MiniAppApi:
             if translations is not None
             else await self._service.translations()
         )
+        preferences = self._preferences.preferences_for(session.user_id)
+        available = {option.code for option in options}
+        if preferences.translation not in available and options:
+            preferences = self._preferences.update_preferences(
+                session.user_id,
+                translation=options[0].code,
+            )
+        self._sessions.set_user_translation(
+            session.user_id,
+            preferences.translation,
+        )
         return self._response(
             status,
             {
                 "session_token": session.token,
                 "expires_in": int(self._sessions.snapshot()["ttl_seconds"]),
                 "user": {"id": session.user_id},
-                "preferences": self._preferences.preferences_for(session.user_id).as_dict(),
+                "preferences": preferences.as_dict(),
                 "entrypoint": {
                     "route": session.launch.initial_route,
                     "query": session.launch.initial_query,
@@ -752,6 +770,8 @@ class MiniAppApi:
         query: str,
     ) -> MiniAppHttpResponse:
         values = _query(query)
+        if set(values) - {"translation"}:
+            raise MiniAppApiInputError("Books request contains unsupported parameters.")
         translation = _translation(values.get("translation"), session.translation)
         books = await self._service.books(translation)
         return self._response(
@@ -768,6 +788,8 @@ class MiniAppApi:
         query: str,
     ) -> MiniAppHttpResponse:
         values = _query(query)
+        if set(values) - {"translation", "book"}:
+            raise MiniAppApiInputError("Chapters request contains unsupported parameters.")
         translation = _translation(values.get("translation"), session.translation)
         book_number = _positive_integer(values.get("book"), "book", maximum=1000)
         books = await self._service.books(translation)
@@ -826,16 +848,6 @@ class MiniAppApi:
             book,
             chapters,
             chapter,
-        )
-        self._remember_translation(session, translation)
-        self._preferences.set_reader_location(
-            session.user_id,
-            ReaderLocation(
-                translation=translation,
-                book=book.number,
-                chapter=chapter.number,
-                verse=target_verse,
-            ),
         )
         items: list[dict[str, object]] = []
         for verse in content.verses:
@@ -954,7 +966,6 @@ class MiniAppApi:
             total=page.total,
             items=page.items,
         )
-        self._remember_translation(session, page.translation)
         return self._response(200, self._search_payload(search, 0))
 
     def _search_page(
@@ -964,6 +975,8 @@ class MiniAppApi:
         query: str,
     ) -> MiniAppHttpResponse:
         values = _query(query)
+        if set(values) - {"page"}:
+            raise MiniAppApiInputError("Search page contains unsupported parameters.")
         page = _nonnegative_integer(values.get("page", "0"), "page", maximum=10_000)
         search = self._sessions.search(session, search_token)
         if search is None:
@@ -1023,29 +1036,68 @@ class MiniAppApi:
             raise MiniAppApiInputError("preferences contains unsupported fields.")
         if not payload:
             raise MiniAppApiInputError("preferences must not be empty.")
-        if "translation" in payload:
-            translation = _translation(payload["translation"], session.translation)
-            if not await self._service.translation_exists(translation):
-                raise MiniAppApiInputError("translation is not available.")
-            self._preferences.set_translation(session.user_id, translation)
-            session.translation = translation
-        if "search_defaults" in payload:
+        async with session.preference_lock:
+            current = self._preferences.preferences_for(session.user_id)
+            translation = current.translation
+            if "translation" in payload:
+                translation = _translation(payload["translation"], session.translation)
+                available = {
+                    option.code for option in await self._service.translations()
+                }
+                if translation not in available:
+                    raise MiniAppApiInputError("translation is not available.")
+
+            defaults: SearchDefaults | None = None
+            if "search_defaults" in payload:
+                try:
+                    defaults = SearchDefaults.validated(payload["search_defaults"])
+                except ValueError as error:
+                    raise MiniAppApiInputError(str(error)) from error
+
+            location: ReaderLocation | None | object = _PREFERENCE_UNCHANGED
+            if "reader_location" in payload:
+                raw_location = payload["reader_location"]
+                if raw_location is None:
+                    location = None
+                else:
+                    try:
+                        location = ReaderLocation.validated(raw_location)
+                    except ValueError as error:
+                        raise MiniAppApiInputError(str(error)) from error
+                    if location.translation != translation:
+                        raise MiniAppApiInputError(
+                            "Reader location translation must match the preference."
+                        )
+                    await self._validate_reader_location(location)
+
             try:
-                defaults = SearchDefaults.validated(payload["search_defaults"])
+                if location is _PREFERENCE_UNCHANGED:
+                    preferences = self._preferences.update_preferences(
+                        session.user_id,
+                        translation=(
+                            translation if "translation" in payload else None
+                        ),
+                        search_defaults=defaults,
+                    )
+                else:
+                    preferences = self._preferences.update_preferences(
+                        session.user_id,
+                        translation=(
+                            translation if "translation" in payload else None
+                        ),
+                        search_defaults=defaults,
+                        reader_location=cast(ReaderLocation | None, location),
+                    )
             except ValueError as error:
                 raise MiniAppApiInputError(str(error)) from error
-            self._preferences.set_search_defaults(session.user_id, defaults)
-        if "reader_location" in payload:
-            try:
-                location = ReaderLocation.validated(payload["reader_location"])
-            except ValueError as error:
-                raise MiniAppApiInputError(str(error)) from error
-            await self._validate_reader_location(location)
-            self._preferences.set_reader_location(session.user_id, location)
-        return self._response(
-            200,
-            {"preferences": self._preferences.preferences_for(session.user_id).as_dict()},
-        )
+            self._sessions.set_user_translation(
+                session.user_id,
+                preferences.translation,
+            )
+            return self._response(
+                200,
+                {"preferences": preferences.as_dict()},
+            )
 
     async def _validate_reader_location(self, location: ReaderLocation) -> None:
         books = await self._service.books(location.translation)
@@ -1204,14 +1256,6 @@ class MiniAppApi:
             "maximum": self._service.settings.mini_app_max_selections,
             "items": [_selection_payload(item) for item in items],
         }
-
-    def _remember_translation(
-        self,
-        session: MiniAppSession,
-        translation: str,
-    ) -> None:
-        self._preferences.set_translation(session.user_id, translation)
-        session.translation = translation
 
     def _json_body(self, request: MiniAppHttpRequest) -> dict[str, Any]:
         content_type = (_header(request.headers, "content-type") or "").split(";", 1)[0]

@@ -81,6 +81,44 @@ class UserPreferenceStoreTestCase(unittest.TestCase):
             self.assertNotIn("For God", encoded)
             self.assertLess(len(encoded), 512)
 
+    def test_atomic_update_keeps_translation_and_reader_location_consistent(
+        self,
+    ) -> None:
+        store = UserPreferenceStore(
+            path=None,
+            default_translation="kjv",
+            max_users=100,
+        )
+        location = ReaderLocation("kjv", 43, 3, 16)
+        updated = store.update_preferences(
+            200,
+            translation="kjv",
+            reader_location=location,
+        )
+        self.assertEqual(updated.reader_location, location)
+
+        switched = store.update_preferences(200, translation="aov")
+        self.assertEqual(switched.translation, "aov")
+        self.assertIsNone(switched.reader_location)
+
+        with self.assertRaises(ValueError):
+            store.update_preferences(
+                200,
+                translation="kjv",
+                reader_location=ReaderLocation("aov", 43, 3, 16),
+            )
+        self.assertEqual(store.preferences_for(200), switched)
+
+    def test_atomic_update_can_explicitly_clear_reader_location(self) -> None:
+        store = UserPreferenceStore(
+            path=None,
+            default_translation="kjv",
+            max_users=100,
+        )
+        store.set_reader_location(200, ReaderLocation("kjv", 43, 3, 16))
+        updated = store.update_preferences(200, reader_location=None)
+        self.assertIsNone(updated.reader_location)
+
     def test_existing_translation_database_is_migrated_in_place(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "preferences.sqlite3"

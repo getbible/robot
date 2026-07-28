@@ -23,9 +23,9 @@ The existing **Bible** tab is both a compact chapter reader and the verse
 selection surface. It does not introduce a second reader route or a fifth
 bottom-navigation item. The normal sequence is:
 
-1. choose a translation;
-2. choose a book;
-3. choose a numbered chapter;
+1. choose the global translation from the header chip when needed;
+2. choose a book from the passage picker;
+3. choose a numbered chapter from the passage picker;
 4. read the chapter as continuous, edge-friendly Scripture text;
 5. tap a verse number or row to select or remove it;
 6. add verses from other chapters, books, searches, or translations;
@@ -60,7 +60,6 @@ The interface exposes the supported Librarian search controls:
 
 | Control | Values |
 |---|---|
-| Translation | Available repository translations |
 | Words | All, any, or phrase |
 | Match | Whole word or substring |
 | Scope | Bible, Old Testament, New Testament, or deuterocanon |
@@ -79,6 +78,19 @@ can dismiss the on-screen keyboard. Only the final server-resolved post enters
 the target chat.
 
 ## Translation and interface preferences
+
+The translation chip in the application header is the only translation
+selector. It opens a dedicated selector containing the bounded translation
+name, language, and abbreviation. It never changes the current tab. The Search
+filter sheet contains only search filters, and the Bible passage picker contains
+only book and chapter controls.
+
+Selecting a translation updates the interface language and direction
+immediately, clears any old-translation Scripture before it can be relabelled,
+and reloads the current book, chapter, and visible verse when the Bible reader
+is open. An in-flight response for an older translation is ignored. Search and
+Scripture reads are side-effect-free; only the serialized preferences endpoint
+may change the saved translation or reader location.
 
 The selected Bible translation and the last reader location are stored per
 Telegram user. A reader location is only four bounded identifiers:

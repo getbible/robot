@@ -43,7 +43,9 @@ directly or opened in that reader for context. A bounded basket can contain one
 verse, ranges, or separate references across pages before one final post.
 Translation and the last content-free reader location persist per Telegram
 user, with KJV as the application fallback. Intermediate browsing never floods
-the chat.
+the chat. The header translation chip is the sole translation selector; it
+keeps the current tab, updates localization immediately, and reloads the active
+Bible passage before any new-translation label can appear with old text.
 
 The browser never supplies authoritative verse text. Every protected Mini App
 request requires fresh Telegram-signed `initData` plus a short-lived,

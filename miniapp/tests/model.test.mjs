@@ -15,6 +15,7 @@ import {
   normalizeScripture,
   normalizeSearch,
   normalizeSession,
+  planTranslationChange,
   resolveBibleEntrypoint,
   routeName,
   uniqueVerses,
@@ -59,6 +60,13 @@ test("normalizes the backend session bootstrap without retaining identity", () =
         name: "King James Version",
         language: "English",
         lang: "en-GB",
+        direction: "ltr",
+      },
+      {
+        code: "aov",
+        name: "Afrikaanse Ou Vertaling",
+        language: "Afrikaans",
+        lang: "af",
         direction: "ltr",
       },
     ],
@@ -131,6 +139,31 @@ test("normalizes zero-based search pages and derives pagination", () => {
   ]);
 });
 
+test("rejects search and Scripture responses from a stale translation", () => {
+  assert.throws(
+    () => normalizeSearch({
+      search_id: "SearchTokenValue1",
+      query: "God",
+      translation: "kjv",
+      total: 1,
+      items: [verse],
+    }, "aov"),
+    /translation did not match/,
+  );
+  assert.throws(
+    () => normalizeScripture({
+      translation: "kjv",
+      book: { number: 43, name: "John" },
+      chapter: 3,
+      reference: "John 3",
+      target_verse: 16,
+      navigation: {},
+      items: [verse],
+    }, { translation: "aov", book: 43, chapter: 3 }),
+    /requested passage/,
+  );
+});
+
 test("normalizes scripture and basket without accepting malformed selections", () => {
   const scripture = normalizeScripture({
     translation: "kjv",
@@ -138,7 +171,7 @@ test("normalizes scripture and basket without accepting malformed selections", (
     chapter: 3,
     reference: "John 3",
     target_verse: 16,
-    sha: "0123456789abcdef0123456789abcdef01234567",
+    sha: "01234567".repeat(5),
     navigation: {
       previous: { book: 43, book_name: "John", chapter: 2 },
       next: { book: 43, book_name: "John", chapter: 4 },
@@ -160,6 +193,83 @@ test("normalizes scripture and basket without accepting malformed selections", (
   });
   assert.equal(basket.count, 1);
   assert.equal(basket.items[0].text, verse.text);
+});
+
+test("plans an immediate translation change without losing reader position", () => {
+  const translations = [
+    { code: "kjv" },
+    { code: "aov" },
+  ];
+  assert.deepEqual(
+    planTranslationChange(
+      "AOV",
+      translations,
+      { translation: "kjv", book: 43, chapter: 3, verse: 16 },
+      { route: "bible", hasSearchQuery: true },
+    ),
+    {
+      translation: "aov",
+      reader_location: {
+        translation: "aov",
+        book: 43,
+        chapter: 3,
+        verse: 16,
+      },
+      reload_reader: true,
+      rerun_search: false,
+    },
+  );
+  assert.equal(
+    planTranslationChange("missing", translations, null),
+    null,
+  );
+});
+
+test("keeps long valid translation metadata available to the selector", () => {
+  const longName = "S".repeat(135);
+  const session = normalizeSession({
+    preferences: { translation: "statenvertalinga" },
+    translations: [
+      {
+        code: "statenvertalinga",
+        name: longName,
+        language: "Dutch",
+        lang: "nl",
+        direction: "ltr",
+      },
+    ],
+    basket: { items: [] },
+  });
+
+  assert.equal(session.translations[0].name, longName);
+  assert.equal(session.preferences.translation, "statenvertalinga");
+});
+
+test("falls back safely when a saved translation left the catalog", () => {
+  const session = normalizeSession({
+    preferences: {
+      translation: "removed",
+      reader_location: {
+        translation: "removed",
+        book: 43,
+        chapter: 3,
+        verse: 16,
+      },
+    },
+    translations: [
+      {
+        code: "kjv",
+        name: "King James Version",
+        language: "English",
+        lang: "en",
+        direction: "ltr",
+      },
+    ],
+    basket: { items: [] },
+  });
+
+  assert.equal(session.preferences.translation, "kjv");
+  assert.equal(session.preferences.reader_location, null);
 });
 
 test("reduces reader locations to compact identifiers only", () => {

@@ -154,7 +154,10 @@ class CatalogClient:
         self._translations: _CacheEntry | None = None
         self._books: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._chapters: OrderedDict[tuple[str, int, str], _CacheEntry] = OrderedDict()
-        self._scripture: OrderedDict[tuple[str, int, int], _CacheEntry] = OrderedDict()
+        self._scripture: OrderedDict[
+            tuple[str, int, str, int],
+            _CacheEntry,
+        ] = OrderedDict()
         self._guard = threading.RLock()
 
     def translations(self) -> tuple[TranslationOption, ...]:
@@ -233,7 +236,7 @@ class CatalogClient:
     ) -> ChapterContent:
         """Return one whole chapter after a bounded before/after hash check."""
         code = self._translation_code(translation)
-        key = (code, book.number, chapter.number)
+        key = (code, book.number, book.sha, chapter.number)
         cached = self._cached_mapping(
             self._scripture,
             key,
@@ -256,6 +259,12 @@ class CatalogClient:
             last_after = self._fetch_sha(f"{base}.sha", missing_translation=code)
             if last_before != last_after:
                 continue
+            actual_sha = hashlib.sha1(raw, usedforsecurity=False).hexdigest()
+            if actual_sha != last_after:
+                raise CacheIntegrityError(
+                    "Checksum mismatch for chapter content "
+                    f"{code}/{book.number}/{chapter.number}."
+                )
             try:
                 payload = json.loads(raw)
             except (UnicodeDecodeError, json.JSONDecodeError) as error:
