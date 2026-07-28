@@ -46,6 +46,15 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Mini App
 
+- Upgraded the existing Bible tab into a compact full-chapter reader and
+  selection surface without adding a command or navigation tab. Bare `/bible`
+  resumes a content-free saved location; direct references still post through
+  Librarian. Reader chapters use a hash-consistent, response-bounded Main API
+  client and a fixed 64-entry cache, while search results can open exact reader
+  context or enter the existing basket directly.
+- Kept the established translation-driven light/dark interface while adding a
+  scroll-aware compact chapter toolbar, edge-friendly verse layout, and a
+  responsive bottom navigation that collapses to a safe-area-backed handle.
 - Added a production Telegram Mini App for contained Scripture search, filtering,
   Bible navigation, full-text verse-card selection, basket review/reordering,
   and one final server-resolved post. Direct `/bible <reference>` commands keep

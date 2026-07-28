@@ -11,6 +11,7 @@ import {
   normalizeBooks,
   normalizeChapters,
   normalizeFilters,
+  normalizeReaderLocation,
   normalizeScripture,
   normalizeSearch,
   normalizeSession,
@@ -44,6 +45,12 @@ test("normalizes the backend session bootstrap without retaining identity", () =
         diacritics: "sensitive",
         sort: "canonical",
       },
+      reader_location: {
+        translation: "kjv",
+        book: 43,
+        chapter: 3,
+        verse: 16,
+      },
     },
     entrypoint: { route: "search", query: "eternal life" },
     translations: [
@@ -62,6 +69,12 @@ test("normalizes the backend session bootstrap without retaining identity", () =
   assert.equal(session.translations[0].lang, "en-GB");
   assert.equal(session.translations[0].direction, "ltr");
   assert.equal(session.preferences.search_defaults.words, "phrase");
+  assert.deepEqual(session.preferences.reader_location, {
+    translation: "kjv",
+    book: 43,
+    chapter: 3,
+    verse: 16,
+  });
   assert.equal(session.entrypoint.route, "search");
   assert.equal(session.entrypoint.query, "eternal life");
   assert.equal(session.basket.count, 1);
@@ -123,6 +136,13 @@ test("normalizes scripture and basket without accepting malformed selections", (
     translation: "kjv",
     book: { number: 43, name: "John" },
     chapter: 3,
+    reference: "John 3",
+    target_verse: 16,
+    sha: "0123456789abcdef0123456789abcdef01234567",
+    navigation: {
+      previous: { book: 43, book_name: "John", chapter: 2 },
+      next: { book: 43, book_name: "John", chapter: 4 },
+    },
     items: [
       verse,
       { ...verse, selection_id: "invalid token with spaces" },
@@ -131,8 +151,47 @@ test("normalizes scripture and basket without accepting malformed selections", (
   const basket = normalizeBasket({ count: 1, maximum: 100, items: [verse] });
 
   assert.equal(scripture.verses.length, 1);
+  assert.equal(scripture.reference, "John 3");
+  assert.equal(scripture.target_verse, 16);
+  assert.deepEqual(scripture.navigation.next, {
+    book: 43,
+    book_name: "John",
+    chapter: 4,
+  });
   assert.equal(basket.count, 1);
   assert.equal(basket.items[0].text, verse.text);
+});
+
+test("reduces reader locations to compact identifiers only", () => {
+  assert.deepEqual(
+    normalizeReaderLocation({
+      translation: "KJV",
+      book: 43,
+      chapter: 3,
+      verse: 16,
+    }),
+    {
+      translation: "kjv",
+      book: 43,
+      chapter: 3,
+      verse: 16,
+    },
+  );
+  assert.deepEqual(
+    normalizeReaderLocation({
+      translation: "kjv",
+      book: 43,
+      chapter: 3,
+      verse: 16,
+      text: "Scripture must not be persisted here.",
+    }),
+    {
+      translation: "kjv",
+      book: 43,
+      chapter: 3,
+      verse: 16,
+    },
+  );
 });
 
 test("bounds filters and counts only non-default search controls", () => {

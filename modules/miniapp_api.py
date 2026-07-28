@@ -46,7 +46,7 @@ from .miniapp_sessions import (
     MiniAppSession,
     MiniAppSessionStore,
 )
-from .preferences import SearchDefaults, UserPreferenceStore
+from .preferences import ReaderLocation, SearchDefaults, UserPreferenceStore
 from .rate_limit import InboundRateLimiter
 from .service import ScriptureQuery, ScriptureService
 
@@ -790,14 +790,14 @@ class MiniAppApi:
         request: MiniAppHttpRequest,
     ) -> MiniAppHttpResponse:
         payload = self._json_body(request)
-        if set(payload) - {"translation", "book", "chapter"}:
+        if set(payload) - {"translation", "book", "chapter", "verse"}:
             raise MiniAppApiInputError("Scripture request contains unsupported fields.")
         translation = _translation(payload.get("translation"), session.translation)
-        book_number = _positive_integer(payload.get("book"), "book", maximum=1000)
+        book_number = _positive_integer(payload.get("book"), "book", maximum=200)
         chapter_number = _positive_integer(
             payload.get("chapter"),
             "chapter",
-            maximum=1000,
+            maximum=250,
         )
         books = await self._service.books(translation)
         book = next((item for item in books if item.number == book_number), None)
@@ -812,48 +812,42 @@ class MiniAppApi:
             raise MiniAppApiInputError("chapter is not available in this book.")
         if len(chapter.verses) > MAX_MINIAPP_CHAPTER_VERSES:
             raise ScriptureUnavailable("The chapter exceeds the Mini App display bound.")
-        chunk_size = min(
-            self._service.settings.max_verses_per_reference,
-            self._service.settings.max_total_verses,
+        target_verse = _positive_integer(
+            payload.get("verse", chapter.verses[0]),
+            "verse",
+            maximum=500,
         )
-        loaded: dict[int, str] = {}
-        for start in range(0, len(chapter.verses), chunk_size):
-            numbers = chapter.verses[start : start + chunk_size]
-            reference = f"{book.name} {chapter.number}:{_number_ranges(numbers)}"
-            query = await self._service.resolve_query(
-                [reference],
-                default_translation=translation,
-            )
-            result = await self._service.select(query)
-            for chapter_payload in _scripture_payload(result):
-                if (
-                    chapter_payload["book_name"] != book.name
-                    or chapter_payload["chapter"] != chapter.number
-                ):
-                    raise ScriptureUnavailable(
-                        "The Scripture repository returned the wrong chapter."
-                    )
-                for verse in chapter_payload["verses"]:
-                    verse_number = int(verse["verse"])
-                    if verse_number in loaded:
-                        raise ScriptureUnavailable(
-                            "The Scripture repository returned duplicate verses."
-                        )
-                    loaded[verse_number] = str(verse["text"])
-        if set(loaded) != set(chapter.verses):
-            raise ScriptureUnavailable("The Scripture repository returned an incomplete chapter.")
+        if target_verse not in chapter.verses:
+            raise MiniAppApiInputError("verse is not available in this chapter.")
+        content = await self._service.chapter(translation, book, chapter)
+        previous, following = await self._chapter_navigation(
+            translation,
+            books,
+            book,
+            chapters,
+            chapter,
+        )
         self._remember_translation(session, translation)
+        self._preferences.set_reader_location(
+            session.user_id,
+            ReaderLocation(
+                translation=translation,
+                book=book.number,
+                chapter=chapter.number,
+                verse=target_verse,
+            ),
+        )
         items: list[dict[str, object]] = []
-        for verse_number in chapter.verses:
+        for verse in content.verses:
             selection = self._sessions.register_selection(
                 session,
-                reference=f"{book.name} {chapter.number}:{verse_number}",
+                reference=f"{book.name} {chapter.number}:{verse.number}",
                 translation=translation,
                 book_number=book.number,
                 book_name=book.name,
                 chapter=chapter.number,
-                verse=verse_number,
-                text=loaded[verse_number],
+                verse=verse.number,
+                text=verse.text,
             )
             items.append(_selection_payload(selection))
         return self._response(
@@ -862,10 +856,76 @@ class MiniAppApi:
                 "translation": translation,
                 "book": _book_payload(book),
                 "chapter": chapter.number,
-                "reference": f"{book.name} {chapter.number}",
+                "reference": content.reference,
+                "target_verse": target_verse,
+                "sha": content.sha,
+                "navigation": {
+                    "previous": previous,
+                    "next": following,
+                },
                 "items": items,
             },
         )
+
+    async def _chapter_navigation(
+        self,
+        translation: str,
+        books: Sequence[BookOption],
+        book: BookOption,
+        chapters: Sequence[ChapterOption],
+        chapter: ChapterOption,
+    ) -> tuple[dict[str, object] | None, dict[str, object] | None]:
+        book_index = next(
+            (index for index, item in enumerate(books) if item.number == book.number),
+            -1,
+        )
+        chapter_index = next(
+            (
+                index
+                for index, item in enumerate(chapters)
+                if item.number == chapter.number
+            ),
+            -1,
+        )
+        if book_index < 0 or chapter_index < 0:
+            raise ScriptureUnavailable("The chapter navigation state is invalid.")
+
+        previous: dict[str, object] | None = None
+        following: dict[str, object] | None = None
+        if chapter_index > 0:
+            previous = _reader_location_payload(
+                book,
+                chapters[chapter_index - 1].number,
+            )
+        elif book_index > 0:
+            previous_book = books[book_index - 1]
+            previous_chapters = await self._service.chapters(
+                translation,
+                previous_book,
+            )
+            if previous_chapters:
+                previous = _reader_location_payload(
+                    previous_book,
+                    previous_chapters[-1].number,
+                )
+
+        if chapter_index + 1 < len(chapters):
+            following = _reader_location_payload(
+                book,
+                chapters[chapter_index + 1].number,
+            )
+        elif book_index + 1 < len(books):
+            following_book = books[book_index + 1]
+            following_chapters = await self._service.chapters(
+                translation,
+                following_book,
+            )
+            if following_chapters:
+                following = _reader_location_payload(
+                    following_book,
+                    following_chapters[0].number,
+                )
+        return previous, following
 
     async def _search(
         self,
@@ -959,7 +1019,7 @@ class MiniAppApi:
         request: MiniAppHttpRequest,
     ) -> MiniAppHttpResponse:
         payload = self._json_body(request)
-        if set(payload) - {"translation", "search_defaults"}:
+        if set(payload) - {"translation", "search_defaults", "reader_location"}:
             raise MiniAppApiInputError("preferences contains unsupported fields.")
         if not payload:
             raise MiniAppApiInputError("preferences must not be empty.")
@@ -975,10 +1035,34 @@ class MiniAppApi:
             except ValueError as error:
                 raise MiniAppApiInputError(str(error)) from error
             self._preferences.set_search_defaults(session.user_id, defaults)
+        if "reader_location" in payload:
+            try:
+                location = ReaderLocation.validated(payload["reader_location"])
+            except ValueError as error:
+                raise MiniAppApiInputError(str(error)) from error
+            await self._validate_reader_location(location)
+            self._preferences.set_reader_location(session.user_id, location)
         return self._response(
             200,
             {"preferences": self._preferences.preferences_for(session.user_id).as_dict()},
         )
+
+    async def _validate_reader_location(self, location: ReaderLocation) -> None:
+        books = await self._service.books(location.translation)
+        book = next((item for item in books if item.number == location.book), None)
+        if book is None:
+            raise MiniAppApiInputError(
+                "Reader book is not available in this translation."
+            )
+        chapters = await self._service.chapters(location.translation, book)
+        chapter = next(
+            (item for item in chapters if item.number == location.chapter),
+            None,
+        )
+        if chapter is None:
+            raise MiniAppApiInputError("Reader chapter is not available in this book.")
+        if location.verse not in chapter.verses:
+            raise MiniAppApiInputError("Reader verse is not available in this chapter.")
 
     async def _post(
         self,
@@ -1375,6 +1459,17 @@ def _chapter_payload(chapter: ChapterOption) -> dict[str, object]:
     return {"number": chapter.number, "verses": list(chapter.verses)}
 
 
+def _reader_location_payload(
+    book: BookOption,
+    chapter: int,
+) -> dict[str, object]:
+    return {
+        "book": book.number,
+        "book_name": book.name,
+        "chapter": chapter,
+    }
+
+
 def _selection_payload(item: MiniAppSelection) -> dict[str, object]:
     return {
         "selection_id": item.token,
@@ -1408,71 +1503,3 @@ def _basket_digest(items: Sequence[MiniAppSelection]) -> bytes:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.blake2s(encoded, digest_size=32).digest()
-
-
-def _number_ranges(numbers: Sequence[int]) -> str:
-    if not numbers:
-        raise ScriptureUnavailable("The navigation catalog returned no verses.")
-    result: list[str] = []
-    start = previous = numbers[0]
-    for number in numbers[1:]:
-        if number == previous + 1:
-            previous = number
-            continue
-        result.append(str(start) if start == previous else f"{start}-{previous}")
-        start = previous = number
-    result.append(str(start) if start == previous else f"{start}-{previous}")
-    return ",".join(result)
-
-
-def _scripture_payload(result: object) -> list[dict[str, Any]]:
-    if not isinstance(result, dict) or not result:
-        raise ScriptureUnavailable("The Scripture repository returned no verses.")
-    chapters: list[dict[str, Any]] = []
-    for raw_chapter in result.values():
-        if not isinstance(raw_chapter, dict):
-            raise ScriptureUnavailable("The Scripture repository returned malformed data.")
-        book_name = raw_chapter.get("book_name")
-        abbreviation = raw_chapter.get("abbreviation")
-        chapter_number = raw_chapter.get("chapter")
-        raw_verses = raw_chapter.get("verses")
-        if (
-            not isinstance(book_name, str)
-            or not book_name.strip()
-            or not isinstance(abbreviation, str)
-            or _TRANSLATION_RE.fullmatch(abbreviation.casefold()) is None
-            or isinstance(chapter_number, bool)
-            or not isinstance(chapter_number, int)
-            or not 1 <= chapter_number <= 1000
-            or not isinstance(raw_verses, list)
-            or not raw_verses
-        ):
-            raise ScriptureUnavailable("The Scripture repository returned malformed data.")
-        verses: list[dict[str, object]] = []
-        for raw_verse in raw_verses:
-            if not isinstance(raw_verse, dict):
-                raise ScriptureUnavailable(
-                    "The Scripture repository returned malformed verse data."
-                )
-            number = raw_verse.get("verse")
-            text = raw_verse.get("text")
-            if (
-                isinstance(number, bool)
-                or not isinstance(number, int)
-                or not 1 <= number <= 2000
-                or not isinstance(text, str)
-                or not text.strip()
-            ):
-                raise ScriptureUnavailable(
-                    "The Scripture repository returned malformed verse data."
-                )
-            verses.append({"verse": number, "text": text.strip()})
-        chapters.append(
-            {
-                "book_name": book_name.strip(),
-                "translation": abbreviation.casefold(),
-                "chapter": chapter_number,
-                "verses": verses,
-            }
-        )
-    return chapters

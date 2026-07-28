@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from modules.preferences import SearchDefaults, UserPreferenceStore
+from modules.preferences import ReaderLocation, SearchDefaults, UserPreferenceStore
 
 
 class UserPreferenceStoreTestCase(unittest.TestCase):
@@ -54,6 +54,32 @@ class UserPreferenceStoreTestCase(unittest.TestCase):
             self.assertEqual(preferences.translation, "asv")
             self.assertEqual(preferences.search_defaults, expected)
             self.assertNotIn("query", preferences.as_dict())
+
+    def test_reader_location_persists_only_small_content_free_identifiers(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "preferences.sqlite3"
+            first = UserPreferenceStore(
+                path=str(path),
+                default_translation="kjv",
+                max_users=100,
+            )
+            expected = ReaderLocation("kjv", 43, 3, 16)
+            first.set_reader_location(200, expected)
+            first.close()
+
+            second = UserPreferenceStore(
+                path=str(path),
+                default_translation="kjv",
+                max_users=100,
+            )
+            self.addCleanup(second.close)
+            preferences = second.preferences_for(200)
+            self.assertEqual(preferences.reader_location, expected)
+            encoded = str(preferences.as_dict())
+            self.assertNotIn("For God", encoded)
+            self.assertLess(len(encoded), 512)
 
     def test_existing_translation_database_is_migrated_in_place(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -139,6 +165,17 @@ class UserPreferenceStoreTestCase(unittest.TestCase):
             store.set_search_defaults(1, {"words": "everything"})
         with self.assertRaises(ValueError):
             store.set_search_defaults(1, {"query": "grace"})
+        with self.assertRaises(ValueError):
+            store.set_reader_location(
+                1,
+                {
+                    "translation": "kjv",
+                    "book": 43,
+                    "chapter": 3,
+                    "verse": 16,
+                    "text": "must never persist",
+                },
+            )
 
 
 if __name__ == "__main__":

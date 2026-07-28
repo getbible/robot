@@ -7,7 +7,7 @@ browsing workflow into the contained Telegram Mini App.
 |---|---|
 | `/bible John 3:16` | Validate, retrieve, and post the verse immediately |
 | `/bible John 3:16-18` | Validate, retrieve, and post the range immediately |
-| `/bible` | Open the Mini App Bible browser |
+| `/bible` | Resume the Mini App Bible reader at the last viewed verse |
 | `/search grace` | Open the Mini App on contained results for `grace` |
 | `/search` | Open the Mini App search form and filters |
 | `/help` | Show native command help |
@@ -17,24 +17,32 @@ browsing workflow into the contained Telegram Mini App.
 false, the existing Telegram-native picker remains available as a compatibility
 fallback.
 
-## Bible browser
+## Bible reader
 
-The Mini App follows a readable selection sequence:
+The existing **Bible** tab is both a compact chapter reader and the verse
+selection surface. It does not introduce a second reader route or a fifth
+bottom-navigation item. The normal sequence is:
 
 1. choose a translation;
 2. choose a book;
 3. choose a numbered chapter;
-4. read the complete, wrapping text of every verse in that chapter;
-5. tap the actual verse card to select or remove it;
+4. read the chapter as continuous, edge-friendly Scripture text;
+5. tap a verse number or row to select or remove it;
 6. add verses from other chapters, books, searches, or translations;
 7. review, reorder, or clear the server-held basket;
 8. press **Post selected verses** once.
 
-Chapter buttons remain compact numbers. Verse selection never uses number-only
-buttons: the reference and complete verse text occupy the same selectable card.
-Selected cards have a visible pressed state and an accessible `aria-pressed`
-state. The basket can contain isolated verses or contiguous verses; the server
-normalizes adjacent selections into safe references at post time.
+The compact chapter heading contains previous/next controls and the current
+passage. It hides while scrolling down and returns while scrolling up, leaving
+the maximum practical space for Scripture. The fixed bottom navigation behaves
+the same way, but leaves a small tap handle available while collapsed. Its
+background and device safe area extend to the physical bottom edge.
+
+Chapter buttons remain compact numbers. Reader verses do not become separate
+raised cards; adjacent selected verses visually join while retaining a visible
+pressed state and accessible `aria-pressed` state. The basket can contain
+isolated verses or contiguous verses; the server normalizes adjacent selections
+into safe references at post time.
 
 The client receives an opaque selection identifier for each displayed verse.
 It never supplies authoritative verse text for posting. On **Post**, the server
@@ -72,9 +80,16 @@ the target chat.
 
 ## Translation and interface preferences
 
-The selected Bible translation is stored per Telegram user. Safe search
-defaults may also be stored, but query text, excluded words, launch state,
-session credentials, and verse text are not durable preferences.
+The selected Bible translation and the last reader location are stored per
+Telegram user. A reader location is only four bounded identifiers:
+translation, book, chapter, and verse. Safe search defaults may also be stored,
+but query text, excluded words, chapter contents, launch state, session
+credentials, and verse text are not durable preferences.
+
+Opening bare `/bible` resumes that saved location. Opening a chapter from a
+search result focuses the matching verse and offers a return to the preserved
+search results. Search results can still be selected directly without opening
+the reader.
 
 Each translation exposes its authoritative `lang` metadata. The Mini App
 resolves the interface catalog in this order:
@@ -134,6 +149,11 @@ Every protected API request is tied to signature-verified Telegram `initData`,
 the exact authenticated user, an absolute-lifetime server session, same-origin
 policy, rate limits, and server-side content/selection bounds. The bot token
 never reaches the browser.
+
+Complete reader chapters come from the GetBible Main API through one
+hash-verified, bounded server cache. Librarian remains responsible for
+reference parsing, search, direct command retrieval, and authoritative final
+posting.
 
 See [Telegram Mini App deployment](MINI_APP.md) for the HTTPS boundary,
 BotFather configuration, reverse-proxy examples, and production verification.

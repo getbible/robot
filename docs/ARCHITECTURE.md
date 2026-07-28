@@ -58,12 +58,13 @@ translation named `3:16`.
 Only when the complete input is not a valid reference does the robot consider the final whitespace-delimited token as a translation abbreviation. The candidate must match the complete abbreviation grammar. The preceding reference is validated locally before the candidate is repository-checked. Explicit `kjv` remains supported.
 
 An empty `/bible` does not enter the reference parser and never falls back to a
-configured verse. It creates a short-lived, owner-bound launch and opens the
-Mini App at translation, testament, book, chapter, and verse/range navigation.
-The basket can combine separate verses and ranges across chapters/books and
-compacts overlapping or adjacent intervals before final validation. Only the
-final server-resolved Scripture is posted into the originating chat and forum
-topic.
+configured verse. It creates a short-lived, owner-bound launch and resumes the
+Mini App Bible reader from four stored identifiers: translation, book, chapter,
+and verse. Complete chapters come from the Main API through a bounded,
+hash-verified process cache. The basket can combine separate verses and ranges
+across chapters/books and compacts overlapping or adjacent intervals before
+final validation. Only the final Librarian-resolved Scripture is posted into
+the originating chat and forum topic.
 
 ## Search and confirmation flow
 
@@ -76,9 +77,10 @@ not depend on whitespace word boundaries.
 Librarian returns exact totals, grouped verse data, and ordered match metadata.
 The server validates that every match points to a verse in the grouped results,
 retains only the configured bounded result set, and returns complete wrapping
-verse cards. Search filters, paging, selection, and review remain inside the
-Mini App; they do not produce chat messages. No ordinary message is sent until
-the owner presses **Post selected**.
+verse cards. A result can be selected directly or opened at its exact verse in
+the Bible reader. Search filters, paging, selection, reader context, and review
+remain inside the Mini App; they do not produce chat messages. No ordinary
+message is sent until the owner presses **Post selected**.
 
 Selected match metadata is converted back into compressed canonical references.
 The final post performs a normal Librarian `select()` call and passes through the
