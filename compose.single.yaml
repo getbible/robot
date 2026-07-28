@@ -1,0 +1,58 @@
+# Compatibility name for operators who already selected the explicit
+# single-bot file. The default compose.yaml has the same recommended layout.
+services:
+  robot:
+    build:
+      context: .
+    image: "${ROBOT_IMAGE:-getbible-robot:local}"
+    container_name: "${ROBOT_CONTAINER_NAME:-getbible-robot-production}"
+    labels:
+      io.getbible.robot.container: "true"
+      io.getbible.robot.mode: "single"
+    restart: unless-stopped
+    environment:
+      ROBOT_MODE: "single"
+      ROBOT_START_GRACE_SECONDS: "${ROBOT_START_GRACE_SECONDS:-150}"
+      ROBOT_HEALTH_INTERVAL_SECONDS: "${ROBOT_HEALTH_INTERVAL_SECONDS:-15}"
+      INSTANCE_NAME: "${INSTANCE_NAME:-production}"
+      TELEGRAM_API_TOKEN: "${TELEGRAM_API_TOKEN:-}"
+      TELEGRAM_DELIVERY_MODE: "${TELEGRAM_DELIVERY_MODE:-polling}"
+      BOT_NAME: "${BOT_NAME:-GetBible Robot}"
+      BOT_DESCRIPTION: "${BOT_DESCRIPTION:-Read and search Scripture in Telegram with GetBible.}"
+      BOT_SHORT_DESCRIPTION: "${BOT_SHORT_DESCRIPTION:-Read and search Scripture with GetBible.}"
+      TRANSLATION: "${TRANSLATION:-kjv}"
+      AUDIT_LOG_MODE: "${AUDIT_LOG_MODE:-metadata}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      MINI_APP_ENABLED: "${MINI_APP_ENABLED:-true}"
+      MINI_APP_PUBLIC_URL: "${MINI_APP_PUBLIC_URL:-}"
+      MINI_APP_PORT: "${MINI_APP_PORT:-9201}"
+      HEALTH_PORT: "${HEALTH_PORT:-8081}"
+      CONTAINER_INSTANCE_MEMORY_LIMIT_MB: "${CONTAINER_INSTANCE_MEMORY_LIMIT_MB:-210}"
+      PREWARM_DEFAULT_TRANSLATION: "${PREWARM_DEFAULT_TRANSLATION:-true}"
+      MAX_CONCURRENT_LOOKUPS: "${MAX_CONCURRENT_LOOKUPS:-2}"
+      MAX_CONCURRENT_SEARCHES: "${MAX_CONCURRENT_SEARCHES:-1}"
+      MAX_CONCURRENT_UPDATES: "${MAX_CONCURRENT_UPDATES:-4}"
+    volumes:
+      - robot-data:/data
+    ports:
+      - "${MINI_APP_BIND_ADDRESS:-127.0.0.1}:${MINI_APP_HOST_PORT:-9201}:${MINI_APP_PORT:-9201}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 48
+    mem_limit: "${ROBOT_MEMORY_LIMIT:-256m}"
+    mem_reservation: "${ROBOT_MEMORY_RESERVATION:-160m}"
+    cpus: "${ROBOT_CPU_LIMIT:-1}"
+    stop_grace_period: 45s
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  robot-data:

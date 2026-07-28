@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import sys
 from collections.abc import Awaitable
@@ -30,6 +31,7 @@ from telegram.ext import (
 )
 
 from config import ConfigurationError, Settings
+from modules.cache_maintenance import CacheJanitor
 from modules.commands import (
     DUPLICATE_POLLER_SLOT,
     INTERACTIONS_SLOT,
@@ -56,9 +58,12 @@ from modules.miniapp_tornado import MiniAppServer
 from modules.posting import post_scripture_queries
 from modules.preferences import UserPreferenceStore
 from modules.rate_limit import InboundRateLimiter
+from modules.runtime_notify import RuntimeNotifier
 from modules.service import ScriptureQuery, ScriptureService
 
 HEALTH_SLOT = "health_server"
+CACHE_JANITOR_SLOT = "cache_janitor"
+NOTIFIER_SLOT = "runtime_notifier"
 LOGGER = logging.getLogger(__name__)
 ALLOWED_UPDATES = ("message", "callback_query")
 
@@ -89,11 +94,46 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+class BoundedFileHandler(logging.FileHandler):
+    """Keep an optional JSONL file under a strict byte ceiling.
+
+    Journald or the container log remains the durable history. The local file
+    is truncated in place so a restricted service account never needs write
+    access to the parent log directory for renames.
+    """
+
+    def __init__(self, filename: str, *, max_bytes: int) -> None:
+        super().__init__(filename, encoding="utf-8")
+        self._max_bytes = max_bytes
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if self.stream is None:
+                self.stream = self._open()
+            message = self.format(record)
+            encoded_size = len((message + self.terminator).encode("utf-8"))
+            if encoded_size > self._max_bytes:
+                message = (
+                    '{"level":"ERROR","message":'
+                    '"one log record exceeded LOG_MAX_BYTES and was discarded"}'
+                )
+                encoded_size = len((message + self.terminator).encode("utf-8"))
+            descriptor = self.stream.fileno()
+            if os.fstat(descriptor).st_size + encoded_size > self._max_bytes:
+                self.stream.seek(0)
+                self.stream.truncate(0)
+            self.stream.write(message + self.terminator)
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+
 def configure_logging(
     level: int,
     *,
     instance_name: str,
     log_file: str | None,
+    log_max_bytes: int = 10 * 1024 * 1024,
 ) -> None:
     formatter = JsonFormatter(instance_name)
     stream_handler = logging.StreamHandler()
@@ -107,7 +147,10 @@ def configure_logging(
     root.addHandler(stream_handler)
 
     if log_file is not None:
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler = BoundedFileHandler(
+            log_file,
+            max_bytes=log_max_bytes,
+        )
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
 
@@ -175,6 +218,11 @@ def build_application(settings: Settings) -> Application:
     application.bot_data[INTERACTIONS_SLOT] = interactions
     application.bot_data[PREFERENCES_SLOT] = preferences
     application.bot_data[HEALTH_SLOT] = health
+    application.bot_data[CACHE_JANITOR_SLOT] = CacheJanitor(
+        max_bytes=settings.cache_max_bytes,
+        interval_seconds=settings.cache_maintenance_interval_seconds,
+    )
+    application.bot_data[NOTIFIER_SLOT] = RuntimeNotifier()
     if getattr(settings, "mini_app_enabled", False):
         async def cleanup_mini_app_launch(launch: MiniAppLaunch) -> None:
             await _cleanup_mini_app_launch_prompt(application.bot, launch)
@@ -196,7 +244,7 @@ def build_application(settings: Settings) -> Application:
             await cleanup_mini_app_launch(launch)
             return message_ids
 
-        application.bot_data[MINI_APP_SLOT] = MiniAppServer(
+        mini_app = MiniAppServer(
             settings=settings,
             service=service,
             preferences=preferences,
@@ -204,6 +252,8 @@ def build_application(settings: Settings) -> Application:
             post_scripture=post_mini_app_scripture,
             cleanup_launch=cleanup_mini_app_launch,
         )
+        application.bot_data[MINI_APP_SLOT] = mini_app
+        health.set_mini_app_snapshot(mini_app.sessions.snapshot)
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("get", bible_command))
@@ -366,9 +416,15 @@ async def _synchronize_telegram_profile(
 
 async def _post_init(application: Application) -> None:
     health: HealthServer = application.bot_data[HEALTH_SLOT]
+    janitor: CacheJanitor = application.bot_data[CACHE_JANITOR_SLOT]
+    notifier: RuntimeNotifier = application.bot_data[NOTIFIER_SLOT]
     service: ScriptureService = application.bot_data[SERVICE_SLOT]
     settings: Settings = application.bot_data[SETTINGS_SLOT]
     mini_app: MiniAppServer | None = application.bot_data.get(MINI_APP_SLOT)
+    # Liveness starts before network synchronization and corpus warming. The
+    # readiness bit remains false until every required startup stage completes.
+    await health.start()
+    janitor.start()
     if mini_app is not None:
         await mini_app.start()
     await _synchronize_telegram_profile(application, settings)
@@ -386,19 +442,24 @@ async def _post_init(application: Application) -> None:
                 metadata.get("abbreviation", settings.default_translation),
                 metadata.get("verses", "unknown"),
             )
-    # Readiness must not become true until Telegram initialization has succeeded.
-    await health.start()
+    health.mark_ready()
+    notifier.ready()
     LOGGER.info("GetBible Robot initialized")
 
 
 async def _post_shutdown(application: Application) -> None:
     health: HealthServer = application.bot_data[HEALTH_SLOT]
+    janitor: CacheJanitor = application.bot_data[CACHE_JANITOR_SLOT]
+    notifier: RuntimeNotifier = application.bot_data[NOTIFIER_SLOT]
     service: ScriptureService = application.bot_data[SERVICE_SLOT]
     preferences: UserPreferenceStore = application.bot_data[PREFERENCES_SLOT]
     mini_app: MiniAppServer | None = application.bot_data.get(MINI_APP_SLOT)
+    health.mark_not_ready()
+    await notifier.stopping()
     if mini_app is not None:
         await mini_app.close()
     await health.close()
+    await janitor.close()
     await service.close()
     preferences.close()
     LOGGER.info("GetBible Robot shut down cleanly")
@@ -442,6 +503,7 @@ def main() -> int:
             settings.log_level,
             instance_name=settings.instance_name,
             log_file=settings.log_file,
+            log_max_bytes=settings.log_max_bytes,
         )
     except OSError as error:
         logging.critical(

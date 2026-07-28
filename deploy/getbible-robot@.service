@@ -3,11 +3,13 @@ Description=GetBible Telegram Robot (%i)
 Documentation=https://github.com/getbible/robot
 Wants=network-online.target
 After=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=45s
 User=gb-%i
 Group=gb-%i
 WorkingDirectory=/opt/getbible-robot/%i/app
@@ -20,8 +22,8 @@ ExecStart=/opt/getbible-robot/%i/app/venv/bin/python /opt/getbible-robot/%i/app/
 
 Restart=on-failure
 RestartPreventExitStatus=75
-RestartSec=5s
-TimeoutStartSec=90
+RestartSec=10s
+TimeoutStartSec=180
 TimeoutStopSec=30
 KillSignal=SIGTERM
 
@@ -52,9 +54,12 @@ AmbientCapabilities=
 SystemCallArchitectures=native
 UMask=0077
 
-MemoryMax=384M
-TasksMax=64
-LimitNOFILE=1024
+MemoryHigh=180M
+MemoryMax=256M
+MemorySwapMax=16M
+OOMPolicy=stop
+TasksMax=48
+LimitNOFILE=512
 
 StandardOutput=journal
 StandardError=journal

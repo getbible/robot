@@ -148,18 +148,27 @@ cooldown state, and the durable per-user translation table are all bounded.
 
 Arbitrary reference strings, translation names, user IDs, and chat IDs therefore cannot create permanent process growth without limit.
 
+The small-host profile retains one parsed translation, one search corpus, 256
+chapters, 1000 parsed references, 200 Telegram interactions, 200 Mini App
+sessions, and no more than two Mini App sessions per Telegram user. Stale
+unreferenced corpus objects are pruned periodically; after a one-day race-safety
+grace, the oldest complete cache entries are also evicted until the disk budget
+is met. The optional JSONL file truncates in place at its byte ceiling;
+container deployments write only to stdout.
+
 ## Startup and shutdown
 
 Startup order:
 
 1. validate all configuration;
 2. construct bounded service objects;
-3. initialize Telegram and synchronize the command menu and profile metadata;
-4. optionally load/index the default search translation;
-5. start the loopback health listener;
-6. when enabled, start the Mini App on its distinct loopback port and
+3. initialize Telegram and start liveness with readiness still false;
+4. when enabled, start the Mini App on its distinct listener and
    synchronize bot-owned launch controls;
-7. start exactly one configured transport:
+5. synchronize the Telegram command menu and profile metadata;
+6. optionally load/index the default search translation;
+7. mark readiness true and start the runtime watchdog;
+8. start exactly one configured transport:
    - polling, which removes any registered webhook; or
    - an authenticated webhook on loopback behind public HTTPS.
 
@@ -180,10 +189,21 @@ non-restarting exit status so duplicate processes do not continue fighting.
 The supplied `systemd` template gives every named instance its own locked
 `gb-<instance>` identity, root-owned application and secret configuration,
 writable cache/state/JSONL paths, restart behavior, filesystem protection, no
-capabilities, limited address families, task/file limits, and `MemoryMax`.
+capabilities, limited address families, task/file limits, event-loop watchdog,
+`MemoryHigh`, `MemoryMax`, a swap ceiling, and a restart-storm limit.
 Instances do not share a token, process, cache, preference database, health
 port, Mini App port/session state, log file, interaction state, or virtual
 environment.
+
+The Docker image contains none of the host-native systemd/Caddy/TLS stack. Its
+PID-1 supervisor reads one environment in the default single-bot mode or
+multiple instance files in explicit multi-bot mode, launches one child process
+per bot, checks liveness and RSS, applies restart backoff/circuit breaking, and
+forwards termination gracefully. A small in-container setup utility controls
+the supervisor without modifying the immutable image. Every child receives
+isolated cache and preference paths and unique ports. Cluster deployments
+should use one bot token per single-replica workload; current Mini App sessions
+are process-local.
 
 ## Errors and observability
 

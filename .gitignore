@@ -30,6 +30,9 @@ htmlcov/
 .nox/
 *.log
 *.jsonl
+docker/instances/*.env
+docker/secrets/*
+!docker/secrets/.gitkeep
 
 # Editors and operating systems
 .idea/

@@ -122,6 +122,21 @@ Commands:
   upgrade     Deploy the exact commit from a reviewed source checkout
   rollback    Return to the immediately previous deployed application
   uninstall   Remove one instance after explicit confirmation
+  docker-deploy [--multi] [--secure] [--env-file FILE]
+              Build and deploy the recommended Docker layout
+  docker-list List GetBible Robot containers
+  docker-status [container]
+              Show Docker and supervised bot status
+  docker-logs [container] [lines]
+              Show recent container stdout/stderr
+  docker-follow [container]
+              Follow container stdout/stderr
+  docker-manage [container]
+              Open the interactive setup utility inside a container
+  docker-shell [container]
+              Open a non-root Bash shell inside a container
+  docker-doctor [container]
+              Run container, supervisor, and log diagnostics
   menu        Open the interactive operations menu
   self-test   Run safe manager validation tests
   help        Show this help
@@ -164,6 +179,12 @@ validate_port() {
 
 validate_delivery_mode() {
     [[ ${1:-} == "polling" || ${1:-} == "webhook" ]]
+}
+
+validate_docker_container_name() {
+    local value=${1:-}
+    [[ -n "$value" && ${#value} -le 128 ]] || return 1
+    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]
 }
 
 validate_webhook_url() {
@@ -629,6 +650,22 @@ ensure_env_value() {
     fi
 }
 
+migrate_env_default() {
+    local python_bin=$1
+    local file=$2
+    local key=$3
+    local old_value=$4
+    local new_value=$5
+    local current
+    current=$(
+        sed -n -E "s/^${key}=\"?([^\"[:space:]]+)\"?$/\\1/p" "$file" |
+            head -n 1
+    )
+    if [[ "$current" == "$old_value" ]]; then
+        replace_env_value "$python_bin" "$file" "$key" "$new_value"
+    fi
+}
+
 migrate_instance_configuration() {
     local source_dir=$1
     local python_bin=$2
@@ -656,17 +693,32 @@ migrate_instance_configuration() {
         sed -n -E 's/^GETBIBLE_MAX_RESPONSE_BYTES="?([0-9]+)"?$/\1/p' \
             "$env_file" | head -n 1
     )
-    if [[ -z "$current_limit" || "$current_limit" == "8388608" ]]; then
+    if [[ -z "$current_limit" || "$current_limit" == "8388608" ||
+        "$current_limit" == "67108864" ]]; then
         replace_env_value "$python_bin" "$env_file" \
-            "GETBIBLE_MAX_RESPONSE_BYTES" "67108864"
+            "GETBIBLE_MAX_RESPONSE_BYTES" "41943040"
     fi
     ensure_env_value "$python_bin" "$env_file" \
         "SEARCH_MAX_RESPONSE_BYTES" "4194304"
+    ensure_env_value "$python_bin" "$env_file" "REFERENCE_CACHE_LIMIT" "1000"
+    ensure_env_value "$python_bin" "$env_file" "BOOKS_CACHE_LIMIT" "16"
+    ensure_env_value "$python_bin" "$env_file" "CHAPTER_CACHE_LIMIT" "256"
+    ensure_env_value "$python_bin" "$env_file" "SEARCH_CORPUS_LIMIT" "1"
+    ensure_env_value "$python_bin" "$env_file" "TRANSLATION_CACHE_LIMIT" "1"
+    ensure_env_value "$python_bin" "$env_file" "CACHE_MAX_BYTES" "268435456"
+    ensure_env_value "$python_bin" "$env_file" \
+        "CACHE_MAINTENANCE_INTERVAL_SECONDS" "21600"
     ensure_env_value "$python_bin" "$env_file" "MAX_CONCURRENT_SEARCHES" "1"
+    migrate_env_default "$python_bin" "$env_file" "MAX_CONCURRENT_LOOKUPS" "4" "2"
+    migrate_env_default "$python_bin" "$env_file" "MAX_CONCURRENT_UPDATES" "16" "4"
+    migrate_env_default "$python_bin" "$env_file" "RATE_LIMIT_CACHE_SIZE" "20000" "2000"
+    migrate_env_default \
+        "$python_bin" "$env_file" "INTERACTION_SESSION_LIMIT" "2000" "200"
     ensure_env_value "$python_bin" "$env_file" "PREWARM_DEFAULT_TRANSLATION" "true"
     ensure_env_value "$python_bin" "$env_file" \
         "USER_PREFERENCES_FILE" "${STATE_ROOT}/${instance}/preferences.sqlite3"
-    ensure_env_value "$python_bin" "$env_file" "USER_PREFERENCE_LIMIT" "100000"
+    migrate_env_default \
+        "$python_bin" "$env_file" "USER_PREFERENCE_LIMIT" "100000" "10000"
     ensure_env_value "$python_bin" "$env_file" "TELEGRAM_DELIVERY_MODE" "polling"
     ensure_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_PUBLIC_URL" ""
     ensure_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_LISTEN" "127.0.0.1"
@@ -689,8 +741,21 @@ migrate_instance_configuration() {
         "MINI_APP_LAUNCH_TTL_SECONDS" "300"
     ensure_env_value "$python_bin" "$env_file" \
         "MINI_APP_SESSION_TTL_SECONDS" "900"
-    ensure_env_value "$python_bin" "$env_file" "MINI_APP_SESSION_LIMIT" "2000"
+    migrate_env_default \
+        "$python_bin" "$env_file" "MINI_APP_SESSION_LIMIT" "2000" "200"
+    ensure_env_value "$python_bin" "$env_file" "MINI_APP_SESSIONS_PER_USER" "2"
+    ensure_env_value \
+        "$python_bin" "$env_file" "MINI_APP_MAX_SEARCHES_PER_SESSION" "2"
+    ensure_env_value \
+        "$python_bin" "$env_file" "MINI_APP_MAX_AVAILABLE_SELECTIONS" "256"
     ensure_env_value "$python_bin" "$env_file" "MINI_APP_MAX_SELECTIONS" "100"
+    ensure_env_value \
+        "$python_bin" "$env_file" "MINI_APP_BODY_TIMEOUT_SECONDS" "10"
+    ensure_env_value \
+        "$python_bin" "$env_file" "MINI_APP_IDLE_TIMEOUT_SECONDS" "30"
+    ensure_env_value "$python_bin" "$env_file" "MINI_APP_MAX_HEADER_BYTES" "16384"
+    ensure_env_value "$python_bin" "$env_file" "LOG_MAX_BYTES" "10485760"
+    ensure_env_value "$python_bin" "$env_file" "CONTAINERIZED" "false"
     chown root:root "$env_file"
     chmod 0600 "$env_file"
     verify_content_access "$service_user" "$instance"
@@ -1047,6 +1112,9 @@ for host in sorted(routes):
                 (
                     f"    @{matcher} path {path} {path}/*",
                     f"    handle @{matcher} {{",
+                    "        request_body {",
+                    "            max_size 64KB",
+                    "        }",
                     f"        reverse_proxy 127.0.0.1:{port}",
                     "    }",
                 )
@@ -1055,6 +1123,9 @@ for host in sorted(routes):
             lines.extend(
                 (
                     "    handle {",
+                    "        request_body {",
+                    "            max_size 64KB",
+                    "        }",
                     f"        reverse_proxy 127.0.0.1:{port}",
                     "    }",
                 )
@@ -1468,7 +1539,7 @@ install_log_rotation() {
     cat >"$LOGROTATE_PATH" <<EOF
 ${LOG_ROOT}/*.jsonl {
     daily
-    rotate 14
+    rotate 3
     size 10M
     compress
     delaycompress
@@ -1799,7 +1870,7 @@ cmd_install() {
     replace_env_value "$python_bin" "$env_file" "TRANSLATION" "$translation"
     replace_env_value "$python_bin" "$env_file" \
         "USER_PREFERENCES_FILE" "${state_dir}/preferences.sqlite3"
-    replace_env_value "$python_bin" "$env_file" "USER_PREFERENCE_LIMIT" "100000"
+    replace_env_value "$python_bin" "$env_file" "USER_PREFERENCE_LIMIT" "10000"
     replace_env_value "$python_bin" "$env_file" "WELCOME_MESSAGE_FILE" "$welcome_file"
     replace_env_value "$python_bin" "$env_file" "HELP_MESSAGE_FILE" "$help_file"
     replace_env_value "$python_bin" "$env_file" "HEALTH_PORT" "$health_port"
@@ -2043,7 +2114,10 @@ cmd_runtime() {
         -p NRestarts \
         -p MemoryCurrent \
         -p MemoryPeak \
+        -p MemoryHigh \
         -p MemoryMax \
+        -p MemorySwapCurrent \
+        -p MemorySwapMax \
         -p TasksCurrent \
         -p TasksMax
     if [[ "$ACTIVE_PORT" != "0" ]]; then
@@ -2827,6 +2901,200 @@ cmd_uninstall() {
     printf 'Instance %s was removed. Revoke or rotate its Telegram token through @BotFather when appropriate.\n' "$ACTIVE_INSTANCE"
 }
 
+require_docker() {
+    command -v docker >/dev/null 2>&1 ||
+        die "Docker Engine with the Compose plugin is required."
+    docker info >/dev/null 2>&1 ||
+        die "Docker is not reachable. Start Docker or grant this operator access to its socket."
+}
+
+require_docker_compose() {
+    require_docker
+    docker compose version >/dev/null 2>&1 ||
+        die "The Docker Compose plugin is required."
+}
+
+resolve_docker_source_dir() {
+    local candidate
+    for candidate in "$SCRIPT_DIR" "$PWD"; do
+        if [[ -f "${candidate}/Dockerfile" &&
+            -f "${candidate}/compose.yaml" &&
+            -f "${candidate}/container/runtime.py" ]]; then
+            readlink -f "$candidate"
+            return
+        fi
+    done
+    die "Run Docker deployment from a GetBible Robot checkout containing Dockerfile and compose.yaml."
+}
+
+docker_container_names() {
+    docker ps --all \
+        --filter "label=io.getbible.robot.container=true" \
+        --format '{{.Names}}' |
+        sort
+}
+
+select_docker_container() {
+    local requested=${1:-}
+    local names=()
+    local index
+    local choice
+    local label
+    require_docker
+    if [[ -n "$requested" ]]; then
+        validate_docker_container_name "$requested" ||
+            die "Invalid Docker container name: ${requested}"
+        label=$(
+            docker inspect \
+                --format '{{ index .Config.Labels "io.getbible.robot.container" }}' \
+                "$requested" 2>/dev/null || true
+        )
+        [[ "$label" == "true" ]] ||
+            die "Container is not a managed GetBible Robot container: ${requested}"
+        printf '%s\n' "$requested"
+        return
+    fi
+    mapfile -t names < <(docker_container_names)
+    ((${#names[@]} > 0)) || die "No GetBible Robot Docker containers were found."
+    if ((${#names[@]} == 1)); then
+        printf '%s\n' "${names[0]}"
+        return
+    fi
+    require_tty
+    printf 'Select a GetBible Robot container:\n' >&2
+    for index in "${!names[@]}"; do
+        printf '  %d) %s\n' "$((index + 1))" "${names[$index]}" >&2
+    done
+    read -r -p "Selection: " choice
+    [[ "$choice" =~ ^[0-9]+$ ]] || die "Selection must be a number."
+    ((choice >= 1 && choice <= ${#names[@]})) ||
+        die "Selection is out of range."
+    printf '%s\n' "${names[$((choice - 1))]}"
+}
+
+cmd_docker_deploy() {
+    require_docker_compose
+    local source_dir
+    source_dir=$(resolve_docker_source_dir)
+    local compose_file="${source_dir}/compose.yaml"
+    local secure_overlay=""
+    local env_file=""
+    local -a compose_args=()
+    while (($#)); do
+        case "$1" in
+            --multi)
+                compose_file="${source_dir}/compose.multi.yaml"
+                shift
+                ;;
+            --secure)
+                secure_overlay="${source_dir}/compose.secret.yaml"
+                shift
+                ;;
+            --env-file)
+                (($# >= 2)) || die "--env-file requires a file path."
+                env_file=$(readlink -f "$2")
+                shift 2
+                ;;
+            *)
+                die "Unknown Docker deploy option: $1"
+                ;;
+        esac
+    done
+    [[ -f "$compose_file" && -f "${source_dir}/Dockerfile" ]] ||
+        die "The checkout is missing Docker deployment files."
+    if [[ "$compose_file" == *"compose.multi.yaml" && -n "$secure_overlay" ]]; then
+        die "--secure is for the environment-driven single-bot layout."
+    fi
+    if [[ -n "$env_file" ]]; then
+        [[ -f "$env_file" ]] || die "Docker environment file not found: ${env_file}"
+        compose_args+=(--env-file "$env_file")
+    fi
+    compose_args+=(
+        --project-directory "$source_dir"
+        --file "$compose_file"
+    )
+    if [[ -n "$secure_overlay" ]]; then
+        compose_args+=(--file "$secure_overlay")
+    fi
+    info "Validating Docker Compose configuration"
+    docker compose "${compose_args[@]}" config --quiet
+    info "Building and deploying GetBible Robot"
+    docker compose "${compose_args[@]}" up --detach --build
+    docker compose "${compose_args[@]}" ps
+    printf '\nInitial container output:\n'
+    docker compose "${compose_args[@]}" logs --no-color --tail 40
+    printf '\nUse ./setup.sh docker-doctor for the complete deployment check.\n'
+}
+
+cmd_docker_list() {
+    require_docker
+    local names=()
+    mapfile -t names < <(docker_container_names)
+    if ((${#names[@]} == 0)); then
+        printf 'No GetBible Robot Docker containers are deployed.\n'
+        return
+    fi
+    docker ps --all \
+        --filter "label=io.getbible.robot.container=true" \
+        --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Image}}'
+}
+
+cmd_docker_status() {
+    local container
+    container=$(select_docker_container "${1:-}")
+    docker inspect \
+        --format $'Container:     {{.Name}}\nImage:         {{.Config.Image}}\nState:         {{.State.Status}}\nHealth:        {{if .State.Health}}{{.State.Health.Status}}{{else}}not configured{{end}}\nStarted:       {{.State.StartedAt}}\nRestarts:      {{.RestartCount}}\nMemory limit:  {{.HostConfig.Memory}}\nPID limit:     {{.HostConfig.PidsLimit}}' \
+        "$container"
+    if [[ "$(docker inspect --format '{{.State.Running}}' "$container")" == "true" ]]; then
+        printf '\nBot supervisor status:\n'
+        docker exec "$container" getbible-robot-container status || true
+    fi
+}
+
+cmd_docker_logs() {
+    local container
+    local lines=${2:-200}
+    [[ "$lines" =~ ^[0-9]+$ ]] && ((lines >= 1 && lines <= 10000)) ||
+        die "Docker log line count must be between 1 and 10000."
+    container=$(select_docker_container "${1:-}")
+    docker logs --tail "$lines" "$container"
+}
+
+cmd_docker_follow() {
+    local container
+    require_tty
+    container=$(select_docker_container "${1:-}")
+    docker logs --follow --tail 100 "$container"
+}
+
+cmd_docker_manage() {
+    local container
+    require_tty
+    container=$(select_docker_container "${1:-}")
+    docker exec --interactive --tty "$container" /app/setup.sh menu
+}
+
+cmd_docker_shell() {
+    local container
+    require_tty
+    container=$(select_docker_container "${1:-}")
+    docker exec --interactive --tty "$container" /bin/bash
+}
+
+cmd_docker_doctor() {
+    local container
+    container=$(select_docker_container "${1:-}")
+    cmd_docker_status "$container"
+    printf '\nBot supervisor diagnostics:\n'
+    if [[ "$(docker inspect --format '{{.State.Running}}' "$container")" == "true" ]]; then
+        docker exec "$container" getbible-robot-container doctor || true
+    else
+        printf 'Container is not running; supervisor diagnostics are unavailable.\n'
+    fi
+    printf '\nRecent stdout/stderr:\n'
+    docker logs --tail 200 "$container" 2>&1 || true
+}
+
 cmd_self_test() {
     local failed=0
     validate_instance_name "production" || ((failed += 1))
@@ -2844,6 +3112,9 @@ cmd_self_test() {
     validate_delivery_mode "polling" || ((failed += 1))
     validate_delivery_mode "webhook" || ((failed += 1))
     ! validate_delivery_mode "streaming" || ((failed += 1))
+    validate_docker_container_name "getbible-robot-production" ||
+        ((failed += 1))
+    ! validate_docker_container_name "../robot" || ((failed += 1))
     validate_webhook_url "https://bot.example.com/telegram/production" ||
         ((failed += 1))
     ! validate_webhook_url "http://bot.example.com/telegram/production" ||
@@ -2902,6 +3173,12 @@ GetBible Robot operations
  16) Update / upgrade deployment
  17) Roll back
  18) Uninstall
+ 19) Deploy / update recommended Docker container
+ 20) List Docker containers
+ 21) Open Docker container management
+ 22) Open shell inside a Docker container
+ 23) Show Docker logs
+ 24) Docker diagnostics
   0) Exit
 EOF
         read -r -p "Selection: " selection
@@ -2924,6 +3201,12 @@ EOF
             16) cmd_upgrade ;;
             17) cmd_rollback ;;
             18) cmd_uninstall ;;
+            19) cmd_docker_deploy ;;
+            20) cmd_docker_list ;;
+            21) cmd_docker_manage ;;
+            22) cmd_docker_shell ;;
+            23) cmd_docker_logs ;;
+            24) cmd_docker_doctor ;;
             0) return ;;
             *) warn "Unknown selection." ;;
         esac
@@ -2952,6 +3235,14 @@ main() {
         update|upgrade) cmd_upgrade "$@" ;;
         rollback) cmd_rollback "$@" ;;
         uninstall) cmd_uninstall "$@" ;;
+        docker-deploy|docker-update) cmd_docker_deploy "$@" ;;
+        docker-list) cmd_docker_list "$@" ;;
+        docker-status) cmd_docker_status "$@" ;;
+        docker-logs) cmd_docker_logs "$@" ;;
+        docker-follow) cmd_docker_follow "$@" ;;
+        docker-manage) cmd_docker_manage "$@" ;;
+        docker-shell) cmd_docker_shell "$@" ;;
+        docker-doctor) cmd_docker_doctor "$@" ;;
         menu) cmd_menu "$@" ;;
         self-test) cmd_self_test "$@" ;;
         help|-h|--help) usage ;;

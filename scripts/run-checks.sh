@@ -10,9 +10,11 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 bash -n setup.sh
+bash -n container/setup.sh
+bash -n tests/docker_manager.sh
 bash setup.sh self-test
 "$PYTHON" -m pip check
-"$PYTHON" -m compileall -q bot.py config.py modules scripts tests
+"$PYTHON" -m compileall -q bot.py config.py modules container scripts tests
 "$PYTHON" -m unittest discover -s tests -v
 "$VENV/bin/ruff" check .
 "$VENV/bin/mypy"
@@ -31,7 +33,7 @@ import getbible
 print(Path(getbible.__file__).resolve().parent)
 PY
 )
-"$VENV/bin/bandit" -q -r bot.py config.py modules scripts "$librarian_path" -ll
+"$VENV/bin/bandit" -q -r bot.py config.py modules container scripts "$librarian_path" -ll
 "$PYTHON" scripts/audit_runtime.py
 
 report=$(mktemp)

@@ -35,6 +35,8 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             bot_name="GetBible Robot",
             bot_description="Read and search Scripture in Telegram with GetBible.",
             bot_short_description="Read and search Scripture with GetBible.",
+            cache_max_bytes=256 * 1024 * 1024,
+            cache_maintenance_interval_seconds=21_600,
         )
 
     def test_every_public_command_alias_and_interaction_handler_is_registered(
@@ -120,7 +122,14 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(preference_store.call_args_list[1].kwargs["path"])
 
     async def test_startup_and_shutdown_cover_telegram_health_and_service(self) -> None:
-        health = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
+        health = SimpleNamespace(
+            start=AsyncMock(),
+            close=AsyncMock(),
+            mark_ready=Mock(),
+            mark_not_ready=Mock(),
+        )
+        janitor = SimpleNamespace(start=Mock(), close=AsyncMock())
+        notifier = SimpleNamespace(ready=Mock(), stopping=AsyncMock())
         service = SimpleNamespace(
             close=AsyncMock(),
             warm_default_translation=AsyncMock(
@@ -141,6 +150,8 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
                 bot.SERVICE_SLOT: service,
                 bot.SETTINGS_SLOT: settings,
                 bot.PREFERENCES_SLOT: preferences,
+                bot.CACHE_JANITOR_SLOT: janitor,
+                bot.NOTIFIER_SLOT: notifier,
             },
         )
 
@@ -177,16 +188,28 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         )
         service.warm_default_translation.assert_awaited_once()
         health.start.assert_awaited_once()
+        health.mark_ready.assert_called_once_with()
+        janitor.start.assert_called_once_with()
+        notifier.ready.assert_called_once_with()
 
         await bot._post_shutdown(application)
+        health.mark_not_ready.assert_called_once_with()
         health.close.assert_awaited_once()
+        janitor.close.assert_awaited_once()
+        notifier.stopping.assert_awaited_once()
         service.close.assert_awaited_once()
         preferences.close.assert_called_once_with()
 
     async def test_ephemeral_registration_failure_uses_ordinary_group_commands(
         self,
     ) -> None:
-        health = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
+        health = SimpleNamespace(
+            start=AsyncMock(),
+            close=AsyncMock(),
+            mark_ready=Mock(),
+        )
+        janitor = SimpleNamespace(start=Mock())
+        notifier = SimpleNamespace(ready=Mock())
         service = SimpleNamespace(
             close=AsyncMock(),
             warm_default_translation=AsyncMock(
@@ -214,6 +237,8 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
                 bot.SERVICE_SLOT: service,
                 bot.SETTINGS_SLOT: settings,
                 bot.PREFERENCES_SLOT: preferences,
+                bot.CACHE_JANITOR_SLOT: janitor,
+                bot.NOTIFIER_SLOT: notifier,
             },
         )
 
@@ -374,6 +399,7 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             log_level=logging.INFO,
             instance_name="production",
             log_file=None,
+            log_max_bytes=10 * 1024 * 1024,
         )
         with (
             patch.object(bot.Settings, "from_env", return_value=settings),

@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable, Mapping
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from .interactions import InteractionStore
@@ -31,6 +33,23 @@ class HealthServer:
         self._limiter = limiter
         self._interactions = interactions
         self._server: asyncio.AbstractServer | None = None
+        self._application_ready = False
+        self._mini_app_snapshot: Callable[[], Mapping[str, int | float]] | None = None
+
+    def set_mini_app_snapshot(
+        self,
+        snapshot: Callable[[], Mapping[str, int | float]],
+    ) -> None:
+        self._mini_app_snapshot = snapshot
+
+    def mark_ready(self) -> None:
+        self._application_ready = True
+
+    def mark_not_ready(self) -> None:
+        self._application_ready = False
+
+    async def ready(self) -> bool:
+        return self._application_ready and await self._service.ready()
 
     async def start(self) -> None:
         if self._port == 0:
@@ -69,7 +88,7 @@ class HealthServer:
             if path == "/healthz":
                 await self._write(writer, 200, {"status": "ok"})
             elif path == "/readyz":
-                ready = await self._service.ready()
+                ready = await self.ready()
                 await self._write(
                     writer,
                     200 if ready else 503,
@@ -95,7 +114,7 @@ class HealthServer:
         interactions = self._interactions.snapshot()
         lines = [
             "# TYPE getbible_robot_ready gauge",
-            f"getbible_robot_ready {1 if await self._service.ready() else 0}",
+            f"getbible_robot_ready {1 if await self.ready() else 0}",
         ]
         for name, value in sorted(service["metrics"].items()):
             lines.append(f"getbible_robot_{_metric_name(name)} {int(value)}")
@@ -103,6 +122,11 @@ class HealthServer:
             lines.append(f"getbible_robot_rate_limit_{_metric_name(name)} {int(value)}")
         for name, value in sorted(interactions.items()):
             lines.append(f"getbible_robot_interaction_{_metric_name(name)} {int(value)}")
+        if self._mini_app_snapshot is not None:
+            for name, value in sorted(self._mini_app_snapshot().items()):
+                lines.append(f"getbible_robot_mini_app_{_metric_name(name)} {int(value)}")
+        for name, value in sorted(_process_metrics().items()):
+            lines.append(f"getbible_robot_process_{_metric_name(name)} {value}")
         circuit = service["circuit"]
         lines.append(
             "getbible_robot_circuit_open "
@@ -156,3 +180,25 @@ class HealthServer:
 
 def _metric_name(value: str) -> str:
     return "".join(character if character.isalnum() else "_" for character in value)
+
+
+def _process_metrics() -> dict[str, int]:
+    metrics: dict[str, int] = {}
+    try:
+        for line in Path("/proc/self/status").read_text(encoding="ascii").splitlines():
+            name, separator, value = line.partition(":")
+            if not separator:
+                continue
+            if name in {"VmRSS", "VmHWM"}:
+                parts = value.split()
+                if parts and parts[0].isdigit():
+                    metrics[f"{name.casefold()}_bytes"] = int(parts[0]) * 1024
+            elif name == "Threads":
+                stripped = value.strip()
+                if stripped.isdigit():
+                    metrics["threads"] = int(stripped)
+    except (OSError, UnicodeError):
+        pass
+    with suppress(OSError):
+        metrics["open_file_descriptors"] = sum(1 for _ in Path("/proc/self/fd").iterdir())
+    return metrics

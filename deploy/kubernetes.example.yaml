@@ -1,0 +1,141 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: getbible-production-token
+type: Opaque
+stringData:
+  token: replace-through-your-secret-manager
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: getbible-production-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: getbible-production
+spec:
+  # Polling and in-memory Mini App sessions require one replica per bot token.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: getbible-production
+  template:
+    metadata:
+      labels:
+        app: getbible-production
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: robot
+          image: ghcr.io/getbible/robot:replace-with-reviewed-tag
+          args:
+            - run
+          env:
+            - name: ROBOT_MODE
+              value: single
+            - name: INSTANCE_NAME
+              value: production
+            - name: TELEGRAM_API_TOKEN_FILE
+              value: /run/secrets/telegram/token
+            - name: TELEGRAM_DELIVERY_MODE
+              value: polling
+            - name: MINI_APP_ENABLED
+              value: "true"
+            - name: MINI_APP_PUBLIC_URL
+              value: https://bot.example.com/getbible/production
+            - name: MINI_APP_LISTEN
+              value: 0.0.0.0
+            - name: MINI_APP_PORT
+              value: "9201"
+            - name: HEALTH_HOST
+              value: 0.0.0.0
+            - name: HEALTH_PORT
+              value: "8081"
+            - name: CONTAINER_INSTANCE_MEMORY_LIMIT_MB
+              value: "220"
+          ports:
+            - name: mini-app
+              containerPort: 9201
+            - name: health
+              containerPort: 8081
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 160Mi
+              ephemeral-storage: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+              ephemeral-storage: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: temp
+              mountPath: /tmp
+            - name: token
+              mountPath: /run/secrets/telegram
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: getbible-production-data
+        - name: temp
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: token
+          secret:
+            secretName: getbible-production-token  # pragma: allowlist secret
+            defaultMode: 0440
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: getbible-production
+spec:
+  selector:
+    app: getbible-production
+  ports:
+    - name: mini-app
+      port: 9201
+      targetPort: mini-app

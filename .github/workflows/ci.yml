@@ -53,7 +53,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python -m compileall -q bot.py config.py modules scripts tests \
+          python -m compileall -q bot.py config.py modules container scripts tests \
             2>&1 | tee "${RUNNER_TEMP}/compile.log"
 
       - name: Validate setup manager
@@ -145,7 +145,7 @@ jobs:
           print(Path(getbible.__file__).resolve().parent)
           PY
           )
-          bandit -q -r bot.py config.py modules scripts "$librarian_path" -ll \
+          bandit -q -r bot.py config.py modules container scripts "$librarian_path" -ll \
             2>&1 | tee "${RUNNER_TEMP}/bandit.log"
 
       - name: Dependency vulnerability scan
@@ -235,10 +235,73 @@ jobs:
             ${{ runner.temp }}/secrets.json
           if-no-files-found: warn
 
+  container:
+    name: Container build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Validate Compose models
+        shell: bash
+        run: |
+          set -o pipefail
+          cp docker/examples/production.env.example \
+            docker/instances/production.env
+          install -m 0600 /dev/null docker/secrets/production.token
+          docker compose -f compose.yaml config --quiet \
+            2>&1 | tee "${RUNNER_TEMP}/compose-single.log"
+          docker compose -f compose.single.yaml config --quiet \
+            2>&1 | tee -a "${RUNNER_TEMP}/compose-single.log"
+          docker compose -f compose.multi.yaml config --quiet \
+            2>&1 | tee "${RUNNER_TEMP}/compose-multi.log"
+          TELEGRAM_API_TOKEN='123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi' \
+            docker compose -f compose.yaml -f compose.secret.yaml \
+            config --quiet \
+            2>&1 | tee "${RUNNER_TEMP}/compose-secret.log"
+
+      - name: Build exact runtime image
+        shell: bash
+        run: |
+          set -o pipefail
+          docker build --pull --tag getbible-robot:ci . \
+            2>&1 | tee "${RUNNER_TEMP}/docker-build.log"
+
+      - name: Smoke test image contract
+        shell: bash
+        run: |
+          set -o pipefail
+          docker run --rm --entrypoint python getbible-robot:ci \
+            -c 'from config import Settings; from container.runtime import ContainerSupervisor' \
+            2>&1 | tee "${RUNNER_TEMP}/docker-smoke.log"
+          docker run --rm getbible-robot:ci --help \
+            2>&1 | tee -a "${RUNNER_TEMP}/docker-smoke.log"
+          docker run --rm --entrypoint /app/setup.sh \
+            getbible-robot:ci help \
+            2>&1 | tee -a "${RUNNER_TEMP}/docker-smoke.log"
+          container_user=$(docker image inspect \
+            --format '{{.Config.User}}' getbible-robot:ci)
+          test "$container_user" = "10001:10001"
+
+      - name: Upload container diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: container-failure
+          path: |
+            ${{ runner.temp }}/compose-multi.log
+            ${{ runner.temp }}/compose-single.log
+            ${{ runner.temp }}/compose-secret.log
+            ${{ runner.temp }}/docker-build.log
+            ${{ runner.temp }}/docker-smoke.log
+          if-no-files-found: warn
+
   gate:
     name: Security gate status
     if: always() && github.event_name == 'push'
-    needs: [test, quality]
+    needs: [test, quality, container]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -247,10 +310,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TEST_RESULT: ${{ needs.test.result }}
           QUALITY_RESULT: ${{ needs.quality.result }}
+          CONTAINER_RESULT: ${{ needs.container.result }}
         run: |
           state=failure
           description="Robot CI or security checks failed"
-          if [ "$TEST_RESULT" = success ] && [ "$QUALITY_RESULT" = success ]; then
+          if [ "$TEST_RESULT" = success ] \
+            && [ "$QUALITY_RESULT" = success ] \
+            && [ "$CONTAINER_RESULT" = success ]; then
             state=success
             description="Robot CI and security checks passed"
           fi

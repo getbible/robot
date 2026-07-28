@@ -64,7 +64,8 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
 - owner-scoped, TTL/LRU-bounded interactive and Mini App sessions;
 - fresh Telegram Mini App signature validation plus user-bound, short-lived
   launch authorization for every data/action API;
-- loopback-only Mini App serving behind HTTPS, with no bot token or
+- private Mini App serving behind external HTTPS (loopback on host-native
+  installs or a container ingress network), with no bot token or
   authoritative Scripture text in browser state;
 - a bounded per-instance preference database containing only Telegram user IDs,
   selected translation codes, non-content search defaults, and update times;
@@ -84,11 +85,14 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
 - validated startup configuration and narrow Telegram update subscriptions;
 - selectable long polling or reverse-proxied HTTPS webhook delivery, with
   duplicate pollers stopped instead of restarted;
-- per-instance JSONL/journal logs with metadata-only auditing by default and explicit content opt-in;
-- loopback-only health and readiness endpoints;
+- continuously size-capped per-instance JSONL/journal logs with metadata-only
+  auditing by default and explicit content opt-in;
+- lifecycle-aware health and readiness endpoints with process and Mini App metrics;
 - isolated locked service accounts and restartable, capability-free,
-  filesystem-protected `systemd` instances with separate writable preference
-  state;
+  filesystem-protected `systemd` instances with watchdog, memory-high,
+  memory-max, and swap limits plus separate writable preference state;
+- a non-root, read-only Docker image with no bundled reverse proxy, supporting
+  one bot per workload or supervised multi-bot operation with unique ports;
 - deterministic tests, fuzz regressions, Ruff, mypy, Bandit, dependency auditing, secret scanning, and CodeQL.
 
 See [Architecture](docs/ARCHITECTURE.md) and [the release gate](docs/RELEASE_GATE.md) for the complete model.
@@ -96,11 +100,33 @@ See [Architecture](docs/ARCHITECTURE.md) and [the release gate](docs/RELEASE_GAT
 ## Supported runtime
 
 - Python 3.10, 3.11, or 3.12.
-- Linux with `systemd` for the supplied production unit.
+- Docker/OCI on Linux for the recommended portable deployment.
+- Linux with `systemd` for the supplied host-native deployment.
 - A Telegram bot token from `@BotFather`.
 - Outbound HTTPS access to Telegram and `https://api.getbible.net`.
-- Public DNS plus inbound TCP `80`/`443` when the Mini App is enabled; setup
-  manages host Caddy automatic HTTPS while Telegram updates may keep polling.
+- Public HTTPS when the Mini App is enabled. Host-native setup can manage Caddy
+  on TCP `80`/`443`; Docker leaves those ports and ingress entirely external.
+
+The Docker image does not claim ports 80 or 443 and contains no Caddy. It
+serves each bot on configured application ports and leaves TLS and routing to
+the surrounding platform. It supports both one bot per container and a
+supervised multi-bot container. See [Docker deployment](docs/DOCKER.md).
+
+## Docker quick start
+
+```bash
+cp docker/examples/compose.env.example .env
+chmod 600 .env
+${EDITOR:-vi} .env
+./setup.sh docker-deploy
+./setup.sh docker-doctor
+```
+
+The default Compose model runs one bot in one 256 MiB container and publishes
+only its configured Mini App port. Missing configuration is reported through
+container stdout/stderr. Use `./setup.sh docker-manage` for the in-container
+operations menu or `./setup.sh docker-shell` for a non-root shell. Multi-bot
+mode remains available through `./setup.sh docker-deploy --multi`.
 
 ## Dependency policy
 
@@ -182,6 +208,7 @@ Use `sudo getbible-robot runtime <instance>` to resolve and query the correct po
 
 - [Documentation index](docs/README.md)
 - [Installation](docs/INSTALLATION.md)
+- [Docker deployment](docs/DOCKER.md)
 - [Configuration reference](docs/CONFIGURATION.md)
 - [Interactive Bible and search workflows](docs/INTERACTIONS.md)
 - [Telegram Mini App deployment](docs/MINI_APP.md)

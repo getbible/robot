@@ -138,17 +138,32 @@ final server-resolved selection.
 |---|---:|---|
 | `MINI_APP_ENABLED` | `false` | Managed through `getbible-robot miniapp` |
 | `MINI_APP_PUBLIC_URL` | empty | Absolute HTTPS URL; no credentials, query, or fragment |
-| `MINI_APP_LISTEN` | `127.0.0.1` | Manager-owned; never bind publicly |
+| `MINI_APP_LISTEN` | `127.0.0.1` | Host manager keeps loopback; Docker uses a private ingress network |
 | `MINI_APP_PORT` | `9201` | Manager-owned, reserved per configured instance, and different from health/webhook ports |
 | `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | `300` | `30`–`900`; maximum Telegram authentication age |
 | `MINI_APP_LAUNCH_TTL_SECONDS` | `300` | `30`–`900`; lifetime of the user-bound launch token |
 | `MINI_APP_SESSION_TTL_SECONDS` | `900` | Absolute server session lifetime |
-| `MINI_APP_SESSION_LIMIT` | `2000` | Maximum bounded active Mini App sessions |
+| `MINI_APP_SESSION_LIMIT` | `200` | Maximum bounded active Mini App sessions |
+| `MINI_APP_SESSIONS_PER_USER` | `2` | Per-user active session bound |
+| `MINI_APP_MAX_SEARCHES_PER_SESSION` | `2` | Retained searches per session |
+| `MINI_APP_MAX_AVAILABLE_SELECTIONS` | `256` | Retained selectable verses per session |
 | `MINI_APP_MAX_SELECTIONS` | `100` | Maximum selected verse items before final normalization |
 
 Keep the authentication and launch windows short. Lengthening them increases
 the useful replay window and is not a remedy for incorrect clocks. Maintain
 accurate host time with a trusted time-synchronization service.
+
+The backend independently limits request headers to 16 KiB, bodies to 64 KiB,
+body delivery to 10 seconds, and idle/incomplete-header connections to 30
+seconds.
+
+## Docker and external ingress
+
+The Docker image does not install or configure Caddy. It binds the configured
+container port and leaves HTTPS and routing to external ingress. Publish each
+`MINI_APP_PORT` only to a private proxy network or host loopback; do not make
+the plain backend port a public edge. Multiple bots in one container must use
+distinct Mini App and health ports. See [Docker deployment](DOCKER.md).
 
 ## Interface localization
 

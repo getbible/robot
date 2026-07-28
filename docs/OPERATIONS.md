@@ -1,5 +1,25 @@
 # Operations
 
+## Docker instances
+
+The container deployment uses its own non-root supervisor instead of systemd
+and Caddy. Operate it without opening a shell:
+
+```bash
+docker exec getbible-robot getbible-robot-container list
+docker exec getbible-robot getbible-robot-container status production
+docker exec getbible-robot getbible-robot-container doctor production
+docker exec getbible-robot getbible-robot-container restart production
+docker exec getbible-robot getbible-robot-container reload
+docker logs --since 30m getbible-robot
+```
+
+The status response includes PID, assigned ports, current RSS, the per-child
+memory guard, restart count, last exit, and recent liveness. Configuration and
+secrets are edited on the host or secret-management platform and then applied
+with `reload`; they are not mutated inside the read-only container. See
+[Docker deployment](DOCKER.md).
+
 The installed `getbible-robot` manager is the supported interface for routine production operation. Every command accepts an instance name. If it is omitted in an interactive terminal, the manager lists installed instances for selection.
 
 ## Inventory

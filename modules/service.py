@@ -174,11 +174,11 @@ class ScriptureService:
             negative_translation_cache_limit=64,
             negative_translation_ttl=300.0,
             max_response_bytes=settings.max_response_bytes,
-            reference_cache_limit=5000,
-            books_cache_limit=64,
-            chapter_cache_limit=1024,
-            search_corpus_limit=1,
-            translation_cache_limit=2,
+            reference_cache_limit=settings.reference_cache_limit,
+            books_cache_limit=settings.books_cache_limit,
+            chapter_cache_limit=settings.chapter_cache_limit,
+            search_corpus_limit=settings.search_corpus_limit,
+            translation_cache_limit=settings.translation_cache_limit,
         )
         self._catalog = CatalogClient(
             base_url=settings.api_base_url,
@@ -188,7 +188,7 @@ class ScriptureService:
             cache_ttl_seconds=settings.catalog_cache_ttl_seconds,
         )
         self._parser = parser or GetBibleReference(
-            cache_limit=5000,
+            cache_limit=settings.reference_cache_limit,
             max_reference_length=min(settings.max_input_length, 100),
             max_verses=settings.max_verses_per_reference,
             max_verse_number=1000,

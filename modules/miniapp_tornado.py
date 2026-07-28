@@ -152,6 +152,9 @@ class MiniAppServer:
         self.sessions = MiniAppSessionStore(
             max_sessions=settings.mini_app_session_limit,
             ttl_seconds=settings.mini_app_session_ttl_seconds,
+            max_sessions_per_user=settings.mini_app_sessions_per_user,
+            max_searches_per_session=settings.mini_app_max_searches_per_session,
+            max_available_selections=settings.mini_app_max_available_selections,
             max_basket_selections=settings.mini_app_max_selections,
         )
         validator = TelegramInitDataValidator(
@@ -212,8 +215,11 @@ class MiniAppServer:
             application,
             xheaders=True,
             trusted_downstream=["127.0.0.1", "::1"],
-            max_buffer_size=1024 * 1024,
+            max_buffer_size=128 * 1024,
             max_body_size=64 * 1024,
+            max_header_size=self._settings.mini_app_max_header_bytes,
+            idle_connection_timeout=self._settings.mini_app_idle_timeout_seconds,
+            body_timeout=self._settings.mini_app_body_timeout_seconds,
         )
         server.listen(
             self._settings.mini_app_port,

@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from ipaddress import ip_address
+from ipaddress import IPv4Address, IPv6Address, ip_address
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -27,6 +27,9 @@ _WEBHOOK_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
 _WEBHOOK_PATH_RE = re.compile(r"/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\Z")
 _MINI_APP_PATH_RE = re.compile(r"(?:/[A-Za-z0-9_-]+)*\Z")
 _TELEGRAM_WEBHOOK_PORTS = frozenset({80, 88, 443, 8443})
+_WILDCARD_LISTENERS = frozenset(
+    {str(IPv4Address(0)), str(IPv6Address(0))}
+)
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -63,6 +66,37 @@ def _boolean(name: str, default: bool) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     raise ConfigurationError(f"{name} must be true or false.")
+
+
+def _listener(name: str, default: str, *, containerized: bool) -> str:
+    value = _env(name, default) or ""
+    if value in _LOCAL_HOSTS:
+        return value
+    if containerized and value in _WILDCARD_LISTENERS:
+        return value
+    suffix = " or a wildcard container address" if containerized else ""
+    raise ConfigurationError(
+        f"{name} must be localhost or a loopback address{suffix}."
+    )
+
+
+def _secret(name: str) -> str | None:
+    direct = _env(name)
+    secret_file = _env(f"{name}_FILE", "") or ""
+    if direct and secret_file:
+        raise ConfigurationError(f"{name} and {name}_FILE cannot both be set.")
+    if not secret_file:
+        return direct
+    path = Path(secret_file)
+    if not path.is_absolute():
+        raise ConfigurationError(f"{name}_FILE must be an absolute path.")
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as error:
+        raise ConfigurationError(f"{name}_FILE could not be read safely.") from error
+    if not value:
+        raise ConfigurationError(f"{name}_FILE is empty.")
+    return value
 
 
 def _base_url(name: str, default: str) -> str:
@@ -177,7 +211,7 @@ def _webhook_ip_address() -> str | None:
 
 
 def _webhook_secret(delivery_mode: str) -> str | None:
-    value = _env("TELEGRAM_WEBHOOK_SECRET_TOKEN", "") or ""
+    value = _secret("TELEGRAM_WEBHOOK_SECRET_TOKEN") or ""
     if not value:
         if delivery_mode == "webhook":
             raise ConfigurationError(
@@ -298,6 +332,13 @@ class Settings:
     request_retries: int
     max_response_bytes: int
     search_max_response_bytes: int
+    reference_cache_limit: int
+    books_cache_limit: int
+    chapter_cache_limit: int
+    search_corpus_limit: int
+    translation_cache_limit: int
+    cache_max_bytes: int
+    cache_maintenance_interval_seconds: int
     max_input_length: int
     max_references: int
     max_verses_per_reference: int
@@ -326,8 +367,10 @@ class Settings:
     health_port: int
     instance_name: str
     log_file: str | None
+    log_max_bytes: int
     audit_log_mode: str
     log_level: int
+    containerized: bool = False
     mini_app_enabled: bool = False
     mini_app_public_url: str | None = None
     mini_app_listen: str = "127.0.0.1"
@@ -335,15 +378,21 @@ class Settings:
     mini_app_init_data_max_age_seconds: int = 300
     mini_app_launch_ttl_seconds: int = 300
     mini_app_session_ttl_seconds: int = 900
-    mini_app_session_limit: int = 2000
+    mini_app_session_limit: int = 200
+    mini_app_sessions_per_user: int = 2
+    mini_app_max_searches_per_session: int = 2
+    mini_app_max_available_selections: int = 256
     mini_app_max_selections: int = 100
+    mini_app_body_timeout_seconds: float = 10.0
+    mini_app_idle_timeout_seconds: float = 30.0
+    mini_app_max_header_bytes: int = 16 * 1024
 
     @classmethod
     def from_env(cls, *, load_environment_file: bool = True) -> Settings:
         if load_environment_file:
             load_dotenv(override=False)
 
-        primary_token = _env("TELEGRAM_API_TOKEN")
+        primary_token = _secret("TELEGRAM_API_TOKEN")
         legacy_token = _env("TELEGRAM_TOKEN")
         if primary_token and legacy_token and primary_token != legacy_token:
             raise ConfigurationError(
@@ -363,13 +412,13 @@ class Settings:
         if audit_log_mode not in _AUDIT_LOG_MODES:
             raise ConfigurationError("AUDIT_LOG_MODE must be metadata or content.")
 
+        containerized = _boolean("CONTAINERIZED", False)
         delivery_mode = _delivery_mode()
-        webhook_listen = _env("TELEGRAM_WEBHOOK_LISTEN", "127.0.0.1") or ""
-        if webhook_listen not in _LOCAL_HOSTS:
-            raise ConfigurationError(
-                "TELEGRAM_WEBHOOK_LISTEN must be localhost or a loopback address. "
-                "Terminate public HTTPS at a reverse proxy."
-            )
+        webhook_listen = _listener(
+            "TELEGRAM_WEBHOOK_LISTEN",
+            "127.0.0.1",
+            containerized=containerized,
+        )
 
         log_name = (_env("LOG_LEVEL", "INFO") or "").upper()
         log_level = getattr(logging, log_name, None)
@@ -385,17 +434,18 @@ class Settings:
                 "MAX_TOTAL_VERSES cannot be lower than MAX_VERSES_PER_REFERENCE."
             )
 
-        health_host = _env("HEALTH_HOST", "127.0.0.1") or ""
-        if health_host not in _LOCAL_HOSTS:
-            raise ConfigurationError("HEALTH_HOST must be localhost or a loopback address.")
+        health_host = _listener(
+            "HEALTH_HOST",
+            "127.0.0.1",
+            containerized=containerized,
+        )
 
         mini_app_enabled = _boolean("MINI_APP_ENABLED", False)
-        mini_app_listen = _env("MINI_APP_LISTEN", "127.0.0.1") or ""
-        if mini_app_listen not in _LOCAL_HOSTS:
-            raise ConfigurationError(
-                "MINI_APP_LISTEN must be localhost or a loopback address. "
-                "Terminate public HTTPS at a reverse proxy."
-            )
+        mini_app_listen = _listener(
+            "MINI_APP_LISTEN",
+            "127.0.0.1",
+            containerized=containerized,
+        )
         webhook_port = _integer("TELEGRAM_WEBHOOK_PORT", 9001, 1024, 65_535)
         health_port = _integer("HEALTH_PORT", 8081, 0, 65_535)
         mini_app_port = _integer("MINI_APP_PORT", 9201, 1024, 65_535)
@@ -435,7 +485,7 @@ class Settings:
             user_preferences_file=_preferences_file(),
             user_preference_limit=_integer(
                 "USER_PREFERENCE_LIMIT",
-                100_000,
+                10_000,
                 100,
                 1_000_000,
             ),
@@ -465,7 +515,7 @@ class Settings:
             request_retries=_integer("GETBIBLE_REQUEST_RETRIES", 1, 0, 5),
             max_response_bytes=_integer(
                 "GETBIBLE_MAX_RESPONSE_BYTES",
-                64 * 1024 * 1024,
+                40 * 1024 * 1024,
                 1024,
                 128 * 1024 * 1024,
             ),
@@ -474,6 +524,29 @@ class Settings:
                 4 * 1024 * 1024,
                 64 * 1024,
                 16 * 1024 * 1024,
+            ),
+            reference_cache_limit=_integer(
+                "REFERENCE_CACHE_LIMIT", 1000, 100, 50_000
+            ),
+            books_cache_limit=_integer("BOOKS_CACHE_LIMIT", 16, 1, 1000),
+            chapter_cache_limit=_integer(
+                "CHAPTER_CACHE_LIMIT", 256, 16, 10_000
+            ),
+            search_corpus_limit=_integer("SEARCH_CORPUS_LIMIT", 1, 1, 4),
+            translation_cache_limit=_integer(
+                "TRANSLATION_CACHE_LIMIT", 1, 1, 8
+            ),
+            cache_max_bytes=_integer(
+                "CACHE_MAX_BYTES",
+                256 * 1024 * 1024,
+                32 * 1024 * 1024,
+                8 * 1024 * 1024 * 1024,
+            ),
+            cache_maintenance_interval_seconds=_integer(
+                "CACHE_MAINTENANCE_INTERVAL_SECONDS",
+                6 * 60 * 60,
+                300,
+                7 * 24 * 60 * 60,
             ),
             max_input_length=max_input_length,
             max_references=max_references,
@@ -484,9 +557,9 @@ class Settings:
             search_deadline_seconds=_number(
                 "SEARCH_DEADLINE_SECONDS", 5.0, 0.1, 30.0
             ),
-            max_concurrent_lookups=_integer("MAX_CONCURRENT_LOOKUPS", 4, 1, 32),
+            max_concurrent_lookups=_integer("MAX_CONCURRENT_LOOKUPS", 2, 1, 32),
             max_concurrent_searches=_integer("MAX_CONCURRENT_SEARCHES", 1, 1, 8),
-            max_concurrent_updates=_integer("MAX_CONCURRENT_UPDATES", 16, 1, 64),
+            max_concurrent_updates=_integer("MAX_CONCURRENT_UPDATES", 4, 1, 64),
             user_rate_capacity=_integer("USER_RATE_CAPACITY", 4, 1, 100),
             user_rate_refill_per_second=_number(
                 "USER_RATE_REFILL_PER_SECOND", 0.2, 0.01, 100.0
@@ -495,12 +568,12 @@ class Settings:
             chat_rate_refill_per_second=_number(
                 "CHAT_RATE_REFILL_PER_SECOND", 1.0, 0.01, 500.0
             ),
-            rate_limit_cache_size=_integer("RATE_LIMIT_CACHE_SIZE", 20_000, 100, 100_000),
+            rate_limit_cache_size=_integer("RATE_LIMIT_CACHE_SIZE", 2000, 100, 100_000),
             rate_limit_notice_cooldown=_number(
                 "RATE_LIMIT_NOTICE_COOLDOWN", 10.0, 1.0, 300.0
             ),
             interaction_session_limit=_integer(
-                "INTERACTION_SESSION_LIMIT", 2000, 10, 20_000
+                "INTERACTION_SESSION_LIMIT", 200, 10, 20_000
             ),
             interaction_ttl_seconds=_number(
                 "INTERACTION_TTL_SECONDS", 600.0, 60.0, 3600.0
@@ -519,8 +592,15 @@ class Settings:
             health_port=health_port,
             instance_name=_instance_name(),
             log_file=_log_file(),
+            log_max_bytes=_integer(
+                "LOG_MAX_BYTES",
+                10 * 1024 * 1024,
+                1024 * 1024,
+                1024 * 1024 * 1024,
+            ),
             audit_log_mode=audit_log_mode,
             log_level=log_level,
+            containerized=containerized,
             mini_app_enabled=mini_app_enabled,
             mini_app_public_url=_mini_app_public_url(mini_app_enabled),
             mini_app_listen=mini_app_listen,
@@ -535,9 +615,27 @@ class Settings:
                 "MINI_APP_SESSION_TTL_SECONDS", 900, 60, 3600
             ),
             mini_app_session_limit=_integer(
-                "MINI_APP_SESSION_LIMIT", 2000, 10, 20_000
+                "MINI_APP_SESSION_LIMIT", 200, 10, 20_000
+            ),
+            mini_app_sessions_per_user=_integer(
+                "MINI_APP_SESSIONS_PER_USER", 2, 1, 10
+            ),
+            mini_app_max_searches_per_session=_integer(
+                "MINI_APP_MAX_SEARCHES_PER_SESSION", 2, 1, 8
+            ),
+            mini_app_max_available_selections=_integer(
+                "MINI_APP_MAX_AVAILABLE_SELECTIONS", 256, 25, 1000
             ),
             mini_app_max_selections=_integer(
                 "MINI_APP_MAX_SELECTIONS", 100, 1, 200
+            ),
+            mini_app_body_timeout_seconds=_number(
+                "MINI_APP_BODY_TIMEOUT_SECONDS", 10.0, 1.0, 60.0
+            ),
+            mini_app_idle_timeout_seconds=_number(
+                "MINI_APP_IDLE_TIMEOUT_SECONDS", 30.0, 5.0, 300.0
+            ),
+            mini_app_max_header_bytes=_integer(
+                "MINI_APP_MAX_HEADER_BYTES", 16 * 1024, 4096, 64 * 1024
             ),
         )
