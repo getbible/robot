@@ -117,7 +117,7 @@ test("ships complete localized catalogs for every GetBible translation language"
   }
 });
 
-test("updates landing copy and rerenders immediately when translation changes", async () => {
+test("uses one exclusive translation selector and invalidates stale content", async () => {
   const html = await readFile(new URL("index.html", root), "utf8");
   const app = await readFile(new URL("app.js", root), "utf8");
 
@@ -130,14 +130,28 @@ test("updates landing copy and rerenders immediately when translation changes", 
   assert.match(html, />The Holy Word of God</);
   assert.match(html, />Read, find, and share His Word\.</);
   assert.doesNotMatch(app, /Scripture, beautifully close|Move quietly through Scripture/);
+  assert.match(html, /id="translation-dialog"/);
+  assert.match(html, /id="translation-select"/);
+  assert.doesNotMatch(html, /id="filter-translation"/);
+  assert.doesNotMatch(html, /id="bible-translation"/);
   assert.match(
     app,
-    /filterTranslation\.addEventListener\("change",[\s\S]*?syncInterfaceLocale\(/,
+    /translationShortcut\.addEventListener\("click",[\s\S]*?openTranslationSelector\(\)/,
+  );
+  assert.doesNotMatch(
+    app,
+    /translationShortcut\.addEventListener\("click",[\s\S]{0,160}setRoute\("search"\)/,
   );
   assert.match(
     app,
-    /function renderLocalizedState\(\)[\s\S]*?renderSearch\(\)[\s\S]*?renderBible\(\)[\s\S]*?renderSelection\(\)/,
+    /async function changeTranslation\([\s\S]*?resetBibleForTranslationChange\([\s\S]*?renderLocalizedState\(\)[\s\S]*?loadBibleBooks\(\)/,
   );
+  assert.match(
+    app,
+    /function resetBibleForTranslationChange\([\s\S]*?state\.bible\.verses = \[\][\s\S]*?state\.bible\.status = loading \? "loading" : "idle"/,
+  );
+  assert.match(app, /searchRequestId \+= 1/);
+  assert.match(app, /state\.bible\.requestId \+= 1/);
 });
 
 test("ships parseable OpenAPI JSON at the documented relative root", async () => {

@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
 _WORDS = frozenset({"all", "any", "phrase"})
@@ -17,6 +17,7 @@ _MATCHES = frozenset({"whole_word", "substring"})
 _SCOPES = frozenset({"bible", "old_testament", "new_testament", "deuterocanon"})
 _DIACRITICS = frozenset({"sensitive", "insensitive"})
 _SORTS = frozenset({"canonical", "relevance"})
+_UNCHANGED = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,31 +171,7 @@ class UserPreferenceStore:
 
     def set_translation(self, user_id: int, translation: str) -> None:
         """Save one validated translation and enforce the configured bound."""
-        identity = self._user_id(user_id)
-        code = self._translation(translation)
-        with self._guard:
-            if self._connection is None:
-                current = self._memory.get(identity, self._defaults())
-                self._memory[identity] = UserPreferences(
-                    code,
-                    current.search_defaults,
-                    current.reader_location,
-                )
-                self._trim_memory()
-                return
-            now = time.time_ns()
-            with self._connection:
-                self._connection.execute(
-                    """
-                    INSERT INTO user_preferences (user_id, translation, updated_at)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(user_id) DO UPDATE SET
-                        translation = excluded.translation,
-                        updated_at = excluded.updated_at
-                    """,
-                    (identity, code, now),
-                )
-                self._trim_database()
+        self.update_preferences(user_id, translation=translation)
 
     def set_search_defaults(
         self,
@@ -202,28 +179,85 @@ class UserPreferenceStore:
         value: SearchDefaults | dict[str, object],
     ) -> None:
         """Persist only allow-listed filter modes, never query or exclusion text."""
-        identity = self._user_id(user_id)
         defaults = (
             value
             if isinstance(value, SearchDefaults)
             else SearchDefaults.validated(value)
         )
-        encoded = json.dumps(
-            defaults.as_dict(),
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
+        self.update_preferences(user_id, search_defaults=defaults)
+
+    def set_reader_location(
+        self,
+        user_id: int,
+        value: ReaderLocation | dict[str, object] | None,
+    ) -> None:
+        """Persist only translation/book/chapter/verse identifiers."""
+        self.update_preferences(user_id, reader_location=value)
+
+    def update_preferences(
+        self,
+        user_id: int,
+        *,
+        translation: str | None = None,
+        search_defaults: SearchDefaults | dict[str, object] | None = None,
+        reader_location: ReaderLocation | dict[str, object] | None | object = _UNCHANGED,
+    ) -> UserPreferences:
+        """Validate and atomically replace one bounded preference record."""
+        identity = self._user_id(user_id)
+        requested_translation = (
+            None if translation is None else self._translation(translation)
         )
+        requested_defaults = (
+            None
+            if search_defaults is None
+            else (
+                search_defaults
+                if isinstance(search_defaults, SearchDefaults)
+                else SearchDefaults.validated(search_defaults)
+            )
+        )
+        if reader_location is _UNCHANGED:
+            requested_location: ReaderLocation | None | object = _UNCHANGED
+        elif reader_location is None:
+            requested_location = None
+        else:
+            requested_location = (
+                reader_location
+                if isinstance(reader_location, ReaderLocation)
+                else ReaderLocation.validated(reader_location)
+            )
+
         with self._guard:
-            if self._connection is None:
-                current = self._memory.get(identity, self._defaults())
-                self._memory[identity] = UserPreferences(
-                    current.translation,
-                    defaults,
-                    current.reader_location,
+            current = self.preferences_for(identity)
+            code = requested_translation or current.translation
+            defaults = requested_defaults or current.search_defaults
+            if requested_location is _UNCHANGED:
+                location = current.reader_location
+                if location is not None and location.translation != code:
+                    location = None
+            else:
+                location = cast(ReaderLocation | None, requested_location)
+            if location is not None and location.translation != code:
+                raise ValueError(
+                    "Reader location translation must match the preferred translation."
                 )
+            updated = UserPreferences(code, defaults, location)
+            if self._connection is None:
+                self._memory[identity] = updated
                 self._trim_memory()
-                return
+                return updated
+            encoded_defaults = json.dumps(
+                defaults.as_dict(),
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            encoded_location = json.dumps(
+                location.as_dict() if location is not None else {},
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
             now = time.time_ns()
             with self._connection:
                 self._connection.execute(
@@ -232,68 +266,26 @@ class UserPreferenceStore:
                         user_id,
                         translation,
                         search_defaults,
-                        updated_at
-                    )
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(user_id) DO UPDATE SET
-                        search_defaults = excluded.search_defaults,
-                        updated_at = excluded.updated_at
-                    """,
-                    (identity, self._default_translation, encoded, now),
-                )
-                self._trim_database()
-
-    def set_reader_location(
-        self,
-        user_id: int,
-        value: ReaderLocation | dict[str, object],
-    ) -> None:
-        """Persist only translation/book/chapter/verse identifiers."""
-        identity = self._user_id(user_id)
-        location = (
-            value
-            if isinstance(value, ReaderLocation)
-            else ReaderLocation.validated(value)
-        )
-        encoded = json.dumps(
-            location.as_dict(),
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        with self._guard:
-            if self._connection is None:
-                current = self._memory.get(identity, self._defaults())
-                self._memory[identity] = UserPreferences(
-                    current.translation,
-                    current.search_defaults,
-                    location,
-                )
-                self._trim_memory()
-                return
-            now = time.time_ns()
-            with self._connection:
-                self._connection.execute(
-                    """
-                    INSERT INTO user_preferences (
-                        user_id,
-                        translation,
                         reader_location,
                         updated_at
                     )
-                    VALUES (?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(user_id) DO UPDATE SET
+                        translation = excluded.translation,
+                        search_defaults = excluded.search_defaults,
                         reader_location = excluded.reader_location,
                         updated_at = excluded.updated_at
                     """,
                     (
                         identity,
-                        self._default_translation,
-                        encoded,
+                        code,
+                        encoded_defaults,
+                        encoded_location,
                         now,
                     ),
                 )
                 self._trim_database()
+            return updated
 
     def close(self) -> None:
         """Close the durable store; repeated calls are safe."""

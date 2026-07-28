@@ -80,6 +80,37 @@ class _Preferences:
     ) -> None:
         self.reader_locations[user_id] = location
 
+    def update_preferences(
+        self,
+        user_id: int,
+        *,
+        translation: str | None = None,
+        search_defaults: SearchDefaults | None = None,
+        reader_location: ReaderLocation | None | object = ...,
+    ) -> UserPreferences:
+        current = self.preferences_for(user_id)
+        code = translation or current.translation
+        if reader_location is ...:
+            location = current.reader_location
+            if location is not None and location.translation != code:
+                location = None
+        else:
+            location = reader_location
+        if location is None:
+            self.reader_locations.pop(user_id, None)
+        elif isinstance(location, ReaderLocation):
+            if location.translation != code:
+                raise ValueError(
+                    "Reader location translation must match the preferred translation."
+                )
+            self.reader_locations[user_id] = location
+        self.values[user_id] = code
+        return UserPreferences(
+            code,
+            search_defaults or current.search_defaults,
+            self.reader_locations.get(user_id),
+        )
+
 
 class _Limiter:
     def __init__(self) -> None:
@@ -127,7 +158,10 @@ class _Service:
         if self.fail_translations_once:
             self.fail_translations_once = False
             raise ScriptureUnavailable("temporary translation failure")
-        return (TranslationOption("kjv", "King James Version", "English"),)
+        return (
+            TranslationOption("kjv", "King James Version", "English"),
+            TranslationOption("aov", "Afrikaanse Ou Vertaling", "Afrikaans", "af"),
+        )
 
     async def books(self, translation: str) -> tuple[BookOption, ...]:
         if self.long_chapter:
@@ -230,7 +264,7 @@ class _Service:
         )
 
     async def translation_exists(self, translation: str) -> bool:
-        return translation == "kjv"
+        return translation in {"kjv", "aov"}
 
 
 class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
@@ -780,10 +814,60 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.service.selected, [])
         self.assertEqual(payload["sha"], "c" * 40)
-        self.assertEqual(
-            self.preferences.reader_locations[42],
-            ReaderLocation("kjv", 19, 119, 1),
+        self.assertNotIn(42, self.preferences.reader_locations)
+
+    async def test_content_reads_do_not_mutate_explicit_translation(self) -> None:
+        token = await self.exchange()
+        selected = await self.api.handle(
+            self.request(
+                "PUT",
+                "/getbible/api/v1/preferences",
+                token=token,
+                body={"translation": "aov"},
+            )
         )
+        self.assertEqual(selected.status, 200)
+
+        scripture = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/scripture",
+                token=token,
+                body={
+                    "translation": "kjv",
+                    "book": 43,
+                    "chapter": 3,
+                    "verse": 16,
+                },
+            )
+        )
+        search = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/search",
+                token=token,
+                body={
+                    "query": "loved",
+                    "options": {
+                        "translation": "kjv",
+                        "words": "all",
+                        "match": "whole_word",
+                        "scope": "bible",
+                        "case_sensitive": False,
+                        "diacritics": "sensitive",
+                        "sort": "canonical",
+                        "books": [],
+                        "exclude": [],
+                        "proximity": None,
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(scripture.status, 200)
+        self.assertEqual(search.status, 200)
+        self.assertEqual(self.preferences.translation_for(42), "aov")
+        self.assertNotIn(42, self.preferences.reader_locations)
 
     async def test_preferences_accept_only_non_content_allow_list(self) -> None:
         token = await self.exchange()
@@ -817,6 +901,38 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             ReaderLocation("kjv", 43, 3, 16),
         )
 
+        cleared = await self.api.handle(
+            self.request(
+                "PUT",
+                "/getbible/api/v1/preferences",
+                token=token,
+                body={"translation": "aov", "reader_location": None},
+            )
+        )
+        self.assertEqual(cleared.status, 200)
+        self.assertEqual(self.preferences.values[42], "aov")
+        self.assertNotIn(42, self.preferences.reader_locations)
+
+        before = self.preferences.preferences_for(42)
+        invalid_combination = await self.api.handle(
+            self.request(
+                "PUT",
+                "/getbible/api/v1/preferences",
+                token=token,
+                body={
+                    "translation": "kjv",
+                    "reader_location": {
+                        "translation": "aov",
+                        "book": 43,
+                        "chapter": 3,
+                        "verse": 16,
+                    },
+                },
+            )
+        )
+        self.assertEqual(invalid_combination.status, 400)
+        self.assertEqual(self.preferences.preferences_for(42), before)
+
         rejected = await self.api.handle(
             self.request(
                 "PUT",
@@ -844,10 +960,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(content_rejected.status, 400)
-        self.assertEqual(
-            self.preferences.reader_locations[42],
-            ReaderLocation("kjv", 43, 3, 16),
-        )
+        self.assertEqual(self.preferences.preferences_for(42), before)
 
 
 if __name__ == "__main__":

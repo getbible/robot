@@ -333,6 +333,7 @@ class MiniAppSession:
     basket: list[MiniAppSelection] = field(default_factory=list)
     post_attempts: OrderedDict[str, MiniAppPostAttempt] = field(default_factory=OrderedDict)
     post_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    preference_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
 class MiniAppSessionStore:
@@ -507,6 +508,14 @@ class MiniAppSessionStore:
     def revoke(self, token: str) -> None:
         with self._guard:
             self._sessions.pop(token, None)
+
+    def set_user_translation(self, user_id: int, translation: str) -> None:
+        """Keep every active session for one user on the explicit preference."""
+        with self._guard:
+            self._purge_locked()
+            for session in self._sessions.values():
+                if session.user_id == user_id:
+                    session.translation = translation
 
     def remember_search(
         self,

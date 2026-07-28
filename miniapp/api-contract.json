@@ -137,6 +137,7 @@
     "/preferences": {
       "put": {
         "summary": "Persist validated preferences for the Telegram user",
+        "description": "The sole writer for preferred translation and reader location. The complete update is validated before it is committed atomically.",
         "requestBody": {
           "required": true,
           "content": {
@@ -256,6 +257,7 @@
     "/scripture": {
       "post": {
         "summary": "Load one canonical chapter for reading and selection",
+        "description": "Read-only chapter retrieval. Loading Scripture does not change durable translation or reader preferences.",
         "requestBody": {
           "required": true,
           "content": {
@@ -700,12 +702,12 @@
           "name": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 120
+            "maxLength": 256
           },
           "language": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 120
+            "maxLength": 128
           },
           "lang": {
             "type": "string",

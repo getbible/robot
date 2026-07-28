@@ -13,6 +13,7 @@ import {
   normalizeSearch,
   normalizeSearchPage,
   normalizeSession,
+  planTranslationChange,
   resolveBibleEntrypoint,
   routeName,
   uniqueVerses,
@@ -32,6 +33,10 @@ let readerPositionTimer = null;
 let pendingReaderPosition = null;
 let readerPositionSaveTask = null;
 let savedReaderPositionKey = "";
+let preferenceWriteTask = Promise.resolve();
+let searchRequestId = 0;
+let searchPageRequestId = 0;
+let filterBooksRequestId = 0;
 
 const state = {
   route: "home",
@@ -39,6 +44,7 @@ const state = {
   navigationCollapsed: false,
   lastScrollTop: 0,
   translations: [],
+  translation: "kjv",
   filters: { ...DEFAULT_FILTERS, books: [], exclude: [] },
   basket: [],
   pendingSelections: new Set(),
@@ -53,9 +59,9 @@ const state = {
     hasMore: false,
     results: [],
     loadingMore: false,
+    translation: null,
   },
   bible: {
-    translation: "kjv",
     books: [],
     chapters: [],
     selectedBook: null,
@@ -114,6 +120,10 @@ const elements = mapElements({
   homeSelectionTitle: "home-selection-title",
   homeSelectionMeta: "home-selection-meta",
   translationShortcut: "translation-shortcut",
+  translationDialog: "translation-dialog",
+  translationSelect: "translation-select",
+  translationDetails: "translation-details",
+  closeTranslation: "close-translation",
   searchForm: "search-form",
   searchQuery: "search-query",
   openFilters: "open-filters",
@@ -129,7 +139,6 @@ const elements = mapElements({
   bibleView: "bible-view",
   bibleIntro: "bible-intro",
   biblePicker: "bible-picker",
-  bibleTranslation: "bible-translation",
   bibleBook: "bible-book",
   bibleChapter: "bible-chapter",
   bibleHeading: "bible-heading",
@@ -155,7 +164,6 @@ const elements = mapElements({
   bottomNavHandle: "bottom-nav-handle",
   filtersDialog: "filters-dialog",
   filtersForm: "filters-form",
-  filterTranslation: "filter-translation",
   filterCase: "filter-case",
   filterDiacritics: "filter-diacritics",
   filterExclude: "filter-exclude",
@@ -202,8 +210,11 @@ async function boot() {
     }
 
     state.translations = session.translations;
-    state.filters = session.preferences.search_defaults;
-    state.bible.translation = session.preferences.translation;
+    state.translation = session.preferences.translation;
+    state.filters = normalizeFilters(
+      session.preferences.search_defaults,
+      state.translation,
+    );
     state.bible.resumeLocation = session.preferences.reader_location;
     savedReaderPositionKey = readerLocationKey(state.bible.resumeLocation);
     state.basket = session.basket.items;
@@ -279,7 +290,7 @@ function attachListeners() {
   elements.searchSort.addEventListener("change", () => {
     state.filters = normalizeFilters(
       { ...state.filters, sort: elements.searchSort.value },
-      state.filters.translation,
+      state.translation,
     );
     void savePreferences();
     if (state.search.query) {
@@ -289,9 +300,27 @@ function attachListeners() {
 
   elements.openFilters.addEventListener("click", () => void openFilters());
   elements.translationShortcut.addEventListener("click", () => {
-    setRoute("search");
-    void openFilters();
+    openTranslationSelector();
   });
+  elements.translationSelect.addEventListener("change", () => {
+    void changeTranslation(elements.translationSelect.value);
+  });
+  elements.translationDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeTranslationSelector();
+  });
+  elements.translationDialog.addEventListener("close", () => {
+    elements.translationSelect.value = state.translation;
+    syncTranslationDetails();
+    syncBackAction();
+    elements.translationShortcut.focus({ preventScroll: true });
+  });
+  elements.translationDialog.addEventListener("click", (event) => {
+    if (event.target === elements.translationDialog) {
+      closeTranslationSelector();
+    }
+  });
+  elements.closeTranslation.addEventListener("click", closeTranslationSelector);
   elements.filtersForm.addEventListener("submit", (event) => {
     event.preventDefault();
     applyFilters();
@@ -302,7 +331,7 @@ function attachListeners() {
   });
   elements.filtersDialog.addEventListener("close", () => {
     filterDraft = null;
-    syncInterfaceLocale(state.filters.translation);
+    syncInterfaceLocale(state.translation);
     renderLocalizedState();
     syncBackAction();
   });
@@ -320,19 +349,6 @@ function attachListeners() {
         input.checked = false;
       });
   });
-  elements.filterTranslation.addEventListener("change", () => {
-    filterDraft = normalizeFilters(
-      {
-        ...(filterDraft ?? state.filters),
-        translation: elements.filterTranslation.value,
-        books: [],
-      },
-      state.filters.translation,
-    );
-    syncInterfaceLocale(elements.filterTranslation.value);
-    renderLocalizedState();
-    void loadFilterBooks(elements.filterTranslation.value);
-  });
   elements.filtersForm.addEventListener("change", (event) => {
     if (event.target.name === "words") {
       const allWords = event.target.value === "all";
@@ -343,20 +359,6 @@ function attachListeners() {
     }
   });
 
-  elements.bibleTranslation.addEventListener("change", async () => {
-    persistVisibleReaderPosition();
-    await waitForReaderPositionSave();
-    state.bible.translation = elements.bibleTranslation.value;
-    state.bible.resumeLocation = null;
-    state.filters = normalizeFilters(
-      { ...state.filters, translation: state.bible.translation, books: [] },
-      state.bible.translation,
-    );
-    syncTranslationControls();
-    renderLocalizedState();
-    void savePreferences();
-    void loadBibleBooks();
-  });
   elements.bibleBook.addEventListener("change", () => void selectBibleBook());
   elements.bibleChapter.addEventListener("change", () => void selectBibleChapter());
   elements.biblePrevious.addEventListener("click", () => {
@@ -450,6 +452,13 @@ function setRoute(requestedRoute) {
   } else if (route === "bible") {
     elements.bibleHeading.classList.remove("is-hidden");
   }
+  if (
+    route === "search" &&
+    state.search.query &&
+    state.search.translation !== state.translation
+  ) {
+    void runSearch(state.search.query);
+  }
   if (route === "selection") {
     renderSelection();
   }
@@ -511,29 +520,34 @@ function persistVisibleReaderPosition() {
     window.clearTimeout(readerPositionTimer);
     readerPositionTimer = null;
   }
-  if (state.bible.status !== "ready" || elements.bibleView.hidden) {
+  const location = currentReaderLocation();
+  if (!location || elements.bibleView.hidden) {
     return;
+  }
+  state.bible.targetVerse = location.verse;
+  state.bible.resumeLocation = location;
+  void saveReaderPosition();
+}
+
+function currentReaderLocation() {
+  if (
+    state.bible.status !== "ready" ||
+    !state.bible.selectedBook ||
+    !state.bible.selectedChapter
+  ) {
+    return state.bible.resumeLocation;
   }
   const verses = [...elements.bibleVerses.querySelectorAll("[data-reader-verse]")];
   const visible =
     verses.find((verse) => verse.getBoundingClientRect().bottom > 56) ??
     verses.at(-1);
-  const number = Number(visible?.dataset.readerVerse);
-  if (
-    !Number.isInteger(number) ||
-    !state.bible.selectedBook ||
-    !state.bible.selectedChapter
-  ) {
-    return;
-  }
-  state.bible.targetVerse = number;
-  state.bible.resumeLocation = {
-    translation: state.bible.translation,
+  const number = Number(visible?.dataset.readerVerse ?? state.bible.targetVerse);
+  return {
+    translation: state.translation,
     book: state.bible.selectedBook.number,
     chapter: state.bible.selectedChapter.number,
-    verse: number,
+    verse: Number.isInteger(number) ? number : 1,
   };
-  void saveReaderPosition();
 }
 
 async function saveReaderPosition() {
@@ -563,7 +577,7 @@ async function drainReaderPositionSaves() {
       if (pendingKey === savedReaderPositionKey) {
         continue;
       }
-      await api.preferences({ reader_location: pending });
+      await enqueuePreferenceWrite({ reader_location: pending });
       savedReaderPositionKey = pendingKey;
     }
   } catch (error) {
@@ -590,7 +604,9 @@ function readerLocationKey(location) {
 }
 
 function syncBackAction() {
-  if (elements.filtersDialog.open) {
+  if (elements.translationDialog.open) {
+    bridge.setBackAction(closeTranslationSelector);
+  } else if (elements.filtersDialog.open) {
     bridge.setBackAction(closeFilters);
   } else if (state.route !== "home") {
     bridge.setBackAction(() => setRoute("home"));
@@ -600,26 +616,26 @@ function syncBackAction() {
 }
 
 function populateTranslations() {
-  for (const select of [
-    elements.filterTranslation,
-    elements.bibleTranslation,
-  ]) {
-    select.replaceChildren();
-    for (const translation of state.translations) {
-      const option = document.createElement("option");
-      option.value = translation.code;
-      option.textContent = `${translation.name} (${translation.code.toUpperCase()})`;
-      select.append(option);
-    }
+  elements.translationSelect.replaceChildren();
+  for (const translation of state.translations) {
+    const option = document.createElement("option");
+    option.value = translation.code;
+    option.textContent =
+      `${translation.name} · ${translation.language} ` +
+      `(${translation.code.toUpperCase()})`;
+    elements.translationSelect.append(option);
   }
 }
 
 function syncTranslationControls() {
-  const code = state.filters.translation;
+  const code = state.translation;
   const translation = state.translations.find((item) => item.code === code);
+  state.filters = normalizeFilters(
+    { ...state.filters, translation: code },
+    code,
+  );
   syncInterfaceLocale(code);
-  elements.filterTranslation.value = code;
-  elements.bibleTranslation.value = state.bible.translation;
+  elements.translationSelect.value = code;
   elements.translationShortcut.textContent = code.toUpperCase();
   elements.translationShortcut.setAttribute(
     "aria-label",
@@ -627,6 +643,13 @@ function syncTranslationControls() {
       translation: translationName(code),
     }),
   );
+  elements.closeTranslation.setAttribute(
+    "aria-label",
+    i18n.t("translation.change_aria", {
+      translation: translationName(code),
+    }),
+  );
+  syncTranslationDetails();
   elements.searchSort.value = state.filters.sort;
   const count = activeFilterCount(state.filters);
   elements.filterCount.hidden = count === 0;
@@ -637,6 +660,116 @@ function syncInterfaceLocale(code) {
   const translation = state.translations.find((item) => item.code === code);
   i18n.setLocale(translation?.lang ?? "en", translation?.direction ?? "ltr");
   i18n.apply();
+}
+
+function openTranslationSelector() {
+  elements.translationSelect.value = state.translation;
+  syncTranslationDetails();
+  elements.translationDialog.showModal();
+  elements.translationShortcut.setAttribute("aria-expanded", "true");
+  syncBackAction();
+  window.requestAnimationFrame(() => elements.translationSelect.focus());
+}
+
+function closeTranslationSelector() {
+  if (elements.translationDialog.open) {
+    elements.translationDialog.close();
+  }
+  elements.translationShortcut.setAttribute("aria-expanded", "false");
+}
+
+function syncTranslationDetails() {
+  const code = elements.translationSelect.value || state.translation;
+  const translation = state.translations.find((item) => item.code === code);
+  elements.translationDetails.replaceChildren();
+  if (!translation) {
+    return;
+  }
+  const name = document.createElement("strong");
+  name.textContent = translation.name;
+  const metadata = document.createElement("span");
+  metadata.textContent =
+    `${translation.language} · ${translation.code.toUpperCase()}`;
+  elements.translationDetails.append(name, metadata);
+}
+
+async function changeTranslation(value) {
+  const plan = planTranslationChange(
+    value,
+    state.translations,
+    currentReaderLocation(),
+    {
+      route: state.route,
+      hasSearchQuery: Boolean(state.search.query),
+    },
+  );
+  if (!plan || plan.translation === state.translation) {
+    closeTranslationSelector();
+    return;
+  }
+
+  if (readerPositionTimer !== null) {
+    window.clearTimeout(readerPositionTimer);
+    readerPositionTimer = null;
+  }
+  pendingReaderPosition = null;
+  state.bible.requestId += 1;
+  searchRequestId += 1;
+  searchPageRequestId += 1;
+  filterBooksRequestId += 1;
+  state.translation = plan.translation;
+  state.filters = normalizeFilters(
+    { ...state.filters, translation: plan.translation, books: [] },
+    plan.translation,
+  );
+  state.bible.resumeLocation = plan.reader_location;
+  resetBibleForTranslationChange(plan.reload_reader);
+  invalidateSearchForTranslationChange();
+  syncTranslationControls();
+  renderLocalizedState();
+  closeTranslationSelector();
+  announce(translationName(plan.translation));
+
+  void savePreferences(plan.reader_location);
+  if (plan.reload_reader) {
+    await loadBibleBooks();
+  }
+  if (plan.rerun_search) {
+    await runSearch(state.search.query);
+  }
+}
+
+function resetBibleForTranslationChange(loading) {
+  state.bible.books = [];
+  state.bible.chapters = [];
+  state.bible.selectedBook = null;
+  state.bible.selectedChapter = null;
+  state.bible.reference = "";
+  state.bible.verses = [];
+  state.bible.navigation = { previous: null, next: null };
+  state.bible.focusHighlights = [];
+  state.bible.pickerVisible = !loading;
+  state.bible.status = loading ? "loading" : "idle";
+  state.bible.error = null;
+}
+
+function invalidateSearchForTranslationChange() {
+  state.search.searchId = null;
+  state.search.page = 0;
+  state.search.total = 0;
+  state.search.hasMore = false;
+  state.search.results = [];
+  state.search.loadingMore = false;
+  state.search.translation = null;
+  state.search.status = state.search.query ? "idle" : state.search.status;
+}
+
+function enqueuePreferenceWrite(payload) {
+  const write = preferenceWriteTask
+    .catch(() => undefined)
+    .then(() => api.preferences(payload));
+  preferenceWriteTask = write;
+  return write;
 }
 
 function renderLocalizedState() {
@@ -653,6 +786,12 @@ async function runSearch(rawQuery) {
     announce(i18n.t("search.enter_query"));
     return;
   }
+  const requestId = ++searchRequestId;
+  const translation = state.translation;
+  const filters = normalizeFilters(
+    { ...state.filters, translation },
+    translation,
+  );
   bridge.dismissKeyboard();
   state.search = {
     query,
@@ -664,11 +803,21 @@ async function runSearch(rawQuery) {
     hasMore: false,
     results: [],
     loadingMore: false,
+    translation,
   };
   elements.searchQuery.value = query;
   renderSearch();
   try {
-    const result = normalizeSearch(await api.search(query, state.filters));
+    const result = normalizeSearch(
+      await api.search(query, filters),
+      translation,
+    );
+    if (
+      requestId !== searchRequestId ||
+      state.translation !== translation
+    ) {
+      return;
+    }
     state.search = {
       ...state.search,
       status: result.results.length === 0 ? "empty" : "ready",
@@ -677,9 +826,13 @@ async function runSearch(rawQuery) {
       total: result.total,
       hasMore: result.has_more,
       results: result.results,
+      translation: result.translation,
     };
     announce(i18n.plural("search.found", result.total));
   } catch (error) {
+    if (requestId !== searchRequestId) {
+      return;
+    }
     state.search.status = "error";
     state.search.error = safeError(error);
     handleSessionError(error);
@@ -695,20 +848,34 @@ async function loadNextSearchPage() {
   ) {
     return;
   }
+  const requestId = ++searchPageRequestId;
+  const searchId = state.search.searchId;
+  const translation = state.search.translation;
   state.search.loadingMore = true;
   elements.loadMore.disabled = true;
   elements.loadMore.textContent = i18n.t("common.loading");
   try {
     const result = normalizeSearchPage(
-      await api.searchPage(state.search.searchId, state.search.page + 1),
-      state.search.searchId,
+      await api.searchPage(searchId, state.search.page + 1),
+      searchId,
+      translation,
     );
+    if (
+      requestId !== searchPageRequestId ||
+      state.search.searchId !== searchId ||
+      state.translation !== translation
+    ) {
+      return;
+    }
     state.search.page = result.page;
     state.search.total = result.total;
     state.search.hasMore = result.has_more;
     state.search.results = uniqueVerses(state.search.results, result.results);
     announce(i18n.plural("search.more_loaded", result.results.length));
   } catch (error) {
+    if (requestId !== searchPageRequestId) {
+      return;
+    }
     toast(safeError(error).message);
     handleSessionError(error);
   } finally {
@@ -718,6 +885,8 @@ async function loadNextSearchPage() {
 }
 
 function clearSearch() {
+  searchRequestId += 1;
+  searchPageRequestId += 1;
   state.search = {
     query: "",
     status: "idle",
@@ -728,6 +897,7 @@ function clearSearch() {
     hasMore: false,
     results: [],
     loadingMore: false,
+    translation: null,
   };
   elements.searchQuery.value = "";
   renderSearch();
@@ -736,6 +906,10 @@ function clearSearch() {
 
 function renderSearch() {
   const search = state.search;
+  elements.searchResults.setAttribute(
+    "aria-busy",
+    String(search.status === "loading" || search.loadingMore),
+  );
   elements.searchSummary.hidden = !["ready", "empty"].includes(search.status);
   elements.searchResults.replaceChildren();
   elements.searchState.hidden = true;
@@ -764,7 +938,7 @@ function renderSearch() {
   elements.searchSummaryTitle.textContent = `“${search.query}”`;
   elements.searchSummaryMeta.textContent =
     `${formatVerseCount(search.total)} · ` +
-    translationName(state.filters.translation);
+    translationName(search.translation ?? state.translation);
   if (search.status === "empty") {
     renderState(elements.searchState, {
       icon: "⌕",
@@ -788,11 +962,11 @@ function renderSearch() {
 }
 
 async function openFilters() {
-  filterDraft = normalizeFilters(state.filters, state.filters.translation);
+  filterDraft = normalizeFilters(state.filters, state.translation);
   syncFilterForm(filterDraft);
   elements.filtersDialog.showModal();
   syncBackAction();
-  await loadFilterBooks(filterDraft.translation);
+  await loadFilterBooks(state.translation);
 }
 
 function closeFilters() {
@@ -802,7 +976,6 @@ function closeFilters() {
 }
 
 function syncFilterForm(filters = state.filters) {
-  elements.filterTranslation.value = filters.translation;
   setCheckedRadio("words", filters.words);
   setCheckedRadio("match", filters.match);
   setCheckedRadio("scope", filters.scope);
@@ -819,7 +992,7 @@ function applyFilters() {
   const proximityValue = String(data.get("proximity") ?? "").trim();
   state.filters = normalizeFilters(
     {
-      translation: data.get("translation"),
+      translation: state.translation,
       words: data.get("words"),
       match: data.get("match"),
       scope: data.get("scope"),
@@ -832,9 +1005,8 @@ function applyFilters() {
       exclude: String(data.get("exclude") ?? "").trim().split(/\s+/),
       proximity: proximityValue === "" ? null : Number(proximityValue),
     },
-    state.filters.translation,
+    state.translation,
   );
-  state.bible.translation = state.filters.translation;
   syncTranslationControls();
   renderLocalizedState();
   closeFilters();
@@ -846,8 +1018,8 @@ function applyFilters() {
 
 function resetFilters() {
   filterDraft = normalizeFilters(
-    { ...DEFAULT_FILTERS, translation: state.filters.translation },
-    state.filters.translation,
+    { ...DEFAULT_FILTERS, translation: state.translation },
+    state.translation,
   );
   syncFilterForm(filterDraft);
   renderFilterBooks(
@@ -857,16 +1029,26 @@ function resetFilters() {
 }
 
 async function loadFilterBooks(translation) {
+  const requestId = ++filterBooksRequestId;
   state.filterBooksStatus = "loading";
   elements.filterBooks.replaceChildren(paragraph(i18n.t("filters.loading_books")));
   try {
     const books = await getBooks(translation);
+    if (
+      requestId !== filterBooksRequestId ||
+      translation !== state.translation
+    ) {
+      return;
+    }
     state.filterBooksStatus = "ready";
     renderFilterBooks(
       books,
       filterDraft?.translation === translation ? filterDraft.books : [],
     );
   } catch (error) {
+    if (requestId !== filterBooksRequestId) {
+      return;
+    }
     state.filterBooksStatus = "error";
     elements.filterBooks.replaceChildren(paragraph(safeError(error).message));
     handleSessionError(error);
@@ -894,7 +1076,7 @@ function renderFilterBooks(books, selectedBooks = state.filters.books) {
   );
 }
 
-async function savePreferences() {
+async function savePreferences(readerLocation = undefined) {
   try {
     const {
       words,
@@ -904,8 +1086,8 @@ async function savePreferences() {
       diacritics,
       sort,
     } = state.filters;
-    const payload = await api.preferences({
-      translation: state.filters.translation,
+    const payload = {
+      translation: state.translation,
       search_defaults: {
         words,
         match,
@@ -914,19 +1096,11 @@ async function savePreferences() {
         diacritics,
         sort,
       },
-    });
-    if (payload?.preferences) {
-      state.filters = normalizeFilters(
-        {
-          ...state.filters,
-          ...payload.preferences.search_defaults,
-          translation: payload.preferences.translation,
-        },
-        state.filters.translation,
-      );
-      syncTranslationControls();
-      renderLocalizedState();
+    };
+    if (readerLocation !== undefined) {
+      payload.reader_location = readerLocation;
     }
+    await enqueuePreferenceWrite(payload);
   } catch (error) {
     toast(i18n.t("translation.save_failed"));
     handleSessionError(error);
@@ -955,7 +1129,7 @@ async function loadBibleBooks() {
   state.bible.pickerVisible = true;
   renderBible();
   try {
-    const books = await getBooks(state.bible.translation);
+    const books = await getBooks(state.translation);
     if (requestId !== state.bible.requestId) {
       return;
     }
@@ -975,7 +1149,7 @@ async function loadBibleBooks() {
     }
     const resume = state.bible.resumeLocation;
     if (
-      resume?.translation === state.bible.translation &&
+      resume?.translation === state.translation &&
       state.bible.books.some((book) => book.number === resume.book)
     ) {
       renderBible();
@@ -1024,7 +1198,7 @@ async function selectBibleBook(
   renderBible();
   try {
     const chapters = normalizeChapters(
-      await api.chapters(state.bible.translation, book.number),
+      await api.chapters(state.translation, book.number),
     );
     if (requestId !== state.bible.requestId) {
       return;
@@ -1085,11 +1259,16 @@ async function selectBibleChapter(
   try {
     const scripture = normalizeScripture(
       await api.scripture(
-        state.bible.translation,
+        state.translation,
         state.bible.selectedBook.number,
         chapter.number,
         state.bible.targetVerse,
       ),
+      {
+        translation: state.translation,
+        book: state.bible.selectedBook.number,
+        chapter: chapter.number,
+      },
     );
     if (requestId !== state.bible.requestId) {
       return;
@@ -1101,12 +1280,11 @@ async function selectBibleChapter(
     state.bible.navigation = scripture.navigation;
     state.bible.targetVerse = scripture.target_verse;
     state.bible.resumeLocation = {
-      translation: state.bible.translation,
+      translation: state.translation,
       book: state.bible.selectedBook.number,
       chapter: chapter.number,
       verse: scripture.target_verse,
     };
-    savedReaderPositionKey = readerLocationKey(state.bible.resumeLocation);
     state.bible.status = scripture.verses.length === 0 ? "empty" : "ready";
   } catch (error) {
     if (requestId !== state.bible.requestId) {
@@ -1118,6 +1296,7 @@ async function selectBibleChapter(
   }
   renderBible();
   if (state.bible.status === "ready") {
+    void saveReaderPosition();
     scrollReaderToVerse(state.bible.targetVerse);
   }
 }
@@ -1147,12 +1326,14 @@ async function openBibleAtVerse(verse, { fromSearch = false } = {}) {
     chapter: verse.chapter,
     verse: verse.verse,
   };
-  const translationChanged = state.bible.translation !== verse.translation;
-  state.bible.translation = verse.translation;
+  const translationChanged = state.translation !== verse.translation;
+  state.bible.requestId += 1;
+  state.translation = verse.translation;
   state.filters = normalizeFilters(
     { ...state.filters, translation: verse.translation, books: [] },
     verse.translation,
   );
+  void savePreferences(state.bible.resumeLocation);
   syncTranslationControls();
   renderLocalizedState();
   setRoute("bible");
@@ -1178,6 +1359,8 @@ function showBiblePicker() {
   elements.bibleHeading.classList.remove("is-hidden");
   renderBible();
   elements.bibleView.scrollTo({ top: 0, behavior: "smooth" });
+  announce(i18n.t("bible.navigation"));
+  window.requestAnimationFrame(() => elements.bibleBook.focus());
 }
 
 function scrollReaderToVerse(number) {
@@ -1196,7 +1379,6 @@ function scrollReaderToVerse(number) {
 
 function renderBible() {
   const bible = state.bible;
-  elements.bibleTranslation.value = bible.translation;
   populateSelect(
     elements.bibleBook,
     bible.books,
@@ -1213,6 +1395,18 @@ function renderBible() {
   );
   elements.bibleChapter.disabled = bible.chapters.length === 0;
   elements.bibleIntro.hidden = !bible.pickerVisible;
+  elements.biblePassage.setAttribute(
+    "aria-expanded",
+    String(bible.pickerVisible),
+  );
+  elements.bibleVerses.setAttribute(
+    "aria-busy",
+    String(
+      ["loading", "loading_chapters", "loading_scripture"].includes(
+        bible.status,
+      ),
+    ),
+  );
   elements.bibleVerses.replaceChildren();
   elements.bibleState.hidden = true;
   elements.bibleHeading.hidden = true;
@@ -1258,7 +1452,7 @@ function renderBible() {
 
   elements.bibleHeading.hidden = bible.pickerVisible;
   elements.bibleHeading.classList.remove("is-hidden");
-  elements.bibleTranslationLabel.textContent = translationName(bible.translation);
+  elements.bibleTranslationLabel.textContent = translationName(state.translation);
   elements.bibleReference.textContent = bible.reference;
   elements.bibleVerseCount.textContent = formatVerseCount(bible.verses.length);
   elements.biblePassage.setAttribute(

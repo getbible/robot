@@ -21,10 +21,13 @@ export function normalizeSession(payload) {
     throw new TypeError("Invalid session response.");
   }
   const translations = normalizeTranslations(payload.translations);
-  const preferred = translationCode(
+  const requested = translationCode(
     payload.preferences?.translation,
     translations[0]?.code ?? DEFAULT_FILTERS.translation,
   );
+  const preferred = translations.some((item) => item.code === requested)
+    ? requested
+    : translations[0]?.code ?? DEFAULT_FILTERS.translation;
   const filters = normalizeFilters(
     {
       ...payload.preferences?.search_defaults,
@@ -32,15 +35,17 @@ export function normalizeSession(payload) {
     },
     preferred,
   );
+  const readerLocation = normalizeReaderLocation(
+    payload.preferences?.reader_location,
+    preferred,
+  );
   return {
     translations,
     preferences: {
       translation: preferred,
       search_defaults: filters,
-      reader_location: normalizeReaderLocation(
-        payload.preferences?.reader_location,
-        preferred,
-      ),
+      reader_location:
+        readerLocation?.translation === preferred ? readerLocation : null,
     },
     basket: normalizeBasket(payload.basket),
     entrypoint: normalizeEntrypoint(payload.entrypoint),
@@ -58,8 +63,8 @@ export function normalizeTranslations(value) {
       continue;
     }
     const code = translationCode(item.code, null);
-    const name = boundedText(item.name, 120);
-    const language = boundedText(item.language, 120);
+    const name = boundedText(item.name, 256);
+    const language = boundedText(item.language, 128);
     if (!code || !name || seen.has(code)) {
       continue;
     }
@@ -135,7 +140,7 @@ export function normalizeChapters(payload) {
   return chapters.sort((left, right) => left.number - right.number);
 }
 
-export function normalizeSearch(payload) {
+export function normalizeSearch(payload, expectedTranslation = null) {
   if (!isRecord(payload)) {
     throw new TypeError("Invalid search response.");
   }
@@ -147,8 +152,19 @@ export function normalizeSearch(payload) {
   if (!id) {
     throw new TypeError("Search response did not include a valid identifier.");
   }
+  const translation = translationCode(payload.translation, null);
+  const expected = translationCode(expectedTranslation, null);
+  const results = normalizeVerses(payload.results ?? payload.items);
+  if (
+    !translation ||
+    (expected && translation !== expected) ||
+    results.some((verse) => verse.translation !== translation)
+  ) {
+    throw new TypeError("Search response translation did not match the request.");
+  }
   return {
     search_id: id,
+    translation,
     page: boundedInteger(payload.page, 0, 100_000) ?? 0,
     total: boundedInteger(payload.total, 0, 1_000_000) ?? 0,
     has_more:
@@ -156,16 +172,27 @@ export function normalizeSearch(payload) {
         ? payload.has_more
         : (boundedInteger(payload.page, 0, 100_000) ?? 0) + 1 <
           (boundedInteger(payload.page_count, 1, 100_000) ?? 1),
-    results: normalizeVerses(payload.results ?? payload.items),
+    results,
   };
 }
 
-export function normalizeSearchPage(payload, searchId) {
+export function normalizeSearchPage(payload, searchId, expectedTranslation = null) {
   if (!isRecord(payload)) {
     throw new TypeError("Invalid search page response.");
   }
+  const translation = translationCode(payload.translation, null);
+  const expected = translationCode(expectedTranslation, null);
+  const results = normalizeVerses(payload.results ?? payload.items);
+  if (
+    !translation ||
+    (expected && translation !== expected) ||
+    results.some((verse) => verse.translation !== translation)
+  ) {
+    throw new TypeError("Search page translation did not match the request.");
+  }
   return {
     search_id: searchId,
+    translation,
     page: boundedInteger(payload.page, 0, 100_000) ?? 0,
     total: boundedInteger(payload.total, 0, 1_000_000) ?? 0,
     has_more:
@@ -173,22 +200,58 @@ export function normalizeSearchPage(payload, searchId) {
         ? payload.has_more
         : (boundedInteger(payload.page, 0, 100_000) ?? 0) + 1 <
           (boundedInteger(payload.page_count, 1, 100_000) ?? 1),
-    results: normalizeVerses(payload.results ?? payload.items),
+    results,
   };
 }
 
-export function normalizeScripture(payload) {
+export function normalizeScripture(payload, expected = null) {
   if (!isRecord(payload)) {
     throw new TypeError("Invalid scripture response.");
   }
+  const translation = translationCode(payload.translation, null);
+  const book = boundedInteger(
+    isRecord(payload.book) ? payload.book.number : payload.book,
+    1,
+    200,
+  );
+  const chapter = boundedInteger(payload.chapter, 1, 250);
+  const verses = normalizeVerses(payload.verses ?? payload.items);
+  const expectedTranslation = isRecord(expected)
+    ? translationCode(expected.translation, null)
+    : null;
+  const expectedBook = isRecord(expected)
+    ? boundedInteger(expected.book, 1, 200)
+    : null;
+  const expectedChapter = isRecord(expected)
+    ? boundedInteger(expected.chapter, 1, 250)
+    : null;
+  if (
+    !translation ||
+    !book ||
+    !chapter ||
+    (expectedTranslation && translation !== expectedTranslation) ||
+    (expectedBook && book !== expectedBook) ||
+    (expectedChapter && chapter !== expectedChapter) ||
+    verses.some(
+      (verse) =>
+        verse.translation !== translation ||
+        verse.book_number !== book ||
+        verse.chapter !== chapter,
+    )
+  ) {
+    throw new TypeError("Scripture response did not match the requested passage.");
+  }
   return {
+    translation,
+    book,
+    chapter,
     reference: boundedText(payload.reference, 180),
     target_verse: boundedInteger(payload.target_verse, 1, 500) ?? 1,
     navigation: {
       previous: normalizeChapterLocation(payload.navigation?.previous),
       next: normalizeChapterLocation(payload.navigation?.next),
     },
-    verses: normalizeVerses(payload.verses ?? payload.items),
+    verses,
   };
 }
 
@@ -204,6 +267,31 @@ export function normalizeReaderLocation(value, fallbackTranslation = "kjv") {
     return null;
   }
   return { translation, book, chapter, verse };
+}
+
+export function planTranslationChange(
+  value,
+  translations,
+  readerLocation,
+  { route = "home", hasSearchQuery = false } = {},
+) {
+  const translation = translationCode(value, null);
+  if (
+    !translation ||
+    !Array.isArray(translations) ||
+    !translations.some((item) => item?.code === translation)
+  ) {
+    return null;
+  }
+  const location = normalizeReaderLocation(readerLocation, translation);
+  return {
+    translation,
+    reader_location: location
+      ? { ...location, translation }
+      : null,
+    reload_reader: route === "bible",
+    rerun_search: route === "search" && Boolean(hasSearchQuery),
+  };
 }
 
 export function normalizeVerses(value) {

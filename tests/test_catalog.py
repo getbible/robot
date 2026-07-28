@@ -223,7 +223,6 @@ class CatalogClientTestCase(unittest.TestCase):
             _client().chapters("kjv", BookOption(43, "John", "0" * 40))
 
     def test_whole_chapter_is_hash_consistent_validated_and_cached(self) -> None:
-        sha = ("c" * 40).encode()
         payload = json.dumps(
             {
                 "translation": "King James Version",
@@ -238,6 +237,8 @@ class CatalogClientTestCase(unittest.TestCase):
                 ],
             }
         ).encode()
+        sha_text = hashlib.sha1(payload, usedforsecurity=False).hexdigest()
+        sha = sha_text.encode()
         with patch(
             "modules.catalog.requests.get",
             side_effect=[
@@ -260,9 +261,46 @@ class CatalogClientTestCase(unittest.TestCase):
 
         self.assertIs(first, second)
         self.assertEqual(first.reference, "John 3")
-        self.assertEqual(first.sha, "c" * 40)
+        self.assertEqual(first.sha, sha_text)
         self.assertEqual([verse.number for verse in first.verses], [1, 2])
         self.assertEqual(request.call_count, 3)
+
+    def test_whole_chapter_rejects_content_that_does_not_match_published_hash(
+        self,
+    ) -> None:
+        payload = json.dumps(
+            {
+                "translation": "King James Version",
+                "abbreviation": "kjv",
+                "book_nr": 43,
+                "book_name": "John",
+                "chapter": 3,
+                "name": "John 3",
+                "verses": [
+                    {"chapter": 3, "verse": 1, "text": "Changed content."},
+                ],
+            }
+        ).encode()
+        unrelated_sha = hashlib.sha1(
+            b"different content",
+            usedforsecurity=False,
+        ).hexdigest().encode()
+        with (
+            patch(
+                "modules.catalog.requests.get",
+                side_effect=[
+                    _Response(unrelated_sha),
+                    _Response(payload),
+                    _Response(unrelated_sha),
+                ],
+            ),
+            self.assertRaises(CacheIntegrityError),
+        ):
+            _client().chapter(
+                "kjv",
+                BookOption(43, "John", "a" * 40),
+                ChapterOption(3, (1,)),
+            )
 
     def test_whole_chapter_has_an_independent_small_response_bound(self) -> None:
         sha = ("c" * 40).encode()

@@ -46,6 +46,13 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Mini App
 
+- Made the header chip the exclusive translation selector, separated Search
+  filters from translation and Bible passage selection, and made translation
+  changes immediately invalidate old content and reload the same visible
+  passage with latest-response-wins request guards.
+- Made Search and Scripture reads side-effect-free, serialized and atomically
+  validated preference writes, synchronized active sessions, and verified each
+  chapter body against its stable published hash before caching it.
 - Upgraded the existing Bible tab into a compact full-chapter reader and
   selection surface without adding a command or navigation tab. Bare `/bible`
   resumes a content-free saved location; direct references still post through
