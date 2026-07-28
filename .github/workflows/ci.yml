@@ -257,6 +257,8 @@ jobs:
             2>&1 | tee -a "${RUNNER_TEMP}/compose-single.log"
           docker compose -f compose.multi.yaml config --quiet \
             2>&1 | tee "${RUNNER_TEMP}/compose-multi.log"
+          docker compose -f compose.yaml -f compose.build.yaml config --quiet \
+            2>&1 | tee "${RUNNER_TEMP}/compose-build.log"
           TELEGRAM_API_TOKEN='123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi' \
             docker compose -f compose.yaml -f compose.secret.yaml \
             config --quiet \
@@ -294,6 +296,7 @@ jobs:
             ${{ runner.temp }}/compose-multi.log
             ${{ runner.temp }}/compose-single.log
             ${{ runner.temp }}/compose-secret.log
+            ${{ runner.temp }}/compose-build.log
             ${{ runner.temp }}/docker-build.log
             ${{ runner.temp }}/docker-smoke.log
           if-no-files-found: warn

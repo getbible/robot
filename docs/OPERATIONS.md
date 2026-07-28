@@ -27,6 +27,7 @@ host:
 ./setup.sh docker-config
 ./setup.sh docker-validate
 ./setup.sh docker-restart
+./setup.sh docker-update
 ```
 
 `docker-config` creates a backup, validates the edited environment, restores it
@@ -37,6 +38,10 @@ environment variables. Configuration and secrets are not mutated inside the
 read-only container. In-container `reload` applies changed mounted multi-bot
 instance files but cannot rewrite host Compose configuration. See [Docker
 deployment](DOCKER.md).
+
+`docker-update` pulls the exact `ROBOT_IMAGE` selected in `.env` before
+recreation. Routine `docker-restart` retains the already installed image.
+Production should use an exact semantic-version or immutable commit tag.
 
 The installed `getbible-robot` manager is the supported interface for routine production operation. Every command accepts an instance name. If it is omitted in an interactive terminal, the manager lists installed instances for selection.
 

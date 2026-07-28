@@ -349,3 +349,25 @@ sudo getbible-robot doctor production
 ```
 
 `config` validates before accepting changes and restores the prior file on failure. `doctor` validates permissions, configuration, dependencies, deployment identity, unit, service, health, and readiness without printing the token.
+
+## Docker Compose controls
+
+These operator values belong to the Compose `.env` layer rather than the
+application's own `Settings` object:
+
+| Variable | Recommended value | Purpose |
+|---|---|---|
+| `ROBOT_IMAGE` | `ghcr.io/getbible/robot:2.1.0` | Exact published runtime image |
+| `ROBOT_CONTAINER_NAME` | `getbible-robot-production` | Stable container identity |
+| `ROBOT_MEMORY_LIMIT` | `256m` | Aggregate container memory ceiling |
+| `ROBOT_MEMORY_RESERVATION` | `160m` | Compose memory reservation |
+| `ROBOT_CPU_LIMIT` | `1` | Container CPU quota |
+| `ROBOT_PIDS_LIMIT` | `48` | Container process/thread ceiling |
+| `ROBOT_TMPFS_SIZE` | `16m` | Bounded writable `/tmp` |
+| `ROBOT_LOG_MAX_SIZE` | `10m` | Per-file Docker log bound |
+| `ROBOT_LOG_MAX_FILES` | `3` | Docker log retention count |
+
+`docker-init` generates the complete editable example. `docker-validate`
+pulls and validates `ROBOT_IMAGE`; `docker-update` then recreates the workload
+from that image. `ROBOT_BUILD_IMAGE` applies only when the operator explicitly
+adds `--build` to use `compose.build.yaml`.

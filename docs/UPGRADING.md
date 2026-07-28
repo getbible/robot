@@ -128,6 +128,35 @@ getbible>=1.2,<2
 
 The generated lock selects the exact tested artifact. Production does not resolve a newer package during service start.
 
+## Docker upgrade and rollback
+
+Docker deployments upgrade by changing the explicit `ROBOT_IMAGE` value in the
+private Compose environment and letting the setup manager pull, validate, and
+recreate the workload:
+
+```bash
+cd ~/robot
+cp -- .env ".env.before-$(date +%Y%m%dT%H%M%S)"
+${EDITOR:-vi} .env
+./setup.sh docker-validate
+./setup.sh docker-update
+./setup.sh docker-doctor
+```
+
+For example:
+
+```dotenv
+ROBOT_IMAGE=ghcr.io/getbible/robot:2.1.0
+```
+
+Use an exact semantic version or `sha-<full-commit>` tag for production. Do not
+use `edge`; it is the CI-approved `master` channel for pre-production testing.
+The persistent named volume is retained when the container is recreated.
+
+Rollback is the same controlled operation: restore the prior `ROBOT_IMAGE`
+value, validate, and run `docker-update` again. Do not start the old and new
+containers concurrently with the same Telegram token.
+
 ## Deployment record
 
 Record:

@@ -1,8 +1,6 @@
 services:
   robot:
-    build:
-      context: .
-    image: "${ROBOT_IMAGE:-getbible-robot:local}"
+    image: "${ROBOT_IMAGE:-ghcr.io/getbible/robot:latest}"
     container_name: "${ROBOT_CONTAINER_NAME:-getbible-robot}"
     labels:
       io.getbible.robot.container: "true"
