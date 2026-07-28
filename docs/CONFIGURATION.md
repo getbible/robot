@@ -58,6 +58,13 @@ to the loopback listener. Do not expose `TELEGRAM_WEBHOOK_PORT` directly. See
 | `MINI_APP_BODY_TIMEOUT_SECONDS` | `10` | `1`–`60` | Maximum time to receive one HTTP request body |
 | `MINI_APP_IDLE_TIMEOUT_SECONDS` | `30` | `5`–`300` | Idle connection and incomplete-header timeout |
 | `MINI_APP_MAX_HEADER_BYTES` | `16384` | `4096`–`65536` | Maximum accepted HTTP header block |
+| `MINI_APP_TRUSTED_PROXY_CIDRS` | `127.0.0.1/32,::1/128` | Comma-separated IPv4/IPv6 networks | Direct peers allowed to supply a forwarded client address |
+| `MINI_APP_IP_RATE_CAPACITY` | `60` | `10`–`10000` | Per-client burst capacity for authenticated Mini App API requests |
+| `MINI_APP_IP_RATE_REFILL_PER_SECOND` | `10` | `0.1`–`10000` | Per-client sustained refill rate |
+| `MINI_APP_SESSION_EXCHANGE_RATE_CAPACITY` | `10` | `1`–`10000` | Per-client burst for unauthenticated session-exchange attempts |
+| `MINI_APP_SESSION_EXCHANGE_RATE_REFILL_PER_SECOND` | `0.2` | `0.01`–`10000` | Per-client sustained session-exchange refill |
+| `MINI_APP_NAVIGATION_RATE_COST` | `0.25` | `0.05`–`1` | Fractional request cost for lightweight authenticated navigation |
+| `MINI_APP_ACCESS_LOG` | `true` | `true` or `false` | Log every Mini App request; errors are always logged |
 
 The HTML shell may be publicly retrievable because Telegram Mini Apps run in a
 browser engine on each user's device. It remains inert without fresh
@@ -71,6 +78,12 @@ text in browser state. See [Mini App deployment](MINI_APP.md).
 Caddy routes, validation, reload, public verification, and rollback remain one
 transaction.
 
+Telegram Bot API updates do not expose an end-user IP address. Mini App HTTP
+requests do. Forwarded addresses are trusted only when the direct connection
+comes from `MINI_APP_TRUSTED_PROXY_CIDRS`; untrusted forwarding headers are
+ignored. Configure the exact proxy address or network rather than a public or
+unnecessarily broad range.
+
 ## Instance identity and audit logging
 
 | Variable | Default | Validation | Purpose |
@@ -79,6 +92,7 @@ transaction.
 | `LOG_FILE` | empty | Empty or an absolute path | Optional JSONL application log in addition to journald |
 | `LOG_MAX_BYTES` | `10485760` | 1 MiB–1 GiB | Continuous byte ceiling for the optional JSONL file |
 | `AUDIT_LOG_MODE` | `metadata` | `metadata` or `content` | Controls whether user-provided query/reference text may enter audit fields |
+| `AUDIT_IDENTITY_MODE` | `pseudonymous` | `disabled`, `pseudonymous`, or `raw` | Controls user/chat/client identity fields in structured events |
 
 The setup manager assigns these values per instance:
 
@@ -86,6 +100,7 @@ The setup manager assigns these values per instance:
 INSTANCE_NAME="production"
 LOG_FILE="/var/log/getbible-robot/production.jsonl"
 AUDIT_LOG_MODE="metadata"
+AUDIT_IDENTITY_MODE="pseudonymous"
 ```
 
 `INSTANCE_NAME`, `LOG_FILE`, `HEALTH_PORT`, and `MINI_APP_LISTEN` are
@@ -93,9 +108,21 @@ manager-owned after installation. `getbible-robot config` rejects changes that
 would detach the environment from its isolated account, log, metadata, or
 loopback listeners.
 
-Metadata mode records operational choices and outcomes without Telegram message text: source workflow, translation, search filter modes, result counts, selected/reference-group counts, output message count, failures, and correlation IDs. It never records tokens, user IDs, chat IDs, verse bodies, or repository response bodies.
+Metadata mode records operational choices and outcomes without Telegram
+message text: source workflow, translation, search filter modes, result counts,
+selected/reference-group counts, output message count, failures, and
+correlation IDs.
 
 Content mode additionally records normalized search terms and final Scripture references. It must be enabled deliberately and used only where privacy, access, and retention requirements permit storing user-provided content.
+
+Identity mode is independent of content mode. `disabled` omits Telegram and
+client identities. `pseudonymous` records stable token-keyed identifiers that
+can reveal repeated activity without exposing the original value. `raw`
+records Telegram numeric user/chat IDs and the resolved Mini App client IP so
+an operator can investigate and contact an abusive Telegram user. Raw identity
+logs are personal data and require appropriate access and retention controls.
+No mode records tokens, names, usernames, verse bodies, repository response
+bodies, Telegram `initData`, or launch/session credentials.
 
 ## Scripture and public-link settings
 
@@ -190,8 +217,22 @@ navigating.
 | `CHAT_RATE_REFILL_PER_SECOND` | `1` | `0.01`–`500` | Per-chat sustained refill rate |
 | `RATE_LIMIT_CACHE_SIZE` | `2000` | `100`–`100000` | Maximum combined user/chat bucket entries |
 | `RATE_LIMIT_NOTICE_COOLDOWN` | `10` seconds | `1`–`300` | Minimum quiet period before another rejection warning for the same user/chat |
+| `ABUSE_REJECTION_THRESHOLD` | `6` | `2`–`100` | Individual rate-limit violations within the window before a temporary block |
+| `ABUSE_WINDOW_SECONDS` | `60` | `10`–`3600` | Sliding interval for repeated individual violations |
+| `ABUSE_BLOCK_SECONDS` | `300` | `10`–`86400` | Temporary user/client pause after the threshold |
+| `ABUSE_WARNING_MESSAGE` | built-in text | Non-empty; at most 4096 characters | Private or ephemeral notice sent when repeated activity is paused |
 
-The bucket and rejection-notification registries use bounded least-recently-used retention so arbitrary identifiers cannot grow memory without limit. Rejected floods are silently discarded after the first warning instead of amplifying traffic through Telegram's API.
+Mini App session exchange and expensive search, Scripture, and post requests
+consume a full request token. Lightweight translation/book/chapter/verse
+navigation consumes `MINI_APP_NAVIGATION_RATE_COST`, preserving normal browsing
+responsiveness.
+
+User, chat, client, abuse, and rejection-notification registries use bounded
+least-recently-used retention so arbitrary identifiers cannot grow memory
+without limit. Only repeated individual user/client exhaustion creates an
+abuse block; chat-wide saturation does not accuse one user. Rejected floods
+are silently discarded after the first cooldown warning instead of amplifying
+traffic through Telegram's API.
 
 ## Interactive sessions and catalog cache
 
@@ -265,6 +306,17 @@ INSTANCE_NAME="production"
 LOG_FILE="/var/log/getbible-robot/production.jsonl"
 LOG_MAX_BYTES="10485760"
 AUDIT_LOG_MODE="metadata"
+AUDIT_IDENTITY_MODE="pseudonymous"
+MINI_APP_TRUSTED_PROXY_CIDRS="127.0.0.1/32,::1/128"
+MINI_APP_IP_RATE_CAPACITY="60"
+MINI_APP_IP_RATE_REFILL_PER_SECOND="10"
+MINI_APP_SESSION_EXCHANGE_RATE_CAPACITY="10"
+MINI_APP_SESSION_EXCHANGE_RATE_REFILL_PER_SECOND="0.2"
+MINI_APP_NAVIGATION_RATE_COST="0.25"
+MINI_APP_ACCESS_LOG="true"
+ABUSE_REJECTION_THRESHOLD="6"
+ABUSE_WINDOW_SECONDS="60"
+ABUSE_BLOCK_SECONDS="300"
 TRANSLATION="kjv"
 USER_PREFERENCES_FILE="/var/lib/getbible-robot/production/preferences.sqlite3"
 USER_PREFERENCE_LIMIT="10000"

@@ -25,21 +25,21 @@ services:
       - "${MINI_APP_BIND_ADDRESS:-127.0.0.1}:${MINI_APP_HOST_PORT:-9201}:9201"
     read_only: true
     tmpfs:
-      - /tmp:size=16m,mode=1777
+      - "/tmp:size=${ROBOT_TMPFS_SIZE:-16m},mode=1777"
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-    pids_limit: 64
+    pids_limit: "${ROBOT_PIDS_LIMIT:-64}"
     mem_limit: "${ROBOT_MEMORY_LIMIT:-320m}"
     mem_reservation: "${ROBOT_MEMORY_RESERVATION:-192m}"
     cpus: "${ROBOT_CPU_LIMIT:-1.5}"
-    stop_grace_period: 45s
+    stop_grace_period: "${ROBOT_STOP_GRACE_PERIOD:-45s}"
     logging:
       driver: local
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: "${ROBOT_LOG_MAX_SIZE:-10m}"
+        max-file: "${ROBOT_LOG_MAX_FILES:-3}"
 
 volumes:
   robot-data:

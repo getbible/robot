@@ -19,6 +19,13 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   an explicit multi-bot Compose file.
 - Added host setup-manager Docker discovery, deploy, status, log, diagnostics,
   management-menu, and shell commands plus `/app/setup.sh` inside the image.
+- Added `docker-init`, `docker-config`, `docker-validate`, and
+  Compose-recreating `docker-restart` operations so the versioned Compose file
+  and private generated environment remain an editable, validated deployment
+  source of truth.
+- Exposed application concurrency, cache, session, timeout, rate, abuse,
+  memory, CPU, PID, tmpfs, and log-retention controls through the default
+  Compose environment without rebuilding the image.
 - Added Compose and Kubernetes examples with secrets, persistent state,
   resource limits, and startup/liveness/readiness probes.
 - Reduced default worker, update, rate-map, interaction, Mini App session,
@@ -26,6 +33,13 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 - Added per-user Mini App session limits, explicit retained-selection/search
   bounds, Mini App header/body/idle connection limits, process RSS metrics,
   cache-object pruning, and continuously byte-capped JSONL logging.
+- Added bounded Mini App client/IP request budgets, trusted-proxy address
+  resolution, fractional-cost normal navigation, repeated-abuse blocking,
+  private/ephemeral user warnings, and configurable
+  disabled/pseudonymous/raw identity audit fields.
+- Added structured queue, timeout, circuit, rate/abuse, Mini App request, and
+  supervisor memory-pressure events so operators can identify which configured
+  barrier is affecting users before increasing limits.
 - Changed the systemd unit to native readiness/watchdog notification with
   `MemoryHigh`, a lower `MemoryMax`, a swap ceiling, and restart-storm
   protection.

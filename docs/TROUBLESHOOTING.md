@@ -171,7 +171,57 @@ sudo logrotate --debug /etc/logrotate.d/getbible-robot
 
 Expected file ownership is `gb-production:gb-production`, mode `0640`. The service unit grants write access only to that exact file and the instance cache.
 
-`LOG_LEVEL=INFO` is needed for normal audit events. `AUDIT_LOG_MODE=metadata` omits query content by design. Choose `content` only through an approved privacy decision.
+`LOG_LEVEL=INFO` is needed for normal audit events. `AUDIT_LOG_MODE=metadata`
+omits query content by design. Choose `content` only through an approved
+privacy decision. Identity is independent: `AUDIT_IDENTITY_MODE=disabled`
+omits it, `pseudonymous` records keyed identifiers, and `raw` records numeric
+Telegram IDs and resolved Mini App client IPs. Raw logs require appropriate
+access and retention.
+
+For Docker, application logs are on stdout/stderr:
+
+```bash
+./setup.sh docker-logs getbible-robot-production 500
+./setup.sh docker-doctor getbible-robot-production
+```
+
+If an edited Docker setting did not take effect, validate and recreate the
+container rather than using a plain Docker restart:
+
+```bash
+./setup.sh docker-validate
+./setup.sh docker-restart
+```
+
+## A client address looks wrong or identical for every Mini App user
+
+Telegram command updates do not contain end-user IP addresses. Client IP
+logging applies only to Mini App HTTP requests.
+
+The application ignores `X-Forwarded-For` unless the direct connection came
+from `MINI_APP_TRUSTED_PROXY_CIDRS`. Set that variable to the exact Caddy,
+Traefik, Nginx, ingress, or load-balancer peer network. If all requests show
+the proxy address, the proxy network is not trusted or it is not forwarding
+the header. Do not solve this with a public catch-all network: that lets a
+client spoof both attribution and its client rate bucket.
+
+## Rate limits or abuse controls affect normal navigation
+
+Inspect `inbound_rate_limited` and `mini_app_request` events. A normal
+authenticated translation/book/chapter/verse navigation request costs
+`MINI_APP_NAVIGATION_RATE_COST` (default `0.25`); session exchange, search,
+Scripture retrieval, and posting cost one full token.
+
+A temporary block requires repeated individual user or client exhaustion
+within `ABUSE_WINDOW_SECONDS`. Chat-wide saturation does not create an
+individual block. When a block begins, the robot sends one private or
+per-user-ephemeral `ABUSE_WARNING_MESSAGE`; subsequent warnings are
+cooldown-limited.
+
+Before increasing a rate, verify whether the same raw or pseudonymous identity
+dominates the events. If legitimate users are distributed normally, change
+the corresponding Compose environment value, run `docker-validate`, and apply
+it with `docker-restart`.
 
 ## `/healthz` works but `/readyz` returns 503
 
@@ -201,6 +251,13 @@ separately limited by `SEARCH_MAX_RESPONSE_BYTES`.
 Measure upstream latency, memory, and the applicable worker pool. Do not raise
 concurrency, timeouts, result sizes, or message budgets until the impact is
 tested.
+
+Structured `capacity_queue_rejected`, `lookup_timed_out`,
+`upstream_circuit_rejected`, `instance_memory_pressure`, and
+`instance_memory_limit_exceeded` events identify whether the barrier is worker
+capacity, upstream latency, circuit protection, a warning threshold, or the
+hard child RSS guard. `instance_memory_pressure_cleared` confirms recovery
+below the warning band.
 
 ## `/bible` returns a temporary-unavailable reference
 

@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from container import runtime
 
@@ -245,6 +245,53 @@ class ContainerSupervisorTestCase(unittest.IsolatedAsyncioTestCase):
 
             self.assertIsNone(instance.process)
             self.assertIsNotNone(instance.last_exit)
+
+    async def test_memory_pressure_is_logged_before_the_hard_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / "data"
+            with (
+                patch.object(runtime, "DATA_ROOT", data),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ROBOT_MODE": "single",
+                        "INSTANCE_NAME": "production",
+                        "TELEGRAM_API_TOKEN": TOKEN,
+                        "HEALTH_PORT": "8081",
+                        "CONTAINER_INSTANCE_MEMORY_LIMIT_MB": "100",
+                        "CONTAINER_INSTANCE_MEMORY_WARNING_PERCENT": "50",
+                    },
+                    clear=True,
+                ),
+            ):
+                spec = runtime.InstanceSpec.from_environment()
+                supervisor = runtime.ContainerSupervisor()
+                instance = runtime.InstanceRuntime(spec=spec)
+                instance.process = Mock(pid=1234, returncode=None)
+                with (
+                    patch(
+                        "container.runtime._rss_bytes",
+                        side_effect=(60 * 1024 * 1024, 40 * 1024 * 1024),
+                    ),
+                    patch(
+                        "container.runtime._http_health",
+                        new=AsyncMock(return_value=True),
+                    ),
+                    patch("container.runtime._event") as event,
+                ):
+                    await supervisor._check_runtime(instance)
+                    self.assertTrue(instance.memory_pressure)
+                    self.assertEqual(
+                        event.call_args_list[0].args[0],
+                        "instance_memory_pressure",
+                    )
+
+                    await supervisor._check_runtime(instance)
+                    self.assertFalse(instance.memory_pressure)
+                    self.assertEqual(
+                        event.call_args_list[1].args[0],
+                        "instance_memory_pressure_cleared",
+                    )
 
 
 if __name__ == "__main__":

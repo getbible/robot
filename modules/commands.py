@@ -30,7 +30,7 @@ from telegram.error import Conflict, TelegramError
 from telegram.ext import ContextTypes
 
 from config import Settings
-from modules.audit import audit_event
+from modules.audit import audit_event, audit_identity
 from modules.catalog import BookOption, ChapterOption, TranslationOption
 from modules.ephemeral import (
     TELEGRAM_TEXT_LIMIT,
@@ -283,11 +283,49 @@ async def _allow_command(
     try:
         await limiter.acquire(user_id=user_id, chat_id=chat_id)
     except RobotRateLimited as error:
-        if await limiter.should_notify_rejection(user_id=user_id, chat_id=chat_id):
-            text = (
-                "Too many requests. Please try again in about "
-                f"{error.retry_after} seconds."
-            )
+        settings = cast(Settings, context.application.bot_data[SETTINGS_SLOT])
+        audit_event(
+            LOGGER,
+            settings,
+            "inbound_rate_limited",
+            metadata={
+                "source": "telegram",
+                "retry_after_seconds": error.retry_after,
+                "temporarily_blocked": error.blocked,
+                "new_block": error.new_block,
+                "violation_count": error.violation_count,
+                "limited_scopes": ",".join(error.scopes),
+            },
+            identity=audit_identity(
+                settings,
+                user_id=user_id,
+                chat_id=chat_id,
+            ),
+            level=logging.WARNING,
+        )
+        if error.new_block or await limiter.should_notify_rejection(
+            user_id=user_id,
+            chat_id=chat_id,
+        ):
+            if error.blocked:
+                warning = getattr(
+                    settings,
+                    "abuse_warning_message",
+                    (
+                        "Your requests have been paused because the bot received "
+                        "repeated requests too quickly. Please stop repeated or "
+                        "automated requests and try again later."
+                    ),
+                )
+                text = (
+                    f"{warning}\n\n"
+                    f"Please try again in about {error.retry_after} seconds."
+                )
+            else:
+                text = (
+                    "Too many requests. Please try again in about "
+                    f"{error.retry_after} seconds."
+                )
             if session is not None and session.ephemeral:
                 callback = getattr(update, "callback_query", None)
                 if callback is not None:

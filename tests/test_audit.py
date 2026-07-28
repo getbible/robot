@@ -3,7 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from modules.audit import audit_event
+from modules.audit import audit_event, audit_identity
 
 
 class AuditEventTestCase(unittest.TestCase):
@@ -49,6 +49,44 @@ class AuditEventTestCase(unittest.TestCase):
                 "valid_event",
                 metadata={"../field": "value"},
             )
+
+    def test_identity_fields_are_raw_disabled_or_stably_pseudonymous(self) -> None:
+        base = {
+            "audit_log_mode": "metadata",
+            "telegram_api_token": "123456789:test-secret-value",
+        }
+        raw = audit_identity(
+            SimpleNamespace(**base, audit_identity_mode="raw"),
+            user_id=42,
+            chat_id=-100,
+            client_ip="192.0.2.1",
+        )
+        self.assertEqual(raw["telegram_user_id"], 42)
+        self.assertEqual(raw["telegram_chat_id"], -100)
+        self.assertEqual(raw["client_ip"], "192.0.2.1")
+
+        first = audit_identity(
+            SimpleNamespace(**base, audit_identity_mode="pseudonymous"),
+            user_id=42,
+            chat_id=-100,
+            client_ip="192.0.2.1",
+        )
+        second = audit_identity(
+            SimpleNamespace(**base, audit_identity_mode="pseudonymous"),
+            user_id=42,
+            chat_id=-100,
+            client_ip="192.0.2.1",
+        )
+        self.assertEqual(first, second)
+        self.assertNotIn("42", str(first))
+        self.assertNotIn("192.0.2.1", str(first))
+
+        disabled = audit_identity(
+            SimpleNamespace(**base, audit_identity_mode="disabled"),
+            user_id=42,
+            client_ip="192.0.2.1",
+        )
+        self.assertEqual(disabled, {})
 
 
 if __name__ == "__main__":

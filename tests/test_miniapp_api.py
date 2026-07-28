@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from urllib.parse import urlencode
 
 from modules.catalog import BookOption, ChapterOption, TranslationOption
-from modules.errors import ScriptureUnavailable
+from modules.errors import RobotRateLimited, ScriptureUnavailable
 from modules.interactions import SearchOptions, SearchResult
 from modules.miniapp_api import MiniAppApi, MiniAppHttpRequest
 from modules.miniapp_auth import TelegramInitDataValidator
@@ -69,9 +69,21 @@ class _Preferences:
 class _Limiter:
     def __init__(self) -> None:
         self.calls: list[tuple[int, int]] = []
+        self.details: list[tuple[int, int, float, str | None]] = []
+        self.rejection: RobotRateLimited | None = None
 
-    async def acquire(self, *, user_id: int, chat_id: int, cost: float = 1.0) -> None:
+    async def acquire(
+        self,
+        *,
+        user_id: int,
+        chat_id: int,
+        cost: float = 1.0,
+        client_key: str | None = None,
+    ) -> None:
         self.calls.append((user_id, chat_id))
+        self.details.append((user_id, chat_id, cost, client_key))
+        if self.rejection is not None:
+            raise self.rejection
 
 
 class _Clock:
@@ -193,6 +205,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.posted: list[tuple[object, tuple[ScriptureQuery, ...]]] = []
         self.cleaned_launches: list[object] = []
+        self.warnings: list[tuple[int, int, str]] = []
         self.post_error: Exception | None = None
 
         async def post_scripture(
@@ -207,6 +220,9 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         async def cleanup_launch(launch: object) -> None:
             self.cleaned_launches.append(launch)
 
+        async def abuse_warning(user_id: int, chat_id: int, text: str) -> None:
+            self.warnings.append((user_id, chat_id, text))
+
         self.api = MiniAppApi(
             service=self.service,
             preferences=self.preferences,
@@ -220,8 +236,61 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             public_url=PUBLIC_URL,
             post_scripture=post_scripture,
             cleanup_launch=cleanup_launch,
+            abuse_warning=abuse_warning,
         )
         self.active_init_data = _init_data()
+
+    async def test_navigation_has_fractional_cost_but_expensive_work_does_not(
+        self,
+    ) -> None:
+        token = await self.exchange()
+        self.assertEqual(self.limiter.details[-1][2:], (1.0, "192.0.2.1"))
+
+        response = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/translations",
+                token=token,
+            )
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.limiter.details[-1][2:], (0.25, "192.0.2.1"))
+
+        response = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/search",
+                token=token,
+                body={"query": "grace"},
+            )
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.limiter.details[-1][2:], (1.0, "192.0.2.1"))
+
+    async def test_new_abuse_block_sends_one_private_warning(self) -> None:
+        token = await self.exchange()
+        self.limiter.rejection = RobotRateLimited(
+            300,
+            blocked=True,
+            new_block=True,
+            violation_count=6,
+            scopes=("user", "client"),
+            user_id=42,
+            chat_id=42,
+            client_key="192.0.2.1",
+        )
+        response = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/translations",
+                token=token,
+            )
+        )
+        self.assertEqual(response.status, 429)
+        self.assertEqual(len(self.warnings), 1)
+        self.assertEqual(self.warnings[0][:2], (42, 42))
+        self.assertIn("paused", self.warnings[0][2])
+        self.assertEqual(self.api.snapshot()["api_abuse_blocks"], 1)
 
     def request(
         self,

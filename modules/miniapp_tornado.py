@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Sequence
+from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from pathlib import Path
+from typing import TypeAlias
 from urllib.parse import urlsplit
 
 from tornado.httpserver import HTTPServer
@@ -13,7 +15,7 @@ from tornado.web import RedirectHandler, RequestHandler, StaticFileHandler, URLS
 
 from config import Settings
 
-from .miniapp_api import MiniAppApi, MiniAppHttpRequest
+from .miniapp_api import MiniAppApi, MiniAppHttpRequest, MiniAppIngressLimiter
 from .miniapp_auth import TelegramInitDataReplayGuard, TelegramInitDataValidator
 from .miniapp_sessions import (
     MiniAppLaunch,
@@ -28,12 +30,56 @@ from .preferences import UserPreferenceStore
 from .rate_limit import InboundRateLimiter
 from .service import ScriptureQuery, ScriptureService
 
+_IpAddress: TypeAlias = IPv4Address | IPv6Address
+
+
+class ClientAddressResolver:
+    """Trust forwarded client addresses only from configured proxy networks."""
+
+    def __init__(self, trusted_proxy_cidrs: Sequence[str]) -> None:
+        self._trusted = tuple(
+            ip_network(network, strict=False)
+            for network in trusted_proxy_cidrs
+        )
+
+    def resolve(self, peer: str, forwarded_for: str | None) -> str:
+        try:
+            peer_address = ip_address(peer)
+        except ValueError:
+            return "unknown"
+        if not self._is_trusted(peer_address) or not forwarded_for:
+            return str(peer_address)
+        chain: list[_IpAddress] = []
+        for raw_address in forwarded_for.split(","):
+            candidate = raw_address.strip()
+            try:
+                chain.append(ip_address(candidate))
+            except ValueError:
+                return str(peer_address)
+        if not chain or len(chain) > 32:
+            return str(peer_address)
+        for address in reversed((*chain, peer_address)):
+            if not self._is_trusted(address):
+                return str(address)
+        return str(chain[0])
+
+    def _is_trusted(self, address: _IpAddress) -> bool:
+        return any(
+            address.version == network.version and address in network
+            for network in self._trusted
+        )
+
 
 class MiniAppApiHandler(RequestHandler):
     """Forward a bounded Tornado request to :class:`MiniAppApi`."""
 
-    def initialize(self, api: MiniAppApi) -> None:
+    def initialize(
+        self,
+        api: MiniAppApi,
+        address_resolver: ClientAddressResolver,
+    ) -> None:
         self._api = api
+        self._address_resolver = address_resolver
 
     async def get(self, path: str = "") -> None:
         await self._dispatch()
@@ -54,15 +100,22 @@ class MiniAppApiHandler(RequestHandler):
         await self._dispatch()
 
     async def _dispatch(self) -> None:
+        peer = (
+            self.request.remote_ip
+            if isinstance(self.request.remote_ip, str)
+            else "unknown"
+        )
+        client_ip = self._address_resolver.resolve(
+            peer,
+            self.request.headers.get("X-Forwarded-For"),
+        )
         response = await self._api.handle(
             MiniAppHttpRequest(
                 method=self.request.method or "",
                 target=self.request.uri or "",
                 headers=dict(self.request.headers),
                 body=self.request.body,
-                client_key=(
-                    self.request.remote_ip if isinstance(self.request.remote_ip, str) else "unknown"
-                ),
+                client_key=client_ip,
             )
         )
         self.set_status(response.status)
@@ -74,14 +127,25 @@ class MiniAppApiHandler(RequestHandler):
             self.finish()
 
 
-def miniapp_api_handlers(api: MiniAppApi, *, public_path: str = "") -> Sequence[URLSpec]:
+def miniapp_api_handlers(
+    api: MiniAppApi,
+    *,
+    public_path: str = "",
+    address_resolver: ClientAddressResolver | None = None,
+) -> Sequence[URLSpec]:
     """Return route specs for a dedicated, size-limited Tornado HTTP server."""
     prefix = re.escape(public_path.rstrip("/"))
     return (
         URLSpec(
             rf"{prefix}/api/v1/(.*)",
             MiniAppApiHandler,
-            {"api": api},
+            {
+                "api": api,
+                "address_resolver": (
+                    address_resolver
+                    or ClientAddressResolver(("127.0.0.1/32", "::1/128"))
+                ),
+            },
         ),
     )
 
@@ -138,6 +202,7 @@ class MiniAppServer:
             Awaitable[Sequence[int] | None],
         ],
         cleanup_launch: Callable[[MiniAppLaunch], Awaitable[None]] | None = None,
+        abuse_warning: Callable[[int, int, str], Awaitable[None]] | None = None,
         static_root: Path | None = None,
     ) -> None:
         if not settings.mini_app_enabled or settings.mini_app_public_url is None:
@@ -145,6 +210,9 @@ class MiniAppServer:
         self._settings = settings
         self._public_url = miniapp_public_web_url(settings.mini_app_public_url)
         self._public_path = urlsplit(self._public_url).path.rstrip("/")
+        self._address_resolver = ClientAddressResolver(
+            settings.mini_app_trusted_proxy_cidrs
+        )
         self.launches = MiniAppLaunchStore(
             max_launches=settings.mini_app_session_limit,
             ttl_seconds=settings.mini_app_launch_ttl_seconds,
@@ -171,10 +239,21 @@ class MiniAppServer:
             public_url=self._public_url,
             post_scripture=post_scripture,
             cleanup_launch=cleanup_launch,
+            ingress_limiter=MiniAppIngressLimiter(
+                capacity=settings.mini_app_session_exchange_rate_capacity,
+                refill_per_second=(
+                    settings.mini_app_session_exchange_rate_refill_per_second
+                ),
+                max_entries=settings.rate_limit_cache_size,
+            ),
             replay_guard=TelegramInitDataReplayGuard(
                 ttl_seconds=settings.mini_app_init_data_max_age_seconds,
                 max_entries=max(100, settings.mini_app_session_limit * 2),
             ),
+            audit_settings=settings,
+            abuse_warning=abuse_warning,
+            navigation_rate_cost=settings.mini_app_navigation_rate_cost,
+            access_log=settings.mini_app_access_log,
         )
         root = static_root or Path(__file__).resolve().parent.parent / "miniapp"
         if not root.is_dir():
@@ -188,7 +267,11 @@ class MiniAppServer:
             return
         prefix = re.escape(self._public_path)
         handlers: list[URLSpec] = list(
-            miniapp_api_handlers(self.api, public_path=self._public_path)
+            miniapp_api_handlers(
+                self.api,
+                public_path=self._public_path,
+                address_resolver=self._address_resolver,
+            )
         )
         if self._public_path:
             handlers.append(
@@ -213,8 +296,7 @@ class MiniAppServer:
         )
         server = HTTPServer(
             application,
-            xheaders=True,
-            trusted_downstream=["127.0.0.1", "::1"],
+            xheaders=False,
             max_buffer_size=128 * 1024,
             max_body_size=64 * 1024,
             max_header_size=self._settings.mini_app_max_header_bytes,
@@ -235,6 +317,12 @@ class MiniAppServer:
             return
         server.stop()
         await server.close_all_connections()
+
+    def snapshot(self) -> dict[str, int | float]:
+        """Return bounded session and API traffic counters for health metrics."""
+        snapshot = dict(self.sessions.snapshot())
+        snapshot.update(self.api.snapshot())
+        return snapshot
 
     def create_launch(
         self,

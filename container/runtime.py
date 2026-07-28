@@ -64,6 +64,7 @@ class InstanceSpec:
     mini_app_port: int | None
     webhook_port: int | None
     memory_limit_bytes: int
+    memory_warning_percent: int
 
     @classmethod
     def from_file(cls, path: Path) -> InstanceSpec:
@@ -154,6 +155,20 @@ class InstanceSpec:
             raise ContainerConfigurationError(
                 f"{name}: CONTAINER_INSTANCE_MEMORY_LIMIT_MB must be 96-8192."
             )
+        raw_memory_warning = environment.get(
+            "CONTAINER_INSTANCE_MEMORY_WARNING_PERCENT",
+            "80",
+        )
+        try:
+            memory_warning_percent = int(raw_memory_warning)
+        except ValueError as error:
+            raise ContainerConfigurationError(
+                f"{name}: CONTAINER_INSTANCE_MEMORY_WARNING_PERCENT must be an integer."
+            ) from error
+        if not 50 <= memory_warning_percent <= 95:
+            raise ContainerConfigurationError(
+                f"{name}: CONTAINER_INSTANCE_MEMORY_WARNING_PERCENT must be 50-95."
+            )
 
         fingerprint_source = {
             key: value
@@ -175,6 +190,7 @@ class InstanceSpec:
             mini_app_port=mini_app_port,
             webhook_port=webhook_port,
             memory_limit_bytes=memory_limit_mb * 1024 * 1024,
+            memory_warning_percent=memory_warning_percent,
         )
 
 
@@ -192,6 +208,7 @@ class InstanceRuntime:
     health_failures: int = 0
     last_health_ok: float | None = None
     memory_bytes: int = 0
+    memory_pressure: bool = False
     stopping: bool = False
 
     @property
@@ -215,6 +232,8 @@ class InstanceRuntime:
             "webhook_port": self.spec.webhook_port,
             "memory_bytes": self.memory_bytes,
             "memory_limit_bytes": self.spec.memory_limit_bytes,
+            "memory_warning_percent": self.spec.memory_warning_percent,
+            "memory_pressure": self.memory_pressure,
             "restart_count": self.restart_count,
             "last_exit": self.last_exit,
             "last_error": self.last_error,
@@ -365,6 +384,7 @@ class ContainerSupervisor:
         runtime.started_at = None
         runtime.last_exit = returncode
         runtime.memory_bytes = 0
+        runtime.memory_pressure = False
         if runtime.stopping:
             runtime.stopping = False
             return
@@ -410,6 +430,38 @@ class ContainerSupervisor:
         if process is None or process.returncode is not None:
             return
         runtime.memory_bytes = _rss_bytes(process.pid)
+        warning_bytes = (
+            runtime.spec.memory_limit_bytes
+            * runtime.spec.memory_warning_percent
+            // 100
+        )
+        if runtime.memory_bytes >= warning_bytes and not runtime.memory_pressure:
+            runtime.memory_pressure = True
+            _event(
+                "instance_memory_pressure",
+                level="WARNING",
+                instance=runtime.spec.name,
+                memory_bytes=runtime.memory_bytes,
+                warning_bytes=warning_bytes,
+                limit_bytes=runtime.spec.memory_limit_bytes,
+                used_percent=round(
+                    runtime.memory_bytes
+                    * 100
+                    / runtime.spec.memory_limit_bytes,
+                    1,
+                ),
+            )
+        elif (
+            runtime.memory_pressure
+            and runtime.memory_bytes < warning_bytes * 85 // 100
+        ):
+            runtime.memory_pressure = False
+            _event(
+                "instance_memory_pressure_cleared",
+                instance=runtime.spec.name,
+                memory_bytes=runtime.memory_bytes,
+                warning_bytes=warning_bytes,
+            )
         if runtime.memory_bytes > runtime.spec.memory_limit_bytes:
             runtime.last_error = "per-instance memory guard exceeded"
             _event(
@@ -467,6 +519,7 @@ class ContainerSupervisor:
         runtime.process = None
         runtime.started_at = None
         runtime.memory_bytes = 0
+        runtime.memory_pressure = False
         runtime.stopping = False
         if restart and failure:
             self._schedule_failure_restart(runtime)
