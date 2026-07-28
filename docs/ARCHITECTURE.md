@@ -65,7 +65,13 @@ hash-verified process cache. Both the stability of the published hash and the
 digest of the downloaded chapter bytes are verified before content is cached.
 Search and chapter retrieval are read-only; explicit serialized preference
 updates are the sole writer of the global translation and reader position. The
-basket can combine separate verses and ranges
+bounds-checked preference path resolves a translated book/chapter/verse and
+commits the new translation and nearest available reader location atomically.
+Translation-specific API book names remain authoritative; the browser derives
+only collision-free compact presentation labels and never maintains its own
+translated book-name table. The partial-width passage sheet keeps its
+book/chapter draft isolated from the active reader until a chapter is chosen.
+The basket can combine separate verses and ranges
 across chapters/books and compacts overlapping or adjacent intervals before
 final validation. Only the final Librarian-resolved Scripture is posted into
 the originating chat and forum topic.
@@ -152,6 +158,21 @@ The negative translation cache has a TTL and size limit. Navigation-catalog
 caches, interactive sessions, user/chat/client token buckets, abuse-window and
 temporary-block state, rejection-notification cooldown state, and the durable
 per-user translation table are all bounded.
+
+Mini App retained selections have nested hard bounds: 4 KiB of display text per
+verse, 8 MiB of conservatively accounted selection payload per session, and
+32 MiB across the in-process session store, plus independent selection-object
+counts. Accounting includes reference/translation/book strings, highlighting
+terms, tokens, and object overhead. Preference writes are serialized by
+Telegram user rather than browser session, and canonical translation/location
+PUTs are idempotent under transport retry. The process ceiling deliberately
+leaves headroom between the documented 148 MiB fully warmed workload and the
+supported container profile's 210 MiB child-RSS restart guard.
+Sessions with an active Telegram post transaction are pinned until the
+idempotency outcome is recorded; bounded admission fails retryably rather than
+evicting an indeterminate external side effect.
+Within a session, oldest retained search snapshots are discarded before any
+fresh reader selection ID, keeping every accepted visible chapter selectable.
 
 Arbitrary reference strings, translation names, user IDs, chat IDs, and client
 addresses therefore cannot create permanent process growth without limit.

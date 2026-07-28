@@ -147,7 +147,7 @@ final server-resolved selection.
 | `MINI_APP_SESSION_LIMIT` | `200` | Maximum bounded active Mini App sessions |
 | `MINI_APP_SESSIONS_PER_USER` | `2` | Per-user active session bound |
 | `MINI_APP_MAX_SEARCHES_PER_SESSION` | `2` | Retained searches per session |
-| `MINI_APP_MAX_AVAILABLE_SELECTIONS` | `256` | Retained selectable verses per session |
+| `MINI_APP_MAX_AVAILABLE_SELECTIONS` | `256` | Recent selectable verses per session, excluding the separately bounded basket; minimum 250 preserves a complete accepted chapter |
 | `MINI_APP_MAX_SELECTIONS` | `100` | Maximum selected verse items before final normalization |
 | `MINI_APP_TRUSTED_PROXY_CIDRS` | loopback | Exact proxy peers allowed to supply a forwarded client IP |
 | `MINI_APP_IP_RATE_CAPACITY` | `60` | Per-client authenticated API burst |
@@ -204,6 +204,39 @@ The existing bounded preference store retains only translation, book, chapter,
 and the nearest visible verse for reader continuation. Existing databases are
 migrated in place with an empty reader location. The position update is
 debounced in the browser and is written only when the visible verse changes.
+During a translation change, the backend resolves the closest available verse
+and commits translation plus reader location in one retry-safe preference
+transaction. Preference transitions share one per-user lock across that user's
+active Mini App sessions, so an older slow request cannot overwrite a newer
+queued choice. Repeating an identical translation/location PUT returns the same
+canonical location. A missing book or chapter clears only the location while
+retaining the new translation.
+
+The browser retains at most eight translation-specific book catalogs and 24
+book-specific chapter indexes, both as least-recently-used caches with
+single-flight requests. The session store reserves 250 recent unselected
+selection identities independently from the bounded basket, so every accepted
+chapter remains selectable even with an existing basket. Scripture text is
+still subject to the upstream response ceilings, a separate 4 KiB UTF-8
+per-verse retained-display ceiling, an 8 MiB retained-selection ceiling per
+session, a 32 MiB retained-selection ceiling for the session store, fixed
+selection-count ceilings, and the session lifetime. Selection accounting
+includes text, references, book/translation metadata, highlighting terms,
+tokens, and conservative object overhead.
+When the process ceiling is reached, the oldest other Mini App session is
+evicted through the normal expired-session path. These independent byte and
+count limits prevent valid extreme configuration values from turning retained
+reader/search results into unbounded process growth. The 32 MiB process budget
+fits below the supported 210 MiB child-RSS guard with the documented 148 MiB
+fully warmed workload, leaving capacity for transient requests.
+The per-session ceiling covers the worst-case configured 200-item basket plus
+one complete accepted 250-verse chapter, including maximum validated Unicode
+metadata, so an issued chapter selection ID cannot be evicted before use.
+An in-flight Telegram post pins its session until the outcome is recorded.
+Session admission or selection retention fails retryably if every eligible
+eviction target is temporarily pinned.
+When a session reaches its byte ceiling, the oldest retained Search snapshots
+are removed before any selection ID issued for the currently visible chapter.
 
 ## Interface localization
 
@@ -221,6 +254,14 @@ removes the old chapter immediately, then reloads the same canonical book,
 chapter, and nearest visible verse. The selector also displays the bounded
 translation name, language, and abbreviation returned by the existing session
 catalog.
+
+The passage picker is a partial-width modal side sheet. It opens directly to
+the current book's numbered chapters, offers Back to the translation-specific
+book grid, and supports Close, backdrop, Escape, and Telegram Back dismissal.
+Its book names come directly from the selected translation's GetBible API
+catalog. Short visible labels are collision-free presentation abbreviations;
+the full API name remains the accessible label. No chapter-section headings or
+translated hard-coded book list is maintained by Robot.
 
 The localization sources are:
 
@@ -282,7 +323,8 @@ After any presentation change, run:
 
 ```bash
 cd miniapp
-npm test
+npm run check
+npm run test:browser
 ```
 
 Then verify the opening gate, home hero, top bar, protected/expired state,
@@ -322,21 +364,24 @@ private conversation with the bot:
    select a result directly;
 5. open bare `/bible`, read and select compact verses across two chapters, then
    review and post once;
-6. scroll down and up to verify the chapter toolbar and bottom navigation hide
+6. open the passage side sheet, move Book → Chapters → Psalm 150, then verify
+   Back, Close, backdrop, Escape, Telegram Back, current-item focus, and
+   keyboard arrows in both left-to-right and right-to-left translations;
+7. scroll down and up to verify the chapter toolbar and bottom navigation hide
    and return without covering Scripture;
-7. confirm the server posts only resolved Scripture, in the originating chat;
-8. submit a search with the phone keyboard's Search key and confirm the
+8. confirm the server posts only resolved Scripture, in the originating chat;
+9. submit a search with the phone keyboard's Search key and confirm the
    keyboard closes before the results appear;
-9. close and reopen the same launch before its absolute session timeout and
+10. close and reopen the same launch before its absolute session timeout and
    confirm the active selection is safely recovered;
-10. start a new bare `/bible` launch and confirm it resumes the last visible
+11. start a new bare `/bible` launch and confirm it resumes the last visible
     verse without persisting any chapter text;
-11. after posting in a group, confirm both the "Only visible to GetBibleBot"
+12. after posting in a group, confirm both the "Only visible to GetBibleBot"
    command and the "Only visible to you" launch response are removed;
-12. retry a genuinely expired launch and confirm it fails closed, explains that
+13. retry a genuinely expired launch and confirm it fails closed, explains that
    `/bible` or `/search` must be sent again, and offers a close action instead
    of a reload loop;
-13. open the public URL in an ordinary browser and confirm no data or action API
+14. open the public URL in an ordinary browser and confirm no data or action API
    is available.
 
 For group rollout, repeat through the configured Main Mini App/deep-link path

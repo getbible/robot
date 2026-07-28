@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
+from weakref import WeakValueDictionary
 
 from getbible import RequestLimitError, TranslationNotFoundError
 
@@ -38,12 +39,15 @@ from .miniapp_auth import (
     TelegramInitDataValidator,
 )
 from .miniapp_sessions import (
+    MAX_MINIAPP_SELECTION_TEXT_BYTES,
     MiniAppLaunch,
     MiniAppLaunchStore,
     MiniAppPostAttempt,
     MiniAppSearch,
     MiniAppSelection,
     MiniAppSession,
+    MiniAppSessionCapacityError,
+    MiniAppSessionExpiredError,
     MiniAppSessionStore,
 )
 from .preferences import ReaderLocation, SearchDefaults, UserPreferenceStore
@@ -216,6 +220,9 @@ class MiniAppApi:
         self._traffic: Counter[str] = Counter()
         self._page_size = page_size
         self._max_body = max_body_bytes
+        self._preference_locks: WeakValueDictionary[int, asyncio.Lock] = (
+            WeakValueDictionary()
+        )
 
     async def handle(self, request: MiniAppHttpRequest) -> MiniAppHttpResponse:
         """Handle and account for one request without logging secrets or content."""
@@ -273,8 +280,7 @@ class MiniAppApi:
                     return await self._session_bootstrap(session)
                 if method == "DELETE":
                     session = await self._authenticated(request)
-                    self._sessions.revoke(session.token)
-                    return self._response(204, None)
+                    return await self._revoke_session(session)
                 return self._method_not_allowed("GET, POST, DELETE, OPTIONS")
 
             session = await self._authenticated(request)
@@ -311,25 +317,24 @@ class MiniAppApi:
                 if method == "GET":
                     return self._basket(session)
                 if method == "DELETE":
-                    self._sessions.clear_basket(session)
-                    return self._response(204, None)
+                    return await self._clear_basket(session)
                 return self._method_not_allowed("GET, DELETE, OPTIONS")
             if parts.path == f"{self._api_prefix}/basket/items":
                 if method != "POST":
                     return self._method_not_allowed("POST, OPTIONS")
-                return self._add_basket_item(session, request)
+                return await self._add_basket_item(session, request)
             basket_item_match = self._basket_item_path_re.fullmatch(parts.path)
             if basket_item_match is not None:
                 if method != "DELETE":
                     return self._method_not_allowed("DELETE, OPTIONS")
-                return self._remove_basket_item(
+                return await self._remove_basket_item(
                     session,
                     basket_item_match.group(1),
                 )
             if parts.path == f"{self._api_prefix}/basket/order":
                 if method != "PATCH":
                     return self._method_not_allowed("PATCH, OPTIONS")
-                return self._reorder_basket(session, request)
+                return await self._reorder_basket(session, request)
             if parts.path == f"{self._api_prefix}/preferences":
                 if method != "PUT":
                     return self._method_not_allowed("PUT, OPTIONS")
@@ -350,6 +355,19 @@ class MiniAppApi:
                 401,
                 "unauthorized",
                 "Telegram authorization is invalid or expired.",
+            )
+        except MiniAppSessionExpiredError:
+            return self._error_response(
+                401,
+                "unauthorized",
+                "The Mini App session is no longer active.",
+            )
+        except MiniAppSessionCapacityError:
+            return self._error_response(
+                503,
+                "scripture_temporarily_unavailable",
+                "Mini App capacity is temporarily busy. Please try again.",
+                details={"retryable": True},
             )
         except MiniAppApiInputError as error:
             return self._error_response(400, "invalid_request", str(error))
@@ -791,12 +809,19 @@ class MiniAppApi:
         if set(values) - {"translation", "book"}:
             raise MiniAppApiInputError("Chapters request contains unsupported parameters.")
         translation = _translation(values.get("translation"), session.translation)
-        book_number = _positive_integer(values.get("book"), "book", maximum=1000)
+        book_number = _positive_integer(values.get("book"), "book", maximum=200)
         books = await self._service.books(translation)
         book = next((item for item in books if item.number == book_number), None)
         if book is None:
             raise MiniAppApiInputError("book is not available in this translation.")
         chapters = await self._service.chapters(translation, book)
+        if any(
+            len(chapter.verses) > MAX_MINIAPP_CHAPTER_VERSES
+            for chapter in chapters
+        ):
+            raise ScriptureUnavailable(
+                "A chapter exceeds the Mini App display bound."
+            )
         return self._response(
             200,
             {
@@ -819,7 +844,7 @@ class MiniAppApi:
         chapter_number = _positive_integer(
             payload.get("chapter"),
             "chapter",
-            maximum=250,
+            maximum=1000,
         )
         books = await self._service.books(translation)
         book = next((item for item in books if item.number == book_number), None)
@@ -837,11 +862,18 @@ class MiniAppApi:
         target_verse = _positive_integer(
             payload.get("verse", chapter.verses[0]),
             "verse",
-            maximum=500,
+            maximum=2000,
         )
         if target_verse not in chapter.verses:
             raise MiniAppApiInputError("verse is not available in this chapter.")
         content = await self._service.chapter(translation, book, chapter)
+        if any(
+            len(verse.text.encode("utf-8")) > MAX_MINIAPP_SELECTION_TEXT_BYTES
+            for verse in content.verses
+        ):
+            raise ScriptureUnavailable(
+                "The chapter contains a verse that exceeds the display bound."
+            )
         previous, following = await self._chapter_navigation(
             translation,
             books,
@@ -950,7 +982,7 @@ class MiniAppApi:
         query = _required_text(
             payload,
             "query",
-            self._service.settings.max_input_length,
+            min(self._service.settings.max_input_length, 240),
         )
         preferences = self._preferences.preferences_for(session.user_id)
         options = _search_options(
@@ -959,13 +991,27 @@ class MiniAppApi:
             defaults=preferences.search_defaults,
         )
         page = await self._service.search(query, options)
-        search = self._sessions.remember_search(
-            session,
-            query=page.query,
-            translation=page.translation,
-            total=page.total,
-            items=page.items,
-        )
+        if any(
+            len(item.text.encode("utf-8")) > MAX_MINIAPP_SELECTION_TEXT_BYTES
+            for item in page.items
+        ):
+            raise ScriptureUnavailable(
+                "The search contains a verse that exceeds the display bound."
+            )
+        try:
+            search = self._sessions.remember_search(
+                session,
+                query=page.query,
+                translation=page.translation,
+                total=page.total,
+                items=page.items,
+            )
+        except MiniAppSessionExpiredError:
+            raise
+        except ValueError as error:
+            raise ScriptureUnavailable(
+                "The search result exceeds the Mini App display bound."
+            ) from error
         return self._response(200, self._search_payload(search, 0))
 
     def _search_page(
@@ -990,7 +1036,7 @@ class MiniAppApi:
     def _basket(self, session: MiniAppSession) -> MiniAppHttpResponse:
         return self._response(200, self._basket_payload(session))
 
-    def _add_basket_item(
+    async def _add_basket_item(
         self,
         session: MiniAppSession,
         request: MiniAppHttpRequest,
@@ -999,18 +1045,20 @@ class MiniAppApi:
         if set(payload) != {"selection_id"}:
             raise MiniAppApiInputError("Basket item request is invalid.")
         selection_token = _required_text(payload, "selection_id", 128)
-        self._sessions.add_to_basket(session, selection_token)
-        return self._response(200, self._basket_payload(session))
+        async with session.post_lock:
+            self._sessions.add_to_basket(session, selection_token)
+            return self._response(200, self._basket_payload(session))
 
-    def _remove_basket_item(
+    async def _remove_basket_item(
         self,
         session: MiniAppSession,
         selection_token: str,
     ) -> MiniAppHttpResponse:
-        self._sessions.remove_from_basket(session, selection_token)
-        return self._response(200, self._basket_payload(session))
+        async with session.post_lock:
+            self._sessions.remove_from_basket(session, selection_token)
+            return self._response(200, self._basket_payload(session))
 
-    def _reorder_basket(
+    async def _reorder_basket(
         self,
         session: MiniAppSession,
         request: MiniAppHttpRequest,
@@ -1023,8 +1071,17 @@ class MiniAppApi:
             not isinstance(token, str) for token in selection_tokens
         ):
             raise MiniAppApiInputError("selection_ids must be an array of IDs.")
-        self._sessions.reorder_basket(session, selection_tokens)
-        return self._response(200, self._basket_payload(session))
+        async with session.post_lock:
+            self._sessions.reorder_basket(session, selection_tokens)
+            return self._response(200, self._basket_payload(session))
+
+    async def _clear_basket(
+        self,
+        session: MiniAppSession,
+    ) -> MiniAppHttpResponse:
+        async with session.post_lock:
+            self._sessions.clear_basket(session)
+            return self._response(204, None)
 
     async def _update_preferences(
         self,
@@ -1036,7 +1093,7 @@ class MiniAppApi:
             raise MiniAppApiInputError("preferences contains unsupported fields.")
         if not payload:
             raise MiniAppApiInputError("preferences must not be empty.")
-        async with session.preference_lock:
+        async with self._preference_lock(session.user_id):
             current = self._preferences.preferences_for(session.user_id)
             translation = current.translation
             if "translation" in payload:
@@ -1068,7 +1125,10 @@ class MiniAppApi:
                         raise MiniAppApiInputError(
                             "Reader location translation must match the preference."
                         )
-                    await self._validate_reader_location(location)
+                    if "translation" in payload:
+                        location = await self._resolve_reader_location(location)
+                    else:
+                        await self._validate_reader_location(location)
 
             try:
                 if location is _PREFERENCE_UNCHANGED:
@@ -1099,6 +1159,14 @@ class MiniAppApi:
                 {"preferences": preferences.as_dict()},
             )
 
+    def _preference_lock(self, user_id: int) -> asyncio.Lock:
+        """Return one shared lock for every active session of a Telegram user."""
+        lock = self._preference_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._preference_locks[user_id] = lock
+        return lock
+
     async def _validate_reader_location(self, location: ReaderLocation) -> None:
         books = await self._service.books(location.translation)
         book = next((item for item in books if item.number == location.book), None)
@@ -1115,6 +1183,33 @@ class MiniAppApi:
             raise MiniAppApiInputError("Reader chapter is not available in this book.")
         if location.verse not in chapter.verses:
             raise MiniAppApiInputError("Reader verse is not available in this chapter.")
+
+    async def _resolve_reader_location(
+        self,
+        location: ReaderLocation,
+    ) -> ReaderLocation | None:
+        """Normalize a location while atomically switching translations."""
+        books = await self._service.books(location.translation)
+        book = next((item for item in books if item.number == location.book), None)
+        if book is None:
+            return None
+        chapters = await self._service.chapters(location.translation, book)
+        chapter = next(
+            (item for item in chapters if item.number == location.chapter),
+            None,
+        )
+        if chapter is None or not chapter.verses:
+            return None
+        verse = min(
+            chapter.verses,
+            key=lambda number: (abs(number - location.verse), number),
+        )
+        return ReaderLocation(
+            location.translation,
+            location.book,
+            location.chapter,
+            verse,
+        )
 
     async def _post(
         self,
@@ -1142,10 +1237,16 @@ class MiniAppApi:
             )
             if not created:
                 return self._post_attempt_response(attempt)
-            resolved = [(selection.reference, selection.translation) for selection in selections]
+            resolved = [
+                (selection.reference, selection.translation)
+                for selection in selections
+            ]
             try:
                 queries = await self._resolve_grouped_queries(resolved)
-                raw_message_ids = await self._post_scripture(session.launch, queries)
+                raw_message_ids = await self._post_scripture(
+                    session.launch,
+                    queries,
+                )
                 message_ids = tuple(raw_message_ids or ())
                 if not message_ids or any(
                     isinstance(message_id, bool)
@@ -1153,7 +1254,9 @@ class MiniAppApi:
                     or message_id <= 0
                     for message_id in message_ids
                 ):
-                    raise ScriptureUnavailable("The Telegram post response was invalid.")
+                    raise ScriptureUnavailable(
+                        "The Telegram post response was invalid."
+                    )
             except BaseException:
                 self._sessions.fail_post(
                     session,
@@ -1176,6 +1279,15 @@ class MiniAppApi:
                     "idempotent_replay": False,
                 },
             )
+
+    async def _revoke_session(
+        self,
+        session: MiniAppSession,
+    ) -> MiniAppHttpResponse:
+        """Serialize explicit revocation behind every basket/post transaction."""
+        async with session.post_lock:
+            self._sessions.revoke(session.token)
+            return self._response(204, None)
 
     def _post_attempt_response(
         self,
@@ -1496,7 +1608,18 @@ def _translation_payload(option: TranslationOption) -> dict[str, object]:
 
 
 def _book_payload(book: BookOption) -> dict[str, object]:
-    return {"number": book.number, "name": book.name}
+    testament = (
+        "old"
+        if book.number <= 39
+        else "new"
+        if book.number <= 66
+        else "other"
+    )
+    return {
+        "number": book.number,
+        "name": book.name,
+        "testament": testament,
+    }
 
 
 def _chapter_payload(chapter: ChapterOption) -> dict[str, object]:

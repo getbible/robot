@@ -179,6 +179,7 @@ cd robot
 python3 -m venv venv
 venv/bin/python -m pip install --upgrade pip
 venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
+(cd miniapp && npm ci --ignore-scripts && npx playwright install chromium)
 bash scripts/run-checks.sh
 ```
 
@@ -187,6 +188,7 @@ Run only the unit suite while iterating:
 ```bash
 venv/bin/python -m unittest discover -s tests -v
 (cd miniapp && npm run check)
+(cd miniapp && npm run test:browser)
 ```
 
 ## Production installation summary

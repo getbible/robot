@@ -53,7 +53,7 @@ to the loopback listener. Do not expose `TELEGRAM_WEBHOOK_PORT` directly. See
 | `MINI_APP_SESSION_LIMIT` | `200` | `10`–`20000` | Maximum active Mini App sessions |
 | `MINI_APP_SESSIONS_PER_USER` | `2` | `1`–`10` | Maximum active sessions retained for one Telegram user |
 | `MINI_APP_MAX_SEARCHES_PER_SESSION` | `2` | `1`–`8` | Retained authoritative search pages per session |
-| `MINI_APP_MAX_AVAILABLE_SELECTIONS` | `256` | `25`–`1000` | Retained selectable verse objects per session |
+| `MINI_APP_MAX_AVAILABLE_SELECTIONS` | `256` | `250`–`1000` | Recent selectable verse objects per session, excluding the separately bounded basket |
 | `MINI_APP_MAX_SELECTIONS` | `100` | `1`–`200` | Maximum selected verse items before normalization |
 | `MINI_APP_BODY_TIMEOUT_SECONDS` | `10` | `1`–`60` | Maximum time to receive one HTTP request body |
 | `MINI_APP_IDLE_TIMEOUT_SECONDS` | `30` | `5`–`300` | Idle connection and incomplete-header timeout |

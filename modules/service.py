@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from getbible import (
     CacheIntegrityError,
@@ -45,6 +45,7 @@ from .interactions import SearchOptions, SearchResult
 
 LOGGER = logging.getLogger(__name__)
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
+MAX_SEARCH_TOTAL = 1_000_000
 _T = TypeVar("_T")
 
 
@@ -219,6 +220,8 @@ class ScriptureService:
             failure_threshold=settings.circuit_failure_threshold,
             recovery_seconds=settings.circuit_recovery_seconds,
         )
+        self._catalog_flights: dict[tuple[object, ...], asyncio.Task[Any]] = {}
+        self._catalog_flights_lock = asyncio.Lock()
         self.metrics = Metrics()
         self._closed = False
 
@@ -287,13 +290,15 @@ class ScriptureService:
         )
 
     async def translations(self) -> tuple[TranslationOption, ...]:
-        return await self._repository_call(
+        return await self._catalog_call(
+            ("translations",),
             "catalog_translation_lookups",
             self._catalog.translations,
         )
 
     async def books(self, translation: str) -> tuple[BookOption, ...]:
-        return await self._repository_call(
+        return await self._catalog_call(
+            ("books", translation.casefold()),
             "catalog_book_lookups",
             self._catalog.books,
             translation,
@@ -304,7 +309,8 @@ class ScriptureService:
         translation: str,
         book: BookOption,
     ) -> tuple[ChapterOption, ...]:
-        return await self._repository_call(
+        return await self._catalog_call(
+            ("chapters", translation.casefold(), book.number, book.sha),
             "catalog_chapter_lookups",
             self._catalog.chapters,
             translation,
@@ -318,13 +324,53 @@ class ScriptureService:
         chapter: ChapterOption,
     ) -> ChapterContent:
         """Load one complete chapter from the Main API, not Librarian."""
-        return await self._repository_call(
+        return await self._catalog_call(
+            (
+                "chapter",
+                translation.casefold(),
+                book.number,
+                book.sha,
+                chapter.number,
+            ),
             "catalog_scripture_chapter_lookups",
             self._catalog.chapter,
             translation,
             book,
             chapter,
         )
+
+    async def _catalog_call(
+        self,
+        key: tuple[object, ...],
+        metric: str,
+        function: Callable[..., _T],
+        *args: Any,
+    ) -> _T:
+        """Share identical in-flight catalog reads without sharing mutations."""
+        async with self._catalog_flights_lock:
+            task = self._catalog_flights.get(key)
+            if task is None:
+                task = asyncio.create_task(
+                    self._repository_call(metric, function, *args)
+                )
+                self._catalog_flights[key] = task
+                task.add_done_callback(
+                    partial(self._finish_catalog_flight, key)
+                )
+        return cast(_T, await asyncio.shield(task))
+
+    def _finish_catalog_flight(
+        self,
+        key: tuple[object, ...],
+        task: asyncio.Task[Any],
+    ) -> None:
+        if self._catalog_flights.get(key) is task:
+            self._catalog_flights.pop(key, None)
+        if task.cancelled():
+            return
+        # Retrieve the exception so an abandoned shielded task never produces
+        # an unhandled-task warning. Awaiting callers still receive it.
+        task.exception()
 
     async def search(
         self,
@@ -583,6 +629,7 @@ class ScriptureService:
             not isinstance(total, int)
             or isinstance(total, bool)
             or total < 0
+            or total > MAX_SEARCH_TOTAL
             or len(matches) > self.settings.search_result_limit
             or total < len(matches)
             or len(grouped) > self.settings.search_result_limit

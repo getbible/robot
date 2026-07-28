@@ -35,12 +35,31 @@ test("keeps Bible as the compact reader and selector without adding a fifth rout
   assert.match(html, /id="bible-passage"/);
   assert.match(html, /id="bible-previous"/);
   assert.match(html, /id="bible-next"/);
+  assert.match(html, /id="bible-navigation-dialog"/);
+  assert.match(html, /id="bible-book-grid"/);
+  assert.match(html, /id="bible-chapter-grid"/);
+  assert.match(html, /id="bible-picker-back"/);
+  assert.match(html, /id="close-bible-navigation"/);
+  assert.match(html, /aria-labelledby="bible-navigation-title"/);
+  assert.doesNotMatch(html, /id="bible-(?:book|chapter)"[^-]/);
   assert.match(html, /id="bottom-nav-handle"/);
   assert.match(css, /\.reader-toolbar\.is-hidden/);
   assert.match(css, /\.bottom-nav\.is-collapsed/);
+  assert.match(css, /\.sheet__surface--passage/);
+  assert.match(css, /grid-template-columns: repeat\(6, minmax\(0, 1fr\)\)/);
+  assert.match(css, /@media \(max-width: 367px\)/);
   assert.match(app, /rememberVisibleReaderPosition/);
   assert.match(app, /persistVisibleReaderPosition/);
   assert.match(app, /openBibleAtVerse/);
+  assert.match(app, /async function chooseBiblePickerBook/);
+  assert.match(app, /async function chooseBiblePickerChapter/);
+  assert.match(app, /requestId !== state\.bible\.pickerRequestId/);
+  assert.match(app, /abbreviateBookName\(book\.name\)/);
+  assert.match(app, /uniqueBookLabels\(state\.bible\.books\)/);
+  assert.match(app, /localizedCloseLabel\(navigationLabel\)/);
+  assert.match(app, /sessionGeneration \+= 1/);
+  assert.match(app, /generation !== sessionGeneration/);
+  assert.match(app, /button\.setAttribute\("aria-label", book\.name\)/);
 });
 
 test("does not persist Telegram launch data or bearer tokens beyond sessionStorage", async () => {
@@ -163,4 +182,38 @@ test("ships parseable OpenAPI JSON at the documented relative root", async () =>
   assert.ok(contract.paths["/session"]);
   assert.ok(contract.paths["/basket/order"]);
   assert.ok(contract.paths["/post"]);
+  assert.equal(
+    contract.paths["/basket/order"].patch.requestBody.content[
+      "application/json"
+    ].schema.properties.selection_ids.maxItems,
+    200,
+  );
+  assert.equal(contract.components.schemas.Basket.properties.items.maxItems, 200);
+  assert.equal(contract.components.schemas.Basket.properties.maximum.maximum, 200);
+  assert.equal(
+    contract.paths["/translations"].get.responses["200"].content[
+      "application/json"
+    ].schema.properties.items.maxItems,
+    1000,
+  );
+  assert.equal(
+    contract.paths["/chapters"].get.responses["200"].content[
+      "application/json"
+    ].schema.properties.items.maxItems,
+    500,
+  );
+  assert.equal(
+    contract.components.schemas.Chapter.properties.number.maximum,
+    1000,
+  );
+  assert.equal(
+    contract.components.schemas.Chapter.properties.verses.maxItems,
+    250,
+  );
+  assert.equal(contract.components.schemas.Verse.properties.verse.maximum, 2000);
+  assert.equal(contract.components.schemas.Verse.properties.terms.maxItems, 20);
+  assert.equal(
+    contract.components.schemas.Verse.properties.terms.items.maxLength,
+    80,
+  );
 });

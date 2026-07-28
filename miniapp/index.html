@@ -29,7 +29,7 @@
       <p id="boot-message" data-i18n="gate.opening">Opening getBible.Life…</p>
     </div>
 
-    <main id="access-denied" class="gate-screen" hidden>
+    <main id="access-denied" class="gate-screen" role="alert" hidden>
       <img
         class="gate-screen__book"
         src="./assets/getbible-upright.png"
@@ -227,33 +227,6 @@
           aria-labelledby="bible-title"
           hidden
         >
-          <div id="bible-intro" class="view__intro view__intro--compact">
-            <p class="eyebrow" data-i18n="bible.eyebrow">Read Scripture</p>
-            <h1 id="bible-title" data-i18n="bible.title">Choose a passage</h1>
-            <p data-i18n="bible.body">Open a chapter to read, then tap any verse you want to include.</p>
-
-            <div
-              id="bible-picker"
-              class="bible-picker"
-              role="group"
-              aria-label="Bible navigation"
-              data-i18n-aria-label="bible.navigation"
-            >
-              <label class="select-control">
-                <span data-i18n="bible.book">Book</span>
-                <select id="bible-book" disabled>
-                  <option value="" data-i18n="bible.choose_book">Choose a book</option>
-                </select>
-              </label>
-              <label class="select-control">
-                <span data-i18n="bible.chapter">Chapter</span>
-                <select id="bible-chapter" disabled>
-                  <option value="" data-i18n="bible.choose_chapter">Choose a chapter</option>
-                </select>
-              </label>
-            </div>
-          </div>
-
           <div id="bible-heading" class="reader-toolbar" hidden>
             <button
               id="bible-previous"
@@ -267,7 +240,7 @@
               id="bible-passage"
               class="reader-toolbar__passage"
               type="button"
-              aria-controls="bible-picker"
+              aria-controls="bible-navigation-dialog"
               aria-expanded="false"
             >
               <strong id="bible-reference"></strong>
@@ -292,7 +265,13 @@
             <span data-i18n="nav.search">Search</span>
           </button>
 
-          <div id="bible-state" class="state-panel"></div>
+          <div
+            id="bible-state"
+            class="state-panel"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          ></div>
           <div
             id="bible-verses"
             class="reader-scripture"
@@ -417,6 +396,63 @@
             id="translation-details"
             class="translation-details"
             aria-live="polite"
+          ></div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog
+      id="bible-navigation-dialog"
+      class="sheet sheet--passage"
+      aria-labelledby="bible-navigation-title"
+    >
+      <div class="sheet__surface sheet__surface--passage">
+        <header class="passage-picker__header">
+          <button
+            id="bible-picker-back"
+            class="passage-picker__back"
+            type="button"
+            hidden
+          >
+            <span aria-hidden="true">‹</span>
+            <span data-i18n="bible.book">Book</span>
+          </button>
+          <div class="passage-picker__heading">
+            <p class="eyebrow" data-i18n="bible.eyebrow">Read Scripture</p>
+            <h2 id="bible-navigation-title" data-i18n="bible.choose_book">Choose a book</h2>
+          </div>
+          <button
+            id="close-bible-navigation"
+            class="icon-button"
+            type="button"
+            aria-label="Bible navigation"
+          >
+            ×
+          </button>
+        </header>
+
+        <div id="bible-picker-content" class="passage-picker__content">
+          <div
+            id="bible-picker-state"
+            class="passage-picker__state"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+          <div
+            id="bible-book-grid"
+            class="passage-picker__books"
+            role="group"
+            aria-label="Book"
+            data-i18n-aria-label="bible.book"
+          ></div>
+          <div
+            id="bible-chapter-grid"
+            class="passage-picker__chapters"
+            role="group"
+            aria-label="Chapter"
+            data-i18n-aria-label="bible.chapter"
+            hidden
           ></div>
         </div>
       </div>

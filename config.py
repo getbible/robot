@@ -686,7 +686,7 @@ class Settings:
                 "MINI_APP_MAX_SEARCHES_PER_SESSION", 2, 1, 8
             ),
             mini_app_max_available_selections=_integer(
-                "MINI_APP_MAX_AVAILABLE_SELECTIONS", 256, 25, 1000
+                "MINI_APP_MAX_AVAILABLE_SELECTIONS", 256, 250, 1000
             ),
             mini_app_max_selections=_integer(
                 "MINI_APP_MAX_SELECTIONS", 100, 1, 200
