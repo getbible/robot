@@ -179,6 +179,14 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Testing and delivery
 
+- Added an attested multi-platform GHCR publishing workflow. Complete CI on
+  `master` publishes `edge` plus an immutable commit tag; a published
+  `vX.Y.Z` release with green CI/CodeQL gates publishes exact, minor, major,
+  and `latest` tags.
+- Changed production Compose deployments to pull the selected published image,
+  pinned the generated environment to the reviewed release, and retained local
+  source builds only through the explicit `compose.build.yaml`/`--build`
+  development path.
 - Replaced the mocked application-preparation boundary with the real clone, permission-hardening, move, and locked-account preflight path in the lifecycle suite.
 - Added a CI host regression that starts with a root-only application tree and proves the actual system account can enter and import it only after the production permission function runs.
 - Added a hermetic two-instance setup-manager lifecycle covering transactional failure cleanup, operations, configuration restoration, upgrade recovery, rollback, and isolated uninstall.

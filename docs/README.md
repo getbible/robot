@@ -3,7 +3,7 @@
 Use this index as the starting point for development and production operation.
 
 - [Installation](INSTALLATION.md) — interactive multi-instance setup, isolated accounts, exact deployment, logging, and first validation.
-- [Docker deployment](DOCKER.md) — non-root image, multi-instance supervisor, ports, Compose, cluster probes, and resource budgets.
+- [Docker deployment](DOCKER.md) — published GHCR images, release tags, attestations, non-root Compose operation, cluster probes, and resource budgets.
 - [Configuration](CONFIGURATION.md) — every environment variable, default, range, and trust boundary.
 - [Interactive workflows](INTERACTIONS.md) — direct commands, guided Bible selection, search filters, result confirmation, and rollout roadmap.
 - [Telegram Mini App](MINI_APP.md) — authentication boundary, same-instance listener, HTTPS reverse proxy, BotFather settings, and verification.

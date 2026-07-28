@@ -1,0 +1,7 @@
+# Optional local-development overlay. The production Compose files pull the
+# reviewed GHCR image and do not require a compiler or source build on the host.
+services:
+  robot:
+    build:
+      context: .
+    image: "${ROBOT_BUILD_IMAGE:-getbible-robot:local}"

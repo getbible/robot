@@ -117,7 +117,8 @@ DOCTOR_OUTPUT=$(
 }
 
 DEPLOY_OUTPUT=$(bash "${ROOT}/setup.sh" docker-deploy)
-[[ "$DEPLOY_OUTPUT" == *"Building and deploying GetBible Robot"* &&
+[[ "$DEPLOY_OUTPUT" == *"Pulling the configured GetBible Robot image"* &&
+    "$DEPLOY_OUTPUT" == *"Deploying GetBible Robot"* &&
     "$DEPLOY_OUTPUT" == *"Initial container output:"* ]] || {
     printf 'Docker deploy did not complete the expected lifecycle.\n' >&2
     exit 1
@@ -139,19 +140,37 @@ RESTART_OUTPUT=$(
     exit 1
 }
 
+LOCAL_BUILD_OUTPUT=$(
+    bash "${ROOT}/setup.sh" docker-deploy --build --env-file "$ENV_FILE"
+)
+[[ "$LOCAL_BUILD_OUTPUT" == *"Building the local GetBible Robot image"* ]] || {
+    printf 'Docker local-build deployment did not build the source image.\n' >&2
+    exit 1
+}
+
 grep -Fq -- "compose --project-directory ${ROOT} --file ${ROOT}/compose.yaml config --quiet" \
     "$FAKE_DOCKER_LOG" || {
     printf 'Docker deploy did not validate the recommended Compose file.\n' >&2
     exit 1
 }
-grep -Fq -- "compose --project-directory ${ROOT} --file ${ROOT}/compose.yaml up --detach --build" \
+grep -Fq -- "compose --project-directory ${ROOT} --file ${ROOT}/compose.yaml pull robot" \
     "$FAKE_DOCKER_LOG" || {
-    printf 'Docker deploy did not build and start the recommended Compose file.\n' >&2
+    printf 'Docker deploy did not pull the configured published image.\n' >&2
     exit 1
 }
-grep -Fq -- "compose --env-file ${ENV_FILE} --project-directory ${ROOT} --file ${ROOT}/compose.yaml build robot" \
+grep -Fq -- "compose --project-directory ${ROOT} --file ${ROOT}/compose.yaml up --detach --no-build" \
     "$FAKE_DOCKER_LOG" || {
-    printf 'Docker validate did not build the validation image.\n' >&2
+    printf 'Docker deploy did not start the prepared image without rebuilding.\n' >&2
+    exit 1
+}
+grep -Fq -- "compose --env-file ${ENV_FILE} --project-directory ${ROOT} --file ${ROOT}/compose.yaml pull robot" \
+    "$FAKE_DOCKER_LOG" || {
+    printf 'Docker validate did not pull the configured published image.\n' >&2
+    exit 1
+}
+grep -Fq -- "compose --env-file ${ENV_FILE} --project-directory ${ROOT} --file ${ROOT}/compose.yaml --file ${ROOT}/compose.build.yaml build --pull robot" \
+    "$FAKE_DOCKER_LOG" || {
+    printf 'Docker local-build deployment did not use the build overlay.\n' >&2
     exit 1
 }
 grep -Fq -- "--force-recreate --no-build" "$FAKE_DOCKER_LOG" || {

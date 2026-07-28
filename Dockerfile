@@ -18,6 +18,11 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     ROBOT_CONFIG_DIR=/config/instances \
     ROBOT_DATA_DIR=/data
 
+LABEL org.opencontainers.image.title="GetBible Robot" \
+    org.opencontainers.image.description="Bounded and resilient Telegram interface for GetBible Scripture" \
+    org.opencontainers.image.source="https://github.com/getbible/robot" \
+    org.opencontainers.image.licenses="GPL-2.0-only"
+
 RUN groupadd --gid 10001 robot \
     && useradd --uid 10001 --gid robot --home-dir /app --no-create-home robot \
     && install -d -o robot -g robot -m 0700 /app /data \

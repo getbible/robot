@@ -122,15 +122,17 @@ Commands:
   upgrade     Deploy the exact commit from a reviewed source checkout
   rollback    Return to the immediately previous deployed application
   uninstall   Remove one instance after explicit confirmation
-  docker-deploy [--multi] [--secure] [--env-file FILE]
-              Build and deploy the recommended Docker layout
+  docker-deploy [--multi] [--secure] [--build] [--env-file FILE]
+              Pull and deploy the recommended Docker layout
+  docker-update [--multi] [--secure] [--build] [--env-file FILE]
+              Pull the configured image and recreate the Docker workload
   docker-init [--env-file FILE]
               Create a private, editable Compose environment file
-  docker-config [--env-file FILE] [--no-restart]
+  docker-config [--env-file FILE] [--build] [--no-restart]
               Edit, validate, and apply the single-bot Compose environment
-  docker-validate [--multi] [--secure] [--env-file FILE]
+  docker-validate [--multi] [--secure] [--build] [--env-file FILE]
               Validate Compose and single-bot application configuration
-  docker-restart [--multi] [--secure] [--env-file FILE]
+  docker-restart [--multi] [--secure] [--build] [--env-file FILE]
               Recreate the Compose workload so direct configuration edits apply
   docker-list List GetBible Robot containers
   docker-status [container]
@@ -2938,8 +2940,10 @@ resolve_docker_source_dir() {
 DOCKER_SOURCE_DIR=""
 DOCKER_COMPOSE_FILE=""
 DOCKER_SECURE_OVERLAY=""
+DOCKER_BUILD_OVERLAY=""
 DOCKER_ENV_FILE=""
 DOCKER_MULTI="0"
+DOCKER_BUILD_LOCAL="0"
 declare -a DOCKER_COMPOSE_ARGS=()
 
 prepare_docker_compose() {
@@ -2947,8 +2951,10 @@ prepare_docker_compose() {
     DOCKER_SOURCE_DIR=$(resolve_docker_source_dir)
     DOCKER_COMPOSE_FILE="${DOCKER_SOURCE_DIR}/compose.yaml"
     DOCKER_SECURE_OVERLAY=""
+    DOCKER_BUILD_OVERLAY=""
     DOCKER_ENV_FILE=""
     DOCKER_MULTI="0"
+    DOCKER_BUILD_LOCAL="0"
     DOCKER_COMPOSE_ARGS=()
     while (($#)); do
         case "$1" in
@@ -2961,6 +2967,11 @@ prepare_docker_compose() {
                 DOCKER_SECURE_OVERLAY="${DOCKER_SOURCE_DIR}/compose.secret.yaml"
                 shift
                 ;;
+            --build)
+                DOCKER_BUILD_OVERLAY="${DOCKER_SOURCE_DIR}/compose.build.yaml"
+                DOCKER_BUILD_LOCAL="1"
+                shift
+                ;;
             --env-file)
                 (($# >= 2)) || die "--env-file requires a file path."
                 DOCKER_ENV_FILE=$(readlink -f "$2")
@@ -2971,9 +2982,13 @@ prepare_docker_compose() {
                 ;;
         esac
     done
-    [[ -f "$DOCKER_COMPOSE_FILE" &&
-        -f "${DOCKER_SOURCE_DIR}/Dockerfile" ]] ||
+    [[ -f "$DOCKER_COMPOSE_FILE" ]] ||
         die "The checkout is missing Docker deployment files."
+    if [[ "$DOCKER_BUILD_LOCAL" == "1" &&
+        (! -f "$DOCKER_BUILD_OVERLAY" ||
+            ! -f "${DOCKER_SOURCE_DIR}/Dockerfile") ]]; then
+        die "The checkout is missing the local Docker build files."
+    fi
     if [[ "$DOCKER_MULTI" == "1" && -n "$DOCKER_SECURE_OVERLAY" ]]; then
         die "--secure is for the environment-driven single-bot layout."
     fi
@@ -2989,6 +3004,19 @@ prepare_docker_compose() {
     if [[ -n "$DOCKER_SECURE_OVERLAY" ]]; then
         DOCKER_COMPOSE_ARGS+=(--file "$DOCKER_SECURE_OVERLAY")
     fi
+    if [[ -n "$DOCKER_BUILD_OVERLAY" ]]; then
+        DOCKER_COMPOSE_ARGS+=(--file "$DOCKER_BUILD_OVERLAY")
+    fi
+}
+
+prepare_docker_image() {
+    if [[ "$DOCKER_BUILD_LOCAL" == "1" ]]; then
+        info "Building the local GetBible Robot image"
+        docker compose "${DOCKER_COMPOSE_ARGS[@]}" build --pull robot
+        return
+    fi
+    info "Pulling the configured GetBible Robot image"
+    docker compose "${DOCKER_COMPOSE_ARGS[@]}" pull robot
 }
 
 docker_container_names() {
@@ -3040,8 +3068,9 @@ cmd_docker_deploy() {
     prepare_docker_compose "$@"
     info "Validating Docker Compose configuration"
     docker compose "${DOCKER_COMPOSE_ARGS[@]}" config --quiet || return 1
-    info "Building and deploying GetBible Robot"
-    docker compose "${DOCKER_COMPOSE_ARGS[@]}" up --detach --build
+    prepare_docker_image || return 1
+    info "Deploying GetBible Robot"
+    docker compose "${DOCKER_COMPOSE_ARGS[@]}" up --detach --no-build
     docker compose "${DOCKER_COMPOSE_ARGS[@]}" ps
     printf '\nInitial container output:\n'
     docker compose "${DOCKER_COMPOSE_ARGS[@]}" logs --no-color --tail 40
@@ -3083,12 +3112,11 @@ cmd_docker_validate() {
     prepare_docker_compose "$@"
     info "Validating Docker Compose configuration"
     docker compose "${DOCKER_COMPOSE_ARGS[@]}" config --quiet
+    prepare_docker_image || return 1
     if [[ "$DOCKER_MULTI" == "1" ]]; then
-        printf 'Compose configuration is valid. Each mounted multi-bot instance is validated by the supervisor.\n'
+        printf 'Compose configuration and image are valid. Each mounted multi-bot instance is validated by the supervisor.\n'
         return
     fi
-    info "Building the validation image"
-    docker compose "${DOCKER_COMPOSE_ARGS[@]}" build robot || return 1
     info "Validating the Robot application environment"
     docker compose "${DOCKER_COMPOSE_ARGS[@]}" run \
         --rm \
@@ -3132,6 +3160,10 @@ cmd_docker_config() {
                 ;;
             --secure)
                 compose_options+=(--secure)
+                shift
+                ;;
+            --build)
+                compose_options+=(--build)
                 shift
                 ;;
             --no-restart)

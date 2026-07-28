@@ -116,6 +116,18 @@ serves each bot on configured application ports and leaves TLS and routing to
 the surrounding platform. It supports both one bot per container and a
 supervised multi-bot container. See [Docker deployment](docs/DOCKER.md).
 
+Published Linux AMD64 and ARM64 images are available from GitHub Container
+Registry:
+
+```bash
+docker pull ghcr.io/getbible/robot:2.1.0
+```
+
+Stable releases receive exact version, minor, major, and `latest` tags. The
+full source-commit tag remains available for immutable rollback. The generated
+Compose environment pins the exact reviewed release instead of following a
+moving tag.
+
 ## Docker quick start
 
 ```bash
@@ -126,14 +138,17 @@ ${EDITOR:-vi} .env
 ./setup.sh docker-doctor
 ```
 
-The default Compose model runs one bot in one 256 MiB container and publishes
-only its configured Mini App port. Missing configuration is reported through
-container stdout/stderr. The versioned `compose.yaml` and private generated
-`.env` expose application, memory, CPU, PID, cache, session, rate, abuse, and
-log controls. Use `./setup.sh docker-config` to edit, validate, and apply
-values, `./setup.sh docker-manage` for the in-container operations menu, or
+The default Compose model pulls the configured published image, runs one bot
+in one 256 MiB container, and publishes only its configured Mini App port.
+Missing configuration is reported through container stdout/stderr. The
+versioned `compose.yaml` and private generated `.env` expose the image version
+plus application, memory, CPU, PID, cache, session, rate, abuse, and log
+controls. Use `./setup.sh docker-config` to edit, validate, and apply values,
+`./setup.sh docker-update` to pull and recreate after selecting a newer image,
+`./setup.sh docker-manage` for the in-container operations menu, or
 `./setup.sh docker-shell` for a non-root shell. Multi-bot mode remains
-available through `./setup.sh docker-deploy --multi`.
+available through `./setup.sh docker-deploy --multi`; repository developers
+can explicitly build local source with `./setup.sh docker-deploy --build`.
 
 ## Dependency policy
 

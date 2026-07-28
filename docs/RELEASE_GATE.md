@@ -49,6 +49,16 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - CI validates the default, compatibility-single, multi-bot, and
   environment-sourced secret Compose models, builds the image, verifies its
   non-root user, and smoke-tests both supervisor and setup entrypoints.
+- Production Compose files pull a published image and contain no implicit local
+  build; `compose.build.yaml` is the explicit developer-only build overlay.
+- Successful complete CI on `master` publishes only `edge` and the immutable
+  full-commit tag to `ghcr.io/getbible/robot`.
+- A published stable GitHub release tag exactly matches the project version and
+  cannot publish semantic-version or `latest` image tags unless the exact
+  commit already has green `robot/security-gate` and `robot/codeql-gate`
+  statuses.
+- Published AMD64/ARM64 images carry OCI source/license metadata, BuildKit SBOM
+  and provenance records, and a signed GitHub artifact attestation.
 
 ## Dependency integrity
 

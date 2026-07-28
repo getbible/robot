@@ -161,6 +161,55 @@ class DocumentationContractTestCase(unittest.TestCase):
         self.assertTrue((ROOT / "setup.sh").is_file())
         self.assertTrue((ROOT / "deploy" / "getbible-robot@.service").is_file())
 
+    def test_published_container_version_matches_project(self) -> None:
+        project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        match = re.search(r'(?m)^version = "([^"]+)"$', project)
+        self.assertIsNotNone(match)
+        version = match.group(1) if match is not None else ""
+        expected_image = f"ghcr.io/getbible/robot:{version}"
+        compose_environment = (
+            ROOT / "docker" / "examples" / "compose.env.example"
+        ).read_text(encoding="utf-8")
+        kubernetes = (ROOT / "deploy" / "kubernetes.example.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(f"ROBOT_IMAGE={expected_image}", compose_environment)
+        self.assertIn(f"image: {expected_image}", kubernetes)
+
+    def test_container_publish_workflow_is_versioned_and_attested(self) -> None:
+        workflow = (
+            ROOT / ".github" / "workflows" / "container-publish.yml"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "workflow_run:",
+            "release:",
+            "robot/security-gate",
+            "robot/codeql-gate",
+            "linux/amd64,linux/arm64",
+            "ghcr.io",
+            "provenance: mode=max",
+            "sbom: true",
+            "actions/attest@",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, workflow)
+
+    def test_github_actions_are_immutably_pinned(self) -> None:
+        failures: list[str] = []
+        for workflow in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
+            for line_number, line in enumerate(
+                workflow.read_text(encoding="utf-8").splitlines(),
+                start=1,
+            ):
+                match = re.match(r"\s*uses:\s*[^@\s]+@([^\s#]+)", line)
+                if match is not None and re.fullmatch(
+                    r"[0-9a-f]{40}", match.group(1)
+                ) is None:
+                    failures.append(
+                        f"{workflow.relative_to(ROOT)}:{line_number} -> {match.group(1)}"
+                    )
+        self.assertEqual(failures, [])
+
     def test_operator_docs_use_the_multi_instance_layout(self) -> None:
         documents = {
             ROOT / "README.md",

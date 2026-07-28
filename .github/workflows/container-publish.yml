@@ -1,0 +1,173 @@
+name: Publish container image
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [master]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  artifact-metadata: write
+  id-token: write
+  statuses: read
+
+concurrency:
+  group: container-publish-${{ github.event.workflow_run.head_sha || github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  publish:
+    name: Publish GHCR image
+    if: >-
+      (github.event_name != 'workflow_run' ||
+       github.event.workflow_run.conclusion == 'success') &&
+      (github.event_name != 'workflow_dispatch' ||
+       github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Validate publish source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            printf 'Invalid source commit: %s\n' "$SOURCE_SHA" >&2
+            exit 1
+          }
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+          if [[ "$EVENT_NAME" == "release" ]]; then
+            project_version=$(
+              python - <<'PY'
+          import pathlib
+          import re
+
+          text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          match = re.search(r'(?m)^version = "([^"]+)"$', text)
+          if match is None:
+              raise SystemExit("pyproject.toml has no project version")
+          print(match.group(1))
+          PY
+            )
+            test "$RELEASE_TAG" = "v${project_version}" || {
+              printf 'Release tag %s does not match project version %s.\n' \
+                "$RELEASE_TAG" "$project_version" >&2
+              exit 1
+            }
+          fi
+
+      - name: Verify protected publish gates
+        if: github.event_name != 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          status_file="${RUNNER_TEMP}/commit-status.json"
+          curl --fail-with-body --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/commits/${SOURCE_SHA}/status?per_page=100" \
+            > "$status_file"
+          python - "$status_file" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          states: dict[str, str] = {}
+          for status in payload.get("statuses", []):
+              states.setdefault(str(status.get("context")), str(status.get("state")))
+
+          required = ("robot/security-gate", "robot/codeql-gate")
+          failures = [
+              f"{context}={states.get(context, 'missing')}"
+              for context in required
+              if states.get(context) != "success"
+          ]
+          if failures:
+              raise SystemExit(
+                  "Protected container publication requires green gates: "
+                  + ", ".join(failures)
+              )
+          print("Required CI and CodeQL gate statuses are green.")
+          PY
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=edge,enable=${{ github.event_name != 'release' }}
+            type=raw,value=sha-${{ env.SOURCE_SHA }}
+            type=semver,pattern={{version}},value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
+            type=semver,pattern={{major}},value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+          labels: |
+            org.opencontainers.image.title=GetBible Robot
+            org.opencontainers.image.description=Bounded and resilient Telegram interface for GetBible Scripture
+            org.opencontainers.image.licenses=GPL-2.0-only
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+
+      - name: Build and publish multi-platform image
+        id: publish
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          pull: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          annotations: ${{ steps.metadata.outputs.annotations }}
+          cache-from: type=gha,scope=getbible-robot
+          cache-to: type=gha,mode=max,scope=getbible-robot
+          provenance: mode=max
+          sbom: true
+
+      - name: Attest published image provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true

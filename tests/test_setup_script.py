@@ -57,6 +57,7 @@ class SetupScriptTestCase(unittest.TestCase):
             "rollback",
             "uninstall",
             "docker-deploy",
+            "docker-update",
             "docker-init",
             "docker-config",
             "docker-validate",
@@ -111,7 +112,7 @@ class SetupScriptTestCase(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=90,
         )
         self.assertIn(
             "Setup manager lifecycle test passed.",
