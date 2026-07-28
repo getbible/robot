@@ -94,8 +94,8 @@ class ReaderLocation:
         return cls(
             translation=code,
             book=_bounded_integer(value.get("book"), "book", 1, 200),
-            chapter=_bounded_integer(value.get("chapter"), "chapter", 1, 250),
-            verse=_bounded_integer(value.get("verse", 1), "verse", 1, 500),
+            chapter=_bounded_integer(value.get("chapter"), "chapter", 1, 1000),
+            verse=_bounded_integer(value.get("verse", 1), "verse", 1, 2000),
         )
 
     def as_dict(self) -> dict[str, str | int]:

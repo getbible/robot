@@ -38,6 +38,20 @@ the maximum practical space for Scripture. The fixed bottom navigation behaves
 the same way, but leaves a small tap handle available while collapsed. Its
 background and device safe area extend to the physical bottom edge.
 
+Pressing the current passage opens a narrow side sheet over the Scripture
+instead of replacing the reader. When a chapter is already open, the sheet
+starts at that book's numbered chapter grid; **Back** reveals the book grid.
+The user can dismiss it with **Close**, Telegram Back, Escape, or the shaded
+backdrop. Choosing a chapter closes the sheet and loads it immediately.
+
+Book buttons use the selected translation's authoritative names from the
+GetBible API. The visible labels are collision-free compact forms derived only
+for presentation; each button retains the complete API name for its accessible
+name and desktop title. Old Testament, New Testament, and additional books are
+separated without assuming that every translation contains exactly 66 books.
+Chapter grids contain numbers only and scroll independently through long books
+such as Psalms.
+
 Chapter buttons remain compact numbers. Reader verses do not become separate
 raised cards; adjacent selected verses visually join while retaining a visible
 pressed state and accessible `aria-pressed` state. The basket can contain
@@ -88,7 +102,9 @@ only book and chapter controls.
 Selecting a translation updates the interface language and direction
 immediately, clears any old-translation Scripture before it can be relabelled,
 and reloads the current book, chapter, and visible verse when the Bible reader
-is open. An in-flight response for an older translation is ignored. Search and
+is open. Translation and the closest valid reader location are resolved and
+committed together, so an immediate close cannot leave a mixed or erased resume
+state. An in-flight response for an older translation is ignored. Search and
 Scripture reads are side-effect-free; only the serialized preferences endpoint
 may change the saved translation or reader location.
 

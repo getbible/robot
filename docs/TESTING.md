@@ -15,9 +15,19 @@ venv/bin/python -m pip check
 
 A clean environment matters. A globally installed package can hide a missing
 lock entry or incompatible dependency. Contributors also need Node.js
-22.17.1 with `npm` for the dependency-free Mini App syntax and unit checks,
-matching the pinned CI environment. Node.js is not required by the production
-service.
+22.17.1 with `npm` for the Mini App checks, matching the pinned CI environment.
+Install the exact browser-test dependency and Chromium build from the checked-in
+lock before the first run:
+
+```bash
+cd miniapp
+npm ci --ignore-scripts
+npx playwright install --with-deps chromium
+cd ..
+```
+
+Node.js and Chromium are test-only dependencies; neither is required by the
+production service.
 
 ## Fast deterministic test cycle
 
@@ -27,6 +37,7 @@ venv/bin/python -m unittest discover -s tests -v
 venv/bin/ruff check .
 venv/bin/mypy
 (cd miniapp && npm run check)
+(cd miniapp && npm run test:browser)
 ```
 
 The suite does not contact Telegram or the live GetBible API. It uses fakes and local fixtures for reproducibility.
@@ -69,13 +80,19 @@ venv/bin/bandit -q -r \
 venv/bin/python scripts/audit_runtime.py
 venv/bin/detect-secrets scan \
   --all-files \
+  --exclude-files '(^|/)node_modules/' \
   --exclude-files '(^|/)\.env\.template$' \
   --exclude-files '(^|/)requirements(-dev)?\.txt$'
 ```
 
 Librarian 1.2.0 is installed as a released, hashed package, so `scripts/audit_runtime.py` submits the complete lock to `pip-audit --strict` without filtering a dependency. The helper retains fail-closed validation for any future direct source declaration. A malformed source declaration, missing hash, audit error, or vulnerable dependency fails the check.
 
-Review secret-scan output rather than blindly suppressing it. The `.env.template` contains a deliberate placeholder and is excluded; real tokens are never acceptable. `scripts/run-checks.sh` also excludes the configured in-repository virtual environment and standard environment directory names so following the documented `venv` workflow does not scan installed dependency metadata.
+Review secret-scan output rather than blindly suppressing it. The `.env.template`
+contains a deliberate placeholder and is excluded; real tokens are never
+acceptable. `scripts/run-checks.sh` also excludes exact lock-installed
+`node_modules`, the configured in-repository virtual environment, and standard
+environment directory names so dependency bundles are not mistaken for
+first-party secrets. Package locks and all first-party source remain scanned.
 
 Validate the manager:
 
@@ -108,6 +125,8 @@ The tests cover at least these invariants:
 - an empty `/bible` never substitutes a hidden default verse;
 - explicit `/bible <reference>` commands still post immediately;
 - bare `/bible` resumes only a bounded translation/book/chapter/verse location;
+- translation and its nearest valid reader location change atomically, including
+  an immediate-close boundary;
 - full reader chapters use one hash-consistent Main API request path and a
   separately bounded response body rather than Librarian range chunking;
 - incomplete `/bible` and `/search` commands create short-lived, user-bound
@@ -127,8 +146,22 @@ The tests cover at least these invariants:
 - every registered command alias and every implemented Mini App action appears
   in an explicit test inventory;
 - every translation, testament, book, chapter, verse, navigation, back, reset,
-  cancel, filter, exclusion, proximity, selection, and confirmation control
-  executes through the server-side Mini App state machine;
+  cancel, filter, exclusion, proximity, selection, and confirmation server
+  transition has deterministic coverage;
+- the partial passage sheet preserves Scripture underneath, exposes API-localized
+  book names with unique compact labels, reaches chapter 150, restores focus,
+  and closes through Close, backdrop, Escape, or Telegram Back in a real
+  headless Chromium run;
+- the browser suite executes delayed book/chapter races, immediate translation
+  replacement, page-hide position persistence, LTR/RTL sheet placement,
+  retry-focus announcement, and expired-session focus isolation;
+- a complete 250-verse selectable response remains valid beside a populated
+  basket and never loses its earliest selection token to eviction;
+- retained selections have per-verse text, per-session payload/count, and
+  process-wide payload/count ceilings in addition to response, basket, search,
+  session, and TTL bounds; payload accounting includes references, terms,
+  tokens, metadata, and conservative object overhead, and the process ceiling
+  is tested against the supported container RSS headroom;
 - launch and authenticated sessions require the originating user and workflow
   and expire under separate TTL/size bounds;
 - guided navigation rejects malformed catalogs, oversized responses, redirects, and book checksum mismatches;

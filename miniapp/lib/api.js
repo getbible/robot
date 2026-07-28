@@ -109,6 +109,7 @@ export class MiniAppApi {
     return this.#request("preferences", {
       method: "PUT",
       body: preferences,
+      keepalive: true,
     });
   }
 
@@ -153,6 +154,7 @@ export class MiniAppApi {
     method = "GET",
     body,
     authenticated = true,
+    keepalive = false,
     timeoutMs = this.#timeoutMs,
   } = {}) {
     if (authenticated && !this.#sessionToken) {
@@ -186,6 +188,7 @@ export class MiniAppApi {
         redirect: "error",
         referrerPolicy: "no-referrer",
         signal: controller.signal,
+        keepalive,
       });
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {

@@ -203,6 +203,12 @@ Using a dedicated test bot first, and then a private production-bot chat before 
 - Light/dark themes, compact reader text, auto-hiding chapter and bottom
   controls, safe-area layout, selected states, and accessible focus/contrast
   are verified in Telegram clients.
+- The partial passage sheet leaves Scripture visible, opens at the current
+  chapters, returns to API-localized books, reaches Psalm 150, and closes via
+  Close, backdrop, Escape, and Telegram Back without trapping focus.
+- Changing translation immediately replaces the chapter and atomically retains
+  the nearest valid resume point, including when the Mini App closes during the
+  transition.
 - Ordinary-browser access and expired/mismatched launch attempts cannot read
   protected data or trigger a post.
 - A right-to-left translation and a non-66-book translation navigate correctly.

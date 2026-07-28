@@ -16,8 +16,27 @@ from urllib.parse import quote, urlencode, urlsplit
 from .interactions import SearchResult
 from .miniapp_auth import TelegramMiniAppPrincipal
 
+MAX_MINIAPP_SELECTION_TEXT_BYTES = 4096
+# Covers the configured maximum 200-item basket plus one complete accepted
+# 250-verse chapter at the maximum validated Unicode/metadata bounds.
+MAX_MINIAPP_SESSION_RETAINED_BYTES = 8 * 1024 * 1024
+# Leave enough headroom below the supported container's 210 MiB child-RSS
+# guard for the warmed Librarian corpus, interpreter, and transient requests.
+MAX_MINIAPP_PROCESS_RETAINED_BYTES = 32 * 1024 * 1024
+MAX_MINIAPP_SESSION_RETAINED_SELECTIONS = 2500
+MAX_MINIAPP_PROCESS_RETAINED_SELECTIONS = 250_000
+_MINIAPP_SELECTION_OVERHEAD_BYTES = 2048
+_TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
 MiniAppRoute = Literal["home", "bible", "search"]
+
+
+class MiniAppSessionExpiredError(ValueError):
+    """An authenticated request outlived its bounded server session."""
+
+
+class MiniAppSessionCapacityError(RuntimeError):
+    """All bounded session slots are temporarily pinned by active posts."""
 
 
 @dataclass(slots=True)
@@ -105,7 +124,7 @@ class MiniAppLaunchStore:
                 "Ephemeral source message and receiver IDs must be valid together."
             )
         query = initial_query.strip()
-        if len(query) > 512 or "\x00" in query:
+        if len(query) > 240 or "\x00" in query:
             raise ValueError("initial_query is invalid.")
         with self._guard:
             self._purge_locked()
@@ -301,6 +320,32 @@ class MiniAppSelection:
     terms: tuple[str, ...] = ()
 
 
+def _selection_identity(
+    selection: MiniAppSelection,
+) -> tuple[str, int, int, int]:
+    return (
+        selection.translation,
+        selection.book_number,
+        selection.chapter,
+        selection.verse,
+    )
+
+
+def _selection_retained_bytes(selection: MiniAppSelection) -> int:
+    """Conservatively account for one retained selection and its strings."""
+    strings = (
+        selection.token,
+        selection.reference,
+        selection.translation,
+        selection.book_name,
+        selection.text,
+        *selection.terms,
+    )
+    return _MINIAPP_SELECTION_OVERHEAD_BYTES + sum(
+        len(value.encode("utf-8")) for value in strings
+    )
+
+
 MiniAppPostState = Literal["pending", "completed", "failed"]
 
 
@@ -333,7 +378,8 @@ class MiniAppSession:
     basket: list[MiniAppSelection] = field(default_factory=list)
     post_attempts: OrderedDict[str, MiniAppPostAttempt] = field(default_factory=OrderedDict)
     post_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
-    preference_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    retained_selection_bytes: int = 0
+    retained_selection_count: int = 0
 
 
 class MiniAppSessionStore:
@@ -358,8 +404,10 @@ class MiniAppSessionStore:
             raise ValueError("max_sessions_per_user must be between 1 and 10.")
         if not 1 <= max_searches_per_session <= 16:
             raise ValueError("max_searches_per_session must be between 1 and 16.")
-        if not 25 <= max_available_selections <= 5000:
-            raise ValueError("max_available_selections must be between 25 and 5000.")
+        if not 250 <= max_available_selections <= 5000:
+            raise ValueError(
+                "max_available_selections must be between 250 and 5000."
+            )
         if not 1 <= max_basket_selections <= 200:
             raise ValueError("max_basket_selections must be between 1 and 200.")
         self._max_sessions = max_sessions
@@ -371,6 +419,8 @@ class MiniAppSessionStore:
         self._clock = clock
         self._sessions: OrderedDict[str, MiniAppSession] = OrderedDict()
         self._guard = threading.RLock()
+        self._retained_selection_bytes = 0
+        self._retained_selection_count = 0
         self._created = 0
         self._expired = 0
         self._evicted = 0
@@ -391,7 +441,28 @@ class MiniAppSessionStore:
                 if current.user_id == principal.user_id
             ]
             while len(user_sessions) >= self._max_sessions_per_user:
-                self._sessions.pop(user_sessions.pop(0), None)
+                oldest = next(
+                    (
+                        token
+                        for token in user_sessions
+                        if not self._sessions[token].post_lock.locked()
+                    ),
+                    None,
+                )
+                if oldest is None:
+                    raise MiniAppSessionCapacityError(
+                        "Active posts temporarily occupy this user's sessions."
+                    )
+                user_sessions.remove(oldest)
+                self._drop_session_locked(oldest)
+                self._evicted += 1
+            while len(self._sessions) >= self._max_sessions:
+                oldest = self._oldest_evictable_session_locked()
+                if oldest is None:
+                    raise MiniAppSessionCapacityError(
+                        "Active posts temporarily occupy every Mini App session."
+                    )
+                self._drop_session_locked(oldest)
                 self._evicted += 1
             token = self._new_token(self._sessions)
             now = self._clock()
@@ -409,9 +480,6 @@ class MiniAppSessionStore:
             )
             self._sessions[token] = session
             self._created += 1
-            while len(self._sessions) > self._max_sessions:
-                self._sessions.popitem(last=False)
-                self._evicted += 1
             return session
 
     def get(self, token: str, *, touch: bool = True) -> MiniAppSession | None:
@@ -462,8 +530,9 @@ class MiniAppSessionStore:
                     session.user_id == user_id
                     and session.launch.token == launch_token
                     and now - session.created_at >= self._ttl
+                    and not session.post_lock.locked()
                 ):
-                    self._sessions.pop(token, None)
+                    self._drop_session_locked(token)
                     self._expired += 1
                     self._purge_locked()
                     return session.launch
@@ -507,7 +576,7 @@ class MiniAppSessionStore:
 
     def revoke(self, token: str) -> None:
         with self._guard:
-            self._sessions.pop(token, None)
+            self._drop_session_locked(token)
 
     def set_user_translation(self, user_id: int, translation: str) -> None:
         """Keep every active session for one user on the explicit preference."""
@@ -529,7 +598,9 @@ class MiniAppSessionStore:
         with self._guard:
             current = self._sessions.get(session.token)
             if current is not session:
-                raise ValueError("Mini App session is no longer active.")
+                raise MiniAppSessionExpiredError(
+                    "Mini App session is no longer active."
+                )
             token = self._new_token(current.searches, size=18)
             selections = tuple(
                 self._register_selection_locked(
@@ -555,6 +626,7 @@ class MiniAppSessionStore:
             current.searches[token] = search
             while len(current.searches) > self._max_searches:
                 current.searches.popitem(last=False)
+            self._enforce_retained_selection_budget_locked(current)
             return search
 
     def register_selection(
@@ -573,7 +645,9 @@ class MiniAppSessionStore:
         with self._guard:
             current = self._sessions.get(session.token)
             if current is not session:
-                raise ValueError("Mini App session is no longer active.")
+                raise MiniAppSessionExpiredError(
+                    "Mini App session is no longer active."
+                )
             return self._register_selection_locked(
                 current,
                 reference=reference,
@@ -589,7 +663,9 @@ class MiniAppSessionStore:
     def basket(self, session: MiniAppSession) -> tuple[MiniAppSelection, ...]:
         with self._guard:
             if self._sessions.get(session.token) is not session:
-                raise ValueError("Mini App session is no longer active.")
+                raise MiniAppSessionExpiredError(
+                    "Mini App session is no longer active."
+                )
             return tuple(session.basket)
 
     def add_to_basket(
@@ -601,14 +677,31 @@ class MiniAppSessionStore:
             raise ValueError("Selection is invalid or expired.")
         with self._guard:
             if self._sessions.get(session.token) is not session:
-                raise ValueError("Mini App session is no longer active.")
+                raise MiniAppSessionExpiredError(
+                    "Mini App session is no longer active."
+                )
             selection = session.available_selections.get(selection_token)
             if selection is None:
+                selection = next(
+                    (
+                        item
+                        for search in reversed(tuple(session.searches.values()))
+                        for item in search.items
+                        if item.token == selection_token
+                    ),
+                    None,
+                )
+            if selection is None:
                 raise ValueError("Selection is invalid or expired.")
-            if all(item.token != selection.token for item in session.basket):
+            identity = _selection_identity(selection)
+            if all(_selection_identity(item) != identity for item in session.basket):
                 if len(session.basket) >= self._max_basket:
                     raise OverflowError("The Scripture basket is full.")
                 session.basket.append(selection)
+                session.available_selections[selection.token] = selection
+                session.available_selections.move_to_end(selection.token)
+                self._evict_available_locked(session)
+                self._enforce_retained_selection_budget_locked(session)
             return tuple(session.basket)
 
     def remove_from_basket(
@@ -618,8 +711,12 @@ class MiniAppSessionStore:
     ) -> tuple[MiniAppSelection, ...]:
         with self._guard:
             if self._sessions.get(session.token) is not session:
-                raise ValueError("Mini App session is no longer active.")
+                raise MiniAppSessionExpiredError(
+                    "Mini App session is no longer active."
+                )
             session.basket[:] = [item for item in session.basket if item.token != selection_token]
+            self._evict_available_locked(session)
+            self._enforce_retained_selection_budget_locked(session)
             return tuple(session.basket)
 
     def reorder_basket(
@@ -629,7 +726,9 @@ class MiniAppSessionStore:
     ) -> tuple[MiniAppSelection, ...]:
         with self._guard:
             if self._sessions.get(session.token) is not session:
-                raise ValueError("Mini App session is no longer active.")
+                raise MiniAppSessionExpiredError(
+                    "Mini App session is no longer active."
+                )
             existing = {item.token: item for item in session.basket}
             if (
                 len(selection_tokens) != len(existing)
@@ -643,8 +742,12 @@ class MiniAppSessionStore:
     def clear_basket(self, session: MiniAppSession) -> None:
         with self._guard:
             if self._sessions.get(session.token) is not session:
-                raise ValueError("Mini App session is no longer active.")
+                raise MiniAppSessionExpiredError(
+                    "Mini App session is no longer active."
+                )
             session.basket.clear()
+            self._evict_available_locked(session)
+            self._enforce_retained_selection_budget_locked(session)
 
     def post_attempt(
         self,
@@ -668,7 +771,9 @@ class MiniAppSessionStore:
         """Reserve one authoritative basket before any Telegram send starts."""
         with self._guard:
             if self._sessions.get(session.token) is not session:
-                raise ValueError("Mini App session is no longer active.")
+                raise MiniAppSessionExpiredError(
+                    "Mini App session is no longer active."
+                )
             existing = session.post_attempts.get(idempotency_key)
             if existing is not None:
                 session.post_attempts.move_to_end(idempotency_key)
@@ -696,7 +801,9 @@ class MiniAppSessionStore:
     ) -> None:
         with self._guard:
             if self._sessions.get(session.token) is not session:
-                raise ValueError("Mini App session is no longer active.")
+                raise MiniAppSessionExpiredError(
+                    "Mini App session is no longer active."
+                )
             attempt = session.post_attempts.get(idempotency_key)
             if (
                 attempt is None
@@ -754,6 +861,8 @@ class MiniAppSessionStore:
                 "max_sessions_per_user": self._max_sessions_per_user,
                 "available_selections": selections,
                 "searches": searches,
+                "retained_selection_bytes": self._retained_selection_bytes,
+                "retained_selection_count": self._retained_selection_count,
                 "ttl_seconds": self._ttl,
                 "created": self._created,
                 "expired": self._expired,
@@ -765,10 +874,13 @@ class MiniAppSessionStore:
         expired_sessions = [
             token
             for token, session in self._sessions.items()
-            if now - session.created_at >= self._ttl
+            if (
+                now - session.created_at >= self._ttl
+                and not session.post_lock.locked()
+            )
         ]
         for token in expired_sessions:
-            self._sessions.pop(token, None)
+            self._drop_session_locked(token)
             self._expired += 1
 
     def _register_selection_locked(
@@ -784,40 +896,249 @@ class MiniAppSessionStore:
         text: str,
         terms: tuple[str, ...],
     ) -> MiniAppSelection:
-        for existing in session.available_selections.values():
-            if existing.reference == reference and existing.translation == translation:
-                current = replace(
-                    existing,
-                    book_number=book_number,
-                    book_name=book_name,
-                    chapter=chapter,
-                    verse=verse,
-                    text=text,
-                    terms=terms,
-                )
-                session.available_selections[existing.token] = current
-                session.basket[:] = [
-                    current if item.token == existing.token else item
-                    for item in session.basket
-                ]
-                session.available_selections.move_to_end(existing.token)
-                return current
+        if (
+            not isinstance(reference, str)
+            or not isinstance(translation, str)
+            or not isinstance(book_number, int)
+            or isinstance(book_number, bool)
+            or not 1 <= book_number <= 200
+            or not isinstance(book_name, str)
+            or not isinstance(chapter, int)
+            or isinstance(chapter, bool)
+            or not 1 <= chapter <= 1000
+            or not isinstance(verse, int)
+            or isinstance(verse, bool)
+            or not 1 <= verse <= 2000
+            or not isinstance(text, str)
+            or _TRANSLATION_RE.fullmatch(translation) is None
+        ):
+            raise ValueError("Selection metadata exceeds the Mini App bounds.")
+        normalized_book_name = book_name.strip()
+        if not normalized_book_name or len(normalized_book_name) > 128:
+            raise ValueError("Selection metadata exceeds the Mini App bounds.")
+        if not text.strip() or len(text.encode("utf-8")) > MAX_MINIAPP_SELECTION_TEXT_BYTES:
+            raise ValueError("Selection text exceeds the retained display bound.")
+        normalized_reference = reference.strip()
+        if not normalized_reference or len(normalized_reference) > 180:
+            normalized_reference = (
+                f"{normalized_book_name} {chapter}:{verse}"
+            )
+        normalized_terms = tuple(
+            term.strip()
+            for term in terms
+            if isinstance(term, str) and 1 <= len(term.strip()) <= 80
+        )[:20]
+        identity = (translation, book_number, chapter, verse)
+        existing = next(
+            (
+                item
+                for item in session.basket
+                if _selection_identity(item) == identity
+            ),
+            None,
+        )
+        if existing is None:
+            existing = next(
+                (
+                    item
+                    for item in session.available_selections.values()
+                    if _selection_identity(item) == identity
+                ),
+                None,
+            )
+        if existing is None:
+            existing = next(
+                (
+                    item
+                    for search in reversed(tuple(session.searches.values()))
+                    for item in search.items
+                    if _selection_identity(item) == identity
+                ),
+                None,
+            )
+        if existing is not None:
+            current = replace(
+                existing,
+                reference=normalized_reference,
+                book_number=book_number,
+                book_name=normalized_book_name,
+                chapter=chapter,
+                verse=verse,
+                text=text,
+                terms=normalized_terms,
+            )
+            session.available_selections[existing.token] = current
+            retained: list[MiniAppSelection] = []
+            replaced = False
+            for item in session.basket:
+                if _selection_identity(item) == identity:
+                    if not replaced:
+                        retained.append(current)
+                        replaced = True
+                else:
+                    retained.append(item)
+            session.basket[:] = retained
+            session.available_selections.move_to_end(existing.token)
+            self._evict_available_locked(session)
+            self._enforce_retained_selection_budget_locked(session)
+            return current
         token = self._new_token(session.available_selections, size=18)
         selection = MiniAppSelection(
             token=token,
-            reference=reference,
+            reference=normalized_reference,
             translation=translation,
             book_number=book_number,
-            book_name=book_name,
+            book_name=normalized_book_name,
             chapter=chapter,
             verse=verse,
             text=text,
-            terms=terms,
+            terms=normalized_terms,
         )
         session.available_selections[token] = selection
-        while len(session.available_selections) > self._max_available:
-            session.available_selections.popitem(last=False)
+        self._evict_available_locked(session)
+        self._enforce_retained_selection_budget_locked(session)
         return selection
+
+    def _evict_available_locked(self, session: MiniAppSession) -> None:
+        protected = {item.token for item in session.basket}
+        # Basket entries have their own independently bounded budget. Keeping
+        # that budget separate ensures a full 250-verse response remains
+        # selectable even when the basket is already populated.
+        maximum = self._max_available + len(protected)
+        while len(session.available_selections) > maximum:
+            removable = next(
+                (
+                    token
+                    for token in session.available_selections
+                    if token not in protected
+                ),
+                None,
+            )
+            if removable is None:
+                break
+            session.available_selections.pop(removable, None)
+
+    def _enforce_retained_selection_budget_locked(
+        self,
+        session: MiniAppSession,
+    ) -> None:
+        """Bound retained selection payloads per session and process."""
+        self._refresh_retained_selection_budget_locked(session)
+        while (
+            (
+                session.retained_selection_bytes
+                > MAX_MINIAPP_SESSION_RETAINED_BYTES
+                or session.retained_selection_count
+                > MAX_MINIAPP_SESSION_RETAINED_SELECTIONS
+            )
+            and session.available_selections
+        ):
+            protected = {item.token for item in session.basket}
+            # Retained searches are historical views. Discard the oldest
+            # snapshot before invalidating an opaque ID that was just issued
+            # for the chapter currently visible in the reader.
+            if session.searches:
+                _, expired = session.searches.popitem(last=False)
+                remaining_search_tokens = {
+                    item.token
+                    for search in session.searches.values()
+                    for item in search.items
+                }
+                for item in expired.items:
+                    if (
+                        item.token not in protected
+                        and item.token not in remaining_search_tokens
+                        and session.available_selections.get(item.token) is item
+                    ):
+                        session.available_selections.pop(item.token, None)
+                self._refresh_retained_selection_budget_locked(session)
+                continue
+            removable = next(
+                (
+                    token
+                    for token in session.available_selections
+                    if token not in protected
+                ),
+                None,
+            )
+            if removable is None:
+                break
+            session.available_selections.pop(removable, None)
+            self._refresh_retained_selection_budget_locked(session)
+
+        while (
+            self._retained_selection_bytes > MAX_MINIAPP_PROCESS_RETAINED_BYTES
+            or self._retained_selection_count
+            > MAX_MINIAPP_PROCESS_RETAINED_SELECTIONS
+        ):
+            oldest = next(
+                (
+                    token
+                    for token, current in self._sessions.items()
+                    if (
+                        current is not session
+                        and not current.post_lock.locked()
+                    )
+                ),
+                None,
+            )
+            if oldest is None:
+                self._drop_session_locked(session.token)
+                raise MiniAppSessionExpiredError(
+                    "Mini App session exceeded the bounded selection capacity."
+                )
+            self._drop_session_locked(oldest)
+            self._evicted += 1
+
+    def _oldest_evictable_session_locked(self) -> str | None:
+        return next(
+            (
+                token
+                for token, session in self._sessions.items()
+                if not session.post_lock.locked()
+            ),
+            None,
+        )
+
+    def _refresh_retained_selection_budget_locked(
+        self,
+        session: MiniAppSession,
+    ) -> None:
+        previous_bytes = session.retained_selection_bytes
+        previous_count = session.retained_selection_count
+        unique: dict[int, MiniAppSelection] = {}
+        for item in session.available_selections.values():
+            unique[id(item)] = item
+        for item in session.basket:
+            unique[id(item)] = item
+        for search in session.searches.values():
+            for item in search.items:
+                unique[id(item)] = item
+        current_bytes = sum(
+            _selection_retained_bytes(item) for item in unique.values()
+        )
+        current_count = len(unique)
+        session.retained_selection_bytes = current_bytes
+        session.retained_selection_count = current_count
+        self._retained_selection_bytes += current_bytes - previous_bytes
+        self._retained_selection_count += current_count - previous_count
+
+    def _drop_session_locked(self, token: str) -> MiniAppSession | None:
+        session = self._sessions.pop(token, None)
+        if session is not None:
+            self._retained_selection_bytes = max(
+                0,
+                self._retained_selection_bytes
+                - session.retained_selection_bytes,
+            )
+            self._retained_selection_count = max(
+                0,
+                self._retained_selection_count
+                - session.retained_selection_count,
+            )
+            session.retained_selection_bytes = 0
+            session.retained_selection_count = 0
+        return session
 
     @staticmethod
     def _new_token(mapping: object, *, size: int = 32) -> str:

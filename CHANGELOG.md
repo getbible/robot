@@ -46,6 +46,22 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Mini App
 
+- Replaced the reader's book/chapter dropdown flow with a partial-width,
+  translation-aware passage sheet: API-localized book buttons, collision-free
+  compact labels, numbered chapter grids through Psalm 150, predictable
+  Back/Close/Escape/backdrop/Telegram Back behavior, keyboard and RTL focus
+  handling, and immediate chapter opening without hiding the whole reader.
+- Made translation and nearest valid reader location one atomic server
+  preference transition, made repeated PUTs canonical and retry-safe,
+  serialized transitions across every active session for the same user,
+  guarded every late client mutation by session generation, and separated the
+  complete-chapter selection budget from retained basket entries so long
+  chapters cannot expose already-expired verse controls.
+- Added per-session and process-wide retained-selection byte/object ceilings,
+  including metadata and highlighting terms, aligned translation/chapter
+  response contracts with the full validated Main API catalog bounds, and
+  added real Chromium coverage for the passage sheet, translation reload, RTL
+  placement, focus recovery, request races, and immediate-close persistence.
 - Made the header chip the exclusive translation selector, separated Search
   filters from translation and Bible passage selection, and made translation
   changes immediately invalidate old content and reload the same visible

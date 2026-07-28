@@ -15,6 +15,9 @@ const TRANSLATION_PATTERN = /^[a-z0-9][a-z0-9_-]{0,29}$/;
 const SEARCH_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const SELECTION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const ROUTES = new Set(["home", "search", "bible", "selection"]);
+const GRAPHEME_SEGMENTER = typeof Intl.Segmenter === "function"
+  ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+  : null;
 
 export function normalizeSession(payload) {
   if (!isRecord(payload)) {
@@ -80,7 +83,17 @@ export function normalizeTranslations(value) {
   return translations;
 }
 
-export function normalizeBooks(payload) {
+export function normalizeBooks(payload, expectedTranslation = null) {
+  const expected = translationCode(expectedTranslation, null);
+  if (
+    expected &&
+    (
+      !isRecord(payload) ||
+      translationCode(payload.translation, null) !== expected
+    )
+  ) {
+    throw new TypeError("Book response translation did not match the request.");
+  }
   const value = Array.isArray(payload)
     ? payload
     : payload?.books ?? payload?.items;
@@ -94,7 +107,7 @@ export function normalizeBooks(payload) {
       continue;
     }
     const number = boundedInteger(item.number, 1, 200);
-    const name = boundedText(item.name, 120);
+    const name = boundedText(item.name, 128);
     if (!number || !name || seen.has(number)) {
       continue;
     }
@@ -110,7 +123,97 @@ export function normalizeBooks(payload) {
   return books.sort((left, right) => left.number - right.number);
 }
 
-export function normalizeChapters(payload) {
+export function abbreviateBookName(value) {
+  const name = boundedText(value, 128);
+  if (!name) {
+    return "";
+  }
+  const parts = name
+    .split(/[\s\-–—]+/u)
+    .map(graphemes)
+    .filter((part) => part.length > 0);
+  if (parts.length === 0) {
+    return "";
+  }
+  if (/^\d+$/u.test(parts[0].join("")) && parts.length > 1) {
+    return [
+      ...parts[0],
+      ...parts[1].slice(0, 2),
+    ].join("");
+  }
+  if (parts.length === 1) {
+    return parts[0].slice(0, 3).join("");
+  }
+  return parts.slice(0, 3).map((part) => part[0]).join("");
+}
+
+export function uniqueBookLabels(books) {
+  if (!Array.isArray(books)) {
+    return [];
+  }
+  const compactNames = books.map((book) =>
+    graphemes(boundedText(book?.name, 128))
+      .filter((character) => !/[\s\-–—]/u.test(character)),
+  );
+  const labels = books.map((book) => abbreviateBookName(book?.name));
+  const lengths = labels.map((label) => graphemes(label).length);
+
+  for (let pass = 0; pass < 128; pass += 1) {
+    const groups = new Map();
+    labels.forEach((label, index) => {
+      const key = label.toLocaleLowerCase();
+      groups.set(key, [...(groups.get(key) ?? []), index]);
+    });
+    const duplicates = [...groups.values()].filter((group) => group.length > 1);
+    if (duplicates.length === 0) {
+      return labels;
+    }
+    let expanded = false;
+    for (const group of duplicates) {
+      for (const index of group) {
+        if (lengths[index] < compactNames[index].length) {
+          lengths[index] += 1;
+          labels[index] = compactNames[index].slice(0, lengths[index]).join("");
+          expanded = true;
+        }
+      }
+    }
+    if (!expanded) {
+      break;
+    }
+  }
+
+  return labels.map((label, index) => {
+    const duplicate = labels.some(
+      (other, otherIndex) =>
+        otherIndex !== index &&
+        other.toLocaleLowerCase() === label.toLocaleLowerCase(),
+    );
+    return duplicate && Number.isInteger(books[index]?.number)
+      ? `${label}${books[index].number}`
+      : label;
+  });
+}
+
+export function normalizeChapters(payload, expected = null) {
+  if (isRecord(expected)) {
+    const expectedTranslation = translationCode(expected.translation, null);
+    const expectedBook = boundedInteger(expected.book, 1, 200);
+    const actualTranslation = isRecord(payload)
+      ? translationCode(payload.translation, null)
+      : null;
+    const actualBook = isRecord(payload?.book)
+      ? boundedInteger(payload.book.number, 1, 200)
+      : null;
+    if (
+      !expectedTranslation ||
+      !expectedBook ||
+      actualTranslation !== expectedTranslation ||
+      actualBook !== expectedBook
+    ) {
+      throw new TypeError("Chapter response did not match the requested book.");
+    }
+  }
   const value = Array.isArray(payload)
     ? payload
     : payload?.chapters ?? payload?.items;
@@ -123,21 +226,43 @@ export function normalizeChapters(payload) {
     const number = boundedInteger(
       isRecord(item) ? item.number : item,
       1,
-      250,
+      1_000,
     );
     if (!number || seen.has(number)) {
       continue;
     }
     seen.add(number);
+    const verses = isRecord(item) && Array.isArray(item.verses)
+      ? [...new Set(item.verses
+        .map((verse) => boundedInteger(verse, 1, 2000))
+        .filter((verse) => verse !== null))]
+        .sort((left, right) => left - right)
+      : [];
     chapters.push({
       number,
       verse_count: isRecord(item)
-        ? boundedInteger(item.verse_count, 1, 500) ??
-          (Array.isArray(item.verses) ? item.verses.length : null)
+        ? boundedInteger(item.verse_count, 1, 250) ??
+          (verses.length > 0 ? verses.length : null)
         : null,
+      verses,
     });
   }
   return chapters.sort((left, right) => left.number - right.number);
+}
+
+export function nearestChapterVerse(chapter, requested = 1) {
+  const target = boundedInteger(requested, 1, 2000) ?? 1;
+  const verses = isRecord(chapter) && Array.isArray(chapter.verses)
+    ? chapter.verses
+      .map((verse) => boundedInteger(verse, 1, 2000))
+      .filter((verse) => verse !== null)
+    : [];
+  if (verses.length === 0 || verses.includes(target)) {
+    return target;
+  }
+  return verses.reduce((nearest, verse) =>
+    Math.abs(verse - target) < Math.abs(nearest - target) ? verse : nearest,
+  );
 }
 
 export function normalizeSearch(payload, expectedTranslation = null) {
@@ -214,7 +339,7 @@ export function normalizeScripture(payload, expected = null) {
     1,
     200,
   );
-  const chapter = boundedInteger(payload.chapter, 1, 250);
+  const chapter = boundedInteger(payload.chapter, 1, 1_000);
   const verses = normalizeVerses(payload.verses ?? payload.items);
   const expectedTranslation = isRecord(expected)
     ? translationCode(expected.translation, null)
@@ -223,7 +348,7 @@ export function normalizeScripture(payload, expected = null) {
     ? boundedInteger(expected.book, 1, 200)
     : null;
   const expectedChapter = isRecord(expected)
-    ? boundedInteger(expected.chapter, 1, 250)
+    ? boundedInteger(expected.chapter, 1, 1_000)
     : null;
   if (
     !translation ||
@@ -246,7 +371,7 @@ export function normalizeScripture(payload, expected = null) {
     book,
     chapter,
     reference: boundedText(payload.reference, 180),
-    target_verse: boundedInteger(payload.target_verse, 1, 500) ?? 1,
+    target_verse: boundedInteger(payload.target_verse, 1, 2_000) ?? 1,
     navigation: {
       previous: normalizeChapterLocation(payload.navigation?.previous),
       next: normalizeChapterLocation(payload.navigation?.next),
@@ -261,8 +386,8 @@ export function normalizeReaderLocation(value, fallbackTranslation = "kjv") {
   }
   const translation = translationCode(value.translation, fallbackTranslation);
   const book = boundedInteger(value.book, 1, 200);
-  const chapter = boundedInteger(value.chapter, 1, 250);
-  const verse = boundedInteger(value.verse, 1, 500) ?? 1;
+  const chapter = boundedInteger(value.chapter, 1, 1_000);
+  const verse = boundedInteger(value.verse, 1, 2_000) ?? 1;
   if (!translation || !book || !chapter) {
     return null;
   }
@@ -322,10 +447,10 @@ export function normalizeVerse(value) {
       : null;
   const translation = translationCode(value.translation, null);
   const reference = boundedText(value.reference, 180);
-  const text = boundedText(value.text, 20_000);
+  const text = boundedText(value.text, 4_096);
   const bookNumber = boundedInteger(value.book_number, 1, 200);
-  const chapter = boundedInteger(value.chapter, 1, 250);
-  const verseNumber = boundedInteger(value.verse, 1, 500);
+  const chapter = boundedInteger(value.chapter, 1, 1_000);
+  const verseNumber = boundedInteger(value.verse, 1, 2_000);
   if (
     !selectionId ||
     !translation ||
@@ -343,7 +468,7 @@ export function normalizeVerse(value) {
     translation,
     reference,
     book_number: bookNumber,
-    book_name: boundedText(value.book_name, 120) || reference.split(/\s+\d/)[0],
+    book_name: boundedText(value.book_name, 128) || reference.split(/\s+\d/)[0],
     chapter,
     verse: verseNumber,
     text,
@@ -485,7 +610,7 @@ export function resolveBibleEntrypoint(value, books, translationCodes = []) {
       (book) =>
         isRecord(book) &&
         boundedInteger(book.number, 1, 200) !== null &&
-        boundedText(book.name, 120),
+        boundedText(book.name, 128),
     )
     .map((book) => ({
       number: book.number,
@@ -504,7 +629,7 @@ export function resolveBibleEntrypoint(value, books, translationCodes = []) {
     if (!remainder) {
       return { book_number: book.number, chapter: null };
     }
-    if (/^[1-9][0-9]{0,2}$/.test(remainder)) {
+    if (/^(?:[1-9][0-9]{0,2}|1000)$/.test(remainder)) {
       return {
         book_number: book.number,
         chapter: Number(remainder),
@@ -530,8 +655,8 @@ function normalizeChapterLocation(value) {
     return null;
   }
   const book = boundedInteger(value.book, 1, 200);
-  const chapter = boundedInteger(value.chapter, 1, 250);
-  const bookName = boundedText(value.book_name, 120);
+  const chapter = boundedInteger(value.chapter, 1, 1_000);
+  const bookName = boundedText(value.book_name, 128);
   if (!book || !chapter || !bookName) {
     return null;
   }
@@ -652,6 +777,13 @@ function boundedText(value, maximum) {
   return typeof value === "string" && value.trim().length <= maximum
     ? value.trim()
     : "";
+}
+
+function graphemes(value) {
+  if (GRAPHEME_SEGMENTER) {
+    return [...GRAPHEME_SEGMENTER.segment(value)].map((item) => item.segment);
+  }
+  return Array.from(value);
 }
 
 function isRecord(value) {

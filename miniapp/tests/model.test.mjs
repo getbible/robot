@@ -4,9 +4,11 @@ import test from "node:test";
 import { resolveLocale } from "../lib/i18n.js";
 import {
   DEFAULT_FILTERS,
+  abbreviateBookName,
   activeFilterCount,
   entrypointIntent,
   moveItem,
+  nearestChapterVerse,
   normalizeBasket,
   normalizeBooks,
   normalizeChapters,
@@ -15,9 +17,11 @@ import {
   normalizeScripture,
   normalizeSearch,
   normalizeSession,
+  normalizeTranslations,
   planTranslationChange,
   resolveBibleEntrypoint,
   routeName,
+  uniqueBookLabels,
   uniqueVerses,
 } from "../lib/model.js";
 
@@ -94,13 +98,13 @@ test("normalizes current backend book and chapter item envelopes", () => {
     normalizeBooks({
       translation: "kjv",
       items: [
-        { number: 43, name: "John" },
-        { number: 1, name: "Genesis" },
+        { number: 43, name: "John", testament: "new" },
+        { number: 1, name: "Genesis", testament: "old" },
       ],
     }),
     [
-      { number: 1, name: "Genesis", testament: null },
-      { number: 43, name: "John", testament: null },
+      { number: 1, name: "Genesis", testament: "old" },
+      { number: 43, name: "John", testament: "new" },
     ],
   );
   assert.deepEqual(
@@ -111,9 +115,103 @@ test("normalizes current backend book and chapter item envelopes", () => {
       ],
     }),
     [
-      { number: 1, verse_count: 1 },
-      { number: 3, verse_count: 3 },
+      { number: 1, verse_count: 1, verses: [1] },
+      { number: 3, verse_count: 3, verses: [1, 2, 3] },
     ],
+  );
+  const longName = "L".repeat(128);
+  assert.equal(
+    normalizeBooks({
+      translation: "kjv",
+      items: [{ number: 67, name: longName, testament: "other" }],
+    })[0].name,
+    longName,
+  );
+  assert.deepEqual(
+    normalizeBooks({
+      translation: "kjv",
+      items: [{ number: 67, name: "L".repeat(129), testament: "other" }],
+    }),
+    [],
+  );
+});
+
+test("accepts the complete upstream catalog response bounds", () => {
+  const translations = normalizeTranslations(
+    Array.from({ length: 501 }, (_, index) => ({
+      code: `t${index}`,
+      name: `Translation ${index}`,
+      language: "Test",
+    })),
+  );
+  const chapters = normalizeChapters(
+    {
+      translation: "kjv",
+      book: { number: 19 },
+      items: Array.from({ length: 251 }, (_, index) => ({
+        number: index + 1,
+        verses: [1],
+      })),
+    },
+    { translation: "kjv", book: 19 },
+  );
+
+  assert.equal(translations.length, 501);
+  assert.equal(chapters.length, 251);
+  assert.equal(chapters.at(-1).number, 251);
+});
+
+test("binds navigation envelopes and clamps unavailable target verses", () => {
+  assert.throws(
+    () => normalizeBooks(
+      { translation: "kjv", items: [{ number: 43, name: "John" }] },
+      "aov",
+    ),
+    /translation did not match/,
+  );
+  assert.throws(
+    () => normalizeChapters(
+      {
+        translation: "kjv",
+        book: { number: 43, name: "John" },
+        items: [{ number: 3, verses: [1, 2, 3] }],
+      },
+      { translation: "kjv", book: 19 },
+    ),
+    /requested book/,
+  );
+  const chapter = {
+    number: 3,
+    verse_count: 3,
+    verses: [1, 15, 30],
+  };
+  assert.equal(nearestChapterVerse(chapter, 31), 30);
+  assert.equal(nearestChapterVerse(chapter, 16), 15);
+  assert.equal(nearestChapterVerse(chapter, 15), 15);
+});
+
+test("derives compact book labels from API-provided localized names", () => {
+  assert.equal(abbreviateBookName("Genesis"), "Gen");
+  assert.equal(abbreviateBookName("1 John"), "1Jo");
+  assert.equal(abbreviateBookName("Song of Solomon"), "SoS");
+  assert.equal(abbreviateBookName("创世记"), "创世记");
+  assert.equal(abbreviateBookName("A\u0301mos"), "A\u0301mo");
+  assert.equal(abbreviateBookName(""), "");
+  assert.deepEqual(
+    uniqueBookLabels([
+      { number: 7, name: "Judges" },
+      { number: 50, name: "Philippians" },
+      { number: 57, name: "Philemon" },
+      { number: 65, name: "Jude" },
+    ]),
+    ["Judg", "Phili", "Phile", "Jude"],
+  );
+  assert.equal(
+    new Set(uniqueBookLabels([
+      { number: 7, name: "Judges" },
+      { number: 65, name: "Jude" },
+    ])).size,
+    2,
   );
 });
 
@@ -348,6 +446,14 @@ test("keeps Bible fragments separate from executable search entrypoints", () => 
     search_query: "grace",
     bible_reference: "",
   });
+});
+
+test("resolves API book names through the complete supported length", () => {
+  const name = "A".repeat(128);
+  assert.deepEqual(
+    resolveBibleEntrypoint(`${name} 3`, [{ number: 67, name }]),
+    { book_number: 67, chapter: 3 },
+  );
 });
 
 test("resolves incomplete Bible entrypoints without treating them as searches", () => {

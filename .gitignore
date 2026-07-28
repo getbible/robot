@@ -28,6 +28,9 @@ htmlcov/
 .hypothesis/
 .tox/
 .nox/
+node_modules/
+playwright-report/
+test-results/
 *.log
 *.jsonl
 docker/instances/*.env

@@ -23,6 +23,7 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 2
 fi
 npm --prefix miniapp run check
+npm --prefix miniapp run test:browser
 
 librarian_path=$(
   "$PYTHON" - <<'PY'
@@ -60,6 +61,7 @@ secret_args=(
   --exclude-files '(^|/)\.git/'
   --exclude-files '(^|/)\.(mypy|ruff)_cache/'
   --exclude-files '(^|/)(venv|\.venv|env|ENV|\.lock-venv|\.lock-verify-venv)/'
+  --exclude-files '(^|/)node_modules/'
   --exclude-files '(^|/)\.env\.template$'
   --exclude-files '(^|/)requirements(-dev)?\.txt$'
 )

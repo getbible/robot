@@ -555,7 +555,7 @@ class CatalogClient:
             name = metadata.get("name")
             sha = metadata.get("sha")
             if (
-                not 1 <= number <= 1000
+                not 1 <= number <= 200
                 or number in seen
                 or metadata.get("nr") != number
                 or metadata.get("abbreviation") != code

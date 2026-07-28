@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from getbible import ReferenceValidationError, RequestLimitError
 
 from config import Settings
+from modules.catalog import BookOption
 from modules.errors import CircuitOpen, RobotBusy, ScriptureUnavailable
 from modules.interactions import SearchOptions
 from modules.service import CircuitBreaker, ScriptureQuery, ScriptureService
@@ -151,6 +152,32 @@ class CircuitBreakerTestCase(unittest.IsolatedAsyncioTestCase):
 
 
 class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_identical_catalog_reads_share_one_in_flight_request(self) -> None:
+        service = ScriptureService(_settings(), client=_Client())
+        self.addAsyncCleanup(service.close)
+        started = threading.Event()
+        release = threading.Event()
+        calls = 0
+
+        def books(translation: str) -> tuple[BookOption, ...]:
+            nonlocal calls
+            calls += 1
+            started.set()
+            release.wait(timeout=1)
+            return (BookOption(43, "John", "a" * 40),)
+
+        service._catalog.books = books
+        first = asyncio.create_task(service.books("kjv"))
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        second = asyncio.create_task(service.books("kjv"))
+        await asyncio.sleep(0)
+        release.set()
+
+        left, right = await asyncio.gather(first, second)
+        self.assertEqual(calls, 1)
+        self.assertIs(left, right)
+        self.assertEqual(service._catalog_flights, {})
+
     async def test_librarian_receives_independent_corpus_and_search_limits(
         self,
     ) -> None:
@@ -238,6 +265,19 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.items[0].text, "For God so loved the world.")
         self.assertEqual(page.items[0].terms, ("loved",))
         self.assertEqual(len(client.search_calls), 1)
+
+    async def test_search_total_matches_the_public_contract_bound(self) -> None:
+        client = _Client()
+        service = ScriptureService(_settings(), client=client)
+        self.addAsyncCleanup(service.close)
+        response = client.search("loved", "kjv", object())
+        response["query"]["total"] = 1_000_000
+        accepted = service._search_page(response, "loved", "kjv")
+        self.assertEqual(accepted.total, 1_000_000)
+
+        response["query"]["total"] = 1_000_001
+        with self.assertRaises(ScriptureUnavailable):
+            service._search_page(response, "loved", "kjv")
 
     async def test_default_translation_prewarm_uses_search_capacity(self) -> None:
         client = _Client()
