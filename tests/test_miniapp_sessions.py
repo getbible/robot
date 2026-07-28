@@ -37,6 +37,31 @@ def _principal(
 
 
 class MiniAppSessionStoreTestCase(unittest.TestCase):
+    def test_each_user_has_a_small_independent_session_budget(self) -> None:
+        launches = MiniAppLaunchStore(max_launches=10, ttl_seconds=60)
+        store = MiniAppSessionStore(
+            max_sessions=10,
+            max_sessions_per_user=2,
+            ttl_seconds=60,
+        )
+        sessions = []
+        for _ in range(3):
+            launch = launches.create_launch(user_id=7, target_chat_id=7)
+            sessions.append(
+                store.create(
+                    _principal(7),
+                    translation="kjv",
+                    launch=launch,
+                    init_data_digest=b"x" * 32,
+                )
+            )
+
+        self.assertIsNone(store.get(sessions[0].token))
+        self.assertIs(store.get(sessions[1].token), sessions[1])
+        self.assertIs(store.get(sessions[2].token), sessions[2])
+        self.assertEqual(store.snapshot()["sessions"], 2)
+        self.assertEqual(store.snapshot()["evicted"], 1)
+
     def test_launch_is_owner_bound_one_time_and_expires(self) -> None:
         clock = _Clock()
         launches = MiniAppLaunchStore(

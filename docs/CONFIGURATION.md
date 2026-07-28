@@ -11,6 +11,7 @@ Each production instance reads `/etc/getbible-robot/<instance>.env`. Local devel
 | Variable | Default | Validation | Purpose |
 |---|---:|---|---|
 | `TELEGRAM_API_TOKEN` | none | Required Bot API token shape; template and malformed values rejected | Telegram bot token from `@BotFather` |
+| `TELEGRAM_API_TOKEN_FILE` | empty | Absolute readable file; mutually exclusive with `TELEGRAM_API_TOKEN` | Docker/Kubernetes secret mount containing the token |
 | `TELEGRAM_TOKEN` | none | Deprecated migration alias | Accepted only when `TELEGRAM_API_TOKEN` is absent; startup fails if both disagree |
 
 Store the token outside Git with restrictive permissions. Revoke and replace it immediately through `@BotFather` if disclosure is suspected.
@@ -23,11 +24,13 @@ Store the token outside Git with restrictive permissions. Revoke and replace it 
 |---|---:|---|---|
 | `TELEGRAM_DELIVERY_MODE` | `polling` | `polling` or `webhook` | Selects exactly one Bot API update transport |
 | `TELEGRAM_WEBHOOK_PUBLIC_URL` | empty | Required in webhook mode; HTTPS URL with a non-root private path and no credentials/query/fragment; explicit public port is 80, 88, 443, or 8443 | URL registered with Telegram |
-| `TELEGRAM_WEBHOOK_LISTEN` | `127.0.0.1` | Loopback only | Private application listener behind the reverse proxy |
+| `TELEGRAM_WEBHOOK_LISTEN` | `127.0.0.1` | Loopback; wildcard only when `CONTAINERIZED=true` | Private application listener behind the reverse proxy |
 | `TELEGRAM_WEBHOOK_PORT` | `9001` | `1024`–`65535` | Per-instance local listener port |
 | `TELEGRAM_WEBHOOK_SECRET_TOKEN` | empty | Required in webhook mode; 32–256 safe token characters | Authenticates Telegram's webhook header |
+| `TELEGRAM_WEBHOOK_SECRET_TOKEN_FILE` | empty | Absolute readable file; mutually exclusive with direct value | Secret-mounted webhook header token |
 | `TELEGRAM_WEBHOOK_IP_ADDRESS` | empty | Empty or globally routable IPv4/IPv6 | Optional fixed address sent to Telegram |
 | `TELEGRAM_WEBHOOK_MAX_CONNECTIONS` | `16` | `1`–`100` | Maximum simultaneous Telegram webhook connections |
+| `CONTAINERIZED` | `false` | `true` or `false` | Permits wildcard container listeners; set and owned by the image |
 | `BOT_NAME` | `GetBible Robot` | 1–64 characters | Bot API display name synchronized at startup |
 | `BOT_DESCRIPTION` | built-in text | 1–512 characters | Bot API description synchronized at startup |
 | `BOT_SHORT_DESCRIPTION` | built-in text | 1–120 characters | Bot API short description synchronized at startup |
@@ -42,13 +45,19 @@ to the loopback listener. Do not expose `TELEGRAM_WEBHOOK_PORT` directly. See
 |---|---:|---|---|
 | `MINI_APP_ENABLED` | `false` | `true` or `false`; URL required when true | Enables the same-instance Telegram Mini App |
 | `MINI_APP_PUBLIC_URL` | empty | Absolute HTTPS URL; optional fixed path; no credentials, query, or fragment | URL opened by Telegram and routed by the public proxy |
-| `MINI_APP_LISTEN` | `127.0.0.1` | IPv4 loopback only | Private Mini App HTTP listener |
+| `MINI_APP_LISTEN` | `127.0.0.1` | Loopback; wildcard only when `CONTAINERIZED=true` | Private Mini App HTTP listener |
 | `MINI_APP_PORT` | `9201` | `1024`–`65535`; manager-reserved and different from health/webhook ports | Per-instance Mini App listener port |
 | `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | `300` | `30`–`900` | Maximum accepted age of signed Telegram `initData` |
 | `MINI_APP_LAUNCH_TTL_SECONDS` | `300` | `30`–`900` | Lifetime of the user-bound bot launch token |
 | `MINI_APP_SESSION_TTL_SECONDS` | `900` | `60`–`3600` | Absolute lifetime of authenticated server-side Mini App state |
-| `MINI_APP_SESSION_LIMIT` | `2000` | `10`–`20000` | Maximum active Mini App sessions |
+| `MINI_APP_SESSION_LIMIT` | `200` | `10`–`20000` | Maximum active Mini App sessions |
+| `MINI_APP_SESSIONS_PER_USER` | `2` | `1`–`10` | Maximum active sessions retained for one Telegram user |
+| `MINI_APP_MAX_SEARCHES_PER_SESSION` | `2` | `1`–`8` | Retained authoritative search pages per session |
+| `MINI_APP_MAX_AVAILABLE_SELECTIONS` | `256` | `25`–`1000` | Retained selectable verse objects per session |
 | `MINI_APP_MAX_SELECTIONS` | `100` | `1`–`200` | Maximum selected verse items before normalization |
+| `MINI_APP_BODY_TIMEOUT_SECONDS` | `10` | `1`–`60` | Maximum time to receive one HTTP request body |
+| `MINI_APP_IDLE_TIMEOUT_SECONDS` | `30` | `5`–`300` | Idle connection and incomplete-header timeout |
+| `MINI_APP_MAX_HEADER_BYTES` | `16384` | `4096`–`65536` | Maximum accepted HTTP header block |
 
 The HTML shell may be publicly retrievable because Telegram Mini Apps run in a
 browser engine on each user's device. It remains inert without fresh
@@ -68,6 +77,7 @@ transaction.
 |---|---:|---|---|
 | `INSTANCE_NAME` | `local` | 2–24 lowercase letters, numbers, or single hyphens | Tags every JSON event and identifies the isolated deployment |
 | `LOG_FILE` | empty | Empty or an absolute path | Optional JSONL application log in addition to journald |
+| `LOG_MAX_BYTES` | `10485760` | 1 MiB–1 GiB | Continuous byte ceiling for the optional JSONL file |
 | `AUDIT_LOG_MODE` | `metadata` | `metadata` or `content` | Controls whether user-provided query/reference text may enter audit fields |
 
 The setup manager assigns these values per instance:
@@ -93,7 +103,7 @@ Content mode additionally records normalized search terms and final Scripture re
 |---|---:|---|---|
 | `TRANSLATION` | `kjv` | Lowercase letters, numbers, `_`, or `-`; 1–30 characters | Default translation abbreviation |
 | `USER_PREFERENCES_FILE` | empty | Empty or an absolute path | SQLite database for per-user translation defaults; production setup assigns the isolated instance-state path |
-| `USER_PREFERENCE_LIMIT` | `100000` | `100`–`1000000` | Maximum saved user translation records before oldest-record eviction |
+| `USER_PREFERENCE_LIMIT` | `10000` | `100`–`1000000` | Maximum saved user translation records before oldest-record eviction |
 | `GETBIBLE_API_BASE_URL` | `https://api.getbible.net` | HTTPS base URL; no credentials, path, query, or fragment; loopback HTTP is allowed for tests | Machine-readable Scripture repository |
 | `GETBIBLE_WEB_BASE_URL` | `https://getbible.life` | Same URL rules | Base for every clickable link shown in Telegram |
 | `WELCOME_MESSAGE` | built-in text | Non-empty; at most 4096 characters | `/start` response |
@@ -120,9 +130,16 @@ their manager-owned paths in the environment file.
 | `GETBIBLE_CONNECT_TIMEOUT` | `3.05` seconds | `0.1`–`30` | TCP/TLS connection timeout |
 | `GETBIBLE_READ_TIMEOUT` | `6` seconds | `0.5`–`60` | Per-response read timeout |
 | `GETBIBLE_REQUEST_RETRIES` | `1` | `0`–`5` | Retries for Librarian and navigation-catalog GET requests |
-| `GETBIBLE_MAX_RESPONSE_BYTES` | `67108864` (64 MiB) | `1024`–`134217728` | Maximum accepted full repository/corpus response body |
+| `GETBIBLE_MAX_RESPONSE_BYTES` | `41943040` (40 MiB) | `1024`–`134217728` | Maximum accepted full repository/corpus response body |
 | `LOOKUP_TIMEOUT` | `20` seconds | `1`–`90` | Overall asynchronous wait for one lookup |
 | `LOOKUP_QUEUE_TIMEOUT` | `2` seconds | `0.1`–`30` | Maximum wait for bounded worker capacity |
+| `REFERENCE_CACHE_LIMIT` | `1000` | `100`–`50000` | Parsed reference and selection cache entries |
+| `BOOKS_CACHE_LIMIT` | `16` | `1`–`1000` | In-memory translation book indexes |
+| `CHAPTER_CACHE_LIMIT` | `256` | `16`–`10000` | In-memory chapter payloads |
+| `SEARCH_CORPUS_LIMIT` | `1` | `1`–`4` | Full translation search corpora retained |
+| `TRANSLATION_CACHE_LIMIT` | `1` | `1`–`8` | Parsed full translation payloads retained |
+| `CACHE_MAX_BYTES` | `268435456` | 32 MiB–8 GiB | Disk-cache budget enforced after the one-day race-safety grace |
+| `CACHE_MAINTENANCE_INTERVAL_SECONDS` | `21600` | `300`–`604800` | Interval for pruning stale objects and over-budget cache entries |
 
 A lookup timeout does not pretend that its worker thread stopped. The capacity permit remains occupied until the underlying thread actually exits, preventing an unbounded executor queue.
 
@@ -138,17 +155,17 @@ A lookup timeout does not pretend that its worker thread stopped. The capacity p
 | `SEARCH_RESULT_LIMIT` | `50` | `1`–`200` | Maximum selectable matches retained from one Librarian search |
 | `SEARCH_DEADLINE_SECONDS` | `5` | `0.1`–`30` | Librarian's cooperative per-search execution deadline |
 | `SEARCH_MAX_RESPONSE_BYTES` | `4194304` (4 MiB) | `65536`–`16777216` | Maximum constructed Librarian search result, separate from corpus downloads |
-| `MAX_CONCURRENT_LOOKUPS` | `4` | `1`–`32` | Direct-reference/catalog worker threads and permits |
+| `MAX_CONCURRENT_LOOKUPS` | `2` | `1`–`32` | Direct-reference/catalog worker threads and permits |
 | `MAX_CONCURRENT_SEARCHES` | `1` | `1`–`8` | Independent expensive-search worker threads and permits |
-| `MAX_CONCURRENT_UPDATES` | `16` | `1`–`64` | Telegram updates processed concurrently |
+| `MAX_CONCURRENT_UPDATES` | `4` | `1`–`64` | Telegram updates processed concurrently |
 
 `MAX_TOTAL_VERSES` may not be lower than `MAX_VERSES_PER_REFERENCE`. Telegram text is measured in UTF-16 code units, not Python characters, before chunks are sent.
 
 On 26 July 2026, the largest published corpus measured by uncompressed
 `Content-Length` was `thai` at 30,950,679 bytes; KJV was 8,862,703 bytes. The
-64 MiB repository cap therefore accommodates the currently observed full
+40 MiB repository cap therefore accommodates the currently observed full
 translations, including larger non-66-book corpora, with bounded headroom.
-It does not permit a 64 MiB search result: `SEARCH_MAX_RESPONSE_BYTES`,
+It does not permit a 40 MiB search result: `SEARCH_MAX_RESPONSE_BYTES`,
 `SEARCH_RESULT_LIMIT`, and Telegram message limits remain independent. Search
 also has its own single-worker default so corpus parsing/indexing cannot occupy
 the four direct-reference workers.
@@ -171,7 +188,7 @@ navigating.
 | `USER_RATE_REFILL_PER_SECOND` | `0.2` | `0.01`–`100` | Per-user sustained refill rate |
 | `CHAT_RATE_CAPACITY` | `20` | `1`–`500` | Per-chat burst capacity |
 | `CHAT_RATE_REFILL_PER_SECOND` | `1` | `0.01`–`500` | Per-chat sustained refill rate |
-| `RATE_LIMIT_CACHE_SIZE` | `20000` | `100`–`100000` | Maximum combined user/chat bucket entries |
+| `RATE_LIMIT_CACHE_SIZE` | `2000` | `100`–`100000` | Maximum combined user/chat bucket entries |
 | `RATE_LIMIT_NOTICE_COOLDOWN` | `10` seconds | `1`–`300` | Minimum quiet period before another rejection warning for the same user/chat |
 
 The bucket and rejection-notification registries use bounded least-recently-used retention so arbitrary identifiers cannot grow memory without limit. Rejected floods are silently discarded after the first warning instead of amplifying traffic through Telegram's API.
@@ -180,7 +197,7 @@ The bucket and rejection-notification registries use bounded least-recently-used
 
 | Variable | Default | Allowed range | Purpose |
 |---|---:|---:|---|
-| `INTERACTION_SESSION_LIMIT` | `2000` | `10`–`20000` | Maximum active guided Bible/search sessions |
+| `INTERACTION_SESSION_LIMIT` | `200` | `10`–`20000` | Maximum active guided Bible/search sessions |
 | `INTERACTION_TTL_SECONDS` | `600` | `60`–`3600` | Idle lifetime of an interactive panel |
 | `CATALOG_CACHE_TTL_SECONDS` | `3600` | `60`–`86400` | In-process lifetime of validated translation, book, chapter, and verse navigation metadata |
 
@@ -207,11 +224,14 @@ Validation errors and request-limit rejections do not count as upstream failures
 | `DELETE_COMMAND_MESSAGES` | `false` | `true` or `false` | Attempt to delete standalone handled commands such as `/start` and `/help`; permission failures are non-fatal |
 | `DROP_PENDING_UPDATES` | `true` | `true` or `false` | Drop updates accumulated while the bot was offline at startup |
 | `PREWARM_DEFAULT_TRANSLATION` | `true` | `true` or `false` | Load and index the default search corpus before readiness; safe failure does not prevent direct references |
-| `HEALTH_HOST` | `127.0.0.1` | `127.0.0.1`, `::1`, or `localhost` only | Health listener address |
+| `HEALTH_HOST` | `127.0.0.1` | Loopback; wildcard only when `CONTAINERIZED=true` | Health listener address |
 | `HEALTH_PORT` | `8081` | `0`–`65535`; `0` disables | Health/readiness/metrics port |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level name | Structured JSON log threshold |
 
-The health listener is deliberately loopback-only. Each running instance requires a unique nonzero port. Do not expose it publicly without an authenticated, access-controlled proxy.
+The host-native health listener is deliberately loopback-only. Docker may bind
+it to the container network for platform probes. Each running instance requires
+a unique nonzero port. Do not expose it publicly without authenticated,
+access-controlled ingress.
 
 Completed `/bible` and `/search` workflows have a stricter cleanup contract
 independent of `DELETE_COMMAND_MESSAGES`. After every final Scripture chunk is
@@ -239,15 +259,18 @@ MINI_APP_LISTEN="127.0.0.1"
 MINI_APP_PORT="9201"
 MINI_APP_INIT_DATA_MAX_AGE_SECONDS="300"
 MINI_APP_LAUNCH_TTL_SECONDS="300"
+MINI_APP_SESSION_LIMIT="200"
+MINI_APP_SESSIONS_PER_USER="2"
 INSTANCE_NAME="production"
 LOG_FILE="/var/log/getbible-robot/production.jsonl"
+LOG_MAX_BYTES="10485760"
 AUDIT_LOG_MODE="metadata"
 TRANSLATION="kjv"
 USER_PREFERENCES_FILE="/var/lib/getbible-robot/production/preferences.sqlite3"
-USER_PREFERENCE_LIMIT="100000"
+USER_PREFERENCE_LIMIT="10000"
 GETBIBLE_API_BASE_URL="https://api.getbible.net"
 GETBIBLE_WEB_BASE_URL="https://getbible.life"
-GETBIBLE_MAX_RESPONSE_BYTES="67108864"
+GETBIBLE_MAX_RESPONSE_BYTES="41943040"
 SEARCH_MAX_RESPONSE_BYTES="4194304"
 MAX_CONCURRENT_SEARCHES="1"
 PREWARM_DEFAULT_TRANSLATION="true"

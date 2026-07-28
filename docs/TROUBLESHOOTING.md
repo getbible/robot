@@ -194,7 +194,7 @@ first search may download and index a full translation; with
 default translation. Later searches reuse the bounded cache.
 
 If logs report `RepositoryResponseTooLarge`, compare the actual corpus size with
-`GETBIBLE_MAX_RESPONSE_BYTES`. The production default is 64 MiB; do not lower it
+`GETBIBLE_MAX_RESPONSE_BYTES`. The production default is 40 MiB; do not lower it
 to the old 8 MiB value, which cannot hold KJV. Search result construction remains
 separately limited by `SEARCH_MAX_RESPONSE_BYTES`.
 

@@ -24,9 +24,13 @@ class SettingsTestCase(unittest.TestCase):
     def test_search_capacity_defaults_are_safe_and_independent(self) -> None:
         with patch.dict(os.environ, self.environment(), clear=True):
             settings = Settings.from_env(load_environment_file=False)
-        self.assertEqual(settings.max_response_bytes, 64 * 1024 * 1024)
+        self.assertEqual(settings.max_response_bytes, 40 * 1024 * 1024)
         self.assertEqual(settings.search_max_response_bytes, 4 * 1024 * 1024)
+        self.assertEqual(settings.reference_cache_limit, 1000)
+        self.assertEqual(settings.chapter_cache_limit, 256)
         self.assertEqual(settings.max_concurrent_searches, 1)
+        self.assertEqual(settings.max_concurrent_lookups, 2)
+        self.assertEqual(settings.max_concurrent_updates, 4)
         self.assertTrue(settings.prewarm_default_translation)
         self.assertEqual(settings.telegram_delivery_mode, "polling")
         self.assertFalse(settings.mini_app_enabled)
@@ -54,7 +58,9 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.mini_app_init_data_max_age_seconds, 300)
         self.assertEqual(settings.mini_app_launch_ttl_seconds, 300)
         self.assertEqual(settings.mini_app_session_ttl_seconds, 900)
-        self.assertEqual(settings.mini_app_session_limit, 2000)
+        self.assertEqual(settings.mini_app_session_limit, 200)
+        self.assertEqual(settings.mini_app_sessions_per_user, 2)
+        self.assertEqual(settings.mini_app_max_available_selections, 256)
         self.assertEqual(settings.mini_app_max_selections, 100)
 
     def test_mini_app_configuration_fails_closed(self) -> None:
@@ -259,6 +265,43 @@ class SettingsTestCase(unittest.TestCase):
             ):
                 Settings.from_env(load_environment_file=False)
 
+    def test_token_file_and_container_listeners_are_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            token_file = Path(directory) / "token"
+            token_file.write_text(
+                "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi\n",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "TELEGRAM_API_TOKEN_FILE": str(token_file),
+                    "CONTAINERIZED": "true",
+                    "HEALTH_HOST": "0.0.0.0",
+                    "MINI_APP_ENABLED": "true",
+                    "MINI_APP_PUBLIC_URL": "https://bot.example.com/app",
+                    "MINI_APP_LISTEN": "0.0.0.0",
+                },
+                clear=True,
+            ):
+                settings = Settings.from_env(load_environment_file=False)
+
+        self.assertTrue(settings.containerized)
+        self.assertEqual(settings.health_host, "0.0.0.0")
+        self.assertEqual(settings.mini_app_listen, "0.0.0.0")
+
+        with (
+            patch.dict(
+                os.environ,
+                self.environment(
+                    TELEGRAM_API_TOKEN_FILE="/run/secrets/token",
+                ),
+                clear=True,
+            ),
+            self.assertRaises(ConfigurationError),
+        ):
+            Settings.from_env(load_environment_file=False)
+
     def test_urls_reject_credentials_paths_and_nonlocal_http(self) -> None:
         invalid = (
             "http://api.getbible.net",
@@ -310,7 +353,7 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.instance_name, "local")
         self.assertIsNone(settings.log_file)
         self.assertIsNone(settings.user_preferences_file)
-        self.assertEqual(settings.user_preference_limit, 100_000)
+        self.assertEqual(settings.user_preference_limit, 10_000)
         self.assertEqual(settings.audit_log_mode, "metadata")
 
     def test_instance_file_and_audit_configuration_is_validated(self) -> None:

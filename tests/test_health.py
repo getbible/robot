@@ -54,6 +54,7 @@ class HealthServerTestCase(unittest.IsolatedAsyncioTestCase):
             ),
         )
         await self.health.start()
+        self.health.mark_ready()
 
     async def asyncTearDown(self) -> None:
         await self.health.close()

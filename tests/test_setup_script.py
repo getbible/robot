@@ -9,6 +9,7 @@ UNIT = ROOT / "deploy" / "getbible-robot@.service"
 LIFECYCLE = ROOT / "tests" / "setup_manager_lifecycle.sh"
 CADDY_INSTALLATION = ROOT / "tests" / "caddy_installation.sh"
 MINIAPP_READINESS = ROOT / "tests" / "miniapp_readiness.sh"
+DOCKER_MANAGER = ROOT / "tests" / "docker_manager.sh"
 
 
 class SetupScriptTestCase(unittest.TestCase):
@@ -20,6 +21,7 @@ class SetupScriptTestCase(unittest.TestCase):
         subprocess.run(["bash", "-n", str(LIFECYCLE)], check=True)
         subprocess.run(["bash", "-n", str(CADDY_INSTALLATION)], check=True)
         subprocess.run(["bash", "-n", str(MINIAPP_READINESS)], check=True)
+        subprocess.run(["bash", "-n", str(DOCKER_MANAGER)], check=True)
         result = subprocess.run(
             ["bash", str(SETUP), "self-test"],
             check=True,
@@ -54,6 +56,14 @@ class SetupScriptTestCase(unittest.TestCase):
             "upgrade",
             "rollback",
             "uninstall",
+            "docker-deploy",
+            "docker-list",
+            "docker-status",
+            "docker-logs",
+            "docker-follow",
+            "docker-manage",
+            "docker-shell",
+            "docker-doctor",
             "menu",
             "self-test",
         ):
@@ -67,6 +77,29 @@ class SetupScriptTestCase(unittest.TestCase):
             text=True,
         )
         self.assertIn("getbible-robot setup manager", version_result.stdout)
+
+    def test_container_setup_entrypoint_is_executable_and_valid(self) -> None:
+        container_setup = ROOT / "container" / "setup.sh"
+        self.assertTrue(container_setup.stat().st_mode & stat.S_IXUSR)
+        subprocess.run(["bash", "-n", str(container_setup)], check=True)
+        result = subprocess.run(
+            ["bash", str(container_setup), "help"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("GetBible Robot container setup", result.stdout)
+        self.assertIn("standard output/error", result.stdout)
+
+    def test_docker_manager_lifecycle(self) -> None:
+        result = subprocess.run(
+            ["bash", str(DOCKER_MANAGER)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertIn("Docker manager test passed.", result.stdout)
 
     def test_complete_multi_instance_lifecycle(self) -> None:
         result = subprocess.run(
@@ -123,6 +156,11 @@ class SetupScriptTestCase(unittest.TestCase):
             "ProcSubset=pid",
             "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
             "CapabilityBoundingSet=",
+            "Type=notify",
+            "WatchdogSec=45s",
+            "MemoryHigh=180M",
+            "MemoryMax=256M",
+            "MemorySwapMax=16M",
         }
         for directive in required:
             with self.subTest(directive=directive):
@@ -164,6 +202,7 @@ class SetupScriptTestCase(unittest.TestCase):
         self.assertIn("caddy-stable-archive-keyring.gpg", script)
         self.assertIn("dl.cloudsmith.io/public/caddy/stable", script)
         self.assertIn("render_caddy_routes", script)
+        self.assertIn("max_size 64KB", script)
         self.assertIn("caddy validate --config", script)
         self.assertIn("rollback_caddy_transaction", script)
         self.assertIn("wait_for_mini_app_url", script)

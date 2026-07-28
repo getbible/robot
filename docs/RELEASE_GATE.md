@@ -2,6 +2,26 @@
 
 A robot commit is deployable only when every applicable item below is satisfied. A maintainer must review the actual code, workflow, dependency, and documentation diffs; automated green checks are necessary but not sufficient.
 
+## Container artifacts
+
+- `Dockerfile` installs the exact hashed production lock in a separate build
+  stage and runs as UID/GID 10001.
+- The image includes no Caddy, certificate manager, systemd, or host firewall.
+- `compose.yaml` uses a read-only root filesystem, drops every capability,
+  disables privilege escalation, and sets PID, CPU, memory, tmpfs, and graceful
+  shutdown bounds.
+- `compose.yaml` remains the environment-driven one-bot default and publishes
+  only the Mini App application port; `compose.multi.yaml` is explicit.
+- Missing application configuration produces structured container
+  stdout/stderr, and both host-side and in-container setup commands are
+  syntax/regression tested.
+- Multi-instance configuration rejects invalid names, unsafe process-loader
+  variables, missing health ports, and port collisions before child startup.
+- The container supervisor has liveness, RSS, restart-backoff, restart-circuit,
+  duplicate-poller, and signal-forwarding regression coverage.
+- The Kubernetes example keeps one replica per bot token and declares startup,
+  liveness, readiness, resource, secret, and persistent-state contracts.
+
 ## Source and review
 
 - The intended robot commit is identified by full SHA.
@@ -26,6 +46,9 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - The hardened instantiated `getbible-robot@ci.service` passes `systemd-analyze verify`.
 - CodeQL succeeds.
 - The permanent `robot/security-gate` and `robot/codeql-gate` statuses are green for the exact commit.
+- CI validates the default, compatibility-single, multi-bot, and
+  environment-sourced secret Compose models, builds the image, verifies its
+  non-root user, and smoke-tests both supervisor and setup entrypoints.
 
 ## Dependency integrity
 
@@ -102,7 +125,7 @@ A robot commit is deployable only when every applicable item below is satisfied.
   with status 75, and is not restarted by systemd.
 - Webhook requests require the generated secret and reach only a loopback
   listener behind public HTTPS.
-- The Mini App uses a separate loopback-only listener behind public HTTPS, and
+- The Mini App uses a separate private listener behind public HTTPS, and
   polling remains supported while it is enabled.
 - The public browser shell exposes no data or action capability without
   successful Telegram and launch authorization.

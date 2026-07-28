@@ -460,11 +460,11 @@ assert_contains "$(environment_file_for beta)" 'INSTANCE_NAME="beta"'
 assert_contains "$(environment_file_for alpha)" 'AUDIT_LOG_MODE="metadata"'
 assert_contains "$(environment_file_for alpha)" \
     "USER_PREFERENCES_FILE=\"${STATE_ROOT}/alpha/preferences.sqlite3\""
-assert_contains "$(environment_file_for alpha)" 'USER_PREFERENCE_LIMIT="100000"'
+assert_contains "$(environment_file_for alpha)" 'USER_PREFERENCE_LIMIT="10000"'
 assert_contains "$(environment_file_for beta)" 'HEALTH_PORT="0"'
 assert_contains "$(environment_file_for alpha)" 'TELEGRAM_DELIVERY_MODE="polling"'
 assert_contains "$(environment_file_for alpha)" \
-    'GETBIBLE_MAX_RESPONSE_BYTES="67108864"'
+    'GETBIBLE_MAX_RESPONSE_BYTES="41943040"'
 assert_contains "$(environment_file_for alpha)" \
     'SEARCH_MAX_RESPONSE_BYTES="4194304"'
 assert_contains "$(help_file_for alpha)" "/search"

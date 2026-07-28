@@ -1,5 +1,12 @@
 # Installation
 
+For a portable deployment that does not install Caddy, create Linux accounts,
+or claim host ports 80/443, use the [Docker deployment](DOCKER.md). This
+document describes the separate host-native systemd manager. The same
+`setup.sh` also exposes `docker-deploy`, `docker-list`, `docker-manage`,
+`docker-shell`, `docker-logs`, and `docker-doctor` for the recommended
+one-bot-per-container deployment.
+
 The supported production installation path is the interactive multi-instance manager in `setup.sh`. It creates an isolated Linux account, application checkout, exact hashed Python environment, secret file, cache, state directory, JSONL log, log rotation, and hardened `systemd` service for each instance.
 
 ## Quick production installation

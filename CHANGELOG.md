@@ -4,6 +4,32 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Container deployment and small-host hardening
+
+- Added a non-root, read-only, capability-free Docker image that contains no
+  Caddy or TLS stack and serves only operator-selected Mini App, health, and
+  optional webhook ports.
+- Added single-bot and multi-bot container modes. The PID-1 supervisor validates
+  unique ports, isolates per-instance cache/state, exposes container management
+  commands, checks child liveness and RSS, backs off restarts, and opens a
+  restart circuit instead of thrashing the host.
+- Made one environment-driven bot per container the default Compose path, with
+  only one published Mini App port, structured configuration failures in
+  Docker logs, a production secret overlay, bounded Docker log rotation, and
+  an explicit multi-bot Compose file.
+- Added host setup-manager Docker discovery, deploy, status, log, diagnostics,
+  management-menu, and shell commands plus `/app/setup.sh` inside the image.
+- Added Compose and Kubernetes examples with secrets, persistent state,
+  resource limits, and startup/liveness/readiness probes.
+- Reduced default worker, update, rate-map, interaction, Mini App session,
+  chapter, parsed-translation, and response-byte budgets for a 500 MB host.
+- Added per-user Mini App session limits, explicit retained-selection/search
+  bounds, Mini App header/body/idle connection limits, process RSS metrics,
+  cache-object pruning, and continuously byte-capped JSONL logging.
+- Changed the systemd unit to native readiness/watchdog notification with
+  `MemoryHigh`, a lower `MemoryMax`, a swap ceiling, and restart-storm
+  protection.
+
 ### Mini App
 
 - Added a production Telegram Mini App for contained Scripture search, filtering,

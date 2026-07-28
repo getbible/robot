@@ -343,6 +343,7 @@ class MiniAppSessionStore:
         *,
         max_sessions: int,
         ttl_seconds: float,
+        max_sessions_per_user: int = 2,
         max_searches_per_session: int = 4,
         max_available_selections: int = 512,
         max_basket_selections: int = 50,
@@ -352,6 +353,8 @@ class MiniAppSessionStore:
             raise ValueError("max_sessions must be between 1 and 100000.")
         if not 30 <= ttl_seconds <= 86_400:
             raise ValueError("ttl_seconds must be between 30 and 86400.")
+        if not 1 <= max_sessions_per_user <= 10:
+            raise ValueError("max_sessions_per_user must be between 1 and 10.")
         if not 1 <= max_searches_per_session <= 16:
             raise ValueError("max_searches_per_session must be between 1 and 16.")
         if not 25 <= max_available_selections <= 5000:
@@ -359,6 +362,7 @@ class MiniAppSessionStore:
         if not 1 <= max_basket_selections <= 200:
             raise ValueError("max_basket_selections must be between 1 and 200.")
         self._max_sessions = max_sessions
+        self._max_sessions_per_user = max_sessions_per_user
         self._ttl = ttl_seconds
         self._max_searches = max_searches_per_session
         self._max_available = max_available_selections
@@ -380,6 +384,14 @@ class MiniAppSessionStore:
     ) -> MiniAppSession:
         with self._guard:
             self._purge_locked()
+            user_sessions = [
+                token
+                for token, current in self._sessions.items()
+                if current.user_id == principal.user_id
+            ]
+            while len(user_sessions) >= self._max_sessions_per_user:
+                self._sessions.pop(user_sessions.pop(0), None)
+                self._evicted += 1
             token = self._new_token(self._sessions)
             now = self._clock()
             session = MiniAppSession(
@@ -719,9 +731,20 @@ class MiniAppSessionStore:
     def snapshot(self) -> dict[str, int | float]:
         with self._guard:
             self._purge_locked()
+            selections = sum(
+                len(session.available_selections)
+                for session in self._sessions.values()
+            )
+            searches = sum(
+                len(session.searches)
+                for session in self._sessions.values()
+            )
             return {
                 "sessions": len(self._sessions),
                 "max_sessions": self._max_sessions,
+                "max_sessions_per_user": self._max_sessions_per_user,
+                "available_selections": selections,
+                "searches": searches,
                 "ttl_seconds": self._ttl,
                 "created": self._created,
                 "expired": self._expired,

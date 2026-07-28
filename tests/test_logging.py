@@ -46,6 +46,21 @@ class LoggingTestCase(unittest.TestCase):
         self.assertEqual(payload["instance"], "test")
         self.assertEqual(payload["message"], "ready")
 
+    def test_file_logging_is_continuously_byte_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "robot.jsonl"
+            configure_logging(
+                logging.INFO,
+                instance_name="test",
+                log_file=str(path),
+                log_max_bytes=1024,
+            )
+            for index in range(100):
+                logging.getLogger("test").info("record-%d-%s", index, "x" * 80)
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+            self.assertLessEqual(path.stat().st_size, 1024)
+
 
 if __name__ == "__main__":
     unittest.main()

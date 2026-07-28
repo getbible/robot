@@ -1,0 +1,49 @@
+services:
+  robot:
+    build:
+      context: .
+    image: "${ROBOT_IMAGE:-getbible-robot:local}"
+    container_name: "${ROBOT_CONTAINER_NAME:-getbible-robot}"
+    labels:
+      io.getbible.robot.container: "true"
+      io.getbible.robot.mode: "multi"
+    restart: unless-stopped
+    environment:
+      ROBOT_MODE: "multi"
+      ROBOT_CONFIG_DIR: "/config/instances"
+      ROBOT_DATA_DIR: "/data"
+      ROBOT_START_GRACE_SECONDS: "${ROBOT_START_GRACE_SECONDS:-150}"
+      ROBOT_HEALTH_INTERVAL_SECONDS: "${ROBOT_HEALTH_INTERVAL_SECONDS:-15}"
+    volumes:
+      - ./docker/instances:/config/instances:ro
+      - robot-data:/data
+    secrets:
+      - production_bot_token
+    # Add one application-port mapping for every configured bot. Health ports
+    # remain internal unless an operator has a specific diagnostic need.
+    ports:
+      - "${MINI_APP_BIND_ADDRESS:-127.0.0.1}:${MINI_APP_HOST_PORT:-9201}:9201"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: "${ROBOT_MEMORY_LIMIT:-320m}"
+    mem_reservation: "${ROBOT_MEMORY_RESERVATION:-192m}"
+    cpus: "${ROBOT_CPU_LIMIT:-1.5}"
+    stop_grace_period: 45s
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  robot-data:
+
+secrets:
+  production_bot_token:
+    file: ./docker/secrets/production.token
