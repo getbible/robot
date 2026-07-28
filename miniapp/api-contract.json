@@ -142,7 +142,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Preferences"
+                "$ref": "#/components/schemas/PreferenceUpdate"
               }
             }
           }
@@ -255,7 +255,7 @@
     },
     "/scripture": {
       "post": {
-        "summary": "Load one canonical chapter for selection",
+        "summary": "Load one canonical chapter for reading and selection",
         "requestBody": {
           "required": true,
           "content": {
@@ -277,6 +277,12 @@
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 250
+                  },
+                  "verse": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "default": 1
                   }
                 }
               }
@@ -291,7 +297,16 @@
                 "schema": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["translation", "book", "chapter", "items"],
+                  "required": [
+                    "translation",
+                    "book",
+                    "chapter",
+                    "reference",
+                    "target_verse",
+                    "sha",
+                    "navigation",
+                    "items"
+                  ],
                   "properties": {
                     "translation": {
                       "$ref": "#/components/schemas/TranslationCode"
@@ -303,6 +318,25 @@
                       "type": "integer",
                       "minimum": 1,
                       "maximum": 250
+                    },
+                    "reference": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 180
+                    },
+                    "target_verse": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 500
+                    },
+                    "sha": {
+                      "type": "string",
+                      "minLength": 40,
+                      "maxLength": 40,
+                      "pattern": "^[A-Fa-f0-9]+$"
+                    },
+                    "navigation": {
+                      "$ref": "#/components/schemas/ChapterNavigation"
                     },
                     "items": {
                       "type": "array",
@@ -730,6 +764,41 @@
           }
         }
       },
+      "ChapterLocation": {
+        "type": ["object", "null"],
+        "additionalProperties": false,
+        "required": ["book", "book_name", "chapter"],
+        "properties": {
+          "book": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "book_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "chapter": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 250
+          }
+        }
+      },
+      "ChapterNavigation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["previous", "next"],
+        "properties": {
+          "previous": {
+            "$ref": "#/components/schemas/ChapterLocation"
+          },
+          "next": {
+            "$ref": "#/components/schemas/ChapterLocation"
+          }
+        }
+      },
       "Highlight": {
         "type": "object",
         "additionalProperties": false,
@@ -904,13 +973,57 @@
       "Preferences": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["translation", "search_defaults"],
+        "required": ["translation", "search_defaults", "reader_location"],
         "properties": {
           "translation": {
             "$ref": "#/components/schemas/TranslationCode"
           },
           "search_defaults": {
             "$ref": "#/components/schemas/SearchDefaults"
+          },
+          "reader_location": {
+            "$ref": "#/components/schemas/ReaderLocation"
+          }
+        }
+      },
+      "PreferenceUpdate": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 1,
+        "properties": {
+          "translation": {
+            "$ref": "#/components/schemas/TranslationCode"
+          },
+          "search_defaults": {
+            "$ref": "#/components/schemas/SearchDefaults"
+          },
+          "reader_location": {
+            "$ref": "#/components/schemas/ReaderLocation"
+          }
+        }
+      },
+      "ReaderLocation": {
+        "type": ["object", "null"],
+        "additionalProperties": false,
+        "required": ["translation", "book", "chapter", "verse"],
+        "properties": {
+          "translation": {
+            "$ref": "#/components/schemas/TranslationCode"
+          },
+          "book": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "chapter": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 250
+          },
+          "verse": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
           }
         }
       },

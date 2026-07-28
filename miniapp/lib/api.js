@@ -82,10 +82,10 @@ export class MiniAppApi {
     return this.#request(`chapters?${params({ translation, book })}`);
   }
 
-  scripture(translation, book, chapter) {
+  scripture(translation, book, chapter, verse = 1) {
     return this.#request("scripture", {
       method: "POST",
-      body: { translation, book, chapter },
+      body: { translation, book, chapter, verse },
     });
   }
 

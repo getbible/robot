@@ -1,9 +1,10 @@
 # Telegram Mini App deployment
 
-The GetBible Mini App is part of the same isolated robot instance. It gives
-search, filtering, Bible navigation, multi-selection, and review a contained
-mobile interface while direct commands such as `/bible John 3:16` retain their
-fast native path.
+The GetBible Mini App is part of the same isolated robot instance. Its existing
+Bible tab is a full chapter reader and selection surface alongside search,
+filtering, multi-selection, and review. Bare `/bible` resumes the user's last
+reader location, while direct commands such as `/bible John 3:16` retain their
+fast native posting path.
 
 The Mini App is independent of Telegram update delivery. A production instance
 may use polling and still serve the Mini App, or it may use a separate webhook
@@ -184,6 +185,25 @@ through translation, book, chapter, and verse screens remains smooth. Session
 exchange and the expensive search, Scripture, and posting operations consume a
 full token.
 
+## Reader data and memory bounds
+
+Complete reader chapters are retrieved from the GetBible Main API through the
+authenticated Robot backend. Librarian remains responsible for reference
+parsing, search, direct `/bible <reference>` retrieval, and final
+server-authoritative basket posting.
+
+The chapter client verifies a stable API hash before accepting a response and
+retries once if the chapter changes mid-read. Accepted chapters share one
+process-wide, 64-entry least-recently-used cache with a 15-minute freshness
+window, and each upstream chapter body has an independent 1 MiB ceiling. Those
+bounds are independent of user count. Chapter text is never stored in user
+preferences.
+
+The existing bounded preference store retains only translation, book, chapter,
+and the nearest visible verse for reader continuation. Existing databases are
+migrated in place with an empty reader location. The position update is
+debounced in the browser and is written only when the visible verse changes.
+
 ## Interface localization
 
 The Mini App follows the language of the selected Bible translation. The
@@ -289,18 +309,25 @@ private conversation with the bot:
 1. open the Mini App from `/search grace`;
 2. confirm Telegram light and dark themes both remain legible;
 3. filter and page without creating chat messages;
-4. select several complete verse cards, review them, and post once;
-5. confirm the server posts only resolved Scripture, in the originating chat;
-6. submit a search with the phone keyboard's Search key and confirm the
+4. open a search result in Bible, return to the same search position, and also
+   select a result directly;
+5. open bare `/bible`, read and select compact verses across two chapters, then
+   review and post once;
+6. scroll down and up to verify the chapter toolbar and bottom navigation hide
+   and return without covering Scripture;
+7. confirm the server posts only resolved Scripture, in the originating chat;
+8. submit a search with the phone keyboard's Search key and confirm the
    keyboard closes before the results appear;
-7. close and reopen the same launch before its absolute session timeout and
+9. close and reopen the same launch before its absolute session timeout and
    confirm the active selection is safely recovered;
-8. after posting in a group, confirm both the "Only visible to GetBibleBot"
+10. start a new bare `/bible` launch and confirm it resumes the last visible
+    verse without persisting any chapter text;
+11. after posting in a group, confirm both the "Only visible to GetBibleBot"
    command and the "Only visible to you" launch response are removed;
-9. retry a genuinely expired launch and confirm it fails closed, explains that
+12. retry a genuinely expired launch and confirm it fails closed, explains that
    `/bible` or `/search` must be sent again, and offers a close action instead
    of a reload loop;
-10. open the public URL in an ordinary browser and confirm no data or action API
+13. open the public URL in an ordinary browser and confirm no data or action API
    is available.
 
 For group rollout, repeat through the configured Main Mini App/deep-link path

@@ -124,8 +124,8 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - Raw exceptions, user input, tokens, paths, and internal URLs are absent from user-facing errors.
 - Missing message-deletion permission does not fail an otherwise successful command.
 - `/bible@BotName John 3:16` works in a test group.
-- Empty `/bible` opens the Mini App with translation, testament, book, chapter,
-  first-verse, last-verse, basket, and confirmation controls.
+- Empty `/bible` resumes the Mini App Bible reader with translation, book,
+  chapter, compact verse selection, basket, and confirmation controls.
 - `/search <words>` opens complete wrapping selectable Mini App results without
   posting automatically.
 - Empty `/search` opens the documented Mini App filter dashboard.
@@ -200,8 +200,9 @@ Using a dedicated test bot first, and then a private production-bot chat before 
 - Default and filtered Mini App searches page, select, deselect, and post one
   or multiple results.
 - Search never posts before explicit confirmation.
-- Light/dark themes, wrapping verse cards, safe-area layout, selected states,
-  and accessible focus/contrast are verified in Telegram clients.
+- Light/dark themes, compact reader text, auto-hiding chapter and bottom
+  controls, safe-area layout, selected states, and accessible focus/contrast
+  are verified in Telegram clients.
 - Ordinary-browser access and expired/mismatched launch attempts cannot read
   protected data or trigger a post.
 - A right-to-left translation and a non-66-book translation navigate correctly.

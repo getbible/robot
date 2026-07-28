@@ -116,8 +116,8 @@
             <button class="home-action" type="button" data-home-route="bible">
               <span class="home-action__icon" aria-hidden="true">▤</span>
               <span>
-                <strong data-i18n="home.browse">Browse the Bible</strong>
-                <small data-i18n="home.browse_hint">Choose a book, chapter, and verses</small>
+                <strong data-i18n="home.browse">Read the Bible</strong>
+                <small data-i18n="home.browse_hint">Read by chapter and select verses</small>
               </span>
               <span aria-hidden="true">›</span>
             </button>
@@ -219,55 +219,86 @@
 
         <section
           id="bible-view"
-          class="view"
+          class="view view--reader"
           data-view="bible"
           aria-labelledby="bible-title"
           hidden
         >
-          <div class="view__intro view__intro--compact">
-            <p class="eyebrow" data-i18n="bible.eyebrow">Browse Scripture</p>
+          <div id="bible-intro" class="view__intro view__intro--compact">
+            <p class="eyebrow" data-i18n="bible.eyebrow">Read Scripture</p>
             <h1 id="bible-title" data-i18n="bible.title">Choose a passage</h1>
-            <p data-i18n="bible.body">Open a chapter, then tap every verse you want to include.</p>
-          </div>
+            <p data-i18n="bible.body">Open a chapter to read, then tap any verse you want to include.</p>
 
-          <div
-            class="bible-picker"
-            aria-label="Bible navigation"
-            data-i18n-aria-label="bible.navigation"
-          >
-            <label class="select-control">
-              <span data-i18n="bible.translation">Translation</span>
-              <select id="bible-translation"></select>
-            </label>
-            <label class="select-control">
-              <span data-i18n="bible.book">Book</span>
-              <select id="bible-book" disabled>
-                <option value="" data-i18n="bible.choose_book">Choose a book</option>
-              </select>
-            </label>
-            <label class="select-control">
-              <span data-i18n="bible.chapter">Chapter</span>
-              <select id="bible-chapter" disabled>
-                <option value="" data-i18n="bible.choose_chapter">Choose a chapter</option>
-              </select>
-            </label>
-          </div>
-
-          <div id="bible-heading" class="chapter-heading" hidden>
-            <div>
-              <p id="bible-translation-label"></p>
-              <h2 id="bible-reference"></h2>
+            <div
+              id="bible-picker"
+              class="bible-picker"
+              aria-label="Bible navigation"
+              data-i18n-aria-label="bible.navigation"
+            >
+              <label class="select-control">
+                <span data-i18n="bible.translation">Translation</span>
+                <select id="bible-translation"></select>
+              </label>
+              <label class="select-control">
+                <span data-i18n="bible.book">Book</span>
+                <select id="bible-book" disabled>
+                  <option value="" data-i18n="bible.choose_book">Choose a book</option>
+                </select>
+              </label>
+              <label class="select-control">
+                <span data-i18n="bible.chapter">Chapter</span>
+                <select id="bible-chapter" disabled>
+                  <option value="" data-i18n="bible.choose_chapter">Choose a chapter</option>
+                </select>
+              </label>
             </div>
-            <span id="bible-verse-count"></span>
           </div>
+
+          <div id="bible-heading" class="reader-toolbar" hidden>
+            <button
+              id="bible-previous"
+              class="reader-toolbar__arrow"
+              type="button"
+              aria-label="Previous chapter"
+            >
+              ‹
+            </button>
+            <button id="bible-passage" class="reader-toolbar__passage" type="button">
+              <strong id="bible-reference"></strong>
+              <span>
+                <span id="bible-translation-label"></span>
+                <span aria-hidden="true"> · </span>
+                <span id="bible-verse-count"></span>
+              </span>
+            </button>
+            <button
+              id="bible-next"
+              class="reader-toolbar__arrow"
+              type="button"
+              aria-label="Next chapter"
+            >
+              ›
+            </button>
+          </div>
+
+          <button id="bible-search-return" class="reader-return" type="button" hidden>
+            <span aria-hidden="true">‹</span>
+            <span data-i18n="nav.search">Search</span>
+          </button>
 
           <div id="bible-state" class="state-panel"></div>
           <div
             id="bible-verses"
-            class="verse-list"
+            class="reader-scripture"
             aria-label="Chapter verses"
             data-i18n-aria-label="bible.verses_label"
           ></div>
+          <button
+            id="bible-continue"
+            class="reader-continue"
+            type="button"
+            hidden
+          ></button>
         </section>
 
         <section
@@ -291,9 +322,9 @@
           <div id="selection-empty" class="empty-selection">
             <div class="empty-selection__icon" aria-hidden="true">✓</div>
             <h2 data-i18n="selection.empty_title">Your selected verses will appear here</h2>
-            <p data-i18n="selection.empty_body">Browse or search, then tap the full verse card to add it.</p>
+            <p data-i18n="selection.empty_body">Read or search, then tap a verse to add it.</p>
             <button id="empty-browse" class="button button--primary" type="button">
-              <span data-i18n="selection.browse">Browse the Bible</span>
+              <span data-i18n="selection.browse">Open the Bible</span>
             </button>
           </div>
 
@@ -311,24 +342,41 @@
         </section>
       </div>
 
-      <nav class="bottom-nav" aria-label="getBible.Life" data-i18n-aria-label="nav.label">
-        <button class="bottom-nav__item is-active" type="button" data-route="home">
-          <span class="bottom-nav__icon" aria-hidden="true">⌂</span>
-          <span data-i18n="nav.home">Home</span>
+      <nav
+        id="bottom-nav"
+        class="bottom-nav"
+        aria-label="getBible.Life"
+        data-i18n-aria-label="nav.label"
+      >
+        <button
+          id="bottom-nav-handle"
+          class="bottom-nav__handle"
+          type="button"
+          aria-expanded="true"
+          aria-label="getBible.Life"
+          data-i18n-aria-label="nav.label"
+        >
+          <span aria-hidden="true">⌄</span>
         </button>
-        <button class="bottom-nav__item" type="button" data-route="search">
-          <span class="bottom-nav__icon" aria-hidden="true">⌕</span>
-          <span data-i18n="nav.search">Search</span>
-        </button>
-        <button class="bottom-nav__item" type="button" data-route="bible">
-          <span class="bottom-nav__icon bottom-nav__book" aria-hidden="true">▤</span>
-          <span data-i18n="nav.bible">Bible</span>
-        </button>
-        <button class="bottom-nav__item" type="button" data-route="selection">
-          <span class="bottom-nav__icon" aria-hidden="true">✓</span>
-          <span data-i18n="nav.selected">Selected</span>
-          <span id="nav-selection-count" class="bottom-nav__badge" hidden>0</span>
-        </button>
+        <div class="bottom-nav__items">
+          <button class="bottom-nav__item is-active" type="button" data-route="home">
+            <span class="bottom-nav__icon" aria-hidden="true">⌂</span>
+            <span data-i18n="nav.home">Home</span>
+          </button>
+          <button class="bottom-nav__item" type="button" data-route="search">
+            <span class="bottom-nav__icon" aria-hidden="true">⌕</span>
+            <span data-i18n="nav.search">Search</span>
+          </button>
+          <button class="bottom-nav__item" type="button" data-route="bible">
+            <span class="bottom-nav__icon bottom-nav__book" aria-hidden="true">▤</span>
+            <span data-i18n="nav.bible">Bible</span>
+          </button>
+          <button class="bottom-nav__item" type="button" data-route="selection">
+            <span class="bottom-nav__icon" aria-hidden="true">✓</span>
+            <span data-i18n="nav.selected">Selected</span>
+            <span id="nav-selection-count" class="bottom-nav__badge" hidden>0</span>
+          </button>
+        </div>
       </nav>
     </div>
 

@@ -28,9 +28,16 @@ const i18n = new I18n();
 let api = null;
 let filterDraft = null;
 let accessAction = () => window.location.reload();
+let readerPositionTimer = null;
+let pendingReaderPosition = null;
+let readerPositionSaveTask = null;
+let savedReaderPositionKey = "";
 
 const state = {
   route: "home",
+  scrollPositions: new Map(),
+  navigationCollapsed: false,
+  lastScrollTop: 0,
   translations: [],
   filters: { ...DEFAULT_FILTERS, books: [], exclude: [] },
   basket: [],
@@ -54,8 +61,15 @@ const state = {
     selectedBook: null,
     selectedChapter: null,
     entryReference: "",
+    resumeLocation: null,
     reference: "",
     verses: [],
+    navigation: { previous: null, next: null },
+    targetVerse: 1,
+    focusHighlights: [],
+    returnToSearch: false,
+    pickerVisible: true,
+    requestId: 0,
     status: "idle",
     error: null,
   },
@@ -112,15 +126,23 @@ const elements = mapElements({
   searchState: "search-state",
   searchResults: "search-results",
   loadMore: "load-more",
+  bibleView: "bible-view",
+  bibleIntro: "bible-intro",
+  biblePicker: "bible-picker",
   bibleTranslation: "bible-translation",
   bibleBook: "bible-book",
   bibleChapter: "bible-chapter",
   bibleHeading: "bible-heading",
+  biblePrevious: "bible-previous",
+  biblePassage: "bible-passage",
+  bibleNext: "bible-next",
   bibleTranslationLabel: "bible-translation-label",
   bibleReference: "bible-reference",
   bibleVerseCount: "bible-verse-count",
+  bibleSearchReturn: "bible-search-return",
   bibleState: "bible-state",
   bibleVerses: "bible-verses",
+  bibleContinue: "bible-continue",
   selectionSummary: "selection-summary",
   clearSelection: "clear-selection",
   selectionEmpty: "selection-empty",
@@ -129,6 +151,8 @@ const elements = mapElements({
   postSelection: "post-selection",
   emptyBrowse: "empty-browse",
   navSelectionCount: "nav-selection-count",
+  bottomNav: "bottom-nav",
+  bottomNavHandle: "bottom-nav-handle",
   filtersDialog: "filters-dialog",
   filtersForm: "filters-form",
   filterTranslation: "filter-translation",
@@ -180,6 +204,8 @@ async function boot() {
     state.translations = session.translations;
     state.filters = session.preferences.search_defaults;
     state.bible.translation = session.preferences.translation;
+    state.bible.resumeLocation = session.preferences.reader_location;
+    savedReaderPositionKey = readerLocationKey(state.bible.resumeLocation);
     state.basket = session.basket.items;
     populateTranslations();
     syncTranslationControls();
@@ -216,10 +242,32 @@ function attachListeners() {
   window.addEventListener("offline", updateConnectionState);
 
   document.querySelectorAll("[data-route]").forEach((button) => {
-    button.addEventListener("click", () => setRoute(button.dataset.route));
+    button.addEventListener("click", () => {
+      showNavigation();
+      setRoute(button.dataset.route);
+    });
   });
   document.querySelectorAll("[data-home-route]").forEach((button) => {
-    button.addEventListener("click", () => setRoute(button.dataset.homeRoute));
+    button.addEventListener("click", () => {
+      showNavigation();
+      setRoute(button.dataset.homeRoute);
+    });
+  });
+  document.querySelectorAll("[data-view]").forEach((view) => {
+    view.addEventListener("scroll", () => onViewScroll(view), { passive: true });
+  });
+  elements.bottomNavHandle.addEventListener("click", () => {
+    setNavigationCollapsed(!state.navigationCollapsed);
+  });
+  document.addEventListener("pointermove", (event) => {
+    if (window.innerHeight - event.clientY < 52) {
+      showNavigation();
+    }
+  }, { passive: true });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && state.route === "bible") {
+      persistVisibleReaderPosition();
+    }
   });
 
   elements.searchForm.addEventListener("submit", (event) => {
@@ -295,8 +343,11 @@ function attachListeners() {
     }
   });
 
-  elements.bibleTranslation.addEventListener("change", () => {
+  elements.bibleTranslation.addEventListener("change", async () => {
+    persistVisibleReaderPosition();
+    await waitForReaderPositionSave();
     state.bible.translation = elements.bibleTranslation.value;
+    state.bible.resumeLocation = null;
     state.filters = normalizeFilters(
       { ...state.filters, translation: state.bible.translation, books: [] },
       state.bible.translation,
@@ -308,6 +359,20 @@ function attachListeners() {
   });
   elements.bibleBook.addEventListener("change", () => void selectBibleBook());
   elements.bibleChapter.addEventListener("change", () => void selectBibleChapter());
+  elements.biblePrevious.addEventListener("click", () => {
+    void openChapterLocation(state.bible.navigation.previous);
+  });
+  elements.bibleNext.addEventListener("click", () => {
+    void openChapterLocation(state.bible.navigation.next);
+  });
+  elements.bibleContinue.addEventListener("click", () => {
+    void openChapterLocation(state.bible.navigation.next);
+  });
+  elements.biblePassage.addEventListener("click", showBiblePicker);
+  elements.bibleSearchReturn.addEventListener("click", () => {
+    state.bible.returnToSearch = false;
+    setRoute("search");
+  });
 
   elements.searchResults.addEventListener("click", onVerseCardClick);
   elements.bibleVerses.addEventListener("click", onVerseCardClick);
@@ -351,11 +416,22 @@ function showExpiredAccess() {
 
 function setRoute(requestedRoute) {
   const route = routeName(requestedRoute);
+  const currentView = document.querySelector(`[data-view="${state.route}"]`);
+  if (currentView) {
+    state.scrollPositions.set(state.route, currentView.scrollTop);
+  }
+  if (state.route === "bible" && route !== "bible") {
+    persistVisibleReaderPosition();
+  }
   state.route = route;
   document.querySelectorAll("[data-view]").forEach((view) => {
     view.hidden = view.dataset.view !== route;
     if (!view.hidden) {
-      view.scrollTop = 0;
+      const saved = state.scrollPositions.get(route) ?? 0;
+      window.requestAnimationFrame(() => {
+        view.scrollTop = saved;
+        state.lastScrollTop = saved;
+      });
     }
   });
   document.querySelectorAll("[data-route]").forEach((button) => {
@@ -367,13 +443,150 @@ function setRoute(requestedRoute) {
       button.removeAttribute("aria-current");
     }
   });
+  showNavigation();
   syncBackAction();
   if (route === "bible" && state.bible.books.length === 0) {
     void loadBibleBooks();
+  } else if (route === "bible") {
+    elements.bibleHeading.classList.remove("is-hidden");
   }
   if (route === "selection") {
     renderSelection();
   }
+}
+
+function onViewScroll(view) {
+  if (view.hidden || view.dataset.view !== state.route) {
+    return;
+  }
+  const scrollTop = Math.max(0, view.scrollTop);
+  const delta = scrollTop - state.lastScrollTop;
+  state.scrollPositions.set(state.route, scrollTop);
+  if (scrollTop < 20 || delta < -8) {
+    showNavigation();
+  } else if (delta > 10 && scrollTop > 64) {
+    setNavigationCollapsed(true);
+  }
+
+  if (view === elements.bibleView && state.bible.status === "ready") {
+    const hideToolbar = delta > 6 && scrollTop > 58;
+    if (hideToolbar) {
+      elements.bibleHeading.classList.add("is-hidden");
+    } else if (delta < -4 || scrollTop < 24) {
+      elements.bibleHeading.classList.remove("is-hidden");
+    }
+    rememberVisibleReaderPosition();
+  }
+  state.lastScrollTop = scrollTop;
+}
+
+function setNavigationCollapsed(collapsed) {
+  state.navigationCollapsed = Boolean(collapsed);
+  elements.bottomNav.classList.toggle(
+    "is-collapsed",
+    state.navigationCollapsed,
+  );
+  elements.bottomNavHandle.setAttribute(
+    "aria-expanded",
+    String(!state.navigationCollapsed),
+  );
+}
+
+function showNavigation() {
+  setNavigationCollapsed(false);
+}
+
+function rememberVisibleReaderPosition() {
+  if (readerPositionTimer !== null) {
+    window.clearTimeout(readerPositionTimer);
+  }
+  readerPositionTimer = window.setTimeout(() => {
+    readerPositionTimer = null;
+    persistVisibleReaderPosition();
+  }, 900);
+}
+
+function persistVisibleReaderPosition() {
+  if (readerPositionTimer !== null) {
+    window.clearTimeout(readerPositionTimer);
+    readerPositionTimer = null;
+  }
+  if (state.bible.status !== "ready" || elements.bibleView.hidden) {
+    return;
+  }
+  const verses = [...elements.bibleVerses.querySelectorAll("[data-reader-verse]")];
+  const visible =
+    verses.find((verse) => verse.getBoundingClientRect().bottom > 56) ??
+    verses.at(-1);
+  const number = Number(visible?.dataset.readerVerse);
+  if (
+    !Number.isInteger(number) ||
+    !state.bible.selectedBook ||
+    !state.bible.selectedChapter
+  ) {
+    return;
+  }
+  state.bible.targetVerse = number;
+  state.bible.resumeLocation = {
+    translation: state.bible.translation,
+    book: state.bible.selectedBook.number,
+    chapter: state.bible.selectedChapter.number,
+    verse: number,
+  };
+  void saveReaderPosition();
+}
+
+async function saveReaderPosition() {
+  if (!state.bible.resumeLocation) {
+    return;
+  }
+  const location = { ...state.bible.resumeLocation };
+  const key = readerLocationKey(location);
+  if (!key || key === savedReaderPositionKey) {
+    return;
+  }
+  pendingReaderPosition = location;
+  if (!readerPositionSaveTask) {
+    readerPositionSaveTask = drainReaderPositionSaves().finally(() => {
+      readerPositionSaveTask = null;
+    });
+  }
+  await readerPositionSaveTask;
+}
+
+async function drainReaderPositionSaves() {
+  try {
+    while (pendingReaderPosition) {
+      const pending = pendingReaderPosition;
+      pendingReaderPosition = null;
+      const pendingKey = readerLocationKey(pending);
+      if (pendingKey === savedReaderPositionKey) {
+        continue;
+      }
+      await api.preferences({ reader_location: pending });
+      savedReaderPositionKey = pendingKey;
+    }
+  } catch (error) {
+    pendingReaderPosition = null;
+    handleSessionError(error);
+  }
+}
+
+async function waitForReaderPositionSave() {
+  if (readerPositionSaveTask) {
+    await readerPositionSaveTask;
+  }
+}
+
+function readerLocationKey(location) {
+  return location
+    ? [
+      location.translation,
+      location.book,
+      location.chapter,
+      location.verse,
+    ].join(":")
+    : "";
 }
 
 function syncBackAction() {
@@ -730,6 +943,7 @@ async function getBooks(translation) {
 }
 
 async function loadBibleBooks() {
+  const requestId = ++state.bible.requestId;
   state.bible.status = "loading";
   state.bible.error = null;
   state.bible.books = [];
@@ -737,9 +951,15 @@ async function loadBibleBooks() {
   state.bible.selectedBook = null;
   state.bible.selectedChapter = null;
   state.bible.verses = [];
+  state.bible.navigation = { previous: null, next: null };
+  state.bible.pickerVisible = true;
   renderBible();
   try {
-    state.bible.books = await getBooks(state.bible.translation);
+    const books = await getBooks(state.bible.translation);
+    if (requestId !== state.bible.requestId) {
+      return;
+    }
+    state.bible.books = books;
     state.bible.status = "choose_book";
     const entryReference = state.bible.entryReference;
     state.bible.entryReference = "";
@@ -753,7 +973,24 @@ async function loadBibleBooks() {
       await selectBibleBook(entrypoint.book_number, entrypoint.chapter);
       return;
     }
+    const resume = state.bible.resumeLocation;
+    if (
+      resume?.translation === state.bible.translation &&
+      state.bible.books.some((book) => book.number === resume.book)
+    ) {
+      renderBible();
+      await selectBibleBook(
+        resume.book,
+        resume.chapter,
+        resume.verse,
+        state.bible.focusHighlights,
+      );
+      return;
+    }
   } catch (error) {
+    if (requestId !== state.bible.requestId) {
+      return;
+    }
     state.bible.status = "error";
     state.bible.error = safeError(error);
     handleSessionError(error);
@@ -761,7 +998,15 @@ async function loadBibleBooks() {
   renderBible();
 }
 
-async function selectBibleBook(requestedBookNumber = null, requestedChapter = null) {
+async function selectBibleBook(
+  requestedBookNumber = null,
+  requestedChapter = null,
+  targetVerse = 1,
+  focusHighlights = [],
+) {
+  persistVisibleReaderPosition();
+  await waitForReaderPositionSave();
+  const requestId = ++state.bible.requestId;
   const number = Number.isInteger(requestedBookNumber)
     ? requestedBookNumber
     : Number(elements.bibleBook.value);
@@ -778,19 +1023,30 @@ async function selectBibleBook(requestedBookNumber = null, requestedChapter = nu
   state.bible.status = "loading_chapters";
   renderBible();
   try {
-    state.bible.chapters = normalizeChapters(
+    const chapters = normalizeChapters(
       await api.chapters(state.bible.translation, book.number),
     );
+    if (requestId !== state.bible.requestId) {
+      return;
+    }
+    state.bible.chapters = chapters;
     state.bible.status = "choose_chapter";
     if (
       Number.isInteger(requestedChapter) &&
       state.bible.chapters.some((chapter) => chapter.number === requestedChapter)
     ) {
       renderBible();
-      await selectBibleChapter(requestedChapter);
+      await selectBibleChapter(
+        requestedChapter,
+        targetVerse,
+        focusHighlights,
+      );
       return;
     }
   } catch (error) {
+    if (requestId !== state.bible.requestId) {
+      return;
+    }
     state.bible.status = "error";
     state.bible.error = safeError(error);
     handleSessionError(error);
@@ -798,7 +1054,14 @@ async function selectBibleBook(requestedBookNumber = null, requestedChapter = nu
   renderBible();
 }
 
-async function selectBibleChapter(requestedChapterNumber = null) {
+async function selectBibleChapter(
+  requestedChapterNumber = null,
+  targetVerse = 1,
+  focusHighlights = [],
+) {
+  persistVisibleReaderPosition();
+  await waitForReaderPositionSave();
+  const requestId = ++state.bible.requestId;
   const number = Number.isInteger(requestedChapterNumber)
     ? requestedChapterNumber
     : Number(elements.bibleChapter.value);
@@ -812,6 +1075,12 @@ async function selectBibleChapter(requestedChapterNumber = null) {
     return;
   }
   state.bible.status = "loading_scripture";
+  state.bible.targetVerse = Number.isInteger(targetVerse) ? targetVerse : 1;
+  state.bible.focusHighlights = Array.isArray(focusHighlights)
+    ? focusHighlights
+    : [];
+  state.bible.pickerVisible = false;
+  elements.bibleView.scrollTop = 0;
   renderBible();
   try {
     const scripture = normalizeScripture(
@@ -819,19 +1088,110 @@ async function selectBibleChapter(requestedChapterNumber = null) {
         state.bible.translation,
         state.bible.selectedBook.number,
         chapter.number,
+        state.bible.targetVerse,
       ),
     );
+    if (requestId !== state.bible.requestId) {
+      return;
+    }
     state.bible.reference =
       scripture.reference ||
       `${state.bible.selectedBook.name} ${chapter.number}`;
     state.bible.verses = scripture.verses;
+    state.bible.navigation = scripture.navigation;
+    state.bible.targetVerse = scripture.target_verse;
+    state.bible.resumeLocation = {
+      translation: state.bible.translation,
+      book: state.bible.selectedBook.number,
+      chapter: chapter.number,
+      verse: scripture.target_verse,
+    };
+    savedReaderPositionKey = readerLocationKey(state.bible.resumeLocation);
     state.bible.status = scripture.verses.length === 0 ? "empty" : "ready";
   } catch (error) {
+    if (requestId !== state.bible.requestId) {
+      return;
+    }
     state.bible.status = "error";
     state.bible.error = safeError(error);
     handleSessionError(error);
   }
   renderBible();
+  if (state.bible.status === "ready") {
+    scrollReaderToVerse(state.bible.targetVerse);
+  }
+}
+
+async function openChapterLocation(location) {
+  if (!location) {
+    return;
+  }
+  state.bible.focusHighlights = [];
+  if (state.bible.selectedBook?.number === location.book) {
+    await selectBibleChapter(location.chapter, 1);
+    return;
+  }
+  await selectBibleBook(location.book, location.chapter, 1);
+}
+
+async function openBibleAtVerse(verse, { fromSearch = false } = {}) {
+  if (!verse) {
+    return;
+  }
+  state.scrollPositions.set(state.route, currentRouteScrollTop());
+  state.bible.returnToSearch = fromSearch;
+  state.bible.focusHighlights = fromSearch ? verse.highlights : [];
+  state.bible.resumeLocation = {
+    translation: verse.translation,
+    book: verse.book_number,
+    chapter: verse.chapter,
+    verse: verse.verse,
+  };
+  const translationChanged = state.bible.translation !== verse.translation;
+  state.bible.translation = verse.translation;
+  state.filters = normalizeFilters(
+    { ...state.filters, translation: verse.translation, books: [] },
+    verse.translation,
+  );
+  syncTranslationControls();
+  renderLocalizedState();
+  setRoute("bible");
+  if (translationChanged || state.bible.books.length === 0) {
+    await loadBibleBooks();
+    return;
+  }
+  await selectBibleBook(
+    verse.book_number,
+    verse.chapter,
+    verse.verse,
+    state.bible.focusHighlights,
+  );
+}
+
+function currentRouteScrollTop() {
+  const view = document.querySelector(`[data-view="${state.route}"]`);
+  return view ? view.scrollTop : 0;
+}
+
+function showBiblePicker() {
+  state.bible.pickerVisible = true;
+  elements.bibleHeading.classList.remove("is-hidden");
+  renderBible();
+  elements.bibleView.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function scrollReaderToVerse(number) {
+  window.requestAnimationFrame(() => {
+    const verse = elements.bibleVerses.querySelector(
+      `[data-reader-verse="${number}"]`,
+    );
+    if (!verse) {
+      return;
+    }
+    verse.scrollIntoView({ block: "start", behavior: "auto" });
+    elements.bibleView.scrollTop = Math.max(0, elements.bibleView.scrollTop - 48);
+    state.scrollPositions.set("bible", elements.bibleView.scrollTop);
+  });
 }
 
 function renderBible() {
@@ -852,9 +1212,12 @@ function renderBible() {
     (chapter) => i18n.t("bible.chapter_number", { number: chapter.number }),
   );
   elements.bibleChapter.disabled = bible.chapters.length === 0;
+  elements.bibleIntro.hidden = !bible.pickerVisible;
   elements.bibleVerses.replaceChildren();
   elements.bibleState.hidden = true;
   elements.bibleHeading.hidden = true;
+  elements.bibleSearchReturn.hidden = true;
+  elements.bibleContinue.hidden = true;
 
   if (["loading", "loading_chapters", "loading_scripture"].includes(bible.status)) {
     renderSkeletons(elements.bibleVerses, bible.status === "loading_scripture" ? 5 : 2);
@@ -893,14 +1256,50 @@ function renderBible() {
     return;
   }
 
-  elements.bibleHeading.hidden = false;
+  elements.bibleHeading.hidden = bible.pickerVisible;
+  elements.bibleHeading.classList.remove("is-hidden");
   elements.bibleTranslationLabel.textContent = translationName(bible.translation);
   elements.bibleReference.textContent = bible.reference;
   elements.bibleVerseCount.textContent = formatVerseCount(bible.verses.length);
+  elements.biblePassage.setAttribute(
+    "aria-label",
+    `${i18n.t("bible.navigation")}: ${bible.reference}`,
+  );
+  elements.biblePrevious.disabled = !bible.navigation.previous;
+  elements.bibleNext.disabled = !bible.navigation.next;
+  elements.biblePrevious.setAttribute(
+    "aria-label",
+    chapterNavigationLabel(bible.navigation.previous),
+  );
+  elements.bibleNext.setAttribute(
+    "aria-label",
+    chapterNavigationLabel(bible.navigation.next),
+  );
+  elements.bibleSearchReturn.hidden = !bible.returnToSearch;
   const selected = selectedIds();
-  for (const verse of bible.verses) {
-    elements.bibleVerses.append(createVerseCard(verse, selected));
+  bible.verses.forEach((verse, index) => {
+    elements.bibleVerses.append(
+      createReaderVerse(
+        verse,
+        selected,
+        bible.verses[index - 1] ?? null,
+        bible.verses[index + 1] ?? null,
+      ),
+    );
+  });
+  if (bible.navigation.next) {
+    elements.bibleContinue.hidden = false;
+    elements.bibleContinue.textContent =
+      `› ${bible.navigation.next.book_name} ${bible.navigation.next.chapter}`;
   }
+}
+
+function chapterNavigationLabel(location) {
+  return location
+    ? `${location.book_name} ${i18n.t("bible.chapter_number", {
+      number: location.chapter,
+    })}`
+    : i18n.t("bible.chapter");
 }
 
 function retryBible() {
@@ -941,6 +1340,66 @@ function createVerseCard(verse, selected) {
   text.className = "verse-card__text";
   appendHighlightedText(text, verse.text, verse.highlights);
   button.append(reference, text);
+  const result = document.createElement("article");
+  result.className = "verse-result";
+  const context = document.createElement("button");
+  context.type = "button";
+  context.className = "verse-context";
+  context.dataset.openBible = verse.selection_id;
+  context.setAttribute(
+    "aria-label",
+    `${i18n.t("nav.bible")}: ${verse.reference}`,
+  );
+  context.textContent = `${i18n.t("nav.bible")} ›`;
+  result.append(button, context);
+  return result;
+}
+
+function createReaderVerse(verse, selected, previous, following) {
+  const button = document.createElement("button");
+  const isSelected = selected.has(verse.selection_id);
+  button.type = "button";
+  button.className = `reader-verse${isSelected ? " is-selected" : ""}`;
+  button.dataset.selectionId = verse.selection_id;
+  button.dataset.readerVerse = String(verse.verse);
+  button.setAttribute("aria-pressed", String(isSelected));
+  button.setAttribute(
+    "aria-label",
+    i18n.t(isSelected ? "verse.remove_aria" : "verse.add_aria", {
+      reference: verse.reference,
+      text: verse.text,
+    }),
+  );
+  button.disabled = state.pendingSelections.has(verse.selection_id);
+  if (verse.verse === state.bible.targetVerse && state.bible.focusHighlights.length) {
+    button.classList.add("is-focused");
+  }
+  if (
+    isSelected &&
+    (!previous || !selected.has(previous.selection_id))
+  ) {
+    button.classList.add("is-selection-start");
+  }
+  if (
+    isSelected &&
+    (!following || !selected.has(following.selection_id))
+  ) {
+    button.classList.add("is-selection-end");
+  }
+
+  const number = document.createElement("span");
+  number.className = "reader-verse__number";
+  number.textContent = String(verse.verse);
+  const text = document.createElement("span");
+  text.className = "reader-verse__text";
+  appendHighlightedText(
+    text,
+    verse.text,
+    verse.verse === state.bible.targetVerse
+      ? state.bible.focusHighlights
+      : [],
+  );
+  button.append(number, text);
   return button;
 }
 
@@ -961,10 +1420,26 @@ function appendHighlightedText(container, text, highlights) {
 }
 
 function onVerseCardClick(event) {
+  const context = event.target.closest("[data-open-bible]");
+  if (context) {
+    const verse = findVerse(context.dataset.openBible);
+    void openBibleAtVerse(verse, {
+      fromSearch: Boolean(elements.searchResults.contains(context)),
+    });
+    return;
+  }
   const card = event.target.closest("[data-selection-id]");
   if (card) {
     void toggleBasketItem(card.dataset.selectionId);
   }
+}
+
+function findVerse(selectionId) {
+  return [
+    ...state.search.results,
+    ...state.bible.verses,
+    ...state.basket,
+  ].find((verse) => verse.selection_id === selectionId) ?? null;
 }
 
 async function toggleBasketItem(selectionId) {
@@ -1004,6 +1479,9 @@ function refreshSelectionVisuals() {
     card.setAttribute("aria-pressed", String(isSelected));
     card.disabled = state.pendingSelections.has(selectionId);
   });
+  if (state.bible.status === "ready") {
+    renderBible();
+  }
   renderBasketStatus();
   renderSelection();
 }
@@ -1064,6 +1542,12 @@ function renderSelection() {
     actions.className = "selection-item__actions";
     actions.append(
       selectionAction(
+        "▤",
+        "bible",
+        `${i18n.t("nav.bible")}: ${verse.reference}`,
+        false,
+      ),
+      selectionAction(
         "↑",
         "up",
         i18n.t("selection.move_earlier", { reference: verse.reference }),
@@ -1114,6 +1598,10 @@ async function onSelectionAction(event) {
   }
   if (button.dataset.selectionAction === "remove") {
     await toggleBasketItem(item.dataset.itemId);
+    return;
+  }
+  if (button.dataset.selectionAction === "bible") {
+    await openBibleAtVerse(state.basket[index]);
     return;
   }
   const offset = button.dataset.selectionAction === "up" ? -1 : 1;

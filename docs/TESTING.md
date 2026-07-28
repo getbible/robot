@@ -107,6 +107,9 @@ The tests cover at least these invariants:
 - ordinary references do not trigger speculative translation lookups;
 - an empty `/bible` never substitutes a hidden default verse;
 - explicit `/bible <reference>` commands still post immediately;
+- bare `/bible` resumes only a bounded translation/book/chapter/verse location;
+- full reader chapters use one hash-consistent Main API request path and a
+  separately bounded response body rather than Librarian range chunking;
 - incomplete `/bible` and `/search` commands create short-lived, user-bound
   Mini App launches without exposing chat/user identifiers or queries in URLs;
 - every protected Mini App data/action route requires fresh signed Telegram
@@ -210,7 +213,8 @@ In a group where the bot can delete messages, exercise all three completion
 paths:
 
 1. `/bible John 3:16`;
-2. empty `/bible`, complete the Mini App basket, then press **Post Scripture**;
+2. empty `/bible`, read and select verses in the compact reader, then press
+   **Post Scripture**;
 3. `/search grace`, select results in the Mini App, then press **Post selected**.
 
 For `/bible` and `/search` in a group, confirm all browsing, filtering, paging,

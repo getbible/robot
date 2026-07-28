@@ -26,6 +26,23 @@ test("uses only relative same-origin API paths and no authoritative verse payloa
   assert.doesNotMatch(api, /body: \{[^}]*\btext\b/s);
 });
 
+test("keeps Bible as the compact reader and selector without adding a fifth route", async () => {
+  const html = await readFile(new URL("index.html", root), "utf8");
+  const css = await readFile(new URL("styles.css", root), "utf8");
+  const app = await readFile(new URL("app.js", root), "utf8");
+
+  assert.equal([...html.matchAll(/data-route="/g)].length, 4);
+  assert.match(html, /id="bible-passage"/);
+  assert.match(html, /id="bible-previous"/);
+  assert.match(html, /id="bible-next"/);
+  assert.match(html, /id="bottom-nav-handle"/);
+  assert.match(css, /\.reader-toolbar\.is-hidden/);
+  assert.match(css, /\.bottom-nav\.is-collapsed/);
+  assert.match(app, /rememberVisibleReaderPosition/);
+  assert.match(app, /persistVisibleReaderPosition/);
+  assert.match(app, /openBibleAtVerse/);
+});
+
 test("does not persist Telegram launch data or bearer tokens beyond sessionStorage", async () => {
   const app = await readFile(new URL("app.js", root), "utf8");
   const api = await readFile(new URL("lib/api.js", root), "utf8");

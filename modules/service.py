@@ -33,7 +33,13 @@ from getbible import (
 from config import Settings
 
 from .audit import audit_event
-from .catalog import BookOption, CatalogClient, ChapterOption, TranslationOption
+from .catalog import (
+    BookOption,
+    CatalogClient,
+    ChapterContent,
+    ChapterOption,
+    TranslationOption,
+)
 from .errors import CircuitOpen, RobotBusy, RobotInputError, ScriptureUnavailable
 from .interactions import SearchOptions, SearchResult
 
@@ -303,6 +309,21 @@ class ScriptureService:
             self._catalog.chapters,
             translation,
             book,
+        )
+
+    async def chapter(
+        self,
+        translation: str,
+        book: BookOption,
+        chapter: ChapterOption,
+    ) -> ChapterContent:
+        """Load one complete chapter from the Main API, not Librarian."""
+        return await self._repository_call(
+            "catalog_scripture_chapter_lookups",
+            self._catalog.chapter,
+            translation,
+            book,
+            chapter,
         )
 
     async def search(

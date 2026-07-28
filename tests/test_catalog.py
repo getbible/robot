@@ -10,7 +10,7 @@ from getbible import (
     RepositoryResponseTooLarge,
 )
 
-from modules.catalog import BookOption, CatalogClient
+from modules.catalog import BookOption, CatalogClient, ChapterOption
 
 
 class _Response:
@@ -221,6 +221,70 @@ class CatalogClientTestCase(unittest.TestCase):
             self.assertRaises(CacheIntegrityError),
         ):
             _client().chapters("kjv", BookOption(43, "John", "0" * 40))
+
+    def test_whole_chapter_is_hash_consistent_validated_and_cached(self) -> None:
+        sha = ("c" * 40).encode()
+        payload = json.dumps(
+            {
+                "translation": "King James Version",
+                "abbreviation": "kjv",
+                "book_nr": 43,
+                "book_name": "John",
+                "chapter": 3,
+                "name": "John 3",
+                "verses": [
+                    {"chapter": 3, "verse": 1, "text": "First verse."},
+                    {"chapter": 3, "verse": 2, "text": "Second verse."},
+                ],
+            }
+        ).encode()
+        with patch(
+            "modules.catalog.requests.get",
+            side_effect=[
+                _Response(sha),
+                _Response(payload),
+                _Response(sha),
+            ],
+        ) as request:
+            client = _client()
+            first = client.chapter(
+                "kjv",
+                BookOption(43, "John", "a" * 40),
+                ChapterOption(3, (1, 2)),
+            )
+            second = client.chapter(
+                "kjv",
+                BookOption(43, "John", "a" * 40),
+                ChapterOption(3, (1, 2)),
+            )
+
+        self.assertIs(first, second)
+        self.assertEqual(first.reference, "John 3")
+        self.assertEqual(first.sha, "c" * 40)
+        self.assertEqual([verse.number for verse in first.verses], [1, 2])
+        self.assertEqual(request.call_count, 3)
+
+    def test_whole_chapter_has_an_independent_small_response_bound(self) -> None:
+        sha = ("c" * 40).encode()
+        client = CatalogClient(
+            base_url="https://api.getbible.net",
+            timeout=(1.0, 1.0),
+            request_retries=0,
+            max_response_bytes=40 * 1024 * 1024,
+            scripture_max_response_bytes=4096,
+        )
+        with patch(
+            "modules.catalog.requests.get",
+            side_effect=[
+                _Response(sha),
+                _Response(b"x" * 4097, content_length="4097"),
+            ],
+        ), self.assertRaises(RepositoryResponseTooLarge):
+            client.chapter(
+                "kjv",
+                BookOption(43, "John", "a" * 40),
+                ChapterOption(3, (1,)),
+            )
 
     def test_redirects_and_oversized_responses_fail_closed(self) -> None:
         with (

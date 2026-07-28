@@ -37,11 +37,13 @@ An explicit `/bible` reference preserves the fast path and posts the complete
 selection immediately. Commands that require browsing open the authenticated
 Telegram Mini App: an empty `/bible` opens Bible navigation, `/search grace`
 opens contained results for that query, and an empty `/search` opens the search
-form and filters. Full wrapping verse cards are themselves selectable, and a
-bounded basket can contain one verse, ranges, or separate references across
-pages before one final post. Translation choices persist per Telegram user,
-with KJV as the application fallback. Intermediate browsing never floods the
-chat.
+form and filters. The Bible tab is a compact full-chapter reader whose verses
+are selectable without separate raised cards. Search results can be selected
+directly or opened in that reader for context. A bounded basket can contain one
+verse, ranges, or separate references across pages before one final post.
+Translation and the last content-free reader location persist per Telegram
+user, with KJV as the application fallback. Intermediate browsing never floods
+the chat.
 
 The browser never supplies authoritative verse text. Every protected Mini App
 request requires fresh Telegram-signed `initData` plus a short-lived,
@@ -71,7 +73,10 @@ The robot provides layered controls at both the Telegram and Librarian boundarie
   installs or a container ingress network), with no bot token or
   authoritative Scripture text in browser state;
 - a bounded per-instance preference database containing only Telegram user IDs,
-  selected translation codes, non-content search defaults, and update times;
+  selected translation codes, non-content search defaults, four reader location
+  identifiers, and update times;
+- one hash-verified 64-chapter Main API cache with 15-minute freshness and a
+  1 MiB per-chapter response ceiling;
 - a fixed worker pool and global lookup semaphore;
 - separate reference/search worker pools and circuit breakers, so expensive
   corpus work cannot occupy every direct-reference worker;

@@ -37,6 +37,10 @@ export function normalizeSession(payload) {
     preferences: {
       translation: preferred,
       search_defaults: filters,
+      reader_location: normalizeReaderLocation(
+        payload.preferences?.reader_location,
+        preferred,
+      ),
     },
     basket: normalizeBasket(payload.basket),
     entrypoint: normalizeEntrypoint(payload.entrypoint),
@@ -179,8 +183,27 @@ export function normalizeScripture(payload) {
   }
   return {
     reference: boundedText(payload.reference, 180),
+    target_verse: boundedInteger(payload.target_verse, 1, 500) ?? 1,
+    navigation: {
+      previous: normalizeChapterLocation(payload.navigation?.previous),
+      next: normalizeChapterLocation(payload.navigation?.next),
+    },
     verses: normalizeVerses(payload.verses ?? payload.items),
   };
+}
+
+export function normalizeReaderLocation(value, fallbackTranslation = "kjv") {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const translation = translationCode(value.translation, fallbackTranslation);
+  const book = boundedInteger(value.book, 1, 200);
+  const chapter = boundedInteger(value.chapter, 1, 250);
+  const verse = boundedInteger(value.verse, 1, 500) ?? 1;
+  if (!translation || !book || !chapter) {
+    return null;
+  }
+  return { translation, book, chapter, verse };
 }
 
 export function normalizeVerses(value) {
@@ -412,6 +435,19 @@ function normalizeEntrypoint(value) {
     query: boundedText(value.query, 240),
     reference: boundedText(value.reference, 180),
   };
+}
+
+function normalizeChapterLocation(value) {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const book = boundedInteger(value.book, 1, 200);
+  const chapter = boundedInteger(value.chapter, 1, 250);
+  const bookName = boundedText(value.book_name, 120);
+  if (!book || !chapter || !bookName) {
+    return null;
+  }
+  return { book, book_name: bookName, chapter };
 }
 
 function normalizeHighlights(value, textLength) {

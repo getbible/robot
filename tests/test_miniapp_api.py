@@ -5,13 +5,19 @@ import unittest
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
-from modules.catalog import BookOption, ChapterOption, TranslationOption
+from modules.catalog import (
+    BookOption,
+    ChapterContent,
+    ChapterOption,
+    ChapterVerse,
+    TranslationOption,
+)
 from modules.errors import RobotRateLimited, ScriptureUnavailable
 from modules.interactions import SearchOptions, SearchResult
 from modules.miniapp_api import MiniAppApi, MiniAppHttpRequest
 from modules.miniapp_auth import TelegramInitDataValidator
 from modules.miniapp_sessions import MiniAppLaunchStore, MiniAppSessionStore
-from modules.preferences import SearchDefaults, UserPreferences
+from modules.preferences import ReaderLocation, SearchDefaults, UserPreferences
 from modules.service import ScriptureQuery, SearchPage
 
 TOKEN = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
@@ -41,6 +47,7 @@ def _init_data(
 class _Preferences:
     def __init__(self) -> None:
         self.values: dict[int, str] = {}
+        self.reader_locations: dict[int, ReaderLocation] = {}
         self.fail_preferences_once = False
 
     def translation_for(self, user_id: int) -> str:
@@ -56,6 +63,7 @@ class _Preferences:
         return UserPreferences(
             self.translation_for(user_id),
             SearchDefaults(),
+            self.reader_locations.get(user_id),
         )
 
     def set_search_defaults(
@@ -64,6 +72,13 @@ class _Preferences:
         defaults: SearchDefaults,
     ) -> None:
         return None
+
+    def set_reader_location(
+        self,
+        user_id: int,
+        location: ReaderLocation,
+    ) -> None:
+        self.reader_locations[user_id] = location
 
 
 class _Limiter:
@@ -104,6 +119,7 @@ class _Service:
             mini_app_max_selections=50,
         )
         self.selected: list[ScriptureQuery] = []
+        self.chapter_requests: list[tuple[str, int, int]] = []
         self.long_chapter = False
         self.fail_translations_once = False
 
@@ -164,6 +180,36 @@ class _Service:
                 "verses": [{"verse": 16, "text": "For God so loved the world."}],
             }
         }
+
+    async def chapter(
+        self,
+        translation: str,
+        book: BookOption,
+        chapter: ChapterOption,
+    ) -> ChapterContent:
+        self.chapter_requests.append((translation, book.number, chapter.number))
+        verses = (
+            tuple(
+                ChapterVerse(number, f"Psalm verse {number}.")
+                for number in chapter.verses
+            )
+            if self.long_chapter
+            else (
+                ChapterVerse(1, "There was a man of the Pharisees."),
+                ChapterVerse(2, "The same came to Jesus by night."),
+                ChapterVerse(16, "For God so loved the world."),
+            )
+        )
+        return ChapterContent(
+            translation=translation,
+            translation_name="King James Version",
+            book_number=book.number,
+            book_name=book.name,
+            chapter=chapter.number,
+            reference=f"{book.name} {chapter.number}",
+            verses=verses,
+            sha="c" * 40,
+        )
 
     async def search(self, query: str, options: SearchOptions) -> SearchPage:
         return SearchPage(
@@ -710,7 +756,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(retry.body)["error"], "post_outcome_locked")
         self.assertEqual(len(self.posted), 1)
 
-    async def test_full_psalm_119_is_loaded_in_bounded_chunks(self) -> None:
+    async def test_full_psalm_119_uses_one_main_api_chapter_read(self) -> None:
         self.service.long_chapter = True
         token = await self.exchange()
 
@@ -728,9 +774,15 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(payload["items"]), 176)
         self.assertEqual(payload["items"][0]["reference"], "Psalms 119:1")
         self.assertEqual(payload["items"][-1]["reference"], "Psalms 119:176")
-        self.assertEqual(len(self.service.selected), 4)
-        self.assertTrue(
-            all(query.references.startswith("Psalms 119:") for query in self.service.selected)
+        self.assertEqual(
+            self.service.chapter_requests,
+            [("kjv", 19, 119)],
+        )
+        self.assertEqual(self.service.selected, [])
+        self.assertEqual(payload["sha"], "c" * 40)
+        self.assertEqual(
+            self.preferences.reader_locations[42],
+            ReaderLocation("kjv", 19, 119, 1),
         )
 
     async def test_preferences_accept_only_non_content_allow_list(self) -> None:
@@ -750,10 +802,20 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                         "diacritics": "insensitive",
                         "sort": "canonical",
                     },
+                    "reader_location": {
+                        "translation": "kjv",
+                        "book": 43,
+                        "chapter": 3,
+                        "verse": 16,
+                    },
                 },
             )
         )
         self.assertEqual(response.status, 200)
+        self.assertEqual(
+            self.preferences.reader_locations[42],
+            ReaderLocation("kjv", 43, 3, 16),
+        )
 
         rejected = await self.api.handle(
             self.request(
@@ -764,6 +826,28 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(rejected.status, 400)
+
+        content_rejected = await self.api.handle(
+            self.request(
+                "PUT",
+                "/getbible/api/v1/preferences",
+                token=token,
+                body={
+                    "reader_location": {
+                        "translation": "kjv",
+                        "book": 43,
+                        "chapter": 3,
+                        "verse": 16,
+                        "text": "must never persist",
+                    }
+                },
+            )
+        )
+        self.assertEqual(content_rejected.status, 400)
+        self.assertEqual(
+            self.preferences.reader_locations[42],
+            ReaderLocation("kjv", 43, 3, 16),
+        )
 
 
 if __name__ == "__main__":

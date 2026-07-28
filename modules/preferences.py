@@ -70,16 +70,54 @@ class SearchDefaults:
 
 
 @dataclass(frozen=True, slots=True)
+class ReaderLocation:
+    """A content-free reading position safe to retain between launches."""
+
+    translation: str
+    book: int
+    chapter: int
+    verse: int = 1
+
+    @classmethod
+    def validated(cls, value: object) -> ReaderLocation:
+        if not isinstance(value, dict):
+            raise ValueError("Reader location must be an object.")
+        if set(value) - {"translation", "book", "chapter", "verse"}:
+            raise ValueError("Reader location contains unsupported fields.")
+        translation = value.get("translation")
+        if not isinstance(translation, str):
+            raise ValueError("Reader location translation is invalid.")
+        code = translation.casefold()
+        if _TRANSLATION_RE.fullmatch(code) is None:
+            raise ValueError("Reader location translation is invalid.")
+        return cls(
+            translation=code,
+            book=_bounded_integer(value.get("book"), "book", 1, 200),
+            chapter=_bounded_integer(value.get("chapter"), "chapter", 1, 250),
+            verse=_bounded_integer(value.get("verse", 1), "verse", 1, 500),
+        )
+
+    def as_dict(self) -> dict[str, str | int]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class UserPreferences:
     """The bounded profile retained for one Telegram user."""
 
     translation: str
     search_defaults: SearchDefaults
+    reader_location: ReaderLocation | None
 
     def as_dict(self) -> dict[str, object]:
         return {
             "translation": self.translation,
             "search_defaults": self.search_defaults.as_dict(),
+            "reader_location": (
+                self.reader_location.as_dict()
+                if self.reader_location is not None
+                else None
+            ),
         }
 
 
@@ -114,7 +152,7 @@ class UserPreferenceStore:
                 return self._memory.get(identity, self._defaults())
             row = self._connection.execute(
                 """
-                SELECT translation, search_defaults
+                SELECT translation, search_defaults, reader_location
                 FROM user_preferences
                 WHERE user_id = ?
                 """,
@@ -125,9 +163,10 @@ class UserPreferenceStore:
             try:
                 translation = self._translation(row[0])
                 search_defaults = self._decode_search_defaults(row[1])
+                reader_location = self._decode_reader_location(row[2])
             except (ValueError, TypeError):
                 return self._defaults()
-            return UserPreferences(translation, search_defaults)
+            return UserPreferences(translation, search_defaults, reader_location)
 
     def set_translation(self, user_id: int, translation: str) -> None:
         """Save one validated translation and enforce the configured bound."""
@@ -139,6 +178,7 @@ class UserPreferenceStore:
                 self._memory[identity] = UserPreferences(
                     code,
                     current.search_defaults,
+                    current.reader_location,
                 )
                 self._trim_memory()
                 return
@@ -180,6 +220,7 @@ class UserPreferenceStore:
                 self._memory[identity] = UserPreferences(
                     current.translation,
                     defaults,
+                    current.reader_location,
                 )
                 self._trim_memory()
                 return
@@ -199,6 +240,58 @@ class UserPreferenceStore:
                         updated_at = excluded.updated_at
                     """,
                     (identity, self._default_translation, encoded, now),
+                )
+                self._trim_database()
+
+    def set_reader_location(
+        self,
+        user_id: int,
+        value: ReaderLocation | dict[str, object],
+    ) -> None:
+        """Persist only translation/book/chapter/verse identifiers."""
+        identity = self._user_id(user_id)
+        location = (
+            value
+            if isinstance(value, ReaderLocation)
+            else ReaderLocation.validated(value)
+        )
+        encoded = json.dumps(
+            location.as_dict(),
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        with self._guard:
+            if self._connection is None:
+                current = self._memory.get(identity, self._defaults())
+                self._memory[identity] = UserPreferences(
+                    current.translation,
+                    current.search_defaults,
+                    location,
+                )
+                self._trim_memory()
+                return
+            now = time.time_ns()
+            with self._connection:
+                self._connection.execute(
+                    """
+                    INSERT INTO user_preferences (
+                        user_id,
+                        translation,
+                        reader_location,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        reader_location = excluded.reader_location,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        identity,
+                        self._default_translation,
+                        encoded,
+                        now,
+                    ),
                 )
                 self._trim_database()
 
@@ -229,6 +322,7 @@ class UserPreferenceStore:
                     user_id INTEGER PRIMARY KEY,
                     translation TEXT NOT NULL,
                     search_defaults TEXT NOT NULL DEFAULT '{}',
+                    reader_location TEXT NOT NULL DEFAULT '{}',
                     updated_at INTEGER NOT NULL
                 )
                 """
@@ -244,6 +338,13 @@ class UserPreferenceStore:
                     """
                     ALTER TABLE user_preferences
                     ADD COLUMN search_defaults TEXT NOT NULL DEFAULT '{}'
+                    """
+                )
+            if "reader_location" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE user_preferences
+                    ADD COLUMN reader_location TEXT NOT NULL DEFAULT '{}'
                     """
                 )
             connection.execute(
@@ -289,7 +390,7 @@ class UserPreferenceStore:
         )
 
     def _defaults(self) -> UserPreferences:
-        return UserPreferences(self._default_translation, SearchDefaults())
+        return UserPreferences(self._default_translation, SearchDefaults(), None)
 
     @staticmethod
     def _decode_search_defaults(value: Any) -> SearchDefaults:
@@ -300,6 +401,18 @@ class UserPreferenceStore:
         except (json.JSONDecodeError, UnicodeError) as error:
             raise ValueError("Stored search defaults are invalid.") from error
         return SearchDefaults.validated(decoded)
+
+    @staticmethod
+    def _decode_reader_location(value: Any) -> ReaderLocation | None:
+        if not isinstance(value, str) or len(value) > 512:
+            raise ValueError("Stored reader location is invalid.")
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, UnicodeError) as error:
+            raise ValueError("Stored reader location is invalid.") from error
+        if decoded == {}:
+            return None
+        return ReaderLocation.validated(decoded)
 
     @staticmethod
     def _user_id(value: int) -> int:
@@ -326,4 +439,19 @@ def _choice(value: object, allowed: frozenset[str], label: str) -> str:
 def _boolean(value: object, label: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"Search default {label} must be a boolean.")
+    return value
+
+
+def _bounded_integer(
+    value: object,
+    label: str,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not minimum <= value <= maximum
+    ):
+        raise ValueError(f"Reader location {label} is invalid.")
     return value
