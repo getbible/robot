@@ -1,8 +1,11 @@
 import asyncio
 import unittest
+from types import SimpleNamespace
 
+from modules.miniapp_api import MiniAppHttpRequest
 from modules.miniapp_cleanup import MiniAppLaunchCleanup
 from modules.miniapp_sessions import MiniAppLaunch
+from modules.miniapp_tornado import MiniAppServer
 from modules.service import ScriptureQuery
 
 
@@ -180,6 +183,96 @@ class MiniAppLaunchCleanupTestCase(unittest.IsolatedAsyncioTestCase):
             {launch.prompt_ephemeral_message_id for launch in cleaned},
             {654, 655},
         )
+
+
+class MiniAppCleanupRequestTestCase(unittest.IsolatedAsyncioTestCase):
+    def request(self, origin: str = "https://robot.example") -> MiniAppHttpRequest:
+        return MiniAppHttpRequest(
+            method="POST",
+            target="/getbible/api/v1/cleanup",
+            headers={
+                "Origin": origin,
+                "Authorization": "Bearer abcdefghijklmnop",
+                "X-Telegram-Init-Data": "signed-init-data",
+            },
+            client_key="192.0.2.1",
+        )
+
+    async def test_ready_signal_authenticates_and_cleans_its_bound_launch(self) -> None:
+        launch = MiniAppLaunch(
+            token="abcdefghijklmnop",
+            user_id=42,
+            target_chat_id=-100,
+            message_thread_id=None,
+            initial_route="bible",
+            initial_query="",
+            created_at=0,
+            prompt_ephemeral_message_id=654,
+        )
+        cleaned: list[MiniAppLaunch] = []
+        authenticated: list[MiniAppHttpRequest] = []
+
+        class Api:
+            async def _authenticated(
+                self,
+                request: MiniAppHttpRequest,
+            ) -> SimpleNamespace:
+                authenticated.append(request)
+                return SimpleNamespace(launch=launch)
+
+        class Cleanup:
+            async def cleanup_now(self, current: MiniAppLaunch) -> None:
+                cleaned.append(current)
+
+        server = object.__new__(MiniAppServer)
+        server._public_origin = "https://robot.example"
+        server.api = Api()
+        server._cleanup = Cleanup()
+
+        status = await server._cleanup_session_request(self.request())
+
+        self.assertEqual(status, 204)
+        self.assertEqual(authenticated, [self.request()])
+        self.assertEqual(cleaned, [launch])
+
+    async def test_ready_signal_rejects_foreign_origin_before_authentication(self) -> None:
+        class Api:
+            async def _authenticated(self, request: MiniAppHttpRequest) -> None:
+                raise AssertionError("foreign origin reached authentication")
+
+        class Cleanup:
+            async def cleanup_now(self, launch: MiniAppLaunch) -> None:
+                raise AssertionError("foreign origin reached cleanup")
+
+        server = object.__new__(MiniAppServer)
+        server._public_origin = "https://robot.example"
+        server.api = Api()
+        server._cleanup = Cleanup()
+
+        status = await server._cleanup_session_request(
+            self.request("https://attacker.example")
+        )
+
+        self.assertEqual(status, 403)
+
+    async def test_ready_signal_hides_authentication_failures(self) -> None:
+        class Api:
+            async def _authenticated(self, request: MiniAppHttpRequest) -> None:
+                del request
+                raise RuntimeError("invalid session")
+
+        class Cleanup:
+            async def cleanup_now(self, launch: MiniAppLaunch) -> None:
+                raise AssertionError("invalid session reached cleanup")
+
+        server = object.__new__(MiniAppServer)
+        server._public_origin = "https://robot.example"
+        server.api = Api()
+        server._cleanup = Cleanup()
+
+        status = await server._cleanup_session_request(self.request())
+
+        self.assertEqual(status, 401)
 
 
 if __name__ == "__main__":
