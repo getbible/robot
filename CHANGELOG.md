@@ -46,6 +46,15 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Mini App
 
+- Added guarded Telegram Bot API 8.0+ native fullscreen with `expand()` fallback,
+  runtime fullscreen/viewport/device/content-safe-area synchronization, and
+  complete listener cleanup. Older, unsupported, and rejecting Telegram clients
+  continue in the expanded sheet without blocking startup.
+- Changed Bible reading navigation so downward scrolling collapses the bottom
+  tray to a true arrow-only handle above the device safe area. Upward reading
+  no longer reopens the tray, bottom-edge pointer movement is ignored in Bible,
+  and selecting or removing a verse deliberately reveals the updated Selected
+  state. Other routes retain their existing scroll-aware behavior.
 - Replaced the reader's book/chapter dropdown flow with a partial-width,
   translation-aware passage sheet: API-localized book buttons, collision-free
   compact labels, numbered chapter grids through Psalm 150, predictable

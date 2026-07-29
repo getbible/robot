@@ -203,6 +203,14 @@ Using a dedicated test bot first, and then a private production-bot chat before 
 - Light/dark themes, compact reader text, auto-hiding chapter and bottom
   controls, safe-area layout, selected states, and accessible focus/contrast
   are verified in Telegram clients.
+- Bot API 8.0+ clients enter native fullscreen while older, unsupported, and
+  rejecting clients remain usable in expanded-sheet mode. Fullscreen and
+  safe-area changes do not place content beneath Telegram controls, cutouts,
+  or the device gesture area.
+- In Bible, downward scrolling leaves only the arrow handle and safe-area
+  background. Upward scrolling restores the chapter heading without reopening
+  the bottom navigation; pressing the handle or changing a verse selection
+  reopens it.
 - The partial passage sheet leaves Scripture visible, opens at the current
   chapters, returns to API-localized books, reaches Psalm 150, and closes via
   Close, backdrop, Escape, and Telegram Back without trapping focus.
