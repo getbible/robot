@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import replace
+from typing import Any
 
 from .miniapp_sessions import MiniAppLaunch
 from .service import ScriptureQuery
@@ -22,7 +23,7 @@ class MiniAppLaunchCleanup:
     """Own one deletion attempt for every bot-created Mini App launch row.
 
     The source command is deleted by the command handler immediately after the
-    launch response is recorded.  Once that response has been recorded we drop
+    launch response is recorded. Once that response has been recorded we drop
     the retained source identifiers, ensuring later lifecycle cleanup can never
     retry the source-command deletion.
 
@@ -91,15 +92,7 @@ class MiniAppLaunchCleanup:
                 if timer is not asyncio.current_task():
                     timer.cancel()
 
-        snapshot = self._take_prompt(launch)
-        if snapshot is None or self._cleanup_launch is None:
-            return
-        try:
-            await self._cleanup_launch(snapshot)
-        except Exception:
-            # Cleanup is deliberately invisible to users and must never alter a
-            # successful open, copy, close, or Scripture-posting outcome.
-            return
+        await self._execute(self._take_prompt(launch))
 
     async def post(
         self,
@@ -115,11 +108,7 @@ class MiniAppLaunchCleanup:
         try:
             return await callback(launch, queries)
         finally:
-            if snapshot is not None and self._cleanup_launch is not None:
-                try:
-                    await self._cleanup_launch(snapshot)
-                except Exception:
-                    pass
+            await self._execute(snapshot)
 
     async def close(self) -> None:
         """Clean every still-pending prompt once during graceful shutdown."""
@@ -160,15 +149,29 @@ class MiniAppLaunchCleanup:
         self._timers.pop(launch.token, None)
         await self.cleanup_now(launch, cancel_timer=False)
 
-    def _timer_done(self, token: str, task: asyncio.Task[None]) -> None:
+    async def _execute(self, launch: MiniAppLaunch | None) -> None:
+        if launch is None or self._cleanup_launch is None:
+            return
+        try:
+            await self._cleanup_launch(launch)
+        except Exception:
+            # Cleanup is deliberately invisible and never changes the user's
+            # successful open, copy, close, or Scripture-posting outcome.
+            return
+
+    def _timer_done(self, token: str, task: asyncio.Future[None]) -> None:
         current = self._timers.get(token)
         if current is not None and current[1] is task:
             self._timers.pop(token, None)
 
-    def _start_worker(self, operation: Awaitable[None]) -> None:
+    def _start_worker(self, operation: Coroutine[Any, Any, None]) -> None:
         task = asyncio.create_task(operation)
         self._workers.add(task)
-        task.add_done_callback(self._workers.discard)
+        task.add_done_callback(self._worker_done)
+
+    def _worker_done(self, future: asyncio.Future[None]) -> None:
+        if isinstance(future, asyncio.Task):
+            self._workers.discard(future)
 
     @staticmethod
     def _take_prompt(launch: MiniAppLaunch) -> MiniAppLaunch | None:
