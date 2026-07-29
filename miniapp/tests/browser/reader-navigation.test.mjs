@@ -744,7 +744,7 @@ test("reader navigation remains coherent in a real browser", async (context) => 
     await page.locator(".home-hero__brand").isVisible(),
     "the logo over the Home hero remains visible",
   );
-  await page.setViewportSize({ width: 320, height: 520 });
+  await page.setViewportSize({ width: 320, height: 360 });
   await settleLayout(page);
   const homeNarrowExpandedMetrics =
     await fullscreenTranslationMetrics(page);
