@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from telegram import Bot, ForceReply, InlineKeyboardMarkup
-from telegram.error import TelegramError
+from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError
 
 TELEGRAM_TEXT_LIMIT = 4096
+EPHEMERAL_DELETE_MAX_ATTEMPTS = 2
+EPHEMERAL_DELETE_RETRY_DELAY_SECONDS = 0.2
 
 
 EphemeralReplyMarkup = InlineKeyboardMarkup | ForceReply
@@ -110,14 +113,37 @@ async def delete_ephemeral_text(
     receiver_user_id: int,
     ephemeral_message_id: int,
 ) -> None:
-    """Delete an existing per-user group message."""
-    result = await bot.do_api_request(
-        "deleteEphemeralMessage",
-        api_kwargs={
-            "chat_id": chat_id,
-            "receiver_user_id": receiver_user_id,
-            "ephemeral_message_id": ephemeral_message_id,
-        },
-    )
-    if result is not True:
-        raise TelegramError("Telegram did not confirm ephemeral message deletion.")
+    """Delete an existing per-user group message with one bounded transient retry."""
+    payload = {
+        "chat_id": chat_id,
+        "receiver_user_id": receiver_user_id,
+        "ephemeral_message_id": ephemeral_message_id,
+    }
+    last_error: TelegramError | None = None
+    for attempt in range(EPHEMERAL_DELETE_MAX_ATTEMPTS):
+        try:
+            result = await bot.do_api_request(
+                "deleteEphemeralMessage",
+                api_kwargs=payload,
+            )
+            if result is True:
+                return
+            last_error = TelegramError(
+                "Telegram did not confirm ephemeral message deletion."
+            )
+        except (BadRequest, Forbidden):
+            # Permission and unavailable-message failures are definitive.
+            raise
+        except NetworkError as error:
+            last_error = error
+        except TelegramError:
+            raise
+
+        if attempt + 1 < EPHEMERAL_DELETE_MAX_ATTEMPTS:
+            await asyncio.sleep(EPHEMERAL_DELETE_RETRY_DELAY_SECONDS)
+
+    if last_error is None:  # pragma: no cover - loop bounds are constant and positive
+        last_error = TelegramError(
+            "Telegram did not confirm ephemeral message deletion."
+        )
+    raise last_error

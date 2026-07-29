@@ -140,8 +140,9 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   with explicit close-and-restart guidance.
 - Retained both sides of an ephemeral group launch so the user's “Only visible
   to GetBibleBot” command and the bot's “Only visible to you” launcher can both
-  be removed. Each private row receives at most one Telegram deletion attempt;
-  unavailable-message and permission failures remain silent and never retry.
+  be removed together by authenticated readiness, post, expiry, capacity
+  eviction, or shutdown. Direct commands retry one unconfirmed transient
+  deletion failure; unavailable-message and permission failures remain silent.
 - Updated the home hero to “The Holy Word of God” and “Read, find, and share
   His Word,” added complete same-origin interface catalogs for every language
   tag in the GetBible translation inventory, and made translation changes
@@ -187,10 +188,10 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   query from the result panel. Selection, private delivery, and explicit final
   posting are unchanged.
 - Restored the clean-chat contract for every Scripture workflow. The initiating
-  private command is removed immediately and the private Mini App launcher is
-  removed when the authenticated session is ready. Post leaves only final
-  Scripture; Copy and Close leave no bot-created interaction row. Each known row
-  is attempted once, and Telegram deletion failures never alter the user action.
+  private command and Mini App launcher are claimed together when the
+  authenticated session is ready. Direct commands are removed after successful
+  Scripture delivery. Post leaves only final Scripture; Copy and Close leave no
+  bot-created interaction row, and cleanup failures never alter the user action.
 - Replaced public search-result messages with Telegram Bot API 10.2 ephemeral
   commands and per-user group panels. Complete selectable verse blocks now use
   bounded Previous/Next pages of at most 30 results. Only **Post selected**

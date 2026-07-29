@@ -21,16 +21,17 @@ SleepCallback = Callable[[float], Awaitable[None]]
 
 
 class MiniAppLaunchCleanup:
-    """Own one deletion attempt for every bot-created Mini App launch row.
+    """Own cleanup for every Telegram row involved in a Mini App launch.
 
-    The source command is deleted by the command handler immediately after the
-    launch response is recorded. Once that response has been recorded we drop
-    the retained source identifiers, ensuring later lifecycle cleanup can never
-    retry the source-command deletion.
+    The source command and launcher stay together until authenticated readiness,
+    post, expiry, capacity eviction, or shutdown claims them for cleanup. This
+    avoids deleting the source before the user can open the launcher and keeps
+    the source identifier available to the same lifecycle path that removes the
+    launcher.
 
-    Prompt identifiers are moved into an immutable snapshot before any await.
-    Concurrent ready, post, expiry, and shutdown paths therefore observe an
-    already-cleared launch and cannot issue a second Telegram deletion request.
+    All identifiers are moved into an immutable snapshot before any await.
+    Concurrent lifecycle paths therefore observe an already-cleared launch and
+    cannot issue a second Telegram deletion request.
     """
 
     def __init__(
@@ -56,15 +57,14 @@ class MiniAppLaunchCleanup:
         self._closed = False
 
     def remember_prompt(self, launch: MiniAppLaunch) -> None:
-        """Forget the already-attempted source row and schedule prompt expiry."""
-        launch.source_ephemeral_message_id = None
-        launch.source_ephemeral_receiver_user_id = None
+        """Schedule expiry for the source command and its recorded launcher."""
         if (
             self._closed
             or self._cleanup_launch is None
             or (
                 launch.prompt_message_id is None
                 and launch.prompt_ephemeral_message_id is None
+                and launch.source_ephemeral_message_id is None
             )
         ):
             return
@@ -91,7 +91,7 @@ class MiniAppLaunchCleanup:
                 if timer is not asyncio.current_task():
                     timer.cancel()
 
-        await self._execute(self._take_prompt(launch))
+        await self._execute(self._take_launch(launch))
 
     async def post(
         self,
@@ -103,7 +103,7 @@ class MiniAppLaunchCleanup:
         timer_entry = self._timers.pop(launch.token, None)
         if timer_entry is not None:
             timer_entry[1].cancel()
-        snapshot = self._take_prompt(launch)
+        snapshot = self._take_launch(launch)
         try:
             return await callback(launch, queries)
         finally:
@@ -173,17 +173,14 @@ class MiniAppLaunchCleanup:
             self._workers.discard(future)
 
     @staticmethod
-    def _take_prompt(launch: MiniAppLaunch) -> MiniAppLaunch | None:
+    def _take_launch(launch: MiniAppLaunch) -> MiniAppLaunch | None:
         if (
             launch.prompt_message_id is None
             and launch.prompt_ephemeral_message_id is None
+            and launch.source_ephemeral_message_id is None
         ):
             return None
-        snapshot = replace(
-            launch,
-            source_ephemeral_message_id=None,
-            source_ephemeral_receiver_user_id=None,
-        )
+        snapshot = replace(launch)
         launch.prompt_message_id = None
         launch.prompt_ephemeral_message_id = None
         launch.source_ephemeral_message_id = None
