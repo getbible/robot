@@ -31,6 +31,112 @@ function fulfillJson(route, payload, status = 200) {
   });
 }
 
+async function settleLayout(page) {
+  await page.evaluate(
+    () => new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    }),
+  );
+}
+
+async function fullscreenTranslationMetrics(page) {
+  return page.evaluate(() => {
+    const control = document.querySelector("#translation-shortcut");
+    const label = document.querySelector("#translation-full-label");
+    if (!(control instanceof HTMLElement) || !(label instanceof HTMLElement)) {
+      throw new Error("Fullscreen translation control is unavailable.");
+    }
+    const bounds = control.getBoundingClientRect();
+    const style = getComputedStyle(label);
+    const controlStyle = getComputedStyle(control);
+    const topbar = document.querySelector(".topbar");
+    if (!(topbar instanceof HTMLElement)) {
+      throw new Error("Topbar is unavailable.");
+    }
+    return {
+      x: bounds.x,
+      right: bounds.right,
+      top: bounds.top,
+      width: bounds.width,
+      height: bounds.height,
+      viewportWidth: window.innerWidth,
+      centerOffset:
+        bounds.x + (bounds.width / 2) - (window.innerWidth / 2),
+      labelClientWidth: label.clientWidth,
+      labelScrollWidth: label.scrollWidth,
+      labelOverflow: style.overflow,
+      labelTextOverflow: style.textOverflow,
+      labelWhiteSpace: style.whiteSpace,
+      borderRadius: controlStyle.borderRadius,
+      backgroundColor: controlStyle.backgroundColor,
+      fontSize: controlStyle.fontSize,
+      topbarClientWidth: topbar.clientWidth,
+      topbarScrollWidth: topbar.scrollWidth,
+      documentScrollWidth: document.documentElement.scrollWidth,
+      title: control.title,
+      ariaLabel: control.getAttribute("aria-label"),
+    };
+  });
+}
+
+function assertFullscreenTranslationMetrics(
+  metrics,
+  { fullName, ellipsized = true, expectedTop = null } = {},
+) {
+  const expectedClearance = Math.min(
+    120,
+    Math.max(72, metrics.viewportWidth * 0.2),
+  );
+  const expectedMaximumWidth = Math.min(
+    metrics.viewportWidth * 0.48,
+    248,
+  );
+  assert.ok(
+    Math.abs(metrics.centerOffset) <= 1,
+    "translation pill stays visually centered",
+  );
+  assert.ok(
+    Math.abs(metrics.height - 32) <= 0.5,
+    "translation pill uses the shared compact control height",
+  );
+  if (expectedTop !== null) {
+    assert.ok(
+      Math.abs(metrics.top - expectedTop) <= 1,
+      "translation pill aligns with the intended fullscreen row",
+    );
+  }
+  assert.ok(
+    metrics.width <= expectedMaximumWidth + 1,
+    "translation pill obeys its responsive maximum width",
+  );
+  assert.ok(
+    metrics.x >= expectedClearance - 1 &&
+      metrics.right <= metrics.viewportWidth - expectedClearance + 1,
+    "translation pill leaves symmetric room for Telegram's native controls",
+  );
+  assert.equal(metrics.labelOverflow, "hidden");
+  assert.equal(metrics.labelTextOverflow, "ellipsis");
+  assert.equal(metrics.labelWhiteSpace, "nowrap");
+  assert.equal(metrics.title, fullName);
+  assert.match(metrics.ariaLabel ?? "", new RegExp(
+    fullName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+  ));
+  assert.ok(
+    metrics.topbarScrollWidth <= metrics.topbarClientWidth,
+    "topbar has no horizontal overflow",
+  );
+  assert.ok(
+    metrics.documentScrollWidth <= metrics.viewportWidth,
+    "document has no horizontal overflow",
+  );
+  if (ellipsized) {
+    assert.ok(
+      metrics.labelScrollWidth > metrics.labelClientWidth,
+      "long translation name is visually shortened without changing its value",
+    );
+  }
+}
+
 test("reader navigation remains coherent in a real browser", async (context) => {
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
   const browser = await chromium.launch({
@@ -41,6 +147,7 @@ test("reader navigation remains coherent in a real browser", async (context) => 
   const page = await browser.newPage({
     viewport: { width: 390, height: 844 },
   });
+  await page.emulateMedia({ reducedMotion: "reduce" });
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error));
 
@@ -138,6 +245,10 @@ test("reader navigation remains coherent in a real browser", async (context) => 
       verse: 1,
     },
   };
+  const longKjvName =
+    "King James Version (1769) with Strong’s Numbers and Morphology";
+  const longArabicName =
+    "الكتاب المقدس باللغة العربية مع النص الكامل والتشكيل";
   let pendingChapterRequest = null;
   let failNextScripture = 0;
   const preferenceWrites = [];
@@ -182,7 +293,7 @@ test("reader navigation remains coherent in a real browser", async (context) => 
           translations: [
             {
               code: "kjv",
-              name: "King James Version",
+              name: longKjvName,
               language: "English",
               lang: "en",
               direction: "ltr",
@@ -196,7 +307,7 @@ test("reader navigation remains coherent in a real browser", async (context) => 
             },
             {
               code: "arb",
-              name: "Arabic Bible",
+              name: longArabicName,
               language: "Arabic",
               lang: "ar",
               direction: "rtl",
@@ -413,10 +524,11 @@ test("reader navigation remains coherent in a real browser", async (context) => 
 
   const app = page.locator("#app");
   const translationShortcut = page.locator("#translation-shortcut");
+  await settleLayout(page);
   assert.equal(await app.getAttribute("data-active-route"), "bible");
   assert.equal(
     await page.locator("#translation-full-label").innerText(),
-    "King James Version",
+    longKjvName,
   );
   assert.equal(
     await page.locator("#translation-short-label").evaluate(
@@ -430,20 +542,80 @@ test("reader navigation remains coherent in a real browser", async (context) => 
     ),
     "none",
   );
-  const translationBounds = await translationShortcut.boundingBox();
-  assert.ok(
-    translationBounds && translationBounds.width < 246,
-    "translation pill leaves room for Telegram's native controls",
+  const readerExpandedMetrics = await fullscreenTranslationMetrics(page);
+  assertFullscreenTranslationMetrics(
+    readerExpandedMetrics,
+    { fullName: longKjvName, expectedTop: 58 },
   );
   await page.setViewportSize({ width: 320, height: 700 });
-  const narrowTranslationBounds = await translationShortcut.boundingBox();
-  assert.ok(
-    narrowTranslationBounds &&
-      narrowTranslationBounds.x >= 72 &&
-      narrowTranslationBounds.x + narrowTranslationBounds.width <= 248,
-    "narrow translation pill remains between Telegram's controls",
+  await settleLayout(page);
+  const readerNarrowExpandedMetrics =
+    await fullscreenTranslationMetrics(page);
+  assertFullscreenTranslationMetrics(
+    readerNarrowExpandedMetrics,
+    { fullName: longKjvName, expectedTop: 58 },
   );
+  await page.locator("#bible-view").evaluate((node) => {
+    node.scrollTop = 500;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  await settleLayout(page);
+  assert.match(await app.getAttribute("class"), /is-header-condensed/);
+  const readerNarrowCondensedMetrics =
+    await fullscreenTranslationMetrics(page);
+  assertFullscreenTranslationMetrics(
+    readerNarrowCondensedMetrics,
+    { fullName: longKjvName, expectedTop: 28 },
+  );
+  const narrowCondensedBounds = await translationShortcut.boundingBox();
+  assert.ok(narrowCondensedBounds);
+  assert.deepEqual(
+    await page.evaluate(({ x, top, bottom }) => {
+      const owner = (pointY) =>
+        document.elementFromPoint(x, pointY)
+          ?.closest("#translation-shortcut")
+          ?.id ?? null;
+      return {
+        above: owner(top - 4),
+        below: owner(bottom + 4),
+      };
+    }, {
+      x: narrowCondensedBounds.x + (narrowCondensedBounds.width / 2),
+      top: narrowCondensedBounds.y,
+      bottom: narrowCondensedBounds.y + narrowCondensedBounds.height,
+    }),
+    {
+      above: "translation-shortcut",
+      below: "translation-shortcut",
+    },
+    "the 44px hit target extends beyond both edges of the 32px capsule",
+  );
+  await page.mouse.click(
+    narrowCondensedBounds.x + (narrowCondensedBounds.width / 2),
+    narrowCondensedBounds.y - 4,
+  );
+  const translationDialog = page.locator("#translation-dialog");
+  assert.equal(
+    await translationDialog.evaluate((node) => node.open),
+    true,
+    "the transparent 44px hit target opens the 32px visual control",
+  );
+  await page.locator("#close-translation").click();
+  assert.equal(await translationDialog.evaluate((node) => node.open), false);
+  assert.equal(
+    await translationShortcut.evaluate(
+      (node) => node === document.activeElement,
+    ),
+    true,
+  );
+  await page.locator("#bible-view").evaluate((node) => {
+    node.scrollTop = 0;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  await settleLayout(page);
+  assert.doesNotMatch(await app.getAttribute("class"), /is-header-condensed/);
   await page.setViewportSize({ width: 390, height: 844 });
+  await settleLayout(page);
 
   await page.locator("#bible-view").evaluate((node) => {
     node.scrollTop = 500;
@@ -471,6 +643,11 @@ test("reader navigation remains coherent in a real browser", async (context) => 
       (node) => getComputedStyle(node).visibility,
     ),
     "hidden",
+  );
+  await settleLayout(page);
+  assertFullscreenTranslationMetrics(
+    await fullscreenTranslationMetrics(page),
+    { fullName: longKjvName, expectedTop: 28 },
   );
   await page.locator("#bible-view").evaluate((node) => {
     node.scrollTop = 420;
@@ -511,8 +688,126 @@ test("reader navigation remains coherent in a real browser", async (context) => 
   assert.equal(await bottomNav.getAttribute("class"), "bottom-nav");
 
   await page.locator('[data-route="home"]').click();
+  await settleLayout(page);
   assert.equal(await app.getAttribute("data-active-route"), "home");
   assert.doesNotMatch(await app.getAttribute("class"), /is-header-condensed/);
+  assert.equal(
+    await page.locator(".brand__copy").evaluate(
+      (node) => getComputedStyle(node).display,
+    ),
+    "none",
+  );
+  assert.equal(
+    await page.locator("#translation-short-label").evaluate(
+      (node) => getComputedStyle(node).display,
+    ),
+    "none",
+  );
+  assert.equal(
+    await page.locator("#translation-full-label").evaluate(
+      (node) => getComputedStyle(node).display,
+    ),
+    "block",
+  );
+  const homeExpandedMetrics = await fullscreenTranslationMetrics(page);
+  assertFullscreenTranslationMetrics(
+    homeExpandedMetrics,
+    { fullName: longKjvName, expectedTop: 58 },
+  );
+  for (const key of [
+    "x",
+    "right",
+    "top",
+    "width",
+    "height",
+  ]) {
+    assert.ok(
+      Math.abs(homeExpandedMetrics[key] - readerExpandedMetrics[key]) <= 1,
+      `Home and reader share fullscreen translation geometry: ${key}`,
+    );
+  }
+  for (const key of ["borderRadius", "backgroundColor", "fontSize"]) {
+    assert.equal(
+      homeExpandedMetrics[key],
+      readerExpandedMetrics[key],
+      `Home and reader share fullscreen translation styling: ${key}`,
+    );
+  }
+  assert.ok(
+    await page.locator(".home-hero__brand").isVisible(),
+    "the logo over the Home hero remains visible",
+  );
+  await page.setViewportSize({ width: 320, height: 620 });
+  await settleLayout(page);
+  const homeNarrowExpandedMetrics =
+    await fullscreenTranslationMetrics(page);
+  assertFullscreenTranslationMetrics(
+    homeNarrowExpandedMetrics,
+    { fullName: longKjvName, expectedTop: 58 },
+  );
+  for (const key of ["x", "right", "top", "width", "height"]) {
+    assert.ok(
+      Math.abs(
+        homeNarrowExpandedMetrics[key] -
+          readerNarrowExpandedMetrics[key]
+      ) <= 1,
+      `narrow Home and reader share expanded geometry: ${key}`,
+    );
+  }
+  const homeScrollRange = await page.locator("#home-view").evaluate(
+    (node) => node.scrollHeight - node.clientHeight,
+  );
+  assert.ok(
+    homeScrollRange > 64,
+    "short viewport provides enough Home scroll range for the header threshold",
+  );
+  await page.locator("#home-view").evaluate((node) => {
+    node.scrollTop = 100;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  await settleLayout(page);
+  assert.match(await app.getAttribute("class"), /is-header-condensed/);
+  assert.equal(
+    await page.locator(".brand").evaluate(
+      (node) => getComputedStyle(node).visibility,
+    ),
+    "hidden",
+  );
+  const homeNarrowCondensedMetrics =
+    await fullscreenTranslationMetrics(page);
+  assertFullscreenTranslationMetrics(
+    homeNarrowCondensedMetrics,
+    { fullName: longKjvName, expectedTop: 28 },
+  );
+  for (const key of ["x", "right", "top", "width", "height"]) {
+    assert.ok(
+      Math.abs(
+        homeNarrowCondensedMetrics[key] -
+          readerNarrowCondensedMetrics[key]
+      ) <= 1,
+      `narrow Home and reader share condensed geometry: ${key}`,
+    );
+  }
+  assert.ok(
+    await page.locator(".home-hero__brand").isVisible(),
+    "condensing the topbar does not hide the logo over the Home hero",
+  );
+  await page.locator("#home-view").evaluate((node) => {
+    node.scrollTop = 0;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  await settleLayout(page);
+  assert.doesNotMatch(await app.getAttribute("class"), /is-header-condensed/);
+
+  await page.evaluate(() => {
+    window.Telegram.WebApp.isFullscreen = false;
+    window.__telegramState.emit("fullscreenChanged");
+  });
+  await settleLayout(page);
+  assert.equal(
+    await page.locator("html").getAttribute("data-telegram-fullscreen"),
+    "false",
+  );
   assert.equal(
     await page.locator(".brand__copy").evaluate(
       (node) => getComputedStyle(node).display,
@@ -525,7 +820,68 @@ test("reader navigation remains coherent in a real browser", async (context) => 
     ),
     "inline",
   );
+  assert.equal(
+    await page.locator("#translation-full-label").evaluate(
+      (node) => getComputedStyle(node).display,
+    ),
+    "none",
+  );
+  assert.ok(
+    Math.abs(
+      (await translationShortcut.boundingBox())?.height - 40,
+    ) <= 0.5,
+    "expanded-sheet fallback keeps its established 40px translation chip",
+  );
+  const fallbackGeometry = await page.evaluate(() => {
+    const control = document.querySelector("#translation-shortcut");
+    const topbar = document.querySelector(".topbar");
+    const shortLabel = document.querySelector("#translation-short-label");
+    if (
+      !(control instanceof HTMLElement) ||
+      !(topbar instanceof HTMLElement) ||
+      !(shortLabel instanceof HTMLElement)
+    ) {
+      throw new Error("Expanded-sheet fallback controls are unavailable.");
+    }
+    const bounds = control.getBoundingClientRect();
+    return {
+      left: bounds.left,
+      right: bounds.right,
+      topbarClientWidth: topbar.clientWidth,
+      topbarScrollWidth: topbar.scrollWidth,
+      documentScrollWidth: document.documentElement.scrollWidth,
+      shortClientWidth: shortLabel.clientWidth,
+      shortScrollWidth: shortLabel.scrollWidth,
+      viewportWidth: window.innerWidth,
+    };
+  });
+  assert.ok(
+    fallbackGeometry.left >= 0 &&
+      fallbackGeometry.right <= fallbackGeometry.viewportWidth,
+    "expanded-sheet translation chip remains inside the narrow viewport",
+  );
+  assert.ok(
+    fallbackGeometry.topbarScrollWidth <= fallbackGeometry.topbarClientWidth,
+    "expanded-sheet topbar does not overflow",
+  );
+  assert.ok(
+    fallbackGeometry.documentScrollWidth <= fallbackGeometry.viewportWidth,
+    "expanded-sheet document does not overflow",
+  );
+  assert.ok(
+    fallbackGeometry.shortScrollWidth <= fallbackGeometry.shortClientWidth,
+    "expanded-sheet abbreviation is not clipped",
+  );
+  assert.ok(await page.locator(".home-hero__brand").isVisible());
+  await page.evaluate(() => {
+    window.Telegram.WebApp.isFullscreen = true;
+    window.__telegramState.emit("fullscreenChanged");
+  });
+  await settleLayout(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await settleLayout(page);
   await page.locator('[data-route="bible"]').click();
+  await settleLayout(page);
 
   await page.locator("#bible-passage").click();
   const dialog = page.locator("#bible-navigation-dialog");
@@ -638,9 +994,42 @@ test("reader navigation remains coherent in a real browser", async (context) => 
   await page.locator("#bible-verses [data-reader-verse]").first().waitFor();
   assert.equal(
     await page.locator("#translation-full-label").innerText(),
-    "Arabic Bible",
+    longArabicName,
   );
   assert.equal(await page.locator("html").getAttribute("dir"), "rtl");
+  await page.setViewportSize({ width: 320, height: 700 });
+  await page.locator("#bible-view").evaluate((node) => {
+    node.scrollTop = 0;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  await settleLayout(page);
+  assert.doesNotMatch(await app.getAttribute("class"), /is-header-condensed/);
+  assertFullscreenTranslationMetrics(
+    await fullscreenTranslationMetrics(page),
+    { fullName: longArabicName, expectedTop: 58 },
+  );
+  await page.locator("#bible-view").evaluate((node) => {
+    node.scrollTop = 500;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  await settleLayout(page);
+  assert.match(await app.getAttribute("class"), /is-header-condensed/);
+  assertFullscreenTranslationMetrics(
+    await fullscreenTranslationMetrics(page),
+    { fullName: longArabicName, expectedTop: 28 },
+  );
+  await page.locator("#bible-view").evaluate((node) => {
+    node.scrollTop = 0;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  await settleLayout(page);
+  assert.doesNotMatch(await app.getAttribute("class"), /is-header-condensed/);
+  assertFullscreenTranslationMetrics(
+    await fullscreenTranslationMetrics(page),
+    { fullName: longArabicName, expectedTop: 58 },
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await settleLayout(page);
   await page.locator("#bible-passage").click();
   assert.ok(
     await page.locator(".sheet__surface--passage").evaluate(
