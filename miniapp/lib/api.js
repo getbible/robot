@@ -1,4 +1,4 @@
-import "./clipboard.js";
+import { setClipboardBasket } from "./clipboard.js";
 
 const API_ROOT = "api/v1/";
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -23,6 +23,7 @@ export class MiniAppApi {
   #initData;
   #sessionToken = null;
   #timeoutMs;
+  #cleanupAttempted = false;
 
   constructor(initData, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
     if (typeof initData !== "string" || initData.length === 0) {
@@ -51,6 +52,9 @@ export class MiniAppApi {
       });
     }
     this.#sessionToken = payload.session_token;
+    this.#cleanupAttempted = false;
+    this.#syncBasket(payload.basket);
+    this.#cleanupLaunch();
     return payload;
   }
 
@@ -65,11 +69,17 @@ export class MiniAppApi {
       });
     }
     this.#sessionToken = sessionToken;
-    return this.#request("session");
+    this.#cleanupAttempted = false;
+    const payload = await this.#request("session");
+    this.#syncBasket(payload.basket);
+    this.#cleanupLaunch();
+    return payload;
   }
 
   clearSession() {
     this.#sessionToken = null;
+    this.#cleanupAttempted = false;
+    setClipboardBasket({ items: [] });
   }
 
   translations() {
@@ -115,41 +125,71 @@ export class MiniAppApi {
     });
   }
 
-  basket() {
-    return this.#request("basket");
+  async basket() {
+    const payload = await this.#request("basket");
+    this.#syncBasket(payload);
+    return payload;
   }
 
-  addBasketItem(selectionId) {
-    return this.#request("basket/items", {
+  async addBasketItem(selectionId) {
+    const payload = await this.#request("basket/items", {
       method: "POST",
       body: { selection_id: selectionId },
     });
+    this.#syncBasket(payload?.basket ?? payload);
+    return payload;
   }
 
-  removeBasketItem(selectionId) {
-    return this.#request(
+  async removeBasketItem(selectionId) {
+    const payload = await this.#request(
       `basket/items/${encodeURIComponent(selectionId)}`,
       { method: "DELETE" },
     );
+    this.#syncBasket(payload?.basket ?? payload);
+    return payload;
   }
 
-  reorderBasket(selectionIds) {
-    return this.#request("basket/order", {
+  async reorderBasket(selectionIds) {
+    const payload = await this.#request("basket/order", {
       method: "PATCH",
       body: { selection_ids: selectionIds },
     });
+    this.#syncBasket(payload?.basket ?? payload);
+    return payload;
   }
 
-  clearBasket() {
-    return this.#request("basket", { method: "DELETE" });
+  async clearBasket() {
+    const payload = await this.#request("basket", { method: "DELETE" });
+    setClipboardBasket({ items: [] });
+    return payload;
   }
 
-  postSelection(idempotencyKey) {
-    return this.#request("post", {
+  async postSelection(idempotencyKey) {
+    const payload = await this.#request("post", {
       method: "POST",
       body: { idempotency_key: idempotencyKey },
       timeoutMs: 25_000,
     });
+    if (payload?.status === "posted") {
+      setClipboardBasket({ items: [] });
+    }
+    return payload;
+  }
+
+  #syncBasket(candidate) {
+    setClipboardBasket(candidate);
+  }
+
+  #cleanupLaunch() {
+    if (this.#cleanupAttempted || !this.#sessionToken) {
+      return;
+    }
+    this.#cleanupAttempted = true;
+    void this.#request("cleanup", {
+      method: "POST",
+      keepalive: true,
+      timeoutMs: 5_000,
+    }).catch(() => undefined);
   }
 
   async #request(path, {
