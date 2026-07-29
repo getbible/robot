@@ -653,6 +653,7 @@ test("reader navigation remains coherent in a real browser", async (context) => 
     node.scrollTop = 420;
     node.dispatchEvent(new Event("scroll"));
   });
+  await settleLayout(page);
   assert.doesNotMatch(
     await app.getAttribute("class"),
     /is-header-condensed/,
