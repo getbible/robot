@@ -1,3 +1,5 @@
+import { UI_CATALOGS } from "./i18n.js";
+
 const DEFAULT_WEB_BASE_URL = "https://getbible.life";
 const SESSION_PATH = /\/api\/v1\/session\/?$/;
 const BASKET_PATH = /\/api\/v1\/basket\/?$/;
@@ -24,33 +26,33 @@ export function formatBasketForClipboard(
   const textBlocks = [];
   const htmlBlocks = [];
   for (const run of translationRuns) {
-    const canonical = [...run.items]
-      .sort((left, right) =>
-        left.book_number - right.book_number ||
-        left.chapter - right.chapter ||
-        left.verse - right.verse
-      )
-      .filter((item, index, values) =>
-        index === 0 || clipboardIdentity(item) !== clipboardIdentity(values[index - 1])
-      );
+    const seen = new Set();
     const chapters = [];
-    for (const item of canonical) {
+    const chaptersByKey = new Map();
+    for (const item of run.items) {
+      const identity = clipboardIdentity(item);
+      if (seen.has(identity)) {
+        continue;
+      }
+      seen.add(identity);
       const key = `${item.book_number}:${item.chapter}`;
-      const chapter = chapters.at(-1);
-      if (!chapter || chapter.key !== key) {
-        chapters.push({
+      let chapter = chaptersByKey.get(key);
+      if (!chapter) {
+        chapter = {
           key,
           book_name: item.book_name,
           chapter: item.chapter,
           translation: item.translation,
-          verses: [item],
-        });
-      } else {
-        chapter.verses.push(item);
+          verses: [],
+        };
+        chaptersByKey.set(key, chapter);
+        chapters.push(chapter);
       }
+      chapter.verses.push(item);
     }
 
     for (const chapter of chapters) {
+      chapter.verses.sort((left, right) => left.verse - right.verse);
       const range = verseRanges(chapter.verses.map((item) => item.verse));
       const label = `${chapter.book_name} ${chapter.chapter}:${range}`;
       const code = chapter.translation.toLowerCase();
@@ -144,7 +146,7 @@ function installClipboardEnhancements(windowObject, documentObject) {
     }
     const postButton = documentObject.getElementById("post-selection");
     const hasSelection = basketReady && latestBasket.length > 0;
-    copyButton.hidden = postButton?.hidden ?? !hasSelection;
+    copyButton.hidden = !hasSelection || Boolean(postButton?.hidden);
     copyButton.disabled = !hasSelection || Boolean(postButton?.disabled);
     copyButton.setAttribute(
       "aria-label",
@@ -167,11 +169,11 @@ function installClipboardEnhancements(windowObject, documentObject) {
     if (cleanupAttempted || typeof token !== "string" || token.length < 16) {
       return;
     }
-    cleanupAttempted = true;
     const initData = windowObject.Telegram?.WebApp?.initData;
     if (typeof initData !== "string" || initData.length === 0) {
       return;
     }
+    cleanupAttempted = true;
     void originalFetch(new URL("api/v1/cleanup", documentObject.baseURI), {
       method: "POST",
       headers: {
@@ -259,24 +261,25 @@ function installClipboardEnhancements(windowObject, documentObject) {
     copyButton.id = "copy-selection";
     copyButton.type = "button";
     copyButton.className = "button button--secondary post-button";
-    copyButton.textContent = "Copy selected verses";
+    copyButton.dataset.i18n = "selection.copy";
+    copyButton.textContent = localizedMessage("selection.copy");
     copyButton.disabled = true;
     copyButton.addEventListener("click", async () => {
       const payload = formatBasketForClipboard(latestBasket);
       const copied = await writeClipboardPayload(payload);
       if (!copied) {
-        showToast("Unable to copy the selected verses.");
+        showToast(localizedMessage("selection.copy_failed"));
         windowObject.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
         return;
       }
       windowObject.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
-      showToast("Selected verses copied.");
-      copyButton.textContent = "Copied";
+      showToast(localizedMessage("selection.copy_success"));
+      copyButton.textContent = localizedMessage("selection.copied");
       if (labelTimer !== null) {
         windowObject.clearTimeout(labelTimer);
       }
       labelTimer = windowObject.setTimeout(() => {
-        copyButton.textContent = "Copy selected verses";
+        copyButton.textContent = localizedMessage("selection.copy");
         labelTimer = null;
       }, 1200);
       attemptLaunchCleanup(sessionToken);
@@ -296,6 +299,15 @@ function installClipboardEnhancements(windowObject, documentObject) {
   } else {
     installButton();
   }
+}
+
+function localizedMessage(key) {
+  const requested = String(document.documentElement.lang || "en").toLowerCase();
+  const base = requested.split("-")[0];
+  return UI_CATALOGS[requested]?.[key] ??
+    UI_CATALOGS[base]?.[key] ??
+    UI_CATALOGS.en?.[key] ??
+    key;
 }
 
 function normalizeClipboardItems(rawItems) {
