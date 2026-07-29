@@ -15,12 +15,19 @@ from tornado.web import RedirectHandler, RequestHandler, StaticFileHandler, URLS
 
 from config import Settings
 
+from .errors import RobotRateLimited
 from .miniapp_api import MiniAppApi, MiniAppHttpRequest, MiniAppIngressLimiter
-from .miniapp_auth import TelegramInitDataReplayGuard, TelegramInitDataValidator
+from .miniapp_auth import (
+    MiniAppAuthenticationError,
+    TelegramInitDataReplayGuard,
+    TelegramInitDataValidator,
+)
+from .miniapp_cleanup import MiniAppLaunchCleanup
 from .miniapp_sessions import (
     MiniAppLaunch,
     MiniAppLaunchStore,
     MiniAppRoute,
+    MiniAppSessionExpiredError,
     MiniAppSessionStore,
     miniapp_direct_url,
     miniapp_public_web_url,
@@ -31,6 +38,7 @@ from .rate_limit import InboundRateLimiter
 from .service import ScriptureQuery, ScriptureService
 
 _IpAddress: TypeAlias = IPv4Address | IPv6Address
+CleanupSessionCallback = Callable[[MiniAppHttpRequest], Awaitable[int]]
 
 
 class ClientAddressResolver:
@@ -77,29 +85,31 @@ class MiniAppApiHandler(RequestHandler):
         self,
         api: MiniAppApi,
         address_resolver: ClientAddressResolver,
+        cleanup_session: CleanupSessionCallback | None = None,
     ) -> None:
         self._api = api
         self._address_resolver = address_resolver
+        self._cleanup_session = cleanup_session
 
     async def get(self, path: str = "") -> None:
-        await self._dispatch()
+        await self._dispatch(path)
 
     async def post(self, path: str = "") -> None:
-        await self._dispatch()
+        await self._dispatch(path)
 
     async def delete(self, path: str = "") -> None:
-        await self._dispatch()
+        await self._dispatch(path)
 
     async def options(self, path: str = "") -> None:
-        await self._dispatch()
+        await self._dispatch(path)
 
     async def put(self, path: str = "") -> None:
-        await self._dispatch()
+        await self._dispatch(path)
 
     async def patch(self, path: str = "") -> None:
-        await self._dispatch()
+        await self._dispatch(path)
 
-    async def _dispatch(self) -> None:
+    async def _dispatch(self, path: str) -> None:
         peer = (
             self.request.remote_ip
             if isinstance(self.request.remote_ip, str)
@@ -109,15 +119,18 @@ class MiniAppApiHandler(RequestHandler):
             peer,
             self.request.headers.get("X-Forwarded-For"),
         )
-        response = await self._api.handle(
-            MiniAppHttpRequest(
-                method=self.request.method or "",
-                target=self.request.uri or "",
-                headers=dict(self.request.headers),
-                body=self.request.body,
-                client_key=client_ip,
-            )
+        request = MiniAppHttpRequest(
+            method=self.request.method or "",
+            target=self.request.uri or "",
+            headers=dict(self.request.headers),
+            body=self.request.body,
+            client_key=client_ip,
         )
+        if path == "cleanup":
+            await self._dispatch_cleanup(request)
+            return
+
+        response = await self._api.handle(request)
         self.set_status(response.status)
         for name, value in response.headers.items():
             self.set_header(name, value)
@@ -126,12 +139,34 @@ class MiniAppApiHandler(RequestHandler):
         else:
             self.finish()
 
+    async def _dispatch_cleanup(self, request: MiniAppHttpRequest) -> None:
+        self.set_header("Cache-Control", "no-store, max-age=0")
+        self.set_header("X-Content-Type-Options", "nosniff")
+        method = request.method.upper()
+        if method == "OPTIONS":
+            self.set_header("Allow", "POST, OPTIONS")
+            self.set_status(204)
+            self.finish()
+            return
+        if method != "POST":
+            self.set_header("Allow", "POST, OPTIONS")
+            self.set_status(405)
+            self.finish()
+            return
+        if self._cleanup_session is None:
+            self.set_status(404)
+            self.finish()
+            return
+        self.set_status(await self._cleanup_session(request))
+        self.finish()
+
 
 def miniapp_api_handlers(
     api: MiniAppApi,
     *,
     public_path: str = "",
     address_resolver: ClientAddressResolver | None = None,
+    cleanup_session: CleanupSessionCallback | None = None,
 ) -> Sequence[URLSpec]:
     """Return route specs for a dedicated, size-limited Tornado HTTP server."""
     prefix = re.escape(public_path.rstrip("/"))
@@ -145,6 +180,7 @@ def miniapp_api_handlers(
                     address_resolver
                     or ClientAddressResolver(("127.0.0.1/32", "::1/128"))
                 ),
+                "cleanup_session": cleanup_session,
             },
         ),
     )
@@ -209,9 +245,16 @@ class MiniAppServer:
             raise ValueError("Mini App settings are not enabled.")
         self._settings = settings
         self._public_url = miniapp_public_web_url(settings.mini_app_public_url)
-        self._public_path = urlsplit(self._public_url).path.rstrip("/")
+        public_parts = urlsplit(self._public_url)
+        self._public_path = public_parts.path.rstrip("/")
+        self._public_origin = f"{public_parts.scheme}://{public_parts.netloc}"
         self._address_resolver = ClientAddressResolver(
             settings.mini_app_trusted_proxy_cidrs
+        )
+        self._cleanup = MiniAppLaunchCleanup(
+            cleanup_launch,
+            ttl_seconds=settings.mini_app_launch_ttl_seconds,
+            max_pending=settings.mini_app_session_limit,
         )
         self.launches = MiniAppLaunchStore(
             max_launches=settings.mini_app_session_limit,
@@ -229,6 +272,13 @@ class MiniAppServer:
             settings.telegram_api_token,
             max_age_seconds=settings.mini_app_init_data_max_age_seconds,
         )
+
+        async def post_with_cleanup(
+            launch: MiniAppLaunch,
+            queries: tuple[ScriptureQuery, ...],
+        ) -> Sequence[int] | None:
+            return await self._cleanup.post(launch, queries, post_scripture)
+
         self.api = MiniAppApi(
             service=service,
             preferences=preferences,
@@ -237,8 +287,8 @@ class MiniAppServer:
             launches=self.launches,
             validator=validator,
             public_url=self._public_url,
-            post_scripture=post_scripture,
-            cleanup_launch=cleanup_launch,
+            post_scripture=post_with_cleanup,
+            cleanup_launch=self._cleanup.cleanup_now,
             ingress_limiter=MiniAppIngressLimiter(
                 capacity=settings.mini_app_session_exchange_rate_capacity,
                 refill_per_second=(
@@ -271,6 +321,7 @@ class MiniAppServer:
                 self.api,
                 public_path=self._public_path,
                 address_resolver=self._address_resolver,
+                cleanup_session=self._cleanup_session_request,
             )
         )
         if self._public_path:
@@ -310,18 +361,19 @@ class MiniAppServer:
         self._server = server
 
     async def close(self) -> None:
-        """Stop accepting requests and drain current connections."""
+        """Stop requests and make one final attempt for every pending launch row."""
         server = self._server
         self._server = None
-        if server is None:
-            return
-        server.stop()
-        await server.close_all_connections()
+        if server is not None:
+            server.stop()
+            await server.close_all_connections()
+        await self._cleanup.close()
 
     def snapshot(self) -> dict[str, int | float]:
         """Return bounded session and API traffic counters for health metrics."""
         snapshot = dict(self.sessions.snapshot())
         snapshot.update(self.api.snapshot())
+        snapshot.update(self._cleanup.snapshot())
         return snapshot
 
     def create_launch(
@@ -361,12 +413,37 @@ class MiniAppServer:
         message_id: int | None = None,
         ephemeral_message_id: int | None = None,
     ) -> MiniAppLaunch:
-        """Retain the bot-created launch prompt so successful posts can clean it."""
-        return self.launches.remember_prompt(
+        """Retain the launch response while preventing source-command retries."""
+        remembered = self.launches.remember_prompt(
             launch,
             message_id=message_id,
             ephemeral_message_id=ephemeral_message_id,
         )
+        self._cleanup.remember_prompt(remembered)
+        return remembered
+
+    async def _cleanup_session_request(self, request: MiniAppHttpRequest) -> int:
+        """Authenticate one browser-ready signal and remove its launch row once."""
+        origin = next(
+            (
+                value
+                for name, value in request.headers.items()
+                if name.casefold() == "origin"
+            ),
+            None,
+        )
+        if origin != self._public_origin:
+            return 403
+        try:
+            session = await self.api._authenticated(request)
+        except RobotRateLimited:
+            return 429
+        except (MiniAppAuthenticationError, MiniAppSessionExpiredError):
+            return 401
+        except Exception:
+            return 401
+        await self._cleanup.cleanup_now(session.launch)
+        return 204
 
     @property
     def public_web_url(self) -> str:
