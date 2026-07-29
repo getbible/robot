@@ -1,8 +1,23 @@
 import { UI_CATALOGS } from "./i18n.js";
 
 const DEFAULT_WEB_BASE_URL = "https://getbible.life";
-const SESSION_PATH = /\/api\/v1\/session\/?$/;
-const BASKET_PATH = /\/api\/v1\/basket\/?$/;
+
+let latestBasket = [];
+let basketReady = false;
+let copyButton = null;
+let labelTimer = null;
+let browserWindow = null;
+let browserDocument = null;
+
+export function setClipboardBasket(candidate) {
+  if (!candidate || !Array.isArray(candidate.items)) {
+    return false;
+  }
+  latestBasket = candidate.items;
+  basketReady = true;
+  updateButton();
+  return true;
+}
 
 export function formatBasketForClipboard(
   rawItems,
@@ -128,131 +143,11 @@ export async function writeClipboardPayload(
 }
 
 function installClipboardEnhancements(windowObject, documentObject) {
-  if (
-    !windowObject ||
-    !documentObject ||
-    typeof windowObject.fetch !== "function"
-  ) {
+  if (!windowObject || !documentObject) {
     return;
   }
-
-  const originalFetch = windowObject.fetch.bind(windowObject);
-  let latestBasket = [];
-  let basketReady = false;
-  let sessionToken = null;
-  let cleanupAttempted = false;
-  let copyButton = null;
-  let labelTimer = null;
-
-  const updateButton = () => {
-    if (!copyButton) {
-      return;
-    }
-    const postButton = documentObject.getElementById("post-selection");
-    const hasSelection = basketReady && latestBasket.length > 0;
-    copyButton.hidden = !hasSelection || Boolean(postButton?.hidden);
-    copyButton.disabled = !hasSelection || Boolean(postButton?.disabled);
-    copyButton.setAttribute(
-      "aria-label",
-      localizedMessage("selection.copy"),
-    );
-  };
-
-  const setBasket = (candidate) => {
-    if (!candidate || !Array.isArray(candidate.items)) {
-      return;
-    }
-    latestBasket = candidate.items;
-    basketReady = true;
-    updateButton();
-  };
-
-  const attemptLaunchCleanup = (token) => {
-    if (cleanupAttempted || typeof token !== "string" || token.length < 16) {
-      return;
-    }
-    const initData = windowObject.Telegram?.WebApp?.initData;
-    if (typeof initData !== "string" || initData.length === 0) {
-      return;
-    }
-    cleanupAttempted = true;
-    void originalFetch(new URL("api/v1/cleanup", documentObject.baseURI), {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${token}`,
-        "X-Telegram-Init-Data": initData,
-      },
-      credentials: "omit",
-      cache: "no-store",
-      redirect: "error",
-      referrerPolicy: "no-referrer",
-      keepalive: true,
-    }).catch(() => undefined);
-  };
-
-  const inspectResponse = async (input, init, response) => {
-    let url;
-    try {
-      const source = input instanceof Request ? input.url : String(input);
-      url = new URL(source, documentObject.baseURI);
-    } catch {
-      return;
-    }
-    const method = String(
-      init?.method ?? (input instanceof Request ? input.method : "GET"),
-    ).toUpperCase();
-    if (!response.ok) {
-      return;
-    }
-    if (BASKET_PATH.test(url.pathname) && method === "DELETE" && response.status === 204) {
-      latestBasket = [];
-      basketReady = true;
-      updateButton();
-      return;
-    }
-    if (
-      !SESSION_PATH.test(url.pathname) &&
-      !url.pathname.includes("/api/v1/basket")
-    ) {
-      return;
-    }
-    const payload = await response.clone().json().catch(() => null);
-    if (!payload || typeof payload !== "object") {
-      return;
-    }
-    if (SESSION_PATH.test(url.pathname)) {
-      if (typeof payload.session_token === "string") {
-        sessionToken = payload.session_token;
-        attemptLaunchCleanup(sessionToken);
-      }
-      setBasket(payload.basket);
-      return;
-    }
-    setBasket(payload.basket ?? payload);
-  };
-
-  windowObject.fetch = async (input, init) => {
-    const response = await originalFetch(input, init);
-    void inspectResponse(input, init, response);
-    return response;
-  };
-
-  const showToast = (message) => {
-    const region = documentObject.getElementById("toast-region");
-    if (!region) {
-      return;
-    }
-    const item = documentObject.createElement("div");
-    item.className = "toast";
-    item.textContent = message;
-    region.replaceChildren(item);
-    windowObject.setTimeout(() => {
-      if (region.contains(item)) {
-        region.replaceChildren();
-      }
-    }, 3600);
-  };
+  browserWindow = windowObject;
+  browserDocument = documentObject;
 
   const installButton = () => {
     const postButton = documentObject.getElementById("post-selection");
@@ -266,32 +161,14 @@ function installClipboardEnhancements(windowObject, documentObject) {
     copyButton.dataset.i18n = "selection.copy";
     copyButton.textContent = localizedMessage("selection.copy");
     copyButton.disabled = true;
-    copyButton.addEventListener("click", async () => {
-      const payload = formatBasketForClipboard(latestBasket);
-      const copied = await writeClipboardPayload(payload);
-      if (!copied) {
-        showToast(localizedMessage("selection.copy_failed"));
-        windowObject.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
-        return;
-      }
-      windowObject.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
-      showToast(localizedMessage("selection.copy_success"));
-      copyButton.textContent = localizedMessage("selection.copied");
-      if (labelTimer !== null) {
-        windowObject.clearTimeout(labelTimer);
-      }
-      labelTimer = windowObject.setTimeout(() => {
-        copyButton.textContent = localizedMessage("selection.copy");
-        labelTimer = null;
-      }, 1200);
-      attemptLaunchCleanup(sessionToken);
-    });
+    copyButton.addEventListener("click", () => void copySelection());
     postButton.insertAdjacentElement("beforebegin", copyButton);
     updateButton();
 
     const selectionList = documentObject.getElementById("selection-list");
-    if (selectionList && typeof MutationObserver === "function") {
-      const observer = new MutationObserver(updateButton);
+    const Observer = windowObject.MutationObserver;
+    if (selectionList && typeof Observer === "function") {
+      const observer = new Observer(updateButton);
       observer.observe(selectionList, { childList: true, subtree: true });
     }
   };
@@ -303,8 +180,70 @@ function installClipboardEnhancements(windowObject, documentObject) {
   }
 }
 
+async function copySelection() {
+  if (!copyButton || !browserWindow || !browserDocument) {
+    return;
+  }
+  const payload = formatBasketForClipboard(latestBasket);
+  const copied = await writeClipboardPayload(payload, {
+    navigatorObject: browserWindow.navigator,
+    documentObject: browserDocument,
+    ClipboardItemCtor: browserWindow.ClipboardItem,
+    BlobCtor: browserWindow.Blob,
+  });
+  if (!copied) {
+    showToast(localizedMessage("selection.copy_failed"));
+    browserWindow.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
+    return;
+  }
+  browserWindow.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
+  showToast(localizedMessage("selection.copy_success"));
+  copyButton.textContent = localizedMessage("selection.copied");
+  if (labelTimer !== null) {
+    browserWindow.clearTimeout(labelTimer);
+  }
+  labelTimer = browserWindow.setTimeout(() => {
+    if (copyButton) {
+      copyButton.textContent = localizedMessage("selection.copy");
+    }
+    labelTimer = null;
+  }, 1200);
+}
+
+function updateButton() {
+  if (!copyButton || !browserDocument) {
+    return;
+  }
+  const postButton = browserDocument.getElementById("post-selection");
+  const hasSelection = basketReady && latestBasket.length > 0;
+  copyButton.hidden = !hasSelection || Boolean(postButton?.hidden);
+  copyButton.disabled = !hasSelection || Boolean(postButton?.disabled);
+  copyButton.setAttribute("aria-label", localizedMessage("selection.copy"));
+}
+
+function showToast(message) {
+  if (!browserWindow || !browserDocument) {
+    return;
+  }
+  const region = browserDocument.getElementById("toast-region");
+  if (!region) {
+    return;
+  }
+  const item = browserDocument.createElement("div");
+  item.className = "toast";
+  item.textContent = message;
+  region.replaceChildren(item);
+  browserWindow.setTimeout(() => {
+    if (region.contains(item)) {
+      region.replaceChildren();
+    }
+  }, 3600);
+}
+
 function localizedMessage(key) {
-  const requested = String(document.documentElement.lang || "en").toLowerCase();
+  const requested = String(
+    browserDocument?.documentElement.lang || "en",
+  ).toLowerCase();
   const base = requested.split("-")[0];
   return UI_CATALOGS[requested]?.[key] ??
     UI_CATALOGS[base]?.[key] ??
