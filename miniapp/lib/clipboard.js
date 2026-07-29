@@ -1,6 +1,12 @@
 import { UI_CATALOGS } from "./i18n.js";
 
 const DEFAULT_WEB_BASE_URL = "https://getbible.life";
+const COPY_MESSAGES = Object.freeze({
+  "selection.copy": "Copy selected verses",
+  "selection.copied": "Copied",
+  "selection.copy_success": "Selected verses copied.",
+  "selection.copy_failed": "Unable to copy the selected verses.",
+});
 
 let latestBasket = [];
 let basketReady = false;
@@ -158,7 +164,6 @@ function installClipboardEnhancements(windowObject, documentObject) {
     copyButton.id = "copy-selection";
     copyButton.type = "button";
     copyButton.className = "button button--secondary post-button";
-    copyButton.dataset.i18n = "selection.copy";
     copyButton.textContent = localizedMessage("selection.copy");
     copyButton.disabled = true;
     copyButton.addEventListener("click", () => void copySelection());
@@ -247,7 +252,7 @@ function localizedMessage(key) {
   const base = requested.split("-")[0];
   return UI_CATALOGS[requested]?.[key] ??
     UI_CATALOGS[base]?.[key] ??
-    UI_CATALOGS.en?.[key] ??
+    COPY_MESSAGES[key] ??
     key;
 }
 
