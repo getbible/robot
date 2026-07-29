@@ -30,7 +30,7 @@ bottom-navigation item. The normal sequence is:
 5. tap a verse number or row to select or remove it;
 6. add verses from other chapters, books, searches, or translations;
 7. review, reorder, or clear the server-held basket;
-8. press **Post selected verses** once.
+8. press **Post selected verses** or **Copy selected verses**.
 
 The compact chapter heading contains previous/next controls and the current
 passage. It hides while scrolling down and returns while scrolling up, leaving
@@ -71,7 +71,12 @@ into safe references at post time.
 The client receives an opaque selection identifier for each displayed verse.
 It never supplies authoritative verse text for posting. On **Post**, the server
 rebuilds and retrieves the Scripture references, applies the existing renderer
-and limits, and sends the final message through the bot.
+and limits, and sends the final message through the bot. On **Copy**, the Mini
+App formats the current server-returned basket into the same visible reference,
+translation, verse-number, and verse-text structure and writes it to the device
+clipboard. Rich clipboard data retains linked references where supported, with
+plain text available everywhere. Copy never calls Telegram's posting route and
+does not clear the basket.
 
 ## Search and filters
 
@@ -98,8 +103,8 @@ Results use contained paging or incremental loading and never create a stream
 of Telegram messages. Selections persist across result pages and Bible
 navigation. Submitting through either the visible button or the mobile
 keyboard's Search key blurs the query input before results render so Telegram
-can dismiss the on-screen keyboard. Only the final server-resolved post enters
-the target chat.
+can dismiss the on-screen keyboard. Only a final server-resolved Post enters
+the target chat; Copy remains entirely on the user's device.
 
 ## Translation and interface preferences
 
@@ -151,9 +156,14 @@ ephemeral Main Mini App link. The server binds that token to the Telegram user,
 target chat, topic, and initial route. The URL contains no chat identifier,
 reference, search query, or verse text.
 
-Browsing, filtering, and basket changes remain private. The final post is sent
-by the bot to the launch-bound chat and topic. A generic menu-button launch has
-no group target and posts to the user's private conversation with the bot.
+The initiating user-only command receives one deletion attempt immediately
+after the launcher has been recorded. Once the signed Mini App session is ready,
+the bot-created user-only launcher also receives one deletion attempt because
+it has completed its only purpose. Browsing, filtering, basket changes, Copy,
+and native Close therefore leave no application-created interaction row in the
+target chat. A final Post is sent by the bot to the launch-bound chat and topic,
+so only the requested Scripture remains. A generic menu-button launch has no
+group target and posts to the user's private conversation with the bot.
 
 ## Failure and cleanup behavior
 
@@ -162,15 +172,20 @@ no group target and posts to the user's private conversation with the bot.
   instance. Its absolute expiry is unchanged.
 - A malformed, genuinely expired, replayed, or user-mismatched launch fails
   closed with an explicit close-and-relaunch instruction.
-- Tapping a recorded expired launch performs one best-effort cleanup of its
-  Telegram rows before rejection. Reopening the bot command creates a fresh
-  launch.
+- An unopened launcher receives one best-effort cleanup attempt when its launch
+  lifetime expires. Pending launchers also receive one attempt during graceful
+  application shutdown.
 - Direct `/bible <reference>` commands are deleted only after successful
   delivery when command deletion is enabled.
 - The initiating ephemeral command and the bot's ephemeral Mini App response
-  are both best-effort cleanup items. Immediate source-command cleanup is
-  retried independently after a successful final post; final Scripture
-  messages are never part of that cleanup ledger.
+  are independent cleanup items. Each item is removed from the cleanup ledger
+  before its Telegram deletion call, so no later Post, Copy, Close, expiry, or
+  concurrent request can retry it.
+- Telegram permission failures, unavailable messages, and deletion failures are
+  silent and cannot invalidate opening the Mini App, copying text, closing, or
+  delivering final Scripture.
+- Final Scripture message identifiers are never part of the launch cleanup
+  ledger.
 - The complete basket is resolved and rendered under one global output-message
   limit before the first Telegram send.
 - Known messages from an incomplete send are deleted best-effort. Because a
