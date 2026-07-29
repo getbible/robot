@@ -6,6 +6,7 @@ import asyncio
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import replace
+from functools import partial
 from typing import Any
 
 from .miniapp_sessions import MiniAppLaunch
@@ -70,9 +71,7 @@ class MiniAppLaunchCleanup:
 
         task = asyncio.create_task(self._expire(launch))
         self._timers[launch.token] = (launch, task)
-        task.add_done_callback(
-            lambda completed, token=launch.token: self._timer_done(token, completed)
-        )
+        task.add_done_callback(partial(self._timer_done, launch.token))
         while len(self._timers) > self._max_pending:
             _, (old_launch, old_timer) = self._timers.popitem(last=False)
             old_timer.cancel()
