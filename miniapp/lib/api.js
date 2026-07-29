@@ -223,7 +223,7 @@ export class MiniAppApi {
           ? payload.message
           : typeof error?.message === "string"
             ? error.message
-            : statusMessage(response.status),
+          : statusMessage(response.status),
         {
           code:
             typeof error === "string"
