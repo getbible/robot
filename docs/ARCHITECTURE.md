@@ -80,9 +80,11 @@ the originating chat and forum topic.
 
 `/search <words>` launches the Mini App directly into results constructed with
 Librarian's defaults and the user's saved translation. An empty `/search`
-launches the full search and filter screen. For detected CJK scripts, default
-whole-word matching is adapted to substring matching because those scripts do
-not depend on whitespace word boundaries.
+launches the full search and filter screen. For continuous-writing scripts,
+Robot uses Librarian 1.2.1's shared language policy to adapt default whole-word
+matching to substring matching. This covers Han, Japanese kana, Thai, Lao,
+Khmer, and Myanmar text without misclassifying whitespace-delimited Hangul,
+Arabic, Hebrew, Devanagari, Greek, Cyrillic, or Latin searches.
 
 Librarian returns exact totals, grouped verse data, and ordered match metadata.
 The server validates that every match points to a verse in the grouped results,

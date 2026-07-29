@@ -85,7 +85,7 @@ venv/bin/detect-secrets scan \
   --exclude-files '(^|/)requirements(-dev)?\.txt$'
 ```
 
-Librarian 1.2.0 is installed as a released, hashed package, so `scripts/audit_runtime.py` submits the complete lock to `pip-audit --strict` without filtering a dependency. The helper retains fail-closed validation for any future direct source declaration. A malformed source declaration, missing hash, audit error, or vulnerable dependency fails the check.
+Librarian 1.2.1 is installed as a released, hashed package, so `scripts/audit_runtime.py` submits the complete lock to `pip-audit --strict` without filtering a dependency. The helper retains fail-closed validation for any future direct source declaration. A malformed source declaration, missing hash, audit error, or vulnerable dependency fails the check.
 
 Review secret-scan output rather than blindly suppressing it. The `.env.template`
 contains a deliberate placeholder and is excluded; real tokens are never

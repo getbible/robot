@@ -4,6 +4,18 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Multilingual search integration
+
+- Upgraded the reviewed Librarian dependency to 1.2.1 and made that release
+  the minimum compatible version.
+- Replaced Robot's private CJK-only detector with Librarian's shared
+  multilingual search policy.
+- Applied the same language-aware match adaptation to Telegram-native,
+  Mini App, and direct service searches, while preserving explicitly selected
+  substring mode.
+- Added regression coverage for Han, Japanese, Korean, Thai, Lao, Khmer,
+  Myanmar, Arabic, Hebrew, Devanagari, and Latin queries.
+
 ### Container deployment and small-host hardening
 
 - Added a non-root, read-only, capability-free Docker image that contains no
@@ -268,7 +280,7 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 - Made non-vulnerable `requests==2.34.2` an explicit runtime dependency.
 - Updated mypy to 2.3.0.
 - Made Python 3.10's `exceptiongroup` requirement explicit in the universal runtime input.
-- Moved to the released `getbible>=1.2,<2` policy with `getbible==1.2.0` selected and hashed in both locks.
+- Moved to the released `getbible>=1.2.1,<2` policy with `getbible==1.2.1` selected and hashed in both locks.
 
 ### Documentation
 

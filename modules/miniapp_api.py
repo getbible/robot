@@ -52,7 +52,11 @@ from .miniapp_sessions import (
 )
 from .preferences import ReaderLocation, SearchDefaults, UserPreferenceStore
 from .rate_limit import InboundRateLimiter
-from .service import ScriptureQuery, ScriptureService
+from .service import (
+    ScriptureQuery,
+    ScriptureService,
+    effective_search_options,
+)
 
 LOGGER = logging.getLogger(__name__)
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
@@ -985,10 +989,13 @@ class MiniAppApi:
             min(self._service.settings.max_input_length, 240),
         )
         preferences = self._preferences.preferences_for(session.user_id)
-        options = _search_options(
-            payload.get("options"),
-            session.translation,
-            defaults=preferences.search_defaults,
+        options = effective_search_options(
+            query,
+            _search_options(
+                payload.get("options"),
+                session.translation,
+                defaults=preferences.search_defaults,
+            ),
         )
         page = await self._service.search(query, options)
         if any(
