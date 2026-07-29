@@ -419,7 +419,7 @@ class MiniAppServer:
         message_id: int | None = None,
         ephemeral_message_id: int | None = None,
     ) -> MiniAppLaunch:
-        """Retain the launch response while preventing source-command retries."""
+        """Retain the source command and launch response as one cleanup unit."""
         remembered = self.launches.remember_prompt(
             launch,
             message_id=message_id,

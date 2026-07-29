@@ -156,14 +156,14 @@ ephemeral Main Mini App link. The server binds that token to the Telegram user,
 target chat, topic, and initial route. The URL contains no chat identifier,
 reference, search query, or verse text.
 
-The initiating user-only command receives one deletion attempt immediately
-after the launcher has been recorded. Once the signed Mini App session is ready,
-the bot-created user-only launcher also receives one deletion attempt because
-it has completed its only purpose. Browsing, filtering, basket changes, Copy,
-and native Close therefore leave no application-created interaction row in the
-target chat. A final Post is sent by the bot to the launch-bound chat and topic,
-so only the requested Scripture remains. A generic menu-button launch has no
-group target and posts to the user's private conversation with the bot.
+The initiating user-only command and the bot-created user-only launcher remain
+one cleanup unit. Once the signed Mini App session is ready, both rows have
+completed their purpose and are claimed together for deletion. Browsing,
+filtering, basket changes, Copy, and native Close therefore leave no
+application-created interaction row in the target chat. A final Post is sent by
+the bot to the launch-bound chat and topic, so only the requested Scripture
+remains. A generic menu-button launch has no group target and posts to the
+user's private conversation with the bot.
 
 ## Failure and cleanup behavior
 
@@ -176,11 +176,12 @@ group target and posts to the user's private conversation with the bot.
   lifetime expires. Pending launchers also receive one attempt during graceful
   application shutdown.
 - Direct `/bible <reference>` commands are deleted only after successful
-  delivery when command deletion is enabled.
+  delivery. One unconfirmed transient Bot API deletion failure receives a
+  bounded retry; permission and unavailable-message failures do not retry.
 - The initiating ephemeral command and the bot's ephemeral Mini App response
-  are independent cleanup items. Each item is removed from the cleanup ledger
-  before its Telegram deletion call, so no later Post, Copy, Close, expiry, or
-  concurrent request can retry it.
+  are claimed as one immutable cleanup snapshot. Their live identifiers are
+  cleared before Telegram deletion calls, so concurrent ready, Post, expiry,
+  eviction, or shutdown paths cannot issue duplicate cleanup.
 - Telegram permission failures, unavailable messages, and deletion failures are
   silent and cannot invalidate opening the Mini App, copying text, closing, or
   delivering final Scripture.

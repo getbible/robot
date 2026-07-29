@@ -1,11 +1,12 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError
+from telegram.error import BadRequest, NetworkError, TelegramError
 
 from modules.ephemeral import (
+    EPHEMERAL_DELETE_RETRY_DELAY_SECONDS,
     delete_ephemeral_text,
     edit_ephemeral_text,
     send_ephemeral_text,
@@ -109,6 +110,44 @@ class EphemeralTransportTestCase(unittest.IsolatedAsyncioTestCase):
                 "ephemeral_message_id": 701,
             },
         )
+
+    async def test_delete_retries_one_unconfirmed_transient_failure(self) -> None:
+        bot = SimpleNamespace(
+            do_api_request=AsyncMock(
+                side_effect=[NetworkError("temporary failure"), True]
+            )
+        )
+
+        with patch(
+            "modules.ephemeral.asyncio.sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            await delete_ephemeral_text(
+                bot,
+                chat_id=-100,
+                receiver_user_id=200,
+                ephemeral_message_id=701,
+            )
+
+        self.assertEqual(bot.do_api_request.await_count, 2)
+        sleep.assert_awaited_once_with(EPHEMERAL_DELETE_RETRY_DELAY_SECONDS)
+
+    async def test_delete_does_not_retry_a_definitive_failure(self) -> None:
+        bot = SimpleNamespace(
+            do_api_request=AsyncMock(
+                side_effect=BadRequest("message is unavailable")
+            )
+        )
+
+        with self.assertRaises(BadRequest):
+            await delete_ephemeral_text(
+                bot,
+                chat_id=-100,
+                receiver_user_id=200,
+                ephemeral_message_id=701,
+            )
+
+        self.assertEqual(bot.do_api_request.await_count, 1)
 
 
 if __name__ == "__main__":

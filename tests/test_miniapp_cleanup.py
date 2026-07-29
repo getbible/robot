@@ -45,7 +45,7 @@ class MiniAppLaunchCleanupTestCase(unittest.IsolatedAsyncioTestCase):
             source_ephemeral_receiver_user_id=999,
         )
 
-    async def test_ready_cleanup_forgets_source_and_deletes_prompt_once(self) -> None:
+    async def test_ready_cleanup_claims_source_and_launcher_together(self) -> None:
         cleaned: list[MiniAppLaunch] = []
 
         async def callback(launch: MiniAppLaunch) -> None:
@@ -59,8 +59,8 @@ class MiniAppLaunchCleanupTestCase(unittest.IsolatedAsyncioTestCase):
         launch = self.launch()
         coordinator.remember_prompt(launch)
 
-        self.assertIsNone(launch.source_ephemeral_message_id)
-        self.assertIsNone(launch.source_ephemeral_receiver_user_id)
+        self.assertEqual(launch.source_ephemeral_message_id, 250)
+        self.assertEqual(launch.source_ephemeral_receiver_user_id, 999)
         self.assertEqual(launch.prompt_ephemeral_message_id, 654)
 
         await coordinator.cleanup_now(launch)
@@ -69,8 +69,8 @@ class MiniAppLaunchCleanupTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(launch.prompt_ephemeral_message_id)
         self.assertEqual(len(cleaned), 1)
         self.assertEqual(cleaned[0].prompt_ephemeral_message_id, 654)
-        self.assertIsNone(cleaned[0].source_ephemeral_message_id)
-        self.assertIsNone(cleaned[0].source_ephemeral_receiver_user_id)
+        self.assertEqual(cleaned[0].source_ephemeral_message_id, 250)
+        self.assertEqual(cleaned[0].source_ephemeral_receiver_user_id, 999)
         await coordinator.close()
 
     async def test_post_cannot_repeat_cleanup_owned_by_the_coordinator(self) -> None:
@@ -112,6 +112,8 @@ class MiniAppLaunchCleanupTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(post_observations, [(None, None)])
         self.assertEqual(len(cleaned), 1)
         self.assertEqual(cleaned[0].prompt_ephemeral_message_id, 654)
+        self.assertEqual(cleaned[0].source_ephemeral_message_id, 250)
+        self.assertEqual(cleaned[0].source_ephemeral_receiver_user_id, 999)
         await coordinator.close()
 
     async def test_failed_post_still_removes_the_private_launch_row_once(self) -> None:

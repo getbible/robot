@@ -446,7 +446,8 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     else "Search and filter Scripture in getBible.Life."
                 ),
             )
-            await _cleanup_command_source(update, context, chat_id=chat_id)
+            if not ephemeral:
+                await _cleanup_command_source(update, context, chat_id=chat_id)
             return
         session = interactions.create(
             chat_id=chat_id,
@@ -541,7 +542,8 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     query=raw_reference,
                     text="Complete this Scripture reference in getBible.Life.",
                 )
-                await _cleanup_command_source(update, context, chat_id=chat_id)
+                if not ephemeral:
+                    await _cleanup_command_source(update, context, chat_id=chat_id)
                 return
             if not ephemeral:
                 await send_typing(update, context)
@@ -566,7 +568,8 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 query="",
                 text="Choose a translation, chapter, and full-text verse.",
             )
-            await _cleanup_command_source(update, context, chat_id=chat_id)
+            if not ephemeral:
+                await _cleanup_command_source(update, context, chat_id=chat_id)
             return
 
         if not ephemeral:

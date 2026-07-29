@@ -4,7 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from getbible import RepositoryError
-from telegram.error import TelegramError
+from telegram import Message
+from telegram.error import NetworkError, TelegramError
 
 from modules.catalog import BookOption, ChapterOption, TranslationOption
 from modules.commands import (
@@ -14,6 +15,7 @@ from modules.commands import (
     PREFERENCES_SLOT,
     SERVICE_SLOT,
     SETTINGS_SLOT,
+    _ephemeral_source_target,
     _highlight_search_terms,
     _highlight_search_terms_plain,
     _reference_basket_reference,
@@ -118,6 +120,40 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(limiter.calls, [(200, 100)] * 4)
         self.assertEqual(context.bot.send_message.await_count, 4)
+
+    def test_pinned_runtime_extracts_bot_api_10_ephemeral_source_fields(
+        self,
+    ) -> None:
+        message = Message.de_json(
+            {
+                "message_id": 0,
+                "date": 1_785_360_000,
+                "chat": {
+                    "id": -100_123,
+                    "type": "supergroup",
+                    "title": "Test",
+                },
+                "from": {
+                    "id": 200,
+                    "is_bot": False,
+                    "first_name": "User",
+                },
+                "receiver_user": {
+                    "id": 999,
+                    "is_bot": True,
+                    "first_name": "Robot",
+                },
+                "ephemeral_message_id": 250,
+                "text": "/bible@getBibleRobot James 5:1-3",
+            },
+            None,
+        )
+        update = SimpleNamespace(effective_message=message)
+
+        self.assertEqual(
+            _ephemeral_source_target(update, self.context(_Limiter())),
+            (250, 999),
+        )
 
     async def test_rejected_command_sends_only_rate_limit_response(self) -> None:
         limiter = _Limiter(reject=True)
@@ -224,7 +260,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             message_id=300,
         )
 
-    async def test_group_mini_app_retains_source_command_for_final_cleanup(
+    async def test_group_mini_app_defers_source_to_lifecycle_cleanup(
         self,
     ) -> None:
         context = self.context(_Limiter())
@@ -270,15 +306,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [call.args[0] for call in context.bot.do_api_request.await_args_list],
-            ["sendMessage", "deleteEphemeralMessage"],
-        )
-        self.assertEqual(
-            context.bot.do_api_request.await_args_list[1].kwargs["api_kwargs"],
-            {
-                "chat_id": 100,
-                "receiver_user_id": 999,
-                "ephemeral_message_id": 250,
-            },
+            ["sendMessage"],
         )
 
     async def test_group_search_results_are_ephemeral_until_post(self) -> None:
@@ -819,7 +847,10 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_group_direct_bible_posts_only_scripture_publicly(self) -> None:
         context = self.context(_Limiter())
-        context.bot.do_api_request.return_value = True
+        context.bot.do_api_request.side_effect = [
+            NetworkError("temporary deletion failure"),
+            True,
+        ]
         service = SimpleNamespace(
             resolve_query=AsyncMock(
                 return_value=ScriptureQuery("John 3:16", "kjv")
@@ -863,11 +894,15 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("For God so loved", sent["text"])
         context.bot.send_chat_action.assert_not_awaited()
         context.bot.delete_message.assert_not_awaited()
-        call = context.bot.do_api_request.await_args
-        self.assertEqual(call.args[0], "deleteEphemeralMessage")
         self.assertEqual(
-            call.kwargs["api_kwargs"]["receiver_user_id"],
-            999,
+            [call.args[0] for call in context.bot.do_api_request.await_args_list],
+            ["deleteEphemeralMessage", "deleteEphemeralMessage"],
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["api_kwargs"]["receiver_user_id"] == 999
+                for call in context.bot.do_api_request.await_args_list
+            )
         )
 
     async def test_failed_direct_bible_post_preserves_command_for_retry(self) -> None:
