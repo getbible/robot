@@ -1,3 +1,5 @@
+import "./clipboard.js";
+
 const API_ROOT = "api/v1/";
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -221,7 +223,7 @@ export class MiniAppApi {
           ? payload.message
           : typeof error?.message === "string"
             ? error.message
-          : statusMessage(response.status),
+            : statusMessage(response.status),
         {
           code:
             typeof error === "string"
