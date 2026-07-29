@@ -39,6 +39,19 @@ async function settleLayout(page) {
   );
 }
 
+async function setTelegramViewport(page, { width, height }) {
+  await page.setViewportSize({ width, height });
+  await page.evaluate((stableHeight) => {
+    const webApp = window.Telegram?.WebApp;
+    if (!webApp || typeof window.__telegramState?.emit !== "function") {
+      throw new Error("Telegram viewport mock is unavailable.");
+    }
+    webApp.viewportStableHeight = stableHeight;
+    window.__telegramState.emit("viewportChanged", { isStateStable: true });
+  }, height);
+  await settleLayout(page);
+}
+
 async function fullscreenTranslationMetrics(page) {
   return page.evaluate(() => {
     const control = document.querySelector("#translation-shortcut");
@@ -547,7 +560,7 @@ test("reader navigation remains coherent in a real browser", async (context) => 
     readerExpandedMetrics,
     { fullName: longKjvName, expectedTop: 58 },
   );
-  await page.setViewportSize({ width: 320, height: 700 });
+  await setTelegramViewport(page, { width: 320, height: 700 });
   await settleLayout(page);
   const readerNarrowExpandedMetrics =
     await fullscreenTranslationMetrics(page);
@@ -614,7 +627,7 @@ test("reader navigation remains coherent in a real browser", async (context) => 
   });
   await settleLayout(page);
   assert.doesNotMatch(await app.getAttribute("class"), /is-header-condensed/);
-  await page.setViewportSize({ width: 390, height: 844 });
+  await setTelegramViewport(page, { width: 390, height: 844 });
   await settleLayout(page);
 
   await page.locator("#bible-view").evaluate((node) => {
@@ -744,7 +757,7 @@ test("reader navigation remains coherent in a real browser", async (context) => 
     await page.locator(".home-hero__brand").isVisible(),
     "the logo over the Home hero remains visible",
   );
-  await page.setViewportSize({ width: 320, height: 360 });
+  await setTelegramViewport(page, { width: 320, height: 360 });
   await settleLayout(page);
   const homeNarrowExpandedMetrics =
     await fullscreenTranslationMetrics(page);
@@ -885,7 +898,7 @@ test("reader navigation remains coherent in a real browser", async (context) => 
     window.__telegramState.emit("fullscreenChanged");
   });
   await settleLayout(page);
-  await page.setViewportSize({ width: 390, height: 844 });
+  await setTelegramViewport(page, { width: 390, height: 844 });
   await settleLayout(page);
   await page.locator('[data-route="bible"]').click();
   await settleLayout(page);
@@ -1004,7 +1017,7 @@ test("reader navigation remains coherent in a real browser", async (context) => 
     longArabicName,
   );
   assert.equal(await page.locator("html").getAttribute("dir"), "rtl");
-  await page.setViewportSize({ width: 320, height: 700 });
+  await setTelegramViewport(page, { width: 320, height: 700 });
   await page.locator("#bible-view").evaluate((node) => {
     node.scrollTop = 0;
     node.dispatchEvent(new Event("scroll"));
@@ -1035,7 +1048,7 @@ test("reader navigation remains coherent in a real browser", async (context) => 
     await fullscreenTranslationMetrics(page),
     { fullName: longArabicName, expectedTop: 58 },
   );
-  await page.setViewportSize({ width: 390, height: 844 });
+  await setTelegramViewport(page, { width: 390, height: 844 });
   await settleLayout(page);
   await page.locator("#bible-passage").click();
   assert.ok(
@@ -1058,7 +1071,7 @@ test("reader navigation remains coherent in a real browser", async (context) => 
   await page.evaluate(() => window.__telegramBack());
 
   for (const width of [320, 367, 368]) {
-    await page.setViewportSize({ width, height: 844 });
+    await setTelegramViewport(page, { width, height: 844 });
     await page.locator("#bible-passage").click();
     const target = page.locator("#bible-chapter-grid button").first();
     assert.ok(
@@ -1069,7 +1082,7 @@ test("reader navigation remains coherent in a real browser", async (context) => 
     );
     await page.locator("#close-bible-navigation").click();
   }
-  await page.setViewportSize({ width: 390, height: 844 });
+  await setTelegramViewport(page, { width: 390, height: 844 });
 
   let releaseMutation;
   let resolveMutationStarted;
