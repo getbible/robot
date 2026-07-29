@@ -43,7 +43,12 @@ test("keeps Bible as the compact reader and selector without adding a fifth rout
   assert.match(html, /aria-labelledby="bible-navigation-title"/);
   assert.doesNotMatch(html, /id="bible-(?:book|chapter)"[^-]/);
   assert.match(html, /id="bottom-nav-handle"/);
+  assert.match(html, /id="translation-short-label"/);
+  assert.match(html, /id="translation-full-label"/);
   assert.match(css, /\.reader-toolbar\.is-hidden/);
+  assert.match(css, /data-telegram-fullscreen="true"/);
+  assert.match(css, /\.is-header-condensed/);
+  assert.match(css, /data-active-route="home"/);
   assert.match(css, /\.bottom-nav\.is-collapsed/);
   assert.match(css, /\.bottom-nav\.is-collapsed \.bottom-nav__items/);
   assert.doesNotMatch(
@@ -63,7 +68,10 @@ test("keeps Bible as the compact reader and selector without adding a fifth rout
   assert.match(app, /uniqueBookLabels\(state\.bible\.books\)/);
   assert.match(app, /localizedCloseLabel\(navigationLabel\)/);
   assert.match(app, /state\.route !== "bible"/);
-  assert.match(app, /if \(state\.route === "bible"\) \{\s*showNavigation\(\)/);
+  assert.match(app, /function setHeaderCondensed/);
+  assert.match(app, /elements\.translationFullLabel\.textContent/);
+  assert.match(app, /if \(state\.route === "bible"\) \{\s*revealNavigation\(\)/);
+  assert.match(app, /scrollTop > state\.navigationRevealScrollTop \+ 10/);
   assert.match(app, /sessionGeneration \+= 1/);
   assert.match(app, /generation !== sessionGeneration/);
   assert.match(app, /button\.setAttribute\("aria-label", book\.name\)/);

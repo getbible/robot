@@ -398,6 +398,8 @@ test("reader navigation remains coherent in a real browser", async (context) => 
       safeBottom: getComputedStyle(document.documentElement)
         .getPropertyValue("--bridge-content-safe-area-inset-bottom")
         .trim(),
+      fullscreen:
+        document.documentElement.dataset.telegramFullscreen,
     })),
     {
       expandCalls: 1,
@@ -405,8 +407,43 @@ test("reader navigation remains coherent in a real browser", async (context) => 
       readyCalls: 1,
       safeTop: "48px",
       safeBottom: "34px",
+      fullscreen: "true",
     },
   );
+
+  const app = page.locator("#app");
+  const translationShortcut = page.locator("#translation-shortcut");
+  assert.equal(await app.getAttribute("data-active-route"), "bible");
+  assert.equal(
+    await page.locator("#translation-full-label").innerText(),
+    "King James Version",
+  );
+  assert.equal(
+    await page.locator("#translation-short-label").evaluate(
+      (node) => getComputedStyle(node).display,
+    ),
+    "none",
+  );
+  assert.equal(
+    await page.locator(".brand__copy").evaluate(
+      (node) => getComputedStyle(node).display,
+    ),
+    "none",
+  );
+  const translationBounds = await translationShortcut.boundingBox();
+  assert.ok(
+    translationBounds && translationBounds.width < 246,
+    "translation pill leaves room for Telegram's native controls",
+  );
+  await page.setViewportSize({ width: 320, height: 700 });
+  const narrowTranslationBounds = await translationShortcut.boundingBox();
+  assert.ok(
+    narrowTranslationBounds &&
+      narrowTranslationBounds.x >= 72 &&
+      narrowTranslationBounds.x + narrowTranslationBounds.width <= 248,
+    "narrow translation pill remains between Telegram's controls",
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
 
   await page.locator("#bible-view").evaluate((node) => {
     node.scrollTop = 500;
@@ -418,6 +455,17 @@ test("reader navigation remains coherent in a real browser", async (context) => 
       throw new Error("Bible navigation did not collapse while reading");
     }
   });
+  assert.match(await app.getAttribute("class"), /is-header-condensed/);
+  await page.waitForFunction(
+    () => getComputedStyle(document.querySelector(".brand")).visibility ===
+      "hidden",
+  );
+  assert.equal(
+    await page.locator(".brand").evaluate(
+      (node) => getComputedStyle(node).visibility,
+    ),
+    "hidden",
+  );
   assert.equal(
     await page.locator(".bottom-nav__items").evaluate(
       (node) => getComputedStyle(node).visibility,
@@ -428,6 +476,16 @@ test("reader navigation remains coherent in a real browser", async (context) => 
     node.scrollTop = 420;
     node.dispatchEvent(new Event("scroll"));
   });
+  assert.doesNotMatch(
+    await app.getAttribute("class"),
+    /is-header-condensed/,
+  );
+  assert.equal(
+    await page.locator(".brand").evaluate(
+      (node) => getComputedStyle(node).visibility,
+    ),
+    "visible",
+  );
   await page.mouse.move(389, 843);
   assert.equal(await bottomNav.getAttribute("class"), "bottom-nav is-collapsed");
 
@@ -451,6 +509,23 @@ test("reader navigation remains coherent in a real browser", async (context) => 
   assert.equal(await bottomNav.getAttribute("class"), "bottom-nav is-collapsed");
   await page.locator("#bottom-nav-handle").click();
   assert.equal(await bottomNav.getAttribute("class"), "bottom-nav");
+
+  await page.locator('[data-route="home"]').click();
+  assert.equal(await app.getAttribute("data-active-route"), "home");
+  assert.doesNotMatch(await app.getAttribute("class"), /is-header-condensed/);
+  assert.equal(
+    await page.locator(".brand__copy").evaluate(
+      (node) => getComputedStyle(node).display,
+    ),
+    "flex",
+  );
+  assert.equal(
+    await page.locator("#translation-short-label").evaluate(
+      (node) => getComputedStyle(node).display,
+    ),
+    "inline",
+  );
+  await page.locator('[data-route="bible"]').click();
 
   await page.locator("#bible-passage").click();
   const dialog = page.locator("#bible-navigation-dialog");
@@ -540,6 +615,10 @@ test("reader navigation remains coherent in a real browser", async (context) => 
   await page.locator("#translation-select").selectOption("aov");
   await page.locator("#bible-reference").getByText("Psalms Afrikaans 150").waitFor();
   await page.locator("#bible-verses [data-reader-verse]").first().waitFor();
+  assert.equal(
+    await page.locator("#translation-full-label").innerText(),
+    "Afrikaanse Ou Vertaling",
+  );
   assert.match(
     await page.locator("#bible-verses").innerText(),
     /AOV Psalms Afrikaans/,
@@ -557,6 +636,10 @@ test("reader navigation remains coherent in a real browser", async (context) => 
   await page.locator("#translation-select").selectOption("arb");
   await page.locator("#bible-reference").getByText("Psalms 150").waitFor();
   await page.locator("#bible-verses [data-reader-verse]").first().waitFor();
+  assert.equal(
+    await page.locator("#translation-full-label").innerText(),
+    "Arabic Bible",
+  );
   assert.equal(await page.locator("html").getAttribute("dir"), "rtl");
   await page.locator("#bible-passage").click();
   assert.ok(

@@ -46,6 +46,11 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Mini App
 
+- Refined the Telegram fullscreen header outside Home: the selected
+  translation now remains centered and visible by its complete name, while a
+  compact GetBible mark collapses on downward scrolling and returns on upward
+  scrolling in step with the reader chapter toolbar. Home and expanded-sheet
+  fallback branding remain unchanged.
 - Added guarded Telegram Bot API 8.0+ native fullscreen with `expand()` fallback,
   runtime fullscreen/viewport/device/content-safe-area synchronization, and
   complete listener cleanup. Older, unsupported, and rejecting Telegram clients

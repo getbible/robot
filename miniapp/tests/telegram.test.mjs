@@ -90,8 +90,13 @@ test("requests Telegram fullscreen and follows dynamic safe-area changes", () =>
     );
     assert.equal(mock.properties.get("--app-height"), "844px");
     assert.equal(globalThis.document.documentElement.dataset.theme, "dark");
+    assert.equal(
+      globalThis.document.documentElement.dataset.telegramFullscreen,
+      "false",
+    );
 
     webApp.viewportStableHeight = 900;
+    webApp.isFullscreen = true;
     webApp.safeAreaInset = { top: 40, right: 0, bottom: 32, left: 0 };
     webApp.contentSafeAreaInset = {
       top: 64,
@@ -100,6 +105,10 @@ test("requests Telegram fullscreen and follows dynamic safe-area changes", () =>
       left: 0,
     };
     handlers.get("fullscreenChanged")();
+    assert.equal(
+      globalThis.document.documentElement.dataset.telegramFullscreen,
+      "true",
+    );
     assert.equal(mock.properties.get("--app-height"), "900px");
     assert.equal(
       mock.properties.get("--bridge-safe-area-inset-top"),
@@ -112,6 +121,10 @@ test("requests Telegram fullscreen and follows dynamic safe-area changes", () =>
 
     bridge.destroy();
     assert.deepEqual([...handlers.keys()], []);
+    assert.equal(
+      globalThis.document.documentElement.dataset.telegramFullscreen,
+      undefined,
+    );
   } finally {
     mock.restore();
   }

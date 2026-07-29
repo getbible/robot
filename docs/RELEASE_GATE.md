@@ -207,6 +207,10 @@ Using a dedicated test bot first, and then a private production-bot chat before 
   rejecting clients remain usable in expanded-sheet mode. Fullscreen and
   safe-area changes do not place content beneath Telegram controls, cutouts,
   or the device gesture area.
+- Outside Home, the full translation name remains centered and usable in
+  fullscreen. Downward scrolling leaves only its Telegram-like pill between
+  the native controls; upward scrolling restores the compact GetBible mark
+  above it. Home branding and expanded-sheet fallback remain unchanged.
 - In Bible, downward scrolling leaves only the arrow handle and safe-area
   background. Upward scrolling restores the chapter heading without reopening
   the bottom navigation; pressing the handle or changing a verse selection

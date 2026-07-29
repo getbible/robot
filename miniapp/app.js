@@ -51,7 +51,9 @@ const MAX_CHAPTER_CACHE_ENTRIES = 24;
 const state = {
   route: "home",
   scrollPositions: new Map(),
+  headerCondensed: false,
   navigationCollapsed: false,
+  navigationRevealScrollTop: null,
   lastScrollTop: 0,
   translations: [],
   translation: "kjv",
@@ -139,6 +141,8 @@ const elements = mapElements({
   homeSelectionTitle: "home-selection-title",
   homeSelectionMeta: "home-selection-meta",
   translationShortcut: "translation-shortcut",
+  translationShortLabel: "translation-short-label",
+  translationFullLabel: "translation-full-label",
   translationDialog: "translation-dialog",
   translationSelect: "translation-select",
   translationDetails: "translation-details",
@@ -291,7 +295,11 @@ function attachListeners() {
     view.addEventListener("scroll", () => onViewScroll(view), { passive: true });
   });
   elements.bottomNavHandle.addEventListener("click", () => {
-    setNavigationCollapsed(!state.navigationCollapsed);
+    if (state.navigationCollapsed) {
+      revealNavigation();
+    } else {
+      setNavigationCollapsed(true);
+    }
   });
   document.addEventListener("pointermove", (event) => {
     if (
@@ -505,6 +513,8 @@ function setRoute(requestedRoute) {
     persistVisibleReaderPosition();
   }
   state.route = route;
+  elements.app.dataset.activeRoute = route;
+  setHeaderCondensed(false);
   document.querySelectorAll("[data-view]").forEach((view) => {
     view.hidden = view.dataset.view !== route;
     if (!view.hidden) {
@@ -550,8 +560,21 @@ function onViewScroll(view) {
   const scrollTop = Math.max(0, view.scrollTop);
   const delta = scrollTop - state.lastScrollTop;
   state.scrollPositions.set(state.route, scrollTop);
+  if (state.route === "home") {
+    setHeaderCondensed(false);
+  } else if (delta > 6 && scrollTop > 58) {
+    setHeaderCondensed(true);
+  } else if (delta < -4 || scrollTop < 24) {
+    setHeaderCondensed(false);
+  }
   if (view === elements.bibleView) {
-    if (delta > 10 && scrollTop > 64) {
+    if (state.navigationRevealScrollTop !== null && delta < -4) {
+      state.navigationRevealScrollTop = scrollTop;
+    }
+    const movedBelowRevealPoint =
+      state.navigationRevealScrollTop === null ||
+      scrollTop > state.navigationRevealScrollTop + 10;
+    if (delta > 10 && scrollTop > 64 && movedBelowRevealPoint) {
       setNavigationCollapsed(true);
     }
   } else {
@@ -574,8 +597,24 @@ function onViewScroll(view) {
   state.lastScrollTop = scrollTop;
 }
 
+function setHeaderCondensed(condensed) {
+  const nextCondensed =
+    state.route !== "home" && Boolean(condensed);
+  if (state.headerCondensed === nextCondensed) {
+    return;
+  }
+  state.headerCondensed = nextCondensed;
+  elements.app.classList.toggle(
+    "is-header-condensed",
+    state.headerCondensed,
+  );
+}
+
 function setNavigationCollapsed(collapsed) {
   state.navigationCollapsed = Boolean(collapsed);
+  if (state.navigationCollapsed) {
+    state.navigationRevealScrollTop = null;
+  }
   elements.bottomNav.classList.toggle(
     "is-collapsed",
     state.navigationCollapsed,
@@ -587,6 +626,13 @@ function setNavigationCollapsed(collapsed) {
 }
 
 function showNavigation() {
+  state.navigationRevealScrollTop = null;
+  setNavigationCollapsed(false);
+}
+
+function revealNavigation() {
+  const currentView = document.querySelector(`[data-view="${state.route}"]`);
+  state.navigationRevealScrollTop = Math.max(0, currentView?.scrollTop ?? 0);
   setNavigationCollapsed(false);
 }
 
@@ -721,7 +767,10 @@ function syncTranslationControls() {
   );
   syncInterfaceLocale(code);
   elements.translationSelect.value = code;
-  elements.translationShortcut.textContent = code.toUpperCase();
+  const displayName = translation?.name ?? code.toUpperCase();
+  elements.translationShortLabel.textContent = code.toUpperCase();
+  elements.translationFullLabel.textContent = displayName;
+  elements.translationShortcut.title = displayName;
   elements.translationShortcut.setAttribute(
     "aria-label",
     i18n.t("translation.change_aria", {
@@ -2218,7 +2267,7 @@ function onVerseCardClick(event) {
   const card = event.target.closest("[data-selection-id]");
   if (card) {
     if (state.route === "bible") {
-      showNavigation();
+      revealNavigation();
     }
     void toggleBasketItem(card.dataset.selectionId);
   }
