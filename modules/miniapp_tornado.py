@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from pathlib import Path
 from typing import TypeAlias
@@ -15,19 +17,13 @@ from tornado.web import RedirectHandler, RequestHandler, StaticFileHandler, URLS
 
 from config import Settings
 
-from .errors import RobotRateLimited
 from .miniapp_api import MiniAppApi, MiniAppHttpRequest, MiniAppIngressLimiter
-from .miniapp_auth import (
-    MiniAppAuthenticationError,
-    TelegramInitDataReplayGuard,
-    TelegramInitDataValidator,
-)
+from .miniapp_auth import TelegramInitDataReplayGuard, TelegramInitDataValidator
 from .miniapp_cleanup import MiniAppLaunchCleanup
 from .miniapp_sessions import (
     MiniAppLaunch,
     MiniAppLaunchStore,
     MiniAppRoute,
-    MiniAppSessionExpiredError,
     MiniAppSessionStore,
     miniapp_direct_url,
     miniapp_public_web_url,
@@ -39,6 +35,15 @@ from .service import ScriptureQuery, ScriptureService
 
 _IpAddress: TypeAlias = IPv4Address | IPv6Address
 CleanupSessionCallback = Callable[[MiniAppHttpRequest], Awaitable[int]]
+
+
+def _header_value(headers: Mapping[str, str], name: str) -> str | None:
+    """Read one case-insensitive header from a request mapping."""
+    requested = name.casefold()
+    return next(
+        (value for raw_name, value in headers.items() if raw_name.casefold() == requested),
+        None,
+    )
 
 
 class ClientAddressResolver:
@@ -272,6 +277,7 @@ class MiniAppServer:
             settings.telegram_api_token,
             max_age_seconds=settings.mini_app_init_data_max_age_seconds,
         )
+        self._validator = validator
 
         async def post_with_cleanup(
             launch: MiniAppLaunch,
@@ -423,24 +429,36 @@ class MiniAppServer:
         return remembered
 
     async def _cleanup_session_request(self, request: MiniAppHttpRequest) -> int:
-        """Authenticate one browser-ready signal and remove its launch row once."""
-        origin = next(
-            (
-                value
-                for name, value in request.headers.items()
-                if name.casefold() == "origin"
-            ),
-            None,
-        )
-        if origin != self._public_origin:
+        """Authenticate one browser-ready signal without blocking cleanup on rate limits."""
+        if _header_value(request.headers, "origin") != self._public_origin:
             return 403
-        try:
-            session = await self.api._authenticated(request)
-        except RobotRateLimited:
-            return 429
-        except (MiniAppAuthenticationError, MiniAppSessionExpiredError):
+        authorization = _header_value(request.headers, "authorization") or ""
+        match = re.fullmatch(r"Bearer ([A-Za-z0-9_-]{16,128})\Z", authorization)
+        if match is None:
             return 401
+        session = self.sessions.get(match.group(1), touch=False)
+        if session is None:
+            return 401
+        raw_init_data = _header_value(request.headers, "x-telegram-init-data")
+        if raw_init_data is None:
+            return 401
+        try:
+            principal = self._validator.validate(
+                raw_init_data,
+                check_freshness=False,
+            )
         except Exception:
+            return 401
+        digest = hashlib.sha256(raw_init_data.encode("utf-8")).digest()
+        if (
+            not hmac.compare_digest(digest, session.init_data_digest)
+            or principal.user_id != session.user_id
+            or (
+                session.query_id is not None
+                and principal.query_id != session.query_id
+            )
+            or not self.sessions.touch(session)
+        ):
             return 401
         await self._cleanup.cleanup_now(session.launch)
         return 204
