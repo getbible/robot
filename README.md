@@ -48,10 +48,13 @@ keeps the current tab, updates localization immediately, and reloads the active
 Bible passage before any new-translation label can appear with old text.
 On Bot API 8.0+ clients the Mini App requests Telegram's native fullscreen
 mode and follows Telegram's content-safe-area events; older or rejecting
-clients retain the expanded-sheet fallback. In the Bible reader, scrolling
-down reduces the bottom navigation to its safe-area-backed arrow handle.
-Scrolling upward restores only the chapter heading. The navigation returns
-when the handle is pressed or a verse selection changes.
+clients retain the expanded-sheet fallback. Outside Home, fullscreen centers
+the complete translation name below a compact GetBible mark. Scrolling down
+leaves the translation visible between Telegram's controls while collapsing
+the mark; scrolling upward restores the mark with the chapter heading. In the
+Bible reader, downward scrolling also reduces the bottom navigation to its
+safe-area-backed arrow handle. The navigation returns when the handle is
+pressed or a verse selection changes.
 
 The browser never supplies authoritative verse text. Every protected Mini App
 request requires fresh Telegram-signed `initData` plus a short-lived,

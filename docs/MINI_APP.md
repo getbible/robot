@@ -255,6 +255,15 @@ chapter, and nearest visible verse. The selector also displays the bounded
 translation name, language, and abbreviation returned by the existing session
 catalog.
 
+In Telegram fullscreen, every route except Home uses a compact centered
+header that leaves room for Telegram's native Close and menu controls. The
+selected translation remains visible at all times and uses its complete API
+name. Scrolling down collapses only the small GetBible mark and moves the
+translation pill into the center of Telegram's control row; scrolling upward
+restores the mark above the pill in step with the reader chapter toolbar. Home
+retains its established prominent branding and non-fullscreen clients retain
+the normal horizontal header.
+
 The passage picker is a partial-width modal side sheet. It opens directly to
 the current book's numbered chapters, offers Back to the translation-specific
 book grid, and supports Close, backdrop, Escape, and Telegram Back dismissal.

@@ -49,7 +49,7 @@
       </button>
     </main>
 
-    <div id="app" class="app-shell" hidden>
+    <div id="app" class="app-shell" data-active-route="home" hidden>
       <header class="topbar">
         <div class="brand" aria-label="getBible.Life">
           <img
@@ -73,7 +73,14 @@
           aria-controls="translation-dialog"
           aria-expanded="false"
         >
-          KJV
+          <span
+            id="translation-short-label"
+            class="translation-chip__short"
+          >KJV</span>
+          <span
+            id="translation-full-label"
+            class="translation-chip__full"
+          >King James Version</span>
         </button>
       </header>
 

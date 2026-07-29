@@ -29,6 +29,11 @@
   --bridge-content-safe-area-inset-right: 0px;
   --bridge-content-safe-area-inset-bottom: 0px;
   --bridge-content-safe-area-inset-left: 0px;
+  --device-safe-top: max(
+    env(safe-area-inset-top, 0px),
+    var(--tg-safe-area-inset-top, 0px),
+    var(--bridge-safe-area-inset-top)
+  );
   --safe-top: max(
     env(safe-area-inset-top, 0px),
     var(--tg-safe-area-inset-top, 0px),
@@ -205,18 +210,20 @@ select:focus-visible {
 }
 
 .app-shell {
+  --topbar-row-height: calc(var(--header-height) + var(--safe-top));
   display: grid;
   width: 100%;
   height: var(--app-height);
   min-height: 420px;
   grid-template-rows:
-    calc(var(--header-height) + var(--safe-top))
+    var(--topbar-row-height)
     auto
     minmax(0, 1fr);
   overflow: hidden;
   background:
     radial-gradient(circle at 98% 0%, color-mix(in srgb, var(--brand) 10%, transparent), transparent 30%),
     var(--page);
+  transition: grid-template-rows 180ms ease;
 }
 
 .topbar {
@@ -290,6 +297,127 @@ select:focus-visible {
   font-size: 0.78rem;
   font-weight: 760;
   letter-spacing: 0.045em;
+}
+
+.translation-chip__full {
+  display: none;
+}
+
+:root[data-telegram-fullscreen="true"]
+  .app-shell:not([data-active-route="home"]) {
+  --topbar-row-height: calc(var(--device-safe-top) + 84px);
+}
+
+:root[data-telegram-fullscreen="true"]
+  .app-shell:not([data-active-route="home"]).is-header-condensed {
+  --topbar-row-height: calc(var(--device-safe-top) + 48px);
+}
+
+:root[data-telegram-fullscreen="true"]
+  .app-shell:not([data-active-route="home"])
+  .topbar {
+  display: grid;
+  padding:
+    calc(var(--device-safe-top) + 4px)
+    max(calc(var(--safe-right) + 72px), 72px)
+    4px
+    max(calc(var(--safe-left) + 72px), 72px);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 32px 38px;
+  align-content: start;
+  justify-items: center;
+  gap: 2px;
+  border-bottom-color: transparent;
+  background: transparent;
+  backdrop-filter: none;
+  transition:
+    padding 180ms ease,
+    grid-template-rows 180ms ease,
+    gap 180ms ease;
+}
+
+:root[data-telegram-fullscreen="true"]
+  .app-shell:not([data-active-route="home"])
+  .brand {
+  grid-row: 1;
+  justify-content: center;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transform-origin: center top;
+  transition:
+    opacity 120ms ease,
+    transform 180ms ease,
+    visibility 0s linear;
+}
+
+:root[data-telegram-fullscreen="true"]
+  .app-shell:not([data-active-route="home"])
+  .brand__icon {
+  width: 24px;
+  height: 32px;
+}
+
+:root[data-telegram-fullscreen="true"]
+  .app-shell:not([data-active-route="home"])
+  .brand__copy {
+  display: none;
+}
+
+:root[data-telegram-fullscreen="true"]
+  .app-shell:not([data-active-route="home"])
+  .translation-chip {
+  grid-row: 2;
+  width: fit-content;
+  min-width: 52px;
+  max-width: 100%;
+  min-height: 36px;
+  height: 36px;
+  padding: 0 14px;
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--text) 10%, transparent);
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 16%, transparent);
+  box-shadow:
+    0 1px 0 color-mix(in srgb, var(--page) 20%, transparent) inset,
+    0 2px 10px rgba(0, 0, 0, 0.12);
+  font-size: 0.76rem;
+  letter-spacing: 0;
+  white-space: nowrap;
+  backdrop-filter: blur(18px);
+}
+
+:root[data-telegram-fullscreen="true"]
+  .app-shell:not([data-active-route="home"])
+  .translation-chip__short {
+  display: none;
+}
+
+:root[data-telegram-fullscreen="true"]
+  .app-shell:not([data-active-route="home"])
+  .translation-chip__full {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+:root[data-telegram-fullscreen="true"]
+  .app-shell:not([data-active-route="home"]).is-header-condensed
+  .topbar {
+  grid-template-rows: 0 38px;
+  gap: 0;
+}
+
+:root[data-telegram-fullscreen="true"]
+  .app-shell:not([data-active-route="home"]).is-header-condensed
+  .brand {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-8px) scale(0.82);
+  transition:
+    opacity 120ms ease,
+    transform 180ms ease,
+    visibility 0s linear 180ms;
 }
 
 .connection-banner {

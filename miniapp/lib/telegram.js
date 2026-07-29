@@ -20,10 +20,12 @@ export class TelegramBridge {
     this.#safeAreaHandler = () => this.applySafeAreas();
     this.#contentSafeAreaHandler = () => this.applySafeAreas();
     this.#fullscreenChangedHandler = () => {
+      this.applyFullscreen();
       this.applyViewport();
       this.applySafeAreas();
     };
     this.#fullscreenFailedHandler = () => {
+      this.applyFullscreen();
       this.applyViewport();
       this.applySafeAreas();
     };
@@ -62,6 +64,7 @@ export class TelegramBridge {
     this.applyTheme();
     this.applyViewport();
     this.applySafeAreas();
+    this.applyFullscreen();
     this.#webApp.onEvent?.("themeChanged", this.#themeHandler);
     this.#webApp.onEvent?.("viewportChanged", this.#viewportHandler);
     this.#webApp.onEvent?.("safeAreaChanged", this.#safeAreaHandler);
@@ -116,6 +119,11 @@ export class TelegramBridge {
     );
   }
 
+  applyFullscreen() {
+    document.documentElement.dataset.telegramFullscreen =
+      this.#webApp?.isFullscreen === true ? "true" : "false";
+  }
+
   requestFullscreen() {
     if (
       this.#webApp?.isFullscreen ||
@@ -126,6 +134,7 @@ export class TelegramBridge {
     }
     try {
       this.#webApp.requestFullscreen();
+      this.applyFullscreen();
       return true;
     } catch {
       this.applyViewport();
@@ -209,6 +218,7 @@ export class TelegramBridge {
       "fullscreenFailed",
       this.#fullscreenFailedHandler,
     );
+    delete document.documentElement.dataset.telegramFullscreen;
   }
 }
 
