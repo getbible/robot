@@ -98,26 +98,30 @@ export async function writeClipboardPayload(
     return false;
   }
 
-  try {
-    if (
-      typeof navigatorObject?.clipboard?.write === "function" &&
-      typeof ClipboardItemCtor === "function" &&
-      typeof BlobCtor === "function" &&
-      payload.html
-    ) {
+  if (
+    typeof navigatorObject?.clipboard?.write === "function" &&
+    typeof ClipboardItemCtor === "function" &&
+    typeof BlobCtor === "function" &&
+    payload.html
+  ) {
+    try {
       const item = new ClipboardItemCtor({
         "text/plain": new BlobCtor([payload.text], { type: "text/plain" }),
         "text/html": new BlobCtor([payload.html], { type: "text/html" }),
       });
       await navigatorObject.clipboard.write([item]);
       return true;
+    } catch {
+      // Some Telegram WebViews expose rich writes but permit only plain text.
     }
-    if (typeof navigatorObject?.clipboard?.writeText === "function") {
+  }
+  if (typeof navigatorObject?.clipboard?.writeText === "function") {
+    try {
       await navigatorObject.clipboard.writeText(payload.text);
       return true;
+    } catch {
+      // Continue to the synchronous WebView fallback below.
     }
-  } catch {
-    // Continue to the synchronous WebView fallback below.
   }
 
   return copyWithTextarea(payload.text, documentObject);
@@ -150,9 +154,7 @@ function installClipboardEnhancements(windowObject, documentObject) {
     copyButton.disabled = !hasSelection || Boolean(postButton?.disabled);
     copyButton.setAttribute(
       "aria-label",
-      hasSelection
-        ? `Copy ${latestBasket.length} selected verse${latestBasket.length === 1 ? "" : "s"}`
-        : "Copy selected verses",
+      localizedMessage("selection.copy"),
     );
   };
 
