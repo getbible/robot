@@ -115,6 +115,34 @@ test("uses the plain-text clipboard API when rich clipboard support is absent", 
   assert.equal(copied, "John 3:16 kjv\n16. Text.");
 });
 
+test("falls back to plain text when a WebView rejects rich clipboard writes", async () => {
+  let richWrites = 0;
+  let copied = "";
+  const result = await writeClipboardPayload(
+    { text: "John 3:16 kjv\n16. Text.", html: "<p>Text.</p>" },
+    {
+      navigatorObject: {
+        clipboard: {
+          write: async () => {
+            richWrites += 1;
+            throw new Error("rich clipboard unavailable");
+          },
+          writeText: async (value) => {
+            copied = value;
+          },
+        },
+      },
+      documentObject: null,
+      ClipboardItemCtor: class ClipboardItem {},
+      BlobCtor: class Blob {},
+    },
+  );
+
+  assert.equal(result, true);
+  assert.equal(richWrites, 1);
+  assert.equal(copied, "John 3:16 kjv\n16. Text.");
+});
+
 test("empty selections never overwrite the clipboard", async () => {
   let called = false;
   const result = await writeClipboardPayload(
