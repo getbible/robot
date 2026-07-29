@@ -21,25 +21,41 @@
   --nav-height: 68px;
   --nav-handle-height: 22px;
   --content-width: 780px;
+  --bridge-safe-area-inset-top: 0px;
+  --bridge-safe-area-inset-right: 0px;
+  --bridge-safe-area-inset-bottom: 0px;
+  --bridge-safe-area-inset-left: 0px;
+  --bridge-content-safe-area-inset-top: 0px;
+  --bridge-content-safe-area-inset-right: 0px;
+  --bridge-content-safe-area-inset-bottom: 0px;
+  --bridge-content-safe-area-inset-left: 0px;
   --safe-top: max(
     env(safe-area-inset-top, 0px),
     var(--tg-safe-area-inset-top, 0px),
-    var(--tg-content-safe-area-inset-top, 0px)
+    var(--tg-content-safe-area-inset-top, 0px),
+    var(--bridge-safe-area-inset-top),
+    var(--bridge-content-safe-area-inset-top)
   );
   --safe-right: max(
     env(safe-area-inset-right, 0px),
     var(--tg-safe-area-inset-right, 0px),
-    var(--tg-content-safe-area-inset-right, 0px)
+    var(--tg-content-safe-area-inset-right, 0px),
+    var(--bridge-safe-area-inset-right),
+    var(--bridge-content-safe-area-inset-right)
   );
   --safe-bottom: max(
     env(safe-area-inset-bottom, 0px),
     var(--tg-safe-area-inset-bottom, 0px),
-    var(--tg-content-safe-area-inset-bottom, 0px)
+    var(--tg-content-safe-area-inset-bottom, 0px),
+    var(--bridge-safe-area-inset-bottom),
+    var(--bridge-content-safe-area-inset-bottom)
   );
   --safe-left: max(
     env(safe-area-inset-left, 0px),
     var(--tg-safe-area-inset-left, 0px),
-    var(--tg-content-safe-area-inset-left, 0px)
+    var(--tg-content-safe-area-inset-left, 0px),
+    var(--bridge-safe-area-inset-left),
+    var(--bridge-content-safe-area-inset-left)
   );
   --safe-inline-end: var(--safe-right);
   --app-height: var(--tg-viewport-stable-height, 100dvh);
@@ -1388,13 +1404,10 @@ select:focus-visible {
   box-shadow: 0 -10px 30px rgba(7, 21, 29, 0.08);
   backdrop-filter: blur(18px);
   transform: translateX(-50%);
-  transition: transform 190ms ease;
 }
 
 .bottom-nav.is-collapsed {
-  transform:
-    translateX(-50%)
-    translateY(calc(100% - var(--nav-handle-height) - var(--safe-bottom)));
+  transform: translateX(-50%);
 }
 
 .bottom-nav__handle {
@@ -1425,12 +1438,28 @@ select:focus-visible {
 
 .bottom-nav__items {
   display: grid;
+  max-height: var(--nav-height);
   padding:
     0
     12px
     5px
     12px;
+  overflow: hidden;
   grid-template-columns: repeat(4, minmax(0, 1fr));
+  opacity: 1;
+  transition:
+    max-height 190ms ease,
+    padding 190ms ease,
+    opacity 120ms ease;
+}
+
+.bottom-nav.is-collapsed .bottom-nav__items {
+  visibility: hidden;
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .bottom-nav__item {

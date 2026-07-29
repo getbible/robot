@@ -367,21 +367,27 @@ private conversation with the bot:
 6. open the passage side sheet, move Book → Chapters → Psalm 150, then verify
    Back, Close, backdrop, Escape, Telegram Back, current-item focus, and
    keyboard arrows in both left-to-right and right-to-left translations;
-7. scroll down and up to verify the chapter toolbar and bottom navigation hide
-   and return without covering Scripture;
-8. confirm the server posts only resolved Scripture, in the originating chat;
-9. submit a search with the phone keyboard's Search key and confirm the
+7. on a Bot API 8.0+ client, confirm the Mini App enters native fullscreen and
+   remains clear of Telegram's transparent header/close control and every
+   device content-safe area; repeat on an older or rejecting client and confirm
+   the expanded fallback remains usable;
+8. in Bible, scroll down and confirm only the arrow handle and safe-area
+   background remain; scroll upward and confirm the chapter heading returns
+   without reopening the bottom navigation; select a verse and confirm the
+   navigation and updated Selected count return;
+9. confirm the server posts only resolved Scripture, in the originating chat;
+10. submit a search with the phone keyboard's Search key and confirm the
    keyboard closes before the results appear;
-10. close and reopen the same launch before its absolute session timeout and
+11. close and reopen the same launch before its absolute session timeout and
    confirm the active selection is safely recovered;
-11. start a new bare `/bible` launch and confirm it resumes the last visible
+12. start a new bare `/bible` launch and confirm it resumes the last visible
     verse without persisting any chapter text;
-12. after posting in a group, confirm both the "Only visible to GetBibleBot"
+13. after posting in a group, confirm both the "Only visible to GetBibleBot"
    command and the "Only visible to you" launch response are removed;
-13. retry a genuinely expired launch and confirm it fails closed, explains that
+14. retry a genuinely expired launch and confirm it fails closed, explains that
    `/bible` or `/search` must be sent again, and offers a close action instead
    of a reload loop;
-14. open the public URL in an ordinary browser and confirm no data or action API
+15. open the public URL in an ordinary browser and confirm no data or action API
    is available.
 
 For group rollout, repeat through the configured Main Mini App/deep-link path

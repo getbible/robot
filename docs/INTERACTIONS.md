@@ -34,9 +34,19 @@ bottom-navigation item. The normal sequence is:
 
 The compact chapter heading contains previous/next controls and the current
 passage. It hides while scrolling down and returns while scrolling up, leaving
-the maximum practical space for Scripture. The fixed bottom navigation behaves
-the same way, but leaves a small tap handle available while collapsed. Its
-background and device safe area extend to the physical bottom edge.
+the maximum practical space for Scripture. In the Bible route, downward
+scrolling reduces the fixed bottom navigation to its arrow handle and safe-area
+background. Upward scrolling does not reopen it. The user can reopen it
+explicitly with the handle, and selecting or removing a verse reopens it so the
+updated Selected count is immediately visible. Other routes retain the normal
+scroll-aware navigation behavior.
+
+The Telegram bridge first calls `expand()` for a reliable baseline and then
+requests native fullscreen on Bot API 8.0+ clients. Unsupported, rejected, or
+older clients continue in expanded-sheet mode without blocking startup.
+Fullscreen, viewport, device-safe-area, and content-safe-area events update the
+layout at runtime, keeping Telegram's close/header controls, device cutouts, and
+gesture area clear in portrait and landscape.
 
 Pressing the current passage opens a narrow side sheet over the Scripture
 instead of replacing the reader. When a chapter is already open, the sheet

@@ -294,7 +294,10 @@ function attachListeners() {
     setNavigationCollapsed(!state.navigationCollapsed);
   });
   document.addEventListener("pointermove", (event) => {
-    if (window.innerHeight - event.clientY < 52) {
+    if (
+      state.route !== "bible" &&
+      window.innerHeight - event.clientY < 52
+    ) {
       showNavigation();
     }
   }, { passive: true });
@@ -547,10 +550,16 @@ function onViewScroll(view) {
   const scrollTop = Math.max(0, view.scrollTop);
   const delta = scrollTop - state.lastScrollTop;
   state.scrollPositions.set(state.route, scrollTop);
-  if (scrollTop < 20 || delta < -8) {
-    showNavigation();
-  } else if (delta > 10 && scrollTop > 64) {
-    setNavigationCollapsed(true);
+  if (view === elements.bibleView) {
+    if (delta > 10 && scrollTop > 64) {
+      setNavigationCollapsed(true);
+    }
+  } else {
+    if (scrollTop < 20 || delta < -8) {
+      showNavigation();
+    } else if (delta > 10 && scrollTop > 64) {
+      setNavigationCollapsed(true);
+    }
   }
 
   if (view === elements.bibleView && state.bible.status === "ready") {
@@ -2208,6 +2217,9 @@ function onVerseCardClick(event) {
   }
   const card = event.target.closest("[data-selection-id]");
   if (card) {
+    if (state.route === "bible") {
+      showNavigation();
+    }
     void toggleBasketItem(card.dataset.selectionId);
   }
 }

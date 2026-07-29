@@ -45,12 +45,28 @@ test("reader navigation remains coherent in a real browser", async (context) => 
   page.on("pageerror", (error) => pageErrors.push(error));
 
   await page.addInitScript(() => {
+    const telegramEvents = new Map();
+    const emitTelegramEvent = (name, payload) => {
+      for (const handler of telegramEvents.get(name) ?? []) {
+        handler(payload);
+      }
+    };
+    window.__telegramState = {
+      expandCalls: 0,
+      fullscreenCalls: 0,
+      readyCalls: 0,
+      emit: emitTelegramEvent,
+    };
     window.Telegram = {
       WebApp: {
         initData: "query_id=browser-test&user=%7B%22id%22%3A42%7D",
         initDataUnsafe: { start_param: "browser-test" },
         colorScheme: "dark",
+        version: "8.0",
         viewportStableHeight: 844,
+        safeAreaInset: { top: 24, right: 0, bottom: 18, left: 0 },
+        contentSafeAreaInset: { top: 48, right: 0, bottom: 34, left: 0 },
+        isFullscreen: false,
         BackButton: {
           onClick(handler) {
             window.__telegramBack = handler;
@@ -68,14 +84,36 @@ test("reader navigation remains coherent in a real browser", async (context) => 
         showConfirm(_message, callback) {
           callback(true);
         },
-        onEvent() {},
-        offEvent() {},
-        expand() {},
+        onEvent(name, handler) {
+          const handlers = telegramEvents.get(name) ?? new Set();
+          handlers.add(handler);
+          telegramEvents.set(name, handlers);
+        },
+        offEvent(name, handler) {
+          const handlers = telegramEvents.get(name);
+          handlers?.delete(handler);
+          if (handlers?.size === 0) {
+            telegramEvents.delete(name);
+          }
+        },
+        isVersionAtLeast(version) {
+          return version === "8.0";
+        },
+        expand() {
+          window.__telegramState.expandCalls += 1;
+        },
+        requestFullscreen() {
+          window.__telegramState.fullscreenCalls += 1;
+          this.isFullscreen = true;
+          emitTelegramEvent("fullscreenChanged");
+        },
         enableVerticalSwipes() {},
         setHeaderColor() {},
         setBackgroundColor() {},
         setBottomBarColor() {},
-        ready() {},
+        ready() {
+          window.__telegramState.readyCalls += 1;
+        },
         enableClosingConfirmation() {},
         disableClosingConfirmation() {},
         close() {},
@@ -349,6 +387,70 @@ test("reader navigation remains coherent in a real browser", async (context) => 
   );
   await page.locator("#bible-verses [data-reader-verse]").first().waitFor();
   assert.equal(await page.locator("#bible-reference").innerText(), "John 3");
+  assert.deepEqual(
+    await page.evaluate(() => ({
+      expandCalls: window.__telegramState.expandCalls,
+      fullscreenCalls: window.__telegramState.fullscreenCalls,
+      readyCalls: window.__telegramState.readyCalls,
+      safeTop: getComputedStyle(document.documentElement)
+        .getPropertyValue("--bridge-content-safe-area-inset-top")
+        .trim(),
+      safeBottom: getComputedStyle(document.documentElement)
+        .getPropertyValue("--bridge-content-safe-area-inset-bottom")
+        .trim(),
+    })),
+    {
+      expandCalls: 1,
+      fullscreenCalls: 1,
+      readyCalls: 1,
+      safeTop: "48px",
+      safeBottom: "34px",
+    },
+  );
+
+  await page.locator("#bible-view").evaluate((node) => {
+    node.scrollTop = 500;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  const bottomNav = page.locator("#bottom-nav");
+  await bottomNav.evaluate((node) => {
+    if (!node.classList.contains("is-collapsed")) {
+      throw new Error("Bible navigation did not collapse while reading");
+    }
+  });
+  assert.equal(
+    await page.locator(".bottom-nav__items").evaluate(
+      (node) => getComputedStyle(node).visibility,
+    ),
+    "hidden",
+  );
+  await page.locator("#bible-view").evaluate((node) => {
+    node.scrollTop = 420;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  await page.mouse.move(389, 843);
+  assert.equal(await bottomNav.getAttribute("class"), "bottom-nav is-collapsed");
+
+  await page.locator('[data-reader-verse="30"]').click();
+  assert.equal(await bottomNav.getAttribute("class"), "bottom-nav");
+  await page.waitForFunction(
+    () => document.querySelector('[data-reader-verse="30"]')
+      ?.classList.contains("is-selected"),
+  );
+  await page.locator('[data-reader-verse="30"]').click();
+  await page.waitForFunction(
+    () => !document.querySelector('[data-reader-verse="30"]')
+      ?.classList.contains("is-selected"),
+  );
+  await page.locator("#bible-view").evaluate((node) => {
+    node.scrollTop = 0;
+    node.dispatchEvent(new Event("scroll"));
+    node.scrollTop = node.scrollHeight;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  assert.equal(await bottomNav.getAttribute("class"), "bottom-nav is-collapsed");
+  await page.locator("#bottom-nav-handle").click();
+  assert.equal(await bottomNav.getAttribute("class"), "bottom-nav");
 
   await page.locator("#bible-passage").click();
   const dialog = page.locator("#bible-navigation-dialog");
