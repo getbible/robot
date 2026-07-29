@@ -690,6 +690,12 @@ test("reader navigation remains coherent in a real browser", async (context) => 
 
   await page.locator('[data-route="home"]').click();
   await settleLayout(page);
+  await page.waitForFunction(
+    () => Math.abs(
+      document.querySelector("#translation-shortcut")
+        ?.getBoundingClientRect().top - 58,
+    ) <= 1,
+  );
   assert.equal(await app.getAttribute("data-active-route"), "home");
   assert.doesNotMatch(await app.getAttribute("class"), /is-header-condensed/);
   assert.equal(
