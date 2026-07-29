@@ -21,6 +21,11 @@
   --nav-height: 68px;
   --nav-handle-height: 22px;
   --content-width: 780px;
+  --fullscreen-control-height: 32px;
+  --fullscreen-control-hit-size: 44px;
+  --fullscreen-control-clearance: clamp(72px, 20vw, 120px);
+  --fullscreen-translation-max-width: min(48vw, 248px);
+  --fullscreen-control-safe-inline: max(var(--safe-left), var(--safe-right));
   --bridge-safe-area-inset-top: 0px;
   --bridge-safe-area-inset-right: 0px;
   --bridge-safe-area-inset-bottom: 0px;
@@ -303,27 +308,32 @@ select:focus-visible {
   display: none;
 }
 
-:root[data-telegram-fullscreen="true"]
-  .app-shell:not([data-active-route="home"]) {
-  --topbar-row-height: calc(var(--device-safe-top) + 84px);
+:root[data-telegram-fullscreen="true"] .app-shell {
+  --topbar-row-height: calc(var(--device-safe-top) + 70px);
 }
 
 :root[data-telegram-fullscreen="true"]
-  .app-shell:not([data-active-route="home"]).is-header-condensed {
-  --topbar-row-height: calc(var(--device-safe-top) + 48px);
+  .app-shell.is-header-condensed {
+  --topbar-row-height: calc(var(--device-safe-top) + 40px);
 }
 
 :root[data-telegram-fullscreen="true"]
-  .app-shell:not([data-active-route="home"])
+  .app-shell
   .topbar {
   display: grid;
   padding:
     calc(var(--device-safe-top) + 4px)
-    max(calc(var(--safe-right) + 72px), 72px)
+    calc(
+      var(--fullscreen-control-safe-inline) +
+        var(--fullscreen-control-clearance)
+    )
     4px
-    max(calc(var(--safe-left) + 72px), 72px);
+    calc(
+      var(--fullscreen-control-safe-inline) +
+        var(--fullscreen-control-clearance)
+    );
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: 32px 38px;
+  grid-template-rows: 28px var(--fullscreen-control-height);
   align-content: start;
   justify-items: center;
   gap: 2px;
@@ -337,7 +347,7 @@ select:focus-visible {
 }
 
 :root[data-telegram-fullscreen="true"]
-  .app-shell:not([data-active-route="home"])
+  .app-shell
   .brand {
   grid-row: 1;
   justify-content: center;
@@ -351,64 +361,86 @@ select:focus-visible {
 }
 
 :root[data-telegram-fullscreen="true"]
-  .app-shell:not([data-active-route="home"])
+  .app-shell
   .brand__icon {
-  width: 24px;
-  height: 32px;
+  width: 21px;
+  height: 28px;
 }
 
 :root[data-telegram-fullscreen="true"]
-  .app-shell:not([data-active-route="home"])
+  .app-shell
   .brand__copy {
   display: none;
 }
 
 :root[data-telegram-fullscreen="true"]
-  .app-shell:not([data-active-route="home"])
+  .app-shell
   .translation-chip {
+  position: relative;
   grid-row: 2;
+  display: grid;
   width: fit-content;
   min-width: 52px;
-  max-width: 100%;
-  min-height: 36px;
-  height: 36px;
-  padding: 0 14px;
-  overflow: hidden;
-  border-color: color-mix(in srgb, var(--text) 10%, transparent);
+  min-inline-size: 52px;
+  max-width: min(100%, var(--fullscreen-translation-max-width));
+  max-inline-size: min(100%, var(--fullscreen-translation-max-width));
+  min-height: var(--fullscreen-control-height);
+  height: var(--fullscreen-control-height);
+  padding: 0 clamp(10px, 2.5vw, 14px);
+  overflow: visible;
+  border: 0;
   color: var(--text);
   background: color-mix(in srgb, var(--text) 16%, transparent);
   box-shadow:
     0 1px 0 color-mix(in srgb, var(--page) 20%, transparent) inset,
     0 2px 10px rgba(0, 0, 0, 0.12);
-  font-size: 0.76rem;
+  font-size: 0.72rem;
+  font-weight: 640;
+  line-height: 1;
   letter-spacing: 0;
   white-space: nowrap;
+  appearance: none;
+  place-items: center;
   backdrop-filter: blur(18px);
 }
 
 :root[data-telegram-fullscreen="true"]
-  .app-shell:not([data-active-route="home"])
+  .app-shell
+  .translation-chip::before {
+  position: absolute;
+  inset-block: calc(
+    (var(--fullscreen-control-height) - var(--fullscreen-control-hit-size)) / 2
+  );
+  inset-inline: 0;
+  content: "";
+}
+
+:root[data-telegram-fullscreen="true"]
+  .app-shell
   .translation-chip__short {
   display: none;
 }
 
 :root[data-telegram-fullscreen="true"]
-  .app-shell:not([data-active-route="home"])
+  .app-shell
   .translation-chip__full {
   display: block;
+  min-width: 0;
+  max-width: 100%;
+  max-inline-size: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 :root[data-telegram-fullscreen="true"]
-  .app-shell:not([data-active-route="home"]).is-header-condensed
+  .app-shell.is-header-condensed
   .topbar {
-  grid-template-rows: 0 38px;
+  grid-template-rows: 0 var(--fullscreen-control-height);
   gap: 0;
 }
 
 :root[data-telegram-fullscreen="true"]
-  .app-shell:not([data-active-route="home"]).is-header-condensed
+  .app-shell.is-header-condensed
   .brand {
   visibility: hidden;
   opacity: 0;

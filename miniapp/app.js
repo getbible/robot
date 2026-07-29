@@ -515,13 +515,13 @@ function setRoute(requestedRoute) {
   state.route = route;
   elements.app.dataset.activeRoute = route;
   setHeaderCondensed(false);
+  const savedScrollTop = state.scrollPositions.get(route) ?? 0;
+  state.lastScrollTop = savedScrollTop;
   document.querySelectorAll("[data-view]").forEach((view) => {
     view.hidden = view.dataset.view !== route;
     if (!view.hidden) {
-      const saved = state.scrollPositions.get(route) ?? 0;
       window.requestAnimationFrame(() => {
-        view.scrollTop = saved;
-        state.lastScrollTop = saved;
+        view.scrollTop = savedScrollTop;
       });
     }
   });
@@ -560,9 +560,7 @@ function onViewScroll(view) {
   const scrollTop = Math.max(0, view.scrollTop);
   const delta = scrollTop - state.lastScrollTop;
   state.scrollPositions.set(state.route, scrollTop);
-  if (state.route === "home") {
-    setHeaderCondensed(false);
-  } else if (delta > 6 && scrollTop > 58) {
+  if (delta > 6 && scrollTop > 58) {
     setHeaderCondensed(true);
   } else if (delta < -4 || scrollTop < 24) {
     setHeaderCondensed(false);
@@ -598,8 +596,7 @@ function onViewScroll(view) {
 }
 
 function setHeaderCondensed(condensed) {
-  const nextCondensed =
-    state.route !== "home" && Boolean(condensed);
+  const nextCondensed = Boolean(condensed);
   if (state.headerCondensed === nextCondensed) {
     return;
   }
