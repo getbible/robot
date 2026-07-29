@@ -14,7 +14,6 @@ from modules.commands import (
     PREFERENCES_SLOT,
     SERVICE_SLOT,
     SETTINGS_SLOT,
-    _contains_unsegmented_script,
     _highlight_search_terms,
     _highlight_search_terms_plain,
     _reference_basket_reference,
@@ -1937,10 +1936,6 @@ class SelectionFormattingTestCase(unittest.TestCase):
             _reference_basket_reference(session),
             "John 3:16-20;Romans 8:1-2",
         )
-
-    def test_unsegmented_script_detection_covers_mandarin(self) -> None:
-        self.assertTrue(_contains_unsegmented_script("神爱世人"))
-        self.assertFalse(_contains_unsegmented_script("God loves the world"))
 
     def test_search_selection_compresses_verses_by_chapter(self) -> None:
         session = InteractionSession(

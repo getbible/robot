@@ -58,7 +58,11 @@ from modules.miniapp_tornado import MiniAppServer
 from modules.posting import post_scripture
 from modules.preferences import UserPreferenceStore
 from modules.rate_limit import InboundRateLimiter
-from modules.service import ScriptureQuery, ScriptureService
+from modules.service import (
+    ScriptureQuery,
+    ScriptureService,
+    effective_search_options,
+)
 from modules.utils import safe_delete_command, safe_delete_messages, send_typing
 
 LOGGER = logging.getLogger(__name__)
@@ -1587,14 +1591,10 @@ async def _run_search(
 ) -> None:
     if not query:
         raise RobotInputError("Search words are required.")
-    if (
-        session.search_options.match == "whole_word"
-        and _contains_unsegmented_script(query)
-    ):
-        session.search_options = replace(
-            session.search_options,
-            match="substring",
-        )
+    session.search_options = effective_search_options(
+        query,
+        session.search_options,
+    )
     page = await service.search(query, session.search_options)
     session.search_query = page.query
     session.search_total = page.total
@@ -3278,19 +3278,6 @@ def _normalized_search_value(
             characters.append(item)
             positions.append(index)
     return "".join(characters), tuple(positions)
-
-
-def _contains_unsegmented_script(value: str) -> bool:
-    """Detect scripts where whitespace-delimited whole-word matching is unsafe."""
-    return any(
-        0x3400 <= codepoint <= 0x4DBF
-        or 0x4E00 <= codepoint <= 0x9FFF
-        or 0xF900 <= codepoint <= 0xFAFF
-        or 0x3040 <= codepoint <= 0x30FF
-        or 0xAC00 <= codepoint <= 0xD7AF
-        or 0x20000 <= codepoint <= 0x323AF
-        for codepoint in map(ord, value)
-    )
 
 
 def _is_search_word_char(value: str) -> bool:

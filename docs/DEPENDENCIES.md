@@ -28,25 +28,31 @@ Using an unbounded `pip install --upgrade` during service startup would allow an
 
 ## Current Librarian policy
 
-Librarian 1.2.0 is published and contains the hardened reference parser, request limits, typed repository failures, checksum-validated translation cache, and Unicode-aware search contract required by the robot.
+Librarian 1.2.1 is published and contains the hardened reference parser,
+request limits, typed repository failures, checksum-validated translation
+cache, and shared multilingual search policy required by the robot.
 
 The compatible input policy is:
 
 ```text
-getbible>=1.2,<2
+getbible>=1.2.1,<2
 ```
 
 The exact runtime and development locks currently select:
 
 ```text
-getbible==1.2.0
+getbible==1.2.1
 ```
 
-The lock also records both published artifact hashes. Production therefore installs the reviewed 1.2.0 artifact exactly; it does not resolve a moving branch or an unreviewed later 1.x release.
+The lock also records both published artifact hashes. Production therefore
+installs the reviewed 1.2.1 artifact exactly; it does not resolve a moving
+branch or an unreviewed later 1.x release.
 
 Dependabot proposes newer compatible Librarian releases within the 1.x series. Each proposal must regenerate both locks, pass the complete robot gate, and demonstrate unchanged command/search contracts before merge. A future 2.x release requires an intentional compatibility review and input-range change.
 
-The exact lock may resolve, for example, `getbible==1.2.0` even though the input allows later 1.x versions. That is expected: the next Dependabot lock PR moves the deployed version after testing.
+The compatible range deliberately begins at 1.2.1 because Robot imports its
+shared `requires_substring_matching()` policy. The exact lock moves only after
+the new release passes Robot's complete gate.
 
 ## Regenerating locks
 

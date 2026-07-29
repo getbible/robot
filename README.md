@@ -172,13 +172,13 @@ can explicitly build local source with `./setup.sh docker-deploy --build`.
 
 Human-maintained intent lives in `requirements.in` and `requirements-dev.in`. Production and CI install the exact hashed locks in `requirements.txt` and `requirements-dev.txt`.
 
-The robot accepts compatible Librarian 1.x releases beginning with 1.2:
+The robot accepts compatible Librarian 1.x releases beginning with 1.2.1:
 
 ```text
-getbible>=1.2,<2
+getbible>=1.2.1,<2
 ```
 
-The generated runtime lock currently selects and hashes `getbible==1.2.0`. Dependabot proposes newer compatible releases by regenerating the exact lock for review. Production never resolves an unreviewed “latest” dependency during startup. See [Dependency policy](docs/DEPENDENCIES.md).
+The generated runtime lock currently selects and hashes `getbible==1.2.1`. Dependabot proposes newer compatible releases by regenerating the exact lock for review. Production never resolves an unreviewed “latest” dependency during startup. See [Dependency policy](docs/DEPENDENCIES.md).
 
 ## Quick local test
 

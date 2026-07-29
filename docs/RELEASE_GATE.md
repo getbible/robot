@@ -41,7 +41,7 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - Ruff passes without new suppressions added solely for the release.
 - mypy passes with the configured strictness.
 - Bandit reports no medium/high finding in the robot, maintenance scripts, or exact installed Librarian source.
-- `scripts/audit_runtime.py` runs `pip-audit --strict` against the complete released Librarian 1.2.0 lock.
+- `scripts/audit_runtime.py` runs `pip-audit --strict` against the complete released Librarian 1.2.1 lock.
 - Secret scanning reports no real secret.
 - The hardened instantiated `getbible-robot@ci.service` passes `systemd-analyze verify`.
 - CodeQL succeeds.
@@ -69,7 +69,7 @@ A robot commit is deployable only when every applicable item below is satisfied.
 - The runtime does not resolve or upgrade dependencies during service startup.
 - Python 3.10 conditional requirements remain represented in the universal lock.
 - The direct-source audit contract test fails for a URL mismatch, missing hash, duplicate source, or unfiltered source requirement.
-- The robot uses `getbible>=1.2,<2` as compatible intent and an exact hashed resolved version.
+- The robot uses `getbible>=1.2.1,<2` as compatible intent and an exact hashed resolved version.
 
 ## Parser and work budgets
 

@@ -123,7 +123,7 @@ Maintainers edit `requirements.in` or `requirements-dev.in`, regenerate both loc
 The Librarian policy remains:
 
 ```text
-getbible>=1.2,<2
+getbible>=1.2.1,<2
 ```
 
 The generated lock selects the exact tested artifact. Production does not resolve a newer package during service start.

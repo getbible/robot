@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, TypeVar, cast
 
@@ -28,6 +28,7 @@ from getbible import (
     SearchLimits,
     SearchValidationError,
     TranslationNotFoundError,
+    requires_substring_matching,
 )
 
 from config import Settings
@@ -63,6 +64,13 @@ class SearchPage:
     translation: str
     total: int
     items: tuple[SearchResult, ...]
+
+
+def effective_search_options(query: str, options: SearchOptions) -> SearchOptions:
+    """Apply Librarian's language-aware match policy to the default mode."""
+    if options.match == "whole_word" and requires_substring_matching(query):
+        return replace(options, match="substring")
+    return options
 
 
 class Metrics:
@@ -377,7 +385,8 @@ class ScriptureService:
         query: str,
         options: SearchOptions,
     ) -> SearchPage:
-        """Run one bounded Librarian 1.2 search and validate its public contract."""
+        """Run one bounded Librarian 1.2.1 search and validate its public contract."""
+        options = effective_search_options(query, options)
         criteria = SearchBible(
             words=options.words,
             match=options.match,
