@@ -118,6 +118,36 @@ test("a resumed session also sends exactly one authenticated cleanup signal", as
   assert.equal(requests[1].options.keepalive, true);
 });
 
+test("browser platform callables retain the global receiver", async () => {
+  const requests = [];
+  const api = new MiniAppApi("signed-init-data", {
+    baseUrl: "https://robot.example/getbible/",
+    fetchImplementation: function (url, options) {
+      assert.equal(this, globalThis);
+      requests.push({ url: String(url), options });
+      return Promise.resolve(
+        requests.length === 1
+          ? jsonResponse(SESSION_PAYLOAD, 201)
+          : new Response(null, { status: 204 }),
+      );
+    },
+    setTimeoutImplementation: function (callback, delay) {
+      assert.equal(this, globalThis);
+      return setTimeout(callback, delay);
+    },
+    clearTimeoutImplementation: function (handle) {
+      assert.equal(this, globalThis);
+      clearTimeout(handle);
+    },
+  });
+
+  const payload = await api.createSession("OwnerBoundLaunch1");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(payload.session_token, SESSION_PAYLOAD.session_token);
+  assert.equal(requests.length, 2);
+});
+
 test("delayed basket transport remains data-only after local invalidation", async () => {
   let releaseBasket;
   const basketGate = new Promise((resolve) => {

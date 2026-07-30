@@ -54,9 +54,12 @@ export class MiniAppApi {
     }
     this.#initData = initData;
     this.#timeoutMs = timeoutMs;
-    this.#fetch = fetchImplementation;
-    this.#setTimeout = setTimeoutImplementation;
-    this.#clearTimeout = clearTimeoutImplementation;
+    this.#fetch = (...args) =>
+      Reflect.apply(fetchImplementation, globalThis, args);
+    this.#setTimeout = (...args) =>
+      Reflect.apply(setTimeoutImplementation, globalThis, args);
+    this.#clearTimeout = (...args) =>
+      Reflect.apply(clearTimeoutImplementation, globalThis, args);
   }
 
   async createSession(launchToken = null) {

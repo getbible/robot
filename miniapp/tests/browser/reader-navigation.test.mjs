@@ -509,7 +509,19 @@ test("reader navigation remains coherent in a real browser", async (context) => 
     "https://app.local/miniapp/index.html?launch=browser-test",
     { waitUntil: "domcontentloaded" },
   );
-  await page.locator("#bible-verses [data-reader-verse]").first().waitFor();
+  await page.waitForFunction(() => (
+    Boolean(document.querySelector("#bible-verses [data-reader-verse]")) ||
+    document.querySelector("#access-denied:not([hidden])") !== null
+  ));
+  const accessFailure = await page.locator("#access-message").textContent();
+  assert.equal(
+    await page.locator("#access-denied").isHidden(),
+    true,
+    [
+      `Mini App boot failed: ${accessFailure || "unknown error"}`,
+      ...pageErrors.map((error) => error.stack || error.message),
+    ].join("\n"),
+  );
   assert.equal(await page.locator("#bible-reference").innerText(), "John 3");
   assert.deepEqual(
     await page.evaluate(() => ({
