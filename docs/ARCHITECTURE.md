@@ -22,6 +22,51 @@ Handlers never call synchronous repository code on the event-loop thread.
 executors and semaphores, timeout behavior, circuit state, and aggregate
 metrics.
 
+## Module ownership and dependency direction
+
+The runtime is one process, but its modules have explicit ownership layers.
+Dependencies may point inward or remain within one cohesive adapter layer; they
+must never point outward. The executable checks in `tests/test_architecture.py`
+also reject runtime import cycles and require every new runtime module to be
+assigned deliberately.
+
+| Layer | Ownership | Current modules |
+|---:|---|---|
+| 0 | Configuration, external adapters, validation, persistence, and leaf utilities | `config`, `container`, `audit`, `cache_maintenance`, `catalog`, `ephemeral`, `errors`, `miniapp_auth`, `preferences`, `runtime_notify`, `utils` |
+| 1 | Small domain models and policies | `interactions`, `rate_limit`, `renderer` |
+| 2 | Scripture use cases and bounded in-process Mini App state | `service`, `miniapp_sessions` |
+| 3 | Application coordination around health, cleanup, and posting | `health`, `miniapp_cleanup`, `posting` |
+| 4 | Framework-neutral Mini App HTTP use cases | `miniapp_api` |
+| 5 | Typed delivery dependencies plus Telegram and Tornado adapters | `dependencies`, `commands`, `miniapp_tornado` |
+| 6 | Composition root and process entry point | `bot` |
+
+`bot.py` is the only composition root. Lower layers must not obtain handlers,
+servers, or process wiring from it. Delivery adapters translate framework
+objects into application calls; they do not become a second source of
+Scripture, authentication, preference, or session truth.
+
+The layer check deliberately enforces dependency direction, not file size or a
+particular preference for functions versus classes. Cohesive pure functions
+remain appropriate in rendering and validation code.
+
+## State ownership
+
+| State | Sole owner | Consumers |
+|---|---|---|
+| Librarian clients, worker capacity, and circuit state | `ScriptureService` | Telegram commands, Mini App API, health metrics |
+| Telegram callback fallback sessions | `InteractionStore` | Telegram command adapter |
+| Mini App launches, authenticated sessions, selections, and post attempts | `MiniAppLaunchStore` / `MiniAppSessionStore` | Mini App API and Tornado launch adapter |
+| User translation, search defaults, and reader position | `UserPreferenceStore` | Telegram and Mini App use cases |
+| Command/client rate budgets and abuse windows | `InboundRateLimiter` | Telegram and Mini App ingress |
+| Pending Telegram-row cleanup | `MiniAppLaunchCleanup` | Tornado readiness and post lifecycle |
+| Health readiness and aggregate exposition | `HealthServer` | Process lifecycle and probes |
+| Process readiness/watchdog notification | `RuntimeNotifier` | Composition root startup/shutdown |
+
+State changes must go through the owning object. In particular, browser data is
+never authoritative Scripture, delivery adapters must not mutate store
+internals, and process-global framework registries are wiring rather than a
+domain-state API.
+
 ## Trust boundaries
 
 Telegram command arguments are untrusted. The robot reconstructs them only from `context.args`, applies a length limit, splits a bounded number of references, and fully parses every reference before repository access.

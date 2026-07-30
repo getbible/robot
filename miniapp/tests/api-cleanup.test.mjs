@@ -95,3 +95,131 @@ test("cleanup transport failure cannot invalidate successful session creation", 
   assert.equal(payload.session_token, SESSION_PAYLOAD.session_token);
   assert.equal(requests, 2);
 });
+
+test("a resumed session also sends exactly one authenticated cleanup signal", async () => {
+  const requests = [];
+  const api = new MiniAppApi("signed-init-data", {
+    baseUrl: "https://robot.example/getbible/",
+    fetchImplementation: async (url, options) => {
+      requests.push({ url: String(url), options });
+      return requests.length === 1
+        ? jsonResponse(SESSION_PAYLOAD)
+        : new Response(null, { status: 204 });
+    },
+  });
+
+  const payload = await api.resumeSession(SESSION_PAYLOAD.session_token);
+
+  assert.equal(payload.session_token, SESSION_PAYLOAD.session_token);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].options.method, "GET");
+  assert.equal(requests[1].url, "https://robot.example/getbible/api/v1/cleanup");
+  assert.equal(requests[1].options.method, "POST");
+  assert.equal(requests[1].options.keepalive, true);
+});
+
+test("delayed basket transport remains data-only after local invalidation", async () => {
+  let releaseBasket;
+  const basketGate = new Promise((resolve) => {
+    releaseBasket = resolve;
+  });
+  const requests = [];
+  const api = new MiniAppApi("signed-init-data", {
+    baseUrl: "https://robot.example/getbible/",
+    fetchImplementation: async (url, options) => {
+      const path = new URL(url).pathname;
+      requests.push({ path, options });
+      if (path.endsWith("/session")) {
+        return jsonResponse(SESSION_PAYLOAD, 201);
+      }
+      if (path.endsWith("/cleanup")) {
+        return new Response(null, { status: 204 });
+      }
+      await basketGate;
+      return jsonResponse({
+        items: [{
+          selection_id: "SelectionToken123",
+          translation: "kjv",
+          reference: "John 3:16",
+          book_number: 43,
+          book_name: "John",
+          chapter: 3,
+          verse: 16,
+          text: "For God so loved the world.",
+        }],
+        count: 1,
+        maximum: 100,
+      });
+    },
+  });
+  await api.createSession("OwnerBoundLaunch1");
+
+  const delayed = api.addBasketItem("SelectionToken123");
+  api.clearSession();
+  releaseBasket();
+
+  const payload = await delayed;
+  assert.equal(payload.count, 1);
+  await assert.rejects(
+    api.basket(),
+    (error) => error?.code === "session_not_ready",
+  );
+  assert.equal(
+    requests.filter((request) => request.path.endsWith("/basket/items")).length,
+    1,
+  );
+});
+
+test("explicit revocation calls DELETE session and clears local auth", async () => {
+  const requests = [];
+  const api = new MiniAppApi("signed-init-data", {
+    baseUrl: "https://robot.example/getbible/",
+    fetchImplementation: async (url, options) => {
+      requests.push({ url: String(url), options });
+      return requests.length === 1
+        ? jsonResponse(SESSION_PAYLOAD, 201)
+        : new Response(null, { status: 204 });
+    },
+  });
+  await api.createSession("OwnerBoundLaunch1");
+  await api.revokeSession();
+
+  assert.ok(
+    requests.some(
+      (request) =>
+        request.url.endsWith("/api/v1/session") &&
+        request.options.method === "DELETE" &&
+        request.options.keepalive === true,
+    ),
+  );
+  await assert.rejects(
+    api.basket(),
+    (error) => error?.code === "session_not_ready",
+  );
+});
+
+test("failed explicit revocation still clears local auth", async () => {
+  const api = new MiniAppApi("signed-init-data", {
+    baseUrl: "https://robot.example/getbible/",
+    fetchImplementation: async (url, options) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/session") && options.method === "POST") {
+        return jsonResponse(SESSION_PAYLOAD, 201);
+      }
+      if (path.endsWith("/cleanup")) {
+        return new Response(null, { status: 204 });
+      }
+      throw new TypeError("offline");
+    },
+  });
+  await api.createSession("OwnerBoundLaunch1");
+
+  await assert.rejects(
+    api.revokeSession(),
+    (error) => error?.code === "network_error",
+  );
+  await assert.rejects(
+    api.basket(),
+    (error) => error?.code === "session_not_ready",
+  );
+});

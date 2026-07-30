@@ -85,6 +85,19 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(application.add_handler.call_count, 9)
         application.add_error_handler.assert_called_once_with(bot.error_handler)
+        services = result.bot_data[bot.APPLICATION_SERVICES_SLOT]
+        self.assertIs(services.settings, result.bot_data[bot.SETTINGS_SLOT])
+        self.assertIs(services.scripture, result.bot_data[bot.SERVICE_SLOT])
+        self.assertIs(services.limiter, result.bot_data[bot.LIMITER_SLOT])
+        self.assertIs(
+            services.interactions,
+            result.bot_data[bot.INTERACTIONS_SLOT],
+        )
+        self.assertIs(
+            services.preferences,
+            result.bot_data[bot.PREFERENCES_SLOT],
+        )
+        self.assertIsNone(services.mini_app)
 
     def test_preference_database_failure_falls_back_to_memory(self) -> None:
         application = SimpleNamespace(

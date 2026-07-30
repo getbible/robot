@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { TelegramBridge } from "../lib/telegram.js";
+import { TelegramBridge, validLaunchToken } from "../lib/telegram.js";
 
 function installDocument() {
   const originalDocument = globalThis.document;
@@ -245,4 +245,12 @@ test("does not blur non-editable active elements", () => {
   }
 
   assert.equal(blurCount, 0);
+});
+
+test("accepts only server-compatible opaque launch tokens", () => {
+  assert.equal(validLaunchToken("a".repeat(16)), "a".repeat(16));
+  assert.equal(validLaunchToken("Z_9-".repeat(32)), "Z_9-".repeat(32));
+  assert.equal(validLaunchToken("a".repeat(15)), null);
+  assert.equal(validLaunchToken("a".repeat(129)), null);
+  assert.equal(validLaunchToken("invalid.token.value"), null);
 });

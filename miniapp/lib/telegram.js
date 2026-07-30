@@ -1,4 +1,4 @@
-const LAUNCH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
+const LAUNCH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const FULLSCREEN_API_VERSION = "8.0";
 const INSET_SIDES = Object.freeze(["top", "right", "bottom", "left"]);
 const MAX_SAFE_AREA_INSET = 320;

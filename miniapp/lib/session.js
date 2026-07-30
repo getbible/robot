@@ -1,6 +1,6 @@
 const SESSION_STORAGE_KEY = "getbible.miniapp.session";
 const SESSION_RECORD_VERSION = 1;
-const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9._~-]{16,2048}$/;
+const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 
 export async function openBoundSession(
   api,

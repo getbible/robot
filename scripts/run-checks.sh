@@ -15,7 +15,9 @@ bash -n tests/docker_manager.sh
 bash setup.sh self-test
 "$PYTHON" -m pip check
 "$PYTHON" -m compileall -q bot.py config.py modules container scripts tests
-"$PYTHON" -m unittest discover -s tests -v
+"$VENV/bin/coverage" erase
+"$VENV/bin/coverage" run -m unittest discover -s tests -v
+"$VENV/bin/coverage" report
 "$VENV/bin/ruff" check .
 "$VENV/bin/mypy"
 if ! command -v npm >/dev/null 2>&1; then

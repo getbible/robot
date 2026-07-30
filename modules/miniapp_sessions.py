@@ -35,6 +35,10 @@ class MiniAppSessionExpiredError(ValueError):
     """An authenticated request outlived its bounded server session."""
 
 
+class MiniAppSessionInputError(ValueError):
+    """A client supplied an invalid Mini App session-state mutation."""
+
+
 class MiniAppSessionCapacityError(RuntimeError):
     """All bounded session slots are temporarily pinned by active posts."""
 
@@ -674,7 +678,7 @@ class MiniAppSessionStore:
         selection_token: str,
     ) -> tuple[MiniAppSelection, ...]:
         if _TOKEN_RE.fullmatch(selection_token) is None:
-            raise ValueError("Selection is invalid or expired.")
+            raise MiniAppSessionInputError("Selection is invalid or expired.")
         with self._guard:
             if self._sessions.get(session.token) is not session:
                 raise MiniAppSessionExpiredError(
@@ -692,11 +696,11 @@ class MiniAppSessionStore:
                     None,
                 )
             if selection is None:
-                raise ValueError("Selection is invalid or expired.")
+                raise MiniAppSessionInputError("Selection is invalid or expired.")
             identity = _selection_identity(selection)
             if all(_selection_identity(item) != identity for item in session.basket):
                 if len(session.basket) >= self._max_basket:
-                    raise OverflowError("The Scripture basket is full.")
+                    raise MiniAppSessionInputError("The Scripture basket is full.")
                 session.basket.append(selection)
                 session.available_selections[selection.token] = selection
                 session.available_selections.move_to_end(selection.token)
@@ -735,7 +739,9 @@ class MiniAppSessionStore:
                 or len(set(selection_tokens)) != len(selection_tokens)
                 or set(selection_tokens) != set(existing)
             ):
-                raise ValueError("Basket order must contain every current selection once.")
+                raise MiniAppSessionInputError(
+                    "Basket order must contain every current selection once."
+                )
             session.basket[:] = [existing[token] for token in selection_tokens]
             return tuple(session.basket)
 
@@ -778,7 +784,9 @@ class MiniAppSessionStore:
             if existing is not None:
                 session.post_attempts.move_to_end(idempotency_key)
                 if existing.basket_digest != basket_digest:
-                    raise ValueError("Idempotency key belongs to a different basket.")
+                    raise MiniAppSessionInputError(
+                        "Idempotency key belongs to a different basket."
+                    )
                 return existing, False
             for attempt in session.post_attempts.values():
                 if attempt.basket_digest == basket_digest:

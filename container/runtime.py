@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from collections import deque
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from ipaddress import IPv4Address
@@ -78,11 +79,6 @@ class InstanceSpec:
         values = dotenv_values(path, interpolate=False)
         if any(value is None for value in values.values()):
             raise ContainerConfigurationError(f"{path.name}: every key requires a value.")
-        forbidden = sorted(FORBIDDEN_ENV.intersection(values))
-        if forbidden:
-            raise ContainerConfigurationError(
-                f"{name}: unsafe environment key in instance file: {forbidden[0]}"
-            )
         return cls._build(
             name,
             {key: value for key, value in values.items() if value is not None},
@@ -91,12 +87,27 @@ class InstanceSpec:
     @classmethod
     def from_environment(cls) -> InstanceSpec:
         name = os.environ.get("INSTANCE_NAME", "production").strip()
-        return cls._build(name, dict(os.environ))
+        return cls._build(
+            name,
+            dict(os.environ),
+            reject_forbidden_config=False,
+        )
 
     @classmethod
-    def _build(cls, name: str, configured: dict[str, str]) -> InstanceSpec:
+    def _build(
+        cls,
+        name: str,
+        configured: Mapping[str, str],
+        *,
+        reject_forbidden_config: bool = True,
+    ) -> InstanceSpec:
         if INSTANCE_RE.fullmatch(name) is None or "--" in name:
             raise ContainerConfigurationError(f"{name!r}: invalid instance name.")
+        environment = _child_environment(
+            name,
+            configured,
+            reject_forbidden_config=reject_forbidden_config,
+        )
         instance_root = (DATA_ROOT / name).resolve()
         data_root = DATA_ROOT.resolve()
         if data_root not in instance_root.parents:
@@ -106,12 +117,6 @@ class InstanceSpec:
         cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if key not in FORBIDDEN_ENV
-        }
-        environment.update(configured)
         environment.update(
             {
                 "CONTAINERIZED": "true",
@@ -192,6 +197,33 @@ class InstanceSpec:
             memory_limit_bytes=memory_limit_mb * 1024 * 1024,
             memory_warning_percent=memory_warning_percent,
         )
+
+
+def _child_environment(
+    instance_name: str,
+    configured: Mapping[str, str],
+    *,
+    reject_forbidden_config: bool,
+) -> dict[str, str]:
+    """Build a child environment without process-control variables."""
+    forbidden = sorted(FORBIDDEN_ENV.intersection(configured))
+    if forbidden and reject_forbidden_config:
+        raise ContainerConfigurationError(
+            f"{instance_name}: unsafe environment key in instance file: {forbidden[0]}"
+        )
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in FORBIDDEN_ENV
+    }
+    environment.update(
+        {
+            key: value
+            for key, value in configured.items()
+            if key not in FORBIDDEN_ENV
+        }
+    )
+    return environment
 
 
 @dataclass(slots=True)

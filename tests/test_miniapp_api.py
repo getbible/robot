@@ -548,6 +548,82 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 201)
         return json.loads(response.body)["session_token"]
 
+    async def test_session_mutation_errors_preserve_safe_domain_messages(
+        self,
+    ) -> None:
+        token = await self.exchange()
+        invalid = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/basket/items",
+                token=token,
+                body={"selection_id": "abcdefghijklmnop"},
+            )
+        )
+        self.assertEqual(invalid.status, 400)
+        self.assertEqual(
+            json.loads(invalid.body),
+            {
+                "error": "invalid_request",
+                "message": "Selection is invalid or expired.",
+            },
+        )
+
+    async def test_unexpected_builtin_errors_are_generic_and_never_leak(
+        self,
+    ) -> None:
+        token = await self.exchange()
+        for error_type in (ValueError, OverflowError):
+            private_text = f"private {error_type.__name__} implementation detail"
+            with (
+                self.subTest(error_type=error_type.__name__),
+                patch.object(
+                    self.sessions,
+                    "basket",
+                    side_effect=error_type(private_text),
+                ),
+            ):
+                response = await self.api.handle(
+                    self.request(
+                        "GET",
+                        "/getbible/api/v1/basket",
+                        token=token,
+                    )
+                )
+            self.assertEqual(response.status, 500)
+            self.assertEqual(
+                json.loads(response.body),
+                {
+                    "error": "internal_error",
+                    "message": "The request could not be completed.",
+                },
+            )
+            self.assertNotIn(private_text, response.body.decode())
+
+        private_text = "private preference persistence invariant"
+        with patch.object(
+            self.preferences,
+            "update_preferences",
+            side_effect=ValueError(private_text),
+        ):
+            response = await self.api.handle(
+                self.request(
+                    "PUT",
+                    "/getbible/api/v1/preferences",
+                    token=token,
+                    body={"translation": "aov"},
+                )
+            )
+        self.assertEqual(response.status, 500)
+        self.assertEqual(
+            json.loads(response.body),
+            {
+                "error": "internal_error",
+                "message": "The request could not be completed.",
+            },
+        )
+        self.assertNotIn(private_text, response.body.decode())
+
     async def test_direct_browser_and_forged_telegram_requests_are_denied(self) -> None:
         missing_origin = await self.api.handle(
             self.request(

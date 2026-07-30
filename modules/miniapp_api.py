@@ -48,6 +48,7 @@ from .miniapp_sessions import (
     MiniAppSession,
     MiniAppSessionCapacityError,
     MiniAppSessionExpiredError,
+    MiniAppSessionInputError,
     MiniAppSessionStore,
 )
 from .preferences import ReaderLocation, SearchDefaults, UserPreferenceStore
@@ -375,14 +376,14 @@ class MiniAppApi:
             )
         except MiniAppApiInputError as error:
             return self._error_response(400, "invalid_request", str(error))
+        except MiniAppSessionInputError as error:
+            return self._error_response(400, "invalid_request", str(error))
         except TranslationNotFoundError:
             return self._error_response(
                 400,
                 "invalid_request",
                 "translation is not available.",
             )
-        except (OverflowError, ValueError) as error:
-            return self._error_response(400, "invalid_request", str(error))
         except RobotRateLimited as error:
             await self._handle_rate_limit(error)
             return self._error_response(
@@ -1137,26 +1138,23 @@ class MiniAppApi:
                     else:
                         await self._validate_reader_location(location)
 
-            try:
-                if location is _PREFERENCE_UNCHANGED:
-                    preferences = self._preferences.update_preferences(
-                        session.user_id,
-                        translation=(
-                            translation if "translation" in payload else None
-                        ),
-                        search_defaults=defaults,
-                    )
-                else:
-                    preferences = self._preferences.update_preferences(
-                        session.user_id,
-                        translation=(
-                            translation if "translation" in payload else None
-                        ),
-                        search_defaults=defaults,
-                        reader_location=cast(ReaderLocation | None, location),
-                    )
-            except ValueError as error:
-                raise MiniAppApiInputError(str(error)) from error
+            if location is _PREFERENCE_UNCHANGED:
+                preferences = self._preferences.update_preferences(
+                    session.user_id,
+                    translation=(
+                        translation if "translation" in payload else None
+                    ),
+                    search_defaults=defaults,
+                )
+            else:
+                preferences = self._preferences.update_preferences(
+                    session.user_id,
+                    translation=(
+                        translation if "translation" in payload else None
+                    ),
+                    search_defaults=defaults,
+                    reader_location=cast(ReaderLocation | None, location),
+                )
             self._sessions.set_user_translation(
                 session.user_id,
                 preferences.translation,

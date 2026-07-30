@@ -32,6 +32,7 @@ from telegram.ext import ContextTypes
 from config import Settings
 from modules.audit import audit_event, audit_identity
 from modules.catalog import BookOption, ChapterOption, TranslationOption
+from modules.dependencies import ApplicationServices
 from modules.ephemeral import (
     TELEGRAM_TEXT_LIMIT,
     delete_ephemeral_text,
@@ -73,6 +74,7 @@ LIMITER_SLOT = "inbound_rate_limiter"
 INTERACTIONS_SLOT = "interaction_store"
 PREFERENCES_SLOT = "user_preference_store"
 MINI_APP_SLOT = "mini_app_server"
+APPLICATION_SERVICES_SLOT = "application_services"
 DUPLICATE_POLLER_SLOT = "duplicate_poller_detected"
 
 TRANSLATION_PAGE_SIZE = 6
@@ -143,6 +145,14 @@ def _components(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> tuple[Settings, ScriptureService, InboundRateLimiter, InteractionStore]:
     data = context.application.bot_data
+    services = data.get(APPLICATION_SERVICES_SLOT)
+    if isinstance(services, ApplicationServices):
+        return (
+            services.settings,
+            services.scripture,
+            services.limiter,
+            services.interactions,
+        )
     return (
         cast(Settings, data[SETTINGS_SLOT]),
         cast(ScriptureService, data[SERVICE_SLOT]),
@@ -165,12 +175,20 @@ def _identity(update: Update) -> tuple[int, int] | None:
 def _preference_store(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> UserPreferenceStore | None:
-    value = context.application.bot_data.get(PREFERENCES_SLOT)
+    data = context.application.bot_data
+    services = data.get(APPLICATION_SERVICES_SLOT)
+    if isinstance(services, ApplicationServices):
+        return services.preferences
+    value = data.get(PREFERENCES_SLOT)
     return value if isinstance(value, UserPreferenceStore) else None
 
 
 def _mini_app(context: ContextTypes.DEFAULT_TYPE) -> MiniAppServer | None:
-    value = context.application.bot_data.get(MINI_APP_SLOT)
+    data = context.application.bot_data
+    services = data.get(APPLICATION_SERVICES_SLOT)
+    if isinstance(services, ApplicationServices):
+        return services.mini_app
+    value = data.get(MINI_APP_SLOT)
     return value if isinstance(value, MiniAppServer) else None
 
 

@@ -31,3 +31,27 @@ warn_unused_ignores = true
 
 [tool.bandit]
 exclude_dirs = ["tests", ".venv", "venv"]
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["bot", "config", "modules", "container"]
+omit = [
+    "tests/*",
+    "typings/*",
+    "miniapp/*",
+    "generated/*",
+    "data/*",
+    "docker/instances/*",
+    "docker/secrets/*",
+    "venv/*",
+    ".venv/*",
+    ".lock-venv/*",
+    ".lock-verify-venv/*",
+]
+
+[tool.coverage.report]
+fail_under = 81.5
+precision = 1
+show_missing = true
+skip_empty = true
