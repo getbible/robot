@@ -128,6 +128,15 @@ jobs:
           set -o pipefail
           mypy 2>&1 | tee "${RUNNER_TEMP}/mypy.log"
 
+      - name: Enforce Python branch coverage
+        shell: bash
+        run: |
+          set -o pipefail
+          coverage erase
+          coverage run -m unittest discover -s tests -v \
+            2>&1 | tee "${RUNNER_TEMP}/coverage.log"
+          coverage report 2>&1 | tee -a "${RUNNER_TEMP}/coverage.log"
+
       - name: Install exact Mini App test environment
         shell: bash
         working-directory: miniapp
@@ -243,6 +252,7 @@ jobs:
             ${{ runner.temp }}/development-install.log
             ${{ runner.temp }}/ruff.log
             ${{ runner.temp }}/mypy.log
+            ${{ runner.temp }}/coverage.log
             ${{ runner.temp }}/miniapp.log
             ${{ runner.temp }}/miniapp-install.log
             ${{ runner.temp }}/miniapp-browser-install.log

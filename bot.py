@@ -33,6 +33,7 @@ from telegram.ext import (
 from config import ConfigurationError, Settings
 from modules.cache_maintenance import CacheJanitor
 from modules.commands import (
+    APPLICATION_SERVICES_SLOT,
     DUPLICATE_POLLER_SLOT,
     INTERACTIONS_SLOT,
     LIMITER_SLOT,
@@ -49,6 +50,7 @@ from modules.commands import (
     start_command,
     unknown_command,
 )
+from modules.dependencies import ApplicationServices
 from modules.ephemeral import delete_ephemeral_text, send_ephemeral_text
 from modules.errors import ScriptureUnavailable
 from modules.health import HealthServer
@@ -228,6 +230,7 @@ def build_application(settings: Settings) -> Application:
         interval_seconds=settings.cache_maintenance_interval_seconds,
     )
     application.bot_data[NOTIFIER_SLOT] = RuntimeNotifier()
+    mini_app: MiniAppServer | None = None
     if getattr(settings, "mini_app_enabled", False):
         async def cleanup_mini_app_launch(launch: MiniAppLaunch) -> None:
             await _cleanup_mini_app_launch_prompt(application.bot, launch)
@@ -281,6 +284,15 @@ def build_application(settings: Settings) -> Application:
         )
         application.bot_data[MINI_APP_SLOT] = mini_app
         health.set_mini_app_snapshot(mini_app.snapshot)
+
+    application.bot_data[APPLICATION_SERVICES_SLOT] = ApplicationServices(
+        settings=settings,
+        scripture=service,
+        limiter=limiter,
+        interactions=interactions,
+        preferences=preferences,
+        mini_app=mini_app,
+    )
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("get", bible_command))

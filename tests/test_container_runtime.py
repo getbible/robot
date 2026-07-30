@@ -51,6 +51,77 @@ class ContainerRuntimeTestCase(unittest.TestCase):
                 )
             )
 
+    def test_single_instance_strips_every_forbidden_process_variable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / "data"
+            configured = {
+                "INSTANCE_NAME": "production",
+                "ROBOT_MODE": "single",
+                "TELEGRAM_API_TOKEN": TOKEN,
+                "HEALTH_PORT": "8081",
+                "GETBIBLE_API_BASE_URL": "https://api.example.test",
+                **{
+                    key: f"/untrusted/{key.casefold()}"
+                    for key in runtime.FORBIDDEN_ENV
+                },
+            }
+            with (
+                patch.object(runtime, "DATA_ROOT", data),
+                patch.dict(os.environ, configured, clear=True),
+            ):
+                spec = runtime.InstanceSpec.from_environment()
+
+            self.assertTrue(runtime.FORBIDDEN_ENV.isdisjoint(spec.environment))
+            self.assertEqual(spec.environment["TELEGRAM_API_TOKEN"], TOKEN)
+            self.assertEqual(spec.environment["ROBOT_MODE"], "single")
+            self.assertEqual(
+                spec.environment["GETBIBLE_API_BASE_URL"],
+                "https://api.example.test",
+            )
+            self.assertEqual(spec.environment["PYTHONUNBUFFERED"], "1")
+
+    def test_instance_files_reject_every_forbidden_process_variable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            path = root / "production.env"
+            ambient = {
+                "SAFE_AMBIENT_SETTING": "preserved",
+                **{
+                    key: f"/ambient/{key.casefold()}"
+                    for key in runtime.FORBIDDEN_ENV
+                },
+            }
+            path.write_text(
+                f'TELEGRAM_API_TOKEN="{TOKEN}"\nHEALTH_PORT="8081"\n',
+                encoding="utf-8",
+            )
+            with (
+                patch.object(runtime, "DATA_ROOT", data),
+                patch.dict(os.environ, ambient, clear=True),
+            ):
+                spec = runtime.InstanceSpec.from_file(path)
+                self.assertTrue(runtime.FORBIDDEN_ENV.isdisjoint(spec.environment))
+                self.assertEqual(
+                    spec.environment["SAFE_AMBIENT_SETTING"],
+                    "preserved",
+                )
+
+                for forbidden in sorted(runtime.FORBIDDEN_ENV):
+                    with self.subTest(forbidden=forbidden):
+                        path.write_text(
+                            (
+                                f'TELEGRAM_API_TOKEN="{TOKEN}"\n'
+                                f'{forbidden}="/untrusted/{forbidden.casefold()}"\n'
+                            ),
+                            encoding="utf-8",
+                        )
+                        with self.assertRaisesRegex(
+                            runtime.ContainerConfigurationError,
+                            rf"unsafe environment key.*{forbidden}",
+                        ):
+                            runtime.InstanceSpec.from_file(path)
+
     def test_duplicate_ports_and_unsafe_environment_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -8,21 +8,133 @@ const COPY_MESSAGES = Object.freeze({
   "selection.copy_failed": "Unable to copy the selected verses.",
 });
 
-let latestBasket = [];
-let basketReady = false;
-let copyButton = null;
-let labelTimer = null;
-let browserWindow = null;
-let browserDocument = null;
+export class ClipboardController {
+  #button;
+  #getItems;
+  #format;
+  #write;
+  #message;
+  #toast;
+  #notifySuccess;
+  #notifyError;
+  #navigator;
+  #document;
+  #ClipboardItem;
+  #Blob;
+  #setTimeout;
+  #clearTimeout;
+  #labelTimer = null;
 
-export function setClipboardBasket(candidate) {
-  if (!candidate || !Array.isArray(candidate.items)) {
-    return false;
+  constructor({
+    button,
+    getItems,
+    format = formatBasketForClipboard,
+    write = writeClipboardPayload,
+    message = (key) => clipboardMessage(
+      key,
+      globalThis.document?.documentElement?.lang,
+    ),
+    toast = () => undefined,
+    notifySuccess = () => undefined,
+    notifyError = () => undefined,
+    navigatorObject = globalThis.navigator,
+    documentObject = globalThis.document,
+    ClipboardItemCtor = globalThis.ClipboardItem,
+    BlobCtor = globalThis.Blob,
+    setTimeoutImplementation = globalThis.setTimeout,
+    clearTimeoutImplementation = globalThis.clearTimeout,
+  }) {
+    if (!button || typeof getItems !== "function") {
+      throw new TypeError("Clipboard controls and basket access are required.");
+    }
+    if (
+      typeof format !== "function" ||
+      typeof write !== "function" ||
+      typeof message !== "function" ||
+      typeof toast !== "function" ||
+      typeof notifySuccess !== "function" ||
+      typeof notifyError !== "function" ||
+      typeof setTimeoutImplementation !== "function" ||
+      typeof clearTimeoutImplementation !== "function"
+    ) {
+      throw new TypeError("Clipboard controller dependencies are invalid.");
+    }
+    this.#button = button;
+    this.#getItems = getItems;
+    this.#format = format;
+    this.#write = write;
+    this.#message = message;
+    this.#toast = toast;
+    this.#notifySuccess = notifySuccess;
+    this.#notifyError = notifyError;
+    this.#navigator = navigatorObject;
+    this.#document = documentObject;
+    this.#ClipboardItem = ClipboardItemCtor;
+    this.#Blob = BlobCtor;
+    this.#setTimeout = setTimeoutImplementation;
+    this.#clearTimeout = clearTimeoutImplementation;
   }
-  latestBasket = candidate.items;
-  basketReady = true;
-  updateButton();
-  return true;
+
+  sync({ visible, disabled }) {
+    this.#button.hidden = !visible;
+    this.#button.disabled = !visible || Boolean(disabled);
+    this.#button.setAttribute(
+      "aria-label",
+      this.#message("selection.copy"),
+    );
+    if (this.#labelTimer === null) {
+      this.#button.textContent = this.#message("selection.copy");
+    }
+  }
+
+  async copy() {
+    if (this.#button.disabled) {
+      return false;
+    }
+    const payload = this.#format(this.#getItems());
+    const copied = await this.#write(payload, {
+      navigatorObject: this.#navigator,
+      documentObject: this.#document,
+      ClipboardItemCtor: this.#ClipboardItem,
+      BlobCtor: this.#Blob,
+    });
+    if (!copied) {
+      this.#toast(this.#message("selection.copy_failed"));
+      this.#notifyError();
+      return false;
+    }
+    this.#notifySuccess();
+    this.#toast(this.#message("selection.copy_success"));
+    this.#button.textContent = this.#message("selection.copied");
+    if (this.#labelTimer !== null) {
+      this.#clearTimeout(this.#labelTimer);
+    }
+    this.#labelTimer = this.#setTimeout(() => {
+      this.#button.textContent = this.#message("selection.copy");
+      this.#labelTimer = null;
+    }, 1200);
+    return true;
+  }
+
+  destroy() {
+    if (this.#labelTimer !== null) {
+      this.#clearTimeout(this.#labelTimer);
+      this.#labelTimer = null;
+    }
+  }
+}
+
+export function clipboardMessage(
+  key,
+  requestedLocale = "en",
+  catalogs = UI_CATALOGS,
+) {
+  const requested = String(requestedLocale || "en").toLowerCase();
+  const base = requested.split("-")[0];
+  return catalogs[requested]?.[key] ??
+    catalogs[base]?.[key] ??
+    COPY_MESSAGES[key] ??
+    key;
 }
 
 export function formatBasketForClipboard(
@@ -148,114 +260,6 @@ export async function writeClipboardPayload(
   return copyWithTextarea(payload.text, documentObject);
 }
 
-function installClipboardEnhancements(windowObject, documentObject) {
-  if (!windowObject || !documentObject) {
-    return;
-  }
-  browserWindow = windowObject;
-  browserDocument = documentObject;
-
-  const installButton = () => {
-    const postButton = documentObject.getElementById("post-selection");
-    if (!postButton || documentObject.getElementById("copy-selection")) {
-      return;
-    }
-    copyButton = documentObject.createElement("button");
-    copyButton.id = "copy-selection";
-    copyButton.type = "button";
-    copyButton.className = "button button--secondary post-button";
-    copyButton.textContent = localizedMessage("selection.copy");
-    copyButton.disabled = true;
-    copyButton.addEventListener("click", () => void copySelection());
-    postButton.insertAdjacentElement("beforebegin", copyButton);
-    updateButton();
-
-    const selectionList = documentObject.getElementById("selection-list");
-    const Observer = windowObject.MutationObserver;
-    if (selectionList && typeof Observer === "function") {
-      const observer = new Observer(updateButton);
-      observer.observe(selectionList, { childList: true, subtree: true });
-    }
-  };
-
-  if (documentObject.readyState === "loading") {
-    documentObject.addEventListener("DOMContentLoaded", installButton, { once: true });
-  } else {
-    installButton();
-  }
-}
-
-async function copySelection() {
-  if (!copyButton || !browserWindow || !browserDocument) {
-    return;
-  }
-  const payload = formatBasketForClipboard(latestBasket);
-  const copied = await writeClipboardPayload(payload, {
-    navigatorObject: browserWindow.navigator,
-    documentObject: browserDocument,
-    ClipboardItemCtor: browserWindow.ClipboardItem,
-    BlobCtor: browserWindow.Blob,
-  });
-  if (!copied) {
-    showToast(localizedMessage("selection.copy_failed"));
-    browserWindow.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
-    return;
-  }
-  browserWindow.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
-  showToast(localizedMessage("selection.copy_success"));
-  copyButton.textContent = localizedMessage("selection.copied");
-  if (labelTimer !== null) {
-    browserWindow.clearTimeout(labelTimer);
-  }
-  labelTimer = browserWindow.setTimeout(() => {
-    if (copyButton) {
-      copyButton.textContent = localizedMessage("selection.copy");
-    }
-    labelTimer = null;
-  }, 1200);
-}
-
-function updateButton() {
-  if (!copyButton || !browserDocument) {
-    return;
-  }
-  const postButton = browserDocument.getElementById("post-selection");
-  const hasSelection = basketReady && latestBasket.length > 0;
-  copyButton.hidden = !hasSelection || Boolean(postButton?.hidden);
-  copyButton.disabled = !hasSelection || Boolean(postButton?.disabled);
-  copyButton.setAttribute("aria-label", localizedMessage("selection.copy"));
-}
-
-function showToast(message) {
-  if (!browserWindow || !browserDocument) {
-    return;
-  }
-  const region = browserDocument.getElementById("toast-region");
-  if (!region) {
-    return;
-  }
-  const item = browserDocument.createElement("div");
-  item.className = "toast";
-  item.textContent = message;
-  region.replaceChildren(item);
-  browserWindow.setTimeout(() => {
-    if (region.contains(item)) {
-      region.replaceChildren();
-    }
-  }, 3600);
-}
-
-function localizedMessage(key) {
-  const requested = String(
-    browserDocument?.documentElement.lang || "en",
-  ).toLowerCase();
-  const base = requested.split("-")[0];
-  return UI_CATALOGS[requested]?.[key] ??
-    UI_CATALOGS[base]?.[key] ??
-    COPY_MESSAGES[key] ??
-    key;
-}
-
 function normalizeClipboardItems(rawItems) {
   if (!Array.isArray(rawItems)) {
     return [];
@@ -354,8 +358,4 @@ function copyWithTextarea(text, documentObject) {
   }
   textarea.remove();
   return copied;
-}
-
-if (typeof window !== "undefined" && typeof document !== "undefined") {
-  installClipboardEnhancements(window, document);
 }

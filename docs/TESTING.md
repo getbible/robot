@@ -33,14 +33,20 @@ production service.
 
 ```bash
 venv/bin/python -m compileall -q bot.py config.py modules scripts tests
-venv/bin/python -m unittest discover -s tests -v
+venv/bin/coverage erase
+venv/bin/coverage run -m unittest discover -s tests -v
+venv/bin/coverage report -m
 venv/bin/ruff check .
 venv/bin/mypy
 (cd miniapp && npm run check)
 (cd miniapp && npm run test:browser)
 ```
 
-The suite does not contact Telegram or the live GetBible API. It uses fakes and local fixtures for reproducibility.
+The suite does not contact Telegram or the live GetBible API. It uses fakes and
+local fixtures for reproducibility. Coverage measures first-party Python source
+with branch coverage enabled and fails below the floor recorded in
+`pyproject.toml`; tests, generated/runtime data, virtual environments, and the
+separately tested Mini App are excluded.
 
 Run one module while developing:
 

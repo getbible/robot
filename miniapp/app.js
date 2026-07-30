@@ -1,4 +1,8 @@
 import { ApiError, MiniAppApi } from "./lib/api.js";
+import {
+  ClipboardController,
+  clipboardMessage,
+} from "./lib/clipboard.js";
 import { I18n } from "./lib/i18n.js";
 import {
   DEFAULT_FILTERS,
@@ -22,6 +26,7 @@ import {
   uniqueBookLabels,
   uniqueVerses,
 } from "./lib/model.js";
+import { LatestRequestCoordinator } from "./lib/request-coordinator.js";
 import { TelegramBridge } from "./lib/telegram.js";
 import {
   clearBoundSession,
@@ -41,10 +46,10 @@ let restoreReaderFocusAfterLoad = false;
 let preferenceWriteTask = Promise.resolve();
 let basketMutationTask = Promise.resolve();
 let searchRequestId = 0;
-let searchPageRequestId = 0;
 let filterBooksRequestId = 0;
 let sessionGeneration = 0;
 let suppressDialogFocusRestoration = false;
+const searchPageRequests = new LatestRequestCoordinator();
 const MAX_BOOK_CACHE_ENTRIES = 8;
 const MAX_CHAPTER_CACHE_ENTRIES = 24;
 
@@ -184,6 +189,7 @@ const elements = mapElements({
   selectionEmpty: "selection-empty",
   selectionList: "selection-list",
   postState: "post-state",
+  copySelection: "copy-selection",
   postSelection: "post-selection",
   emptyBrowse: "empty-browse",
   navSelectionCount: "nav-selection-count",
@@ -200,6 +206,15 @@ const elements = mapElements({
   resetFilters: "reset-filters",
   toastRegion: "toast-region",
   announcer: "announcer",
+});
+
+const clipboard = new ClipboardController({
+  button: elements.copySelection,
+  getItems: () => state.basket,
+  message: (key) => clipboardMessage(key, i18n.locale),
+  toast,
+  notifySuccess: () => bridge.notifySuccess(),
+  notifyError: () => bridge.notifyError(),
 });
 
 attachListeners();
@@ -463,6 +478,7 @@ function attachListeners() {
   elements.bibleVerses.addEventListener("click", onVerseCardClick);
   elements.selectionList.addEventListener("click", onSelectionAction);
   elements.clearSelection.addEventListener("click", () => void clearBasket());
+  elements.copySelection.addEventListener("click", () => void clipboard.copy());
   elements.postSelection.addEventListener("click", () => void postBasket());
   elements.emptyBrowse.addEventListener("click", () => setRoute("bible"));
 }
@@ -848,7 +864,7 @@ async function changeTranslation(value) {
   pendingReaderPosition = null;
   state.bible.requestId += 1;
   searchRequestId += 1;
-  searchPageRequestId += 1;
+  searchPageRequests.invalidate();
   filterBooksRequestId += 1;
   state.translation = plan.translation;
   state.filters = normalizeFilters(
@@ -952,6 +968,7 @@ async function runSearch(rawQuery) {
     return;
   }
   const requestId = ++searchRequestId;
+  searchPageRequests.invalidate();
   const translation = state.translation;
   const filters = normalizeFilters(
     { ...state.filters, translation },
@@ -1015,9 +1032,9 @@ async function loadNextSearchPage() {
   ) {
     return;
   }
-  const requestId = ++searchPageRequestId;
   const searchId = state.search.searchId;
   const translation = state.search.translation;
+  const request = searchPageRequests.begin({ searchId, translation });
   state.search.loadingMore = true;
   elements.loadMore.disabled = true;
   elements.loadMore.textContent = i18n.t("common.loading");
@@ -1028,7 +1045,7 @@ async function loadNextSearchPage() {
       translation,
     );
     if (
-      requestId !== searchPageRequestId ||
+      !searchPageRequests.isCurrent(request) ||
       state.search.searchId !== searchId ||
       state.translation !== translation
     ) {
@@ -1043,19 +1060,26 @@ async function loadNextSearchPage() {
     if (handleSessionError(error)) {
       return;
     }
-    if (requestId !== searchPageRequestId) {
+    if (!searchPageRequests.isCurrent(request)) {
       return;
     }
     toast(safeError(error).message);
   } finally {
-    state.search.loadingMore = false;
-    renderSearch();
+    searchPageRequests.complete(request, () => {
+      if (
+        state.search.searchId === searchId &&
+        state.translation === translation
+      ) {
+        state.search.loadingMore = false;
+        renderSearch();
+      }
+    });
   }
 }
 
 function clearSearch() {
   searchRequestId += 1;
-  searchPageRequestId += 1;
+  searchPageRequests.invalidate();
   state.search = {
     query: "",
     status: "idle",
@@ -2358,6 +2382,10 @@ function renderSelection() {
   const items = state.basket;
   elements.selectionEmpty.hidden = items.length > 0;
   elements.selectionList.hidden = items.length === 0;
+  clipboard.sync({
+    visible: items.length > 0,
+    disabled: state.posting,
+  });
   elements.postSelection.hidden = items.length === 0;
   elements.postSelection.disabled = items.length === 0 || state.posting;
   elements.postSelection.textContent = state.posting
@@ -2549,7 +2577,7 @@ async function postBasket() {
           return;
         }
         clearBoundSession();
-        api.clearSession();
+        void api.revokeSession().catch(() => undefined);
         bridge.close();
       }, 850);
     } catch (error) {
@@ -2683,7 +2711,7 @@ function invalidateClientSessionState() {
   sessionGeneration += 1;
   basketMutationTask = Promise.resolve();
   searchRequestId += 1;
-  searchPageRequestId += 1;
+  searchPageRequests.invalidate();
   filterBooksRequestId += 1;
   state.bible.requestId += 1;
   state.bible.pickerRequestId += 1;
@@ -2695,6 +2723,7 @@ function invalidateClientSessionState() {
   restoreReaderFocusAfterLoad = false;
   state.pendingSelections.clear();
   state.basket = [];
+  clipboard.sync({ visible: false, disabled: true });
   state.posting = false;
   state.search.results = [];
   state.bible.verses = [];

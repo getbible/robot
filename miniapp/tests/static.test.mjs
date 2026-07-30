@@ -24,6 +24,33 @@ test("uses only relative same-origin API paths and no authoritative verse payloa
   assert.doesNotMatch(api, /sendData/);
   assert.match(api, /selection_id/);
   assert.doesNotMatch(api, /body: \{[^}]*\btext\b/s);
+  assert.doesNotMatch(api, /clipboard/i);
+});
+
+test("declares one accessible copy control without import-time DOM installation", async () => {
+  const html = await readFile(new URL("index.html", root), "utf8");
+  const clipboard = await readFile(new URL("lib/clipboard.js", root), "utf8");
+
+  assert.equal([...html.matchAll(/id="copy-selection"/g)].length, 1);
+  assert.match(
+    html,
+    /id="copy-selection"[\s\S]*?type="button"[\s\S]*?aria-label="Copy selected verses"[\s\S]*?hidden/,
+  );
+  assert.ok(
+    html.indexOf('id="copy-selection"') < html.indexOf('id="post-selection"'),
+  );
+  assert.doesNotMatch(clipboard, /MutationObserver/);
+  assert.doesNotMatch(clipboard, /DOMContentLoaded/);
+  assert.doesNotMatch(clipboard, /typeof window !== "undefined"/);
+});
+
+test("revokes the live session when a successful post closes the Mini App", async () => {
+  const app = await readFile(new URL("app.js", root), "utf8");
+
+  assert.match(
+    app,
+    /clearBoundSession\(\);\s*void api\.revokeSession\(\)\.catch\(\(\) => undefined\);\s*bridge\.close\(\);/,
+  );
 });
 
 test("keeps Bible as the compact reader and selector without adding a fifth route", async () => {
@@ -204,6 +231,8 @@ test("ships parseable OpenAPI JSON at the documented relative root", async () =>
   assert.equal(contract.openapi, "3.1.0");
   assert.equal(contract.servers[0].url, "api/v1");
   assert.ok(contract.paths["/session"]);
+  assert.ok(contract.paths["/session"].delete);
+  assert.ok(contract.paths["/cleanup"].post);
   assert.ok(contract.paths["/basket/order"]);
   assert.ok(contract.paths["/post"]);
   assert.equal(
@@ -240,4 +269,29 @@ test("ships parseable OpenAPI JSON at the documented relative root", async () =>
     contract.components.schemas.Verse.properties.terms.items.maxLength,
     80,
   );
+  assert.equal(
+    contract.paths["/session"].post.requestBody.content[
+      "application/json"
+    ].schema.properties.launch_token.minLength,
+    16,
+  );
+  assert.equal(
+    contract.paths["/session"].post.requestBody.content[
+      "application/json"
+    ].schema.properties.launch_token.maxLength,
+    128,
+  );
+  assert.equal(
+    contract.paths["/search/{search_id}"].get.parameters[0].schema.minLength,
+    16,
+  );
+  assert.equal(
+    contract.paths["/search/{search_id}"].get.parameters[0].schema.maxLength,
+    128,
+  );
+  const sessionToken =
+    contract.components.schemas.NewSession.allOf[1].properties.session_token;
+  assert.equal(sessionToken.minLength, 16);
+  assert.equal(sessionToken.maxLength, 128);
+  assert.equal(sessionToken.pattern, "^[A-Za-z0-9_-]+$");
 });

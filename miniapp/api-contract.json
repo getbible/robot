@@ -38,7 +38,9 @@
                   },
                   "launch_token": {
                     "type": ["string", "null"],
-                    "pattern": "^[A-Za-z0-9_-]{1,256}$"
+                    "minLength": 16,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9_-]+$"
                   }
                 }
               }
@@ -88,17 +90,46 @@
         "summary": "Resume and hydrate an existing WebView-tab session",
         "responses": {
           "200": {
-            "description": "Current session state without issuing a new bearer",
+            "description": "Current session state with the same active bearer",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SessionState"
+                  "$ref": "#/components/schemas/NewSession"
                 }
               }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Revoke the current Mini App session",
+        "description": "Revocation is serialized behind an active post so an accepted post is never interrupted halfway through.",
+        "responses": {
+          "204": {
+            "description": "Session revoked"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/cleanup": {
+      "post": {
+        "summary": "Signal browser readiness and clean retained launch messages",
+        "description": "Authenticates the current bearer and its original Telegram initData, then removes the bot launch prompt and ephemeral source command as one idempotent cleanup unit. The browser treats transport failure as non-fatal after a session has opened.",
+        "responses": {
+          "204": {
+            "description": "Launch-message cleanup completed or was already complete"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Request origin is not the configured Mini App origin"
           }
         }
       }
@@ -403,7 +434,9 @@
             "required": true,
             "schema": {
               "type": "string",
-              "pattern": "^[A-Za-z0-9_-]{8,256}$"
+              "minLength": 16,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
             }
           },
           {
@@ -600,7 +633,8 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "bearerFormat": "opaque"
+        "bearerFormat": "opaque",
+        "description": "Server-issued URL-safe opaque token matching ^[A-Za-z0-9_-]{16,128}$."
       },
       "telegramInitData": {
         "type": "apiKey",
@@ -1145,8 +1179,8 @@
               "session_token": {
                 "type": "string",
                 "minLength": 16,
-                "maxLength": 2048,
-                "pattern": "^[A-Za-z0-9._~-]+$"
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9_-]+$"
               },
               "expires_in": {
                 "type": "integer",
@@ -1174,7 +1208,9 @@
         "properties": {
           "search_id": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9_-]{8,256}$"
+            "minLength": 16,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
           },
           "page": {
             "type": "integer",

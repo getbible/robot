@@ -8,6 +8,7 @@ from modules.interactions import SearchResult
 from modules.miniapp_auth import TelegramMiniAppPrincipal
 from modules.miniapp_sessions import (
     MiniAppLaunchStore,
+    MiniAppSessionInputError,
     MiniAppSessionStore,
     miniapp_direct_url,
     miniapp_public_web_url,
@@ -297,6 +298,47 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
         self.assertEqual(store.basket(session), (second.items[0],))
         store.clear_basket(session)
         self.assertEqual(store.basket(session), ())
+
+    def test_basket_capacity_uses_a_typed_client_safe_error(self) -> None:
+        launches = MiniAppLaunchStore(max_launches=2, ttl_seconds=60)
+        store = MiniAppSessionStore(
+            max_sessions=2,
+            ttl_seconds=60,
+            max_basket_selections=1,
+        )
+        session = store.create(
+            _principal(7),
+            translation="kjv",
+            launch=launches.create_launch(user_id=7, target_chat_id=7),
+            init_data_digest=b"x" * 32,
+        )
+        first = store.register_selection(
+            session,
+            reference="John 3:1",
+            translation="kjv",
+            book_number=43,
+            book_name="John",
+            chapter=3,
+            verse=1,
+            text="First verse.",
+        )
+        second = store.register_selection(
+            session,
+            reference="John 3:2",
+            translation="kjv",
+            book_number=43,
+            book_name="John",
+            chapter=3,
+            verse=2,
+            text="Second verse.",
+        )
+        store.add_to_basket(session, first.token)
+
+        with self.assertRaisesRegex(
+            MiniAppSessionInputError,
+            "Scripture basket is full",
+        ):
+            store.add_to_basket(session, second.token)
 
     def test_basket_identity_survives_available_selection_eviction(self) -> None:
         launches = MiniAppLaunchStore(max_launches=2, ttl_seconds=60)

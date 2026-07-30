@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  ClipboardController,
+  clipboardMessage,
   formatBasketForClipboard,
   writeClipboardPayload,
 } from "../lib/clipboard.js";
@@ -161,4 +163,59 @@ test("empty selections never overwrite the clipboard", async () => {
 
   assert.equal(result, false);
   assert.equal(called, false);
+});
+
+test("the explicit clipboard controller reads only the current basket authority", async () => {
+  const attributes = new Map();
+  const button = {
+    disabled: true,
+    hidden: true,
+    textContent: "",
+    setAttribute(name, value) {
+      attributes.set(name, value);
+    },
+  };
+  const state = { basket: [verse()] };
+  const writes = [];
+  const notices = [];
+  const toasts = [];
+  let resetLabel = null;
+  const controller = new ClipboardController({
+    button,
+    getItems: () => state.basket,
+    write: async (payload) => {
+      writes.push(payload);
+      return Boolean(payload.text);
+    },
+    message: (key) => clipboardMessage(key, "en"),
+    toast: (message) => toasts.push(message),
+    notifySuccess: () => notices.push("success"),
+    notifyError: () => notices.push("error"),
+    setTimeoutImplementation: (callback) => {
+      resetLabel = callback;
+      return 1;
+    },
+    clearTimeoutImplementation: () => undefined,
+  });
+
+  controller.sync({ visible: true, disabled: false });
+  assert.equal(button.hidden, false);
+  assert.equal(button.disabled, false);
+  assert.equal(attributes.get("aria-label"), "Copy selected verses");
+  assert.equal(await controller.copy(), true);
+  assert.equal(writes.length, 1);
+  assert.match(writes[0].text, /^John 3:16 kjv/);
+  assert.deepEqual(notices, ["success"]);
+  assert.deepEqual(toasts, ["Selected verses copied."]);
+  assert.equal(button.textContent, "Copied");
+
+  resetLabel();
+  assert.equal(button.textContent, "Copy selected verses");
+
+  state.basket = [];
+  controller.sync({ visible: false, disabled: true });
+  assert.equal(button.hidden, true);
+  assert.equal(button.disabled, true);
+  assert.equal(await controller.copy(), false);
+  assert.equal(writes.length, 1);
 });

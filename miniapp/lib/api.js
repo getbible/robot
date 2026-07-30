@@ -1,7 +1,6 @@
-import { setClipboardBasket } from "./clipboard.js";
-
 const API_ROOT = "api/v1/";
 const DEFAULT_TIMEOUT_MS = 15_000;
+const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 
 export class ApiError extends Error {
   constructor(message, {
@@ -24,13 +23,40 @@ export class MiniAppApi {
   #sessionToken = null;
   #timeoutMs;
   #cleanupAttempted = false;
+  #baseUrl;
+  #fetch;
+  #setTimeout;
+  #clearTimeout;
 
-  constructor(initData, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  constructor(initData, {
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    baseUrl = globalThis.document?.baseURI ?? globalThis.location?.href,
+    fetchImplementation = globalThis.fetch,
+    setTimeoutImplementation = globalThis.setTimeout,
+    clearTimeoutImplementation = globalThis.clearTimeout,
+  } = {}) {
     if (typeof initData !== "string" || initData.length === 0) {
       throw new TypeError("Telegram initialization data is required.");
     }
+    if (typeof fetchImplementation !== "function") {
+      throw new TypeError("A fetch implementation is required.");
+    }
+    if (
+      typeof setTimeoutImplementation !== "function" ||
+      typeof clearTimeoutImplementation !== "function"
+    ) {
+      throw new TypeError("Browser timer implementations are required.");
+    }
+    try {
+      this.#baseUrl = new URL(String(baseUrl)).href;
+    } catch {
+      throw new TypeError("A valid Mini App base URL is required.");
+    }
     this.#initData = initData;
     this.#timeoutMs = timeoutMs;
+    this.#fetch = fetchImplementation;
+    this.#setTimeout = setTimeoutImplementation;
+    this.#clearTimeout = clearTimeoutImplementation;
   }
 
   async createSession(launchToken = null) {
@@ -45,7 +71,7 @@ export class MiniAppApi {
     if (
       !payload ||
       typeof payload.session_token !== "string" ||
-      payload.session_token.length < 16
+      !SESSION_TOKEN_PATTERN.test(payload.session_token)
     ) {
       throw new ApiError("The secure Telegram session could not be created.", {
         code: "invalid_session_response",
@@ -53,7 +79,6 @@ export class MiniAppApi {
     }
     this.#sessionToken = payload.session_token;
     this.#cleanupAttempted = false;
-    this.#syncBasket(payload.basket);
     this.#cleanupLaunch();
     return payload;
   }
@@ -61,7 +86,7 @@ export class MiniAppApi {
   async resumeSession(sessionToken) {
     if (
       typeof sessionToken !== "string" ||
-      !/^[A-Za-z0-9._~-]{16,2048}$/.test(sessionToken)
+      !SESSION_TOKEN_PATTERN.test(sessionToken)
     ) {
       throw new ApiError("The saved secure session is invalid.", {
         code: "invalid_session_token",
@@ -71,7 +96,6 @@ export class MiniAppApi {
     this.#sessionToken = sessionToken;
     this.#cleanupAttempted = false;
     const payload = await this.#request("session");
-    this.#syncBasket(payload.basket);
     this.#cleanupLaunch();
     return payload;
   }
@@ -79,7 +103,20 @@ export class MiniAppApi {
   clearSession() {
     this.#sessionToken = null;
     this.#cleanupAttempted = false;
-    setClipboardBasket({ items: [] });
+  }
+
+  async revokeSession() {
+    if (!this.#sessionToken) {
+      return;
+    }
+    try {
+      await this.#request("session", {
+        method: "DELETE",
+        keepalive: true,
+      });
+    } finally {
+      this.clearSession();
+    }
   }
 
   translations() {
@@ -125,59 +162,41 @@ export class MiniAppApi {
     });
   }
 
-  async basket() {
-    const payload = await this.#request("basket");
-    this.#syncBasket(payload);
-    return payload;
+  basket() {
+    return this.#request("basket");
   }
 
-  async addBasketItem(selectionId) {
-    const payload = await this.#request("basket/items", {
+  addBasketItem(selectionId) {
+    return this.#request("basket/items", {
       method: "POST",
       body: { selection_id: selectionId },
     });
-    this.#syncBasket(payload?.basket ?? payload);
-    return payload;
   }
 
-  async removeBasketItem(selectionId) {
-    const payload = await this.#request(
+  removeBasketItem(selectionId) {
+    return this.#request(
       `basket/items/${encodeURIComponent(selectionId)}`,
       { method: "DELETE" },
     );
-    this.#syncBasket(payload?.basket ?? payload);
-    return payload;
   }
 
-  async reorderBasket(selectionIds) {
-    const payload = await this.#request("basket/order", {
+  reorderBasket(selectionIds) {
+    return this.#request("basket/order", {
       method: "PATCH",
       body: { selection_ids: selectionIds },
     });
-    this.#syncBasket(payload?.basket ?? payload);
-    return payload;
   }
 
-  async clearBasket() {
-    const payload = await this.#request("basket", { method: "DELETE" });
-    setClipboardBasket({ items: [] });
-    return payload;
+  clearBasket() {
+    return this.#request("basket", { method: "DELETE" });
   }
 
-  async postSelection(idempotencyKey) {
-    const payload = await this.#request("post", {
+  postSelection(idempotencyKey) {
+    return this.#request("post", {
       method: "POST",
       body: { idempotency_key: idempotencyKey },
       timeoutMs: 25_000,
     });
-    if (payload?.status === "posted") {
-      setClipboardBasket({ items: [] });
-    }
-    return payload;
-  }
-
-  #syncBasket(candidate) {
-    setClipboardBasket(candidate);
   }
 
   #cleanupLaunch() {
@@ -206,7 +225,7 @@ export class MiniAppApi {
     }
 
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    const timeout = this.#setTimeout(() => controller.abort(), timeoutMs);
     const headers = {
       Accept: "application/json",
       "Cache-Control": "no-store",
@@ -221,7 +240,7 @@ export class MiniAppApi {
 
     let response;
     try {
-      response = await fetch(new URL(`${API_ROOT}${path}`, document.baseURI), {
+      response = await this.#fetch(new URL(`${API_ROOT}${path}`, this.#baseUrl), {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -233,7 +252,7 @@ export class MiniAppApi {
         keepalive,
       });
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
+      if (error?.name === "AbortError") {
         throw new ApiError("The request took too long. Please try again.", {
           code: "request_timeout",
           retryable: true,
@@ -244,7 +263,7 @@ export class MiniAppApi {
         retryable: true,
       });
     } finally {
-      window.clearTimeout(timeout);
+      this.#clearTimeout(timeout);
     }
 
     if (response.status === 204) {
