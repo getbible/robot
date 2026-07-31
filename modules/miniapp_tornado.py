@@ -204,7 +204,8 @@ class MiniAppStaticHandler(StaticFileHandler):
         self.set_header(
             "Content-Security-Policy",
             "default-src 'none'; script-src 'self' https://telegram.org; "
-            "style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+            "style-src 'self'; img-src 'self' data:; connect-src 'self' "
+            "https://api.getbible.net https://query.getbible.net; "
             "font-src 'self'; base-uri 'none'; form-action 'self'; "
             "object-src 'none'; frame-ancestors https://web.telegram.org "
             "https://*.telegram.org; upgrade-insecure-requests",
