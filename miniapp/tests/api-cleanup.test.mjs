@@ -15,16 +15,9 @@ const SESSION_PAYLOAD = {
   entrypoint: { route: "bible", query: "" },
   basket: { count: 0, maximum: 100, items: [] },
 };
-const PUBLIC_TRANSLATIONS = [{
-  code: "kjv",
-  name: "King James Version",
-  language: "English",
-  lang: "en",
-  direction: "ltr",
-}];
 const PUBLIC_API = {
   async translations() {
-    return PUBLIC_TRANSLATIONS;
+    throw new Error("Session bootstrap must not call the public API.");
   },
   async chapter() {
     return {};
@@ -79,7 +72,7 @@ test("a created session sends one authenticated launch-cleanup signal", async ()
       const api = createApi("signed-init-data");
       const payload = await api.createSession("owner-bound-launch");
       assert.equal(payload.session_token, SESSION_PAYLOAD.session_token);
-      assert.deepEqual(payload.translations, PUBLIC_TRANSLATIONS);
+      assert.equal("translations" in payload, false);
     },
   );
 
@@ -115,7 +108,7 @@ test("cleanup transport failure cannot invalidate successful session creation", 
   );
 
   assert.equal(payload.session_token, SESSION_PAYLOAD.session_token);
-  assert.deepEqual(payload.translations, PUBLIC_TRANSLATIONS);
+  assert.equal("translations" in payload, false);
   assert.equal(requests, 2);
 });
 
@@ -134,7 +127,7 @@ test("a resumed session also sends exactly one authenticated cleanup signal", as
   const payload = await api.resumeSession(SESSION_PAYLOAD.session_token);
 
   assert.equal(payload.session_token, SESSION_PAYLOAD.session_token);
-  assert.deepEqual(payload.translations, PUBLIC_TRANSLATIONS);
+  assert.equal("translations" in payload, false);
   assert.equal(requests.length, 2);
   assert.equal(requests[0].options.method, "GET");
   assert.equal(requests[1].url, "https://robot.example/getbible/api/v1/cleanup");
