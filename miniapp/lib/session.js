@@ -19,7 +19,8 @@ export async function openBoundSession(
   const stored = readBoundSession(storage, context);
   if (stored) {
     try {
-      return await api.resumeSession(stored.token);
+      const payload = await api.resumeSession(stored.token);
+      return await withPublicTranslations(api, payload);
     } catch (error) {
       if (isAuthorizationFailure(error)) {
         clearBoundSession(storage);
@@ -36,7 +37,7 @@ export async function openBoundSession(
       context,
     });
   }
-  return payload;
+  return withPublicTranslations(api, payload);
 }
 
 export async function sessionContext(
@@ -125,6 +126,17 @@ export function clearBoundSession(storage = window.sessionStorage) {
   } catch {
     // The server remains authoritative when browser storage is unavailable.
   }
+}
+
+async function withPublicTranslations(api, payload) {
+  if (!api || typeof api.translations !== "function") {
+    return payload;
+  }
+  const translations = await api.translations();
+  return {
+    ...payload,
+    translations,
+  };
 }
 
 function isAuthorizationFailure(error) {
