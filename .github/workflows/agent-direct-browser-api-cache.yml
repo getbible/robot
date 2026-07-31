@@ -87,8 +87,11 @@ jobs:
           set -euo pipefail
           python -m venv venv
           venv/bin/pip install --require-hashes -r requirements-dev.txt
-          npm --prefix miniapp ci
-          venv/bin/python -m playwright install --with-deps chromium
+          npm --prefix miniapp ci --ignore-scripts
+          (
+            cd miniapp
+            npx playwright install --with-deps chromium
+          )
 
       - name: Run complete repository quality gate
         shell: bash
