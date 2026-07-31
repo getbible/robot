@@ -1,0 +1,81 @@
+name: Agent browser-direct Bible data integration
+
+on:
+  push:
+    branches:
+      - agent/direct-browser-api-cache
+    paths:
+      - .github/agent/direct-browser-api-cache.mjs.gz.b64
+      - .github/workflows/agent-direct-browser-api-cache.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-direct-browser-api-cache
+  cancel-in-progress: false
+
+jobs:
+  integrate-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: miniapp/package-lock.json
+
+      - name: Apply reviewed integration patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/agent/direct-browser-api-cache.mjs.gz.b64 \
+            | gzip --decompress > /tmp/direct-browser-api-cache.mjs
+          echo "0521754f9327821898f826b97d9e884a8d17422c00716c77c72d84511963301b  /tmp/direct-browser-api-cache.mjs" \
+            | sha256sum --check --strict
+          node --check /tmp/direct-browser-api-cache.mjs
+          node /tmp/direct-browser-api-cache.mjs
+          git diff --check
+
+      - name: Install locked development dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv venv
+          venv/bin/pip install --require-hashes -r requirements-dev.txt
+          npm --prefix miniapp ci
+          venv/bin/python -m playwright install --with-deps chromium
+
+      - name: Run complete repository quality gate
+        shell: bash
+        run: bash scripts/run-checks.sh
+
+      - name: Commit validated architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm -- \
+            .github/agent/direct-browser-api-cache.mjs.gz.b64 \
+            .github/workflows/agent-direct-browser-api-cache.yml
+          git add -A
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo "Integration produced no changes." >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Move Mini App Bible reads to cached browser API"
+          git push origin HEAD:agent/direct-browser-api-cache
