@@ -9,7 +9,6 @@ const SESSION = {
   user: { id: 42 },
   preferences: { translation: "kjv", search_defaults: {}, reader_location: null },
   entrypoint: { route: "bible", query: "" },
-  translations: [],
   basket: { items: [], count: 0, maximum: 100 },
 };
 
@@ -23,10 +22,11 @@ function json(payload, status = 200) {
 test("Bible catalogs and chapters bypass the authenticated robot data routes", async () => {
   const serverRequests = [];
   const publicCalls = [];
+  const publicTranslations = [{ code: "kjv" }];
   const publicApi = {
     async translations() {
       publicCalls.push(["translations"]);
-      return [{ code: "kjv" }];
+      return publicTranslations;
     },
     async books(translation) {
       publicCalls.push(["books", translation]);
@@ -56,8 +56,8 @@ test("Bible catalogs and chapters bypass the authenticated robot data routes", a
     },
   });
 
-  await api.createSession("LaunchToken123456");
-  await api.translations();
+  const bootstrap = await api.createSession("LaunchToken123456");
+  assert.deepEqual(bootstrap.translations, publicTranslations);
   await api.books("kjv");
   await api.chapters("kjv", 43);
   await api.scripture("kjv", 43, 3, 16);
@@ -80,8 +80,12 @@ test("direct verse selection sends one bounded descriptor to the control plane",
   const api = new MiniAppApi("signed-init-data", {
     baseUrl: "https://robot.example/getbible/",
     publicApi: {
-      translations() {},
-      chapter() {},
+      async translations() {
+        return [{ code: "kjv" }];
+      },
+      async chapter() {
+        return {};
+      },
     },
     fetchImplementation: async (url, options) => {
       requests.push({ url: String(url), options });
