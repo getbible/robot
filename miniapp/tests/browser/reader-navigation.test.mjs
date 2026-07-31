@@ -9,6 +9,8 @@ import { chromium } from "playwright";
 
 const miniappRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const corsHeaders = { "access-control-allow-origin": "*" };
+const mainApiPattern = /^https:\/\/api\.getbible\.net\/v2\/.+/;
+const queryApiPattern = /^https:\/\/query\.getbible\.net\/v2\/.+/;
 const bookNames = [
   "Genesis", "Exodus", "Leviticus", "Numbers", "Deuteronomy", "Joshua",
   "Judges", "Ruth", "1 Samuel", "2 Samuel", "1 Kings", "2 Kings",
@@ -133,8 +135,14 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.addInitScript(installTelegramMock);
 
+  const consoleMessages = [];
   const pageErrors = [];
   const failedRequests = [];
+  page.on("console", (message) => {
+    if (["error", "warning"].includes(message.type())) {
+      consoleMessages.push(`${message.type()}: ${message.text()}`);
+    }
+  });
   page.on("pageerror", (error) => pageErrors.push(error.message));
   page.on("requestfailed", (request) => {
     failedRequests.push(`${request.url()}: ${request.failure()?.errorText ?? "failed"}`);
@@ -154,7 +162,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     body: "",
   }));
 
-  await page.route("https://api.getbible.net/v2/**", (route) => {
+  await page.route(mainApiPattern, (route) => {
     const path = new URL(route.request().url()).pathname.replace(/^\/v2\//, "");
     publicRequests.push(path);
     if (path === "translations.json") {
@@ -193,7 +201,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     return fulfillJson(route, { error: "not found" }, 404, true);
   });
 
-  await page.route("https://query.getbible.net/v2/**", (route) => {
+  await page.route(queryApiPattern, (route) => {
     publicRequests.push(new URL(route.request().url()).pathname);
     return fulfillJson(route, { error: "unexpected query request" }, 400, true);
   });
@@ -260,6 +268,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       `access: ${accessMessage ?? "none"}`,
       `public requests: ${publicRequests.join(", ")}`,
       `failed requests: ${failedRequests.join(" | ") || "none"}`,
+      `console: ${consoleMessages.join(" | ") || "none"}`,
       `page errors: ${pageErrors.join(" | ") || "none"}`,
     ].join("\n"));
   }
