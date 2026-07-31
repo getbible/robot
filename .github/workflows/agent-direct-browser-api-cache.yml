@@ -70,6 +70,21 @@ jobs:
             | sha256sum --check --strict
           node --check /tmp/direct-browser-api-cache.mjs
           node /tmp/direct-browser-api-cache.mjs
+          python - <<'PY'
+          from pathlib import Path
+
+          for name in (
+              "docs/ARCHITECTURE.md",
+              "docs/INTERACTIONS.md",
+              "docs/RELEASE_GATE.md",
+              "docs/TESTING.md",
+          ):
+              path = Path(name)
+              path.write_text(
+                  path.read_text(encoding="utf-8").rstrip() + "\n",
+                  encoding="utf-8",
+              )
+          PY
           git diff --check
 
       - name: Install locked development dependencies
