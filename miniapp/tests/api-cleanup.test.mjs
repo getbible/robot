@@ -13,9 +13,30 @@ const SESSION_PAYLOAD = {
     reader_location: null,
   },
   entrypoint: { route: "bible", query: "" },
-  translations: [],
   basket: { count: 0, maximum: 100, items: [] },
 };
+const PUBLIC_TRANSLATIONS = [{
+  code: "kjv",
+  name: "King James Version",
+  language: "English",
+  lang: "en",
+  direction: "ltr",
+}];
+const PUBLIC_API = {
+  async translations() {
+    return PUBLIC_TRANSLATIONS;
+  },
+  async chapter() {
+    return {};
+  },
+};
+
+function createApi(initData, options = {}) {
+  return new MiniAppApi(initData, {
+    publicApi: PUBLIC_API,
+    ...options,
+  });
+}
 
 function jsonResponse(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -55,9 +76,10 @@ test("a created session sends one authenticated launch-cleanup signal", async ()
         : new Response(null, { status: 204 });
     },
     async () => {
-      const api = new MiniAppApi("signed-init-data");
+      const api = createApi("signed-init-data");
       const payload = await api.createSession("owner-bound-launch");
       assert.equal(payload.session_token, SESSION_PAYLOAD.session_token);
+      assert.deepEqual(payload.translations, PUBLIC_TRANSLATIONS);
     },
   );
 
@@ -87,18 +109,19 @@ test("cleanup transport failure cannot invalidate successful session creation", 
       throw new TypeError("cleanup transport unavailable");
     },
     async () => {
-      const api = new MiniAppApi("signed-init-data");
+      const api = createApi("signed-init-data");
       return api.createSession("owner-bound-launch");
     },
   );
 
   assert.equal(payload.session_token, SESSION_PAYLOAD.session_token);
+  assert.deepEqual(payload.translations, PUBLIC_TRANSLATIONS);
   assert.equal(requests, 2);
 });
 
 test("a resumed session also sends exactly one authenticated cleanup signal", async () => {
   const requests = [];
-  const api = new MiniAppApi("signed-init-data", {
+  const api = createApi("signed-init-data", {
     baseUrl: "https://robot.example/getbible/",
     fetchImplementation: async (url, options) => {
       requests.push({ url: String(url), options });
@@ -111,6 +134,7 @@ test("a resumed session also sends exactly one authenticated cleanup signal", as
   const payload = await api.resumeSession(SESSION_PAYLOAD.session_token);
 
   assert.equal(payload.session_token, SESSION_PAYLOAD.session_token);
+  assert.deepEqual(payload.translations, PUBLIC_TRANSLATIONS);
   assert.equal(requests.length, 2);
   assert.equal(requests[0].options.method, "GET");
   assert.equal(requests[1].url, "https://robot.example/getbible/api/v1/cleanup");
@@ -120,7 +144,7 @@ test("a resumed session also sends exactly one authenticated cleanup signal", as
 
 test("browser platform callables retain the global receiver", async () => {
   const requests = [];
-  const api = new MiniAppApi("signed-init-data", {
+  const api = createApi("signed-init-data", {
     baseUrl: "https://robot.example/getbible/",
     fetchImplementation: function (url, options) {
       assert.equal(this, globalThis);
@@ -154,7 +178,7 @@ test("delayed basket transport remains data-only after local invalidation", asyn
     releaseBasket = resolve;
   });
   const requests = [];
-  const api = new MiniAppApi("signed-init-data", {
+  const api = createApi("signed-init-data", {
     baseUrl: "https://robot.example/getbible/",
     fetchImplementation: async (url, options) => {
       const path = new URL(url).pathname;
@@ -202,7 +226,7 @@ test("delayed basket transport remains data-only after local invalidation", asyn
 
 test("explicit revocation calls DELETE session and clears local auth", async () => {
   const requests = [];
-  const api = new MiniAppApi("signed-init-data", {
+  const api = createApi("signed-init-data", {
     baseUrl: "https://robot.example/getbible/",
     fetchImplementation: async (url, options) => {
       requests.push({ url: String(url), options });
@@ -229,7 +253,7 @@ test("explicit revocation calls DELETE session and clears local auth", async () 
 });
 
 test("failed explicit revocation still clears local auth", async () => {
-  const api = new MiniAppApi("signed-init-data", {
+  const api = createApi("signed-init-data", {
     baseUrl: "https://robot.example/getbible/",
     fetchImplementation: async (url, options) => {
       const path = new URL(url).pathname;
