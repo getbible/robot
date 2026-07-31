@@ -7,6 +7,13 @@ on:
     paths:
       - .github/agent/direct-browser-api-cache.mjs.gz.b64
       - .github/workflows/agent-direct-browser-api-cache.yml
+  pull_request:
+    branches:
+      - master
+    types:
+      - opened
+      - reopened
+      - synchronize
 
 permissions:
   contents: write
@@ -17,12 +24,14 @@ concurrency:
 
 jobs:
   integrate-and-validate:
+    if: github.head_ref == 'agent/direct-browser-api-cache' || github.ref_name == 'agent/direct-browser-api-cache'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - name: Check out feature branch
         uses: actions/checkout@v4
         with:
+          ref: agent/direct-browser-api-cache
           fetch-depth: 0
 
       - name: Set up Python
