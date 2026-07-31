@@ -1,3 +1,12 @@
+import {
+  GetBibleApi,
+  PublicApiError,
+} from "./getbible-api.js";
+import {
+  isDirectSelectionId,
+  selectionIdentity,
+} from "./getbible-model.js";
+
 const API_ROOT = "api/v1/";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
@@ -25,6 +34,7 @@ export class MiniAppApi {
   #cleanupAttempted = false;
   #baseUrl;
   #fetch;
+  #publicApi;
   #setTimeout;
   #clearTimeout;
 
@@ -34,6 +44,7 @@ export class MiniAppApi {
     fetchImplementation = globalThis.fetch,
     setTimeoutImplementation = globalThis.setTimeout,
     clearTimeoutImplementation = globalThis.clearTimeout,
+    publicApi = null,
   } = {}) {
     if (typeof initData !== "string" || initData.length === 0) {
       throw new TypeError("Telegram initialization data is required.");
@@ -60,6 +71,14 @@ export class MiniAppApi {
       Reflect.apply(setTimeoutImplementation, globalThis, args);
     this.#clearTimeout = (...args) =>
       Reflect.apply(clearTimeoutImplementation, globalThis, args);
+    this.#publicApi = publicApi ?? new GetBibleApi();
+    if (
+      !this.#publicApi ||
+      typeof this.#publicApi.translations !== "function" ||
+      typeof this.#publicApi.chapter !== "function"
+    ) {
+      throw new TypeError("A GetBible public API client is required.");
+    }
   }
 
   async createSession(launchToken = null) {
@@ -123,22 +142,27 @@ export class MiniAppApi {
   }
 
   translations() {
-    return this.#request("translations");
+    return this.#publicRequest(() => this.#publicApi.translations());
   }
 
   books(translation) {
-    return this.#request(`books?${params({ translation })}`);
+    return this.#publicRequest(() => this.#publicApi.books(translation));
   }
 
   chapters(translation, book) {
-    return this.#request(`chapters?${params({ translation, book })}`);
+    return this.#publicRequest(() => this.#publicApi.chapters(translation, book));
   }
 
   scripture(translation, book, chapter, verse = 1) {
-    return this.#request("scripture", {
-      method: "POST",
-      body: { translation, book, chapter, verse },
-    });
+    return this.#publicRequest(() =>
+      this.#publicApi.chapter(translation, book, chapter, verse),
+    );
+  }
+
+  resolveReference(translation, reference) {
+    return this.#publicRequest(() =>
+      this.#publicApi.resolveReference(translation, reference),
+    );
   }
 
   search(query, filters) {
@@ -169,10 +193,13 @@ export class MiniAppApi {
     return this.#request("basket");
   }
 
-  addBasketItem(selectionId) {
+  addBasketItem(selection) {
+    const body = typeof selection === "string"
+      ? { selection_id: selection }
+      : { selection: directSelectionPayload(selection) };
     return this.#request("basket/items", {
       method: "POST",
-      body: { selection_id: selectionId },
+      body,
     });
   }
 
@@ -212,6 +239,31 @@ export class MiniAppApi {
       keepalive: true,
       timeoutMs: 5_000,
     }).catch(() => undefined);
+  }
+
+  async #publicRequest(operation) {
+    if (!this.#sessionToken) {
+      throw new ApiError("Your secure session is not ready.", {
+        code: "session_not_ready",
+      });
+    }
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof PublicApiError) {
+        throw publicApiError(error);
+      }
+      if (error instanceof TypeError || error instanceof RangeError) {
+        throw new ApiError("GetBible returned an unexpected response.", {
+          code: "invalid_response",
+          retryable: false,
+        });
+      }
+      throw new ApiError("The browser could not load Scripture.", {
+        code: "scripture_temporarily_unavailable",
+        retryable: true,
+      });
+    }
   }
 
   async #request(path, {
@@ -312,6 +364,48 @@ export class MiniAppApi {
     }
     return payload;
   }
+}
+
+function directSelectionPayload(selection) {
+  if (!selection || typeof selection !== "object" || Array.isArray(selection)) {
+    throw new TypeError("A direct Scripture selection is required.");
+  }
+  const selectionId = selection.selection_id;
+  if (
+    !isDirectSelectionId(selectionId) ||
+    selectionIdentity(selection) !== selectionId
+  ) {
+    throw new TypeError("Direct Scripture selection identity is invalid.");
+  }
+  return {
+    selection_id: selectionId,
+    translation: selection.translation,
+    reference: selection.reference,
+    book_number: selection.book_number,
+    book_name: selection.book_name,
+    chapter: selection.chapter,
+    verse: selection.verse,
+    text: selection.text,
+  };
+}
+
+function publicApiError(error) {
+  const code = error.code === "public_api_timeout"
+    ? "request_timeout"
+    : error.code === "public_api_network_error"
+      ? "network_error"
+      : error.code === "public_api_not_found"
+        ? "not_found"
+        : error.code === "public_api_response_too_large"
+          ? "request_too_large"
+          : error.code === "invalid_public_response"
+            ? "invalid_response"
+            : "scripture_temporarily_unavailable";
+  return new ApiError(error.message, {
+    code,
+    status: error.status,
+    retryable: error.retryable,
+  });
 }
 
 function params(values) {
