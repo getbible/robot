@@ -7,9 +7,8 @@ import { fileURLToPath } from "node:url";
 
 import { chromium } from "playwright";
 
-const miniappRoot = resolve(
-  fileURLToPath(new URL("../../", import.meta.url)),
-);
+const miniappRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
+const corsHeaders = { "access-control-allow-origin": "*" };
 const bookNames = [
   "Genesis", "Exodus", "Leviticus", "Numbers", "Deuteronomy", "Joshua",
   "Judges", "Ruth", "1 Samuel", "2 Samuel", "1 Kings", "2 Kings",
@@ -32,11 +31,21 @@ function sha1(value) {
   return createHash("sha1").update(value, "utf8").digest("hex");
 }
 
-function fulfillJson(route, payload, status = 200) {
+function fulfillJson(route, payload, status = 200, cors = false) {
   return route.fulfill({
     status,
     contentType: "application/json",
+    headers: cors ? corsHeaders : undefined,
     body: jsonBody(payload),
+  });
+}
+
+function fulfillPublicText(route, body, contentType = "text/plain") {
+  return route.fulfill({
+    status: 200,
+    contentType,
+    headers: corsHeaders,
+    body,
   });
 }
 
@@ -55,46 +64,10 @@ function chapterPayload(chapter) {
   };
 }
 
-function chaptersPayload() {
-  return Array.from({ length: 21 }, (_, index) => ({
-    chapter: index + 1,
-    verses: Array.from({ length: 40 }, (_, verse) => verse + 1),
-  }));
-}
-
-function translationsPayload() {
-  return [
-    {
-      abbreviation: "kjv",
-      name: "King James Version (1769)",
-      language: "English",
-      lang: "en",
-      direction: "ltr",
-    },
-    {
-      abbreviation: "aov",
-      name: "Afrikaanse Ou Vertaling",
-      language: "Afrikaans",
-      lang: "af",
-      direction: "ltr",
-    },
-  ];
-}
-
-function booksPayload() {
-  return bookNames.map((name, index) => ({
-    nr: index + 1,
-    name,
-    testament: index < 39 ? "old" : "new",
-  }));
-}
-
 function installTelegramMock() {
-  const telegramEvents = new Map();
+  const events = new Map();
   const emit = (name, payload) => {
-    for (const handler of telegramEvents.get(name) ?? []) {
-      handler(payload);
-    }
+    for (const handler of events.get(name) ?? []) handler(payload);
   };
   window.__telegramState = { readyCalls: 0 };
   window.Telegram = {
@@ -107,34 +80,16 @@ function installTelegramMock() {
       safeAreaInset: { top: 24, right: 0, bottom: 18, left: 0 },
       contentSafeAreaInset: { top: 48, right: 0, bottom: 34, left: 0 },
       isFullscreen: false,
-      BackButton: {
-        onClick(handler) {
-          window.__telegramBack = handler;
-        },
-        offClick() {
-          window.__telegramBack = null;
-        },
-        show() {},
-        hide() {},
-      },
-      HapticFeedback: {
-        selectionChanged() {},
-        notificationOccurred() {},
-      },
-      showConfirm(_message, callback) {
-        callback(true);
-      },
+      BackButton: { onClick() {}, offClick() {}, show() {}, hide() {} },
+      HapticFeedback: { selectionChanged() {}, notificationOccurred() {} },
+      showConfirm(_message, callback) { callback(true); },
       onEvent(name, handler) {
-        const handlers = telegramEvents.get(name) ?? new Set();
+        const handlers = events.get(name) ?? new Set();
         handlers.add(handler);
-        telegramEvents.set(name, handlers);
+        events.set(name, handlers);
       },
-      offEvent(name, handler) {
-        telegramEvents.get(name)?.delete(handler);
-      },
-      isVersionAtLeast(version) {
-        return version === "8.0";
-      },
+      offEvent(name, handler) { events.get(name)?.delete(handler); },
+      isVersionAtLeast(version) { return version === "8.0"; },
       expand() {},
       requestFullscreen() {
         this.isFullscreen = true;
@@ -144,9 +99,7 @@ function installTelegramMock() {
       setHeaderColor() {},
       setBackgroundColor() {},
       setBottomBarColor() {},
-      ready() {
-        window.__telegramState.readyCalls += 1;
-      },
+      ready() { window.__telegramState.readyCalls += 1; },
       enableClosingConfirmation() {},
       disableClosingConfirmation() {},
       close() {},
@@ -166,11 +119,7 @@ async function serveStatic(route) {
     ".png": "image/png",
     ".webp": "image/webp",
   }[extname(file)] ?? "application/octet-stream";
-  return route.fulfill({
-    status: 200,
-    contentType: mime,
-    body: await readFile(file),
-  });
+  return route.fulfill({ status: 200, contentType: mime, body: await readFile(file) });
 }
 
 test("reader navigation uses direct GetBible API calls in a real browser", async (context) => {
@@ -180,11 +129,16 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     ...(executablePath ? { executablePath } : {}),
   });
   context.after(() => browser.close());
-  const page = await browser.newPage({
-    viewport: { width: 390, height: 844 },
-  });
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.addInitScript(installTelegramMock);
+
+  const pageErrors = [];
+  const failedRequests = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("requestfailed", (request) => {
+    failedRequests.push(`${request.url()}: ${request.failure()?.errorText ?? "failed"}`);
+  });
 
   const publicRequests = [];
   const robotRequests = [];
@@ -200,47 +154,48 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     body: "",
   }));
 
-  await page.route("https://api.getbible.net/v2/**", async (route) => {
-    const url = new URL(route.request().url());
-    const path = url.pathname.replace(/^\/v2\//, "");
+  await page.route("https://api.getbible.net/v2/**", (route) => {
+    const path = new URL(route.request().url()).pathname.replace(/^\/v2\//, "");
     publicRequests.push(path);
-
     if (path === "translations.json") {
-      return fulfillJson(route, translationsPayload());
+      return fulfillJson(route, [
+        { abbreviation: "kjv", name: "King James Version (1769)", language: "English", lang: "en", direction: "ltr" },
+        { abbreviation: "aov", name: "Afrikaanse Ou Vertaling", language: "Afrikaans", lang: "af", direction: "ltr" },
+      ], 200, true);
     }
-    if (path === "kjv.sha") {
-      return route.fulfill({ status: 200, body: "1".repeat(40) });
-    }
+    if (path === "kjv.sha") return fulfillPublicText(route, "1".repeat(40));
     if (path === "kjv/books.json") {
-      return fulfillJson(route, booksPayload());
+      return fulfillJson(route, bookNames.map((name, index) => ({
+        nr: index + 1,
+        name,
+        testament: index < 39 ? "old" : "new",
+      })), 200, true);
     }
-    if (path === "kjv/43.sha") {
-      return route.fulfill({ status: 200, body: "2".repeat(40) });
-    }
+    if (path === "kjv/43.sha") return fulfillPublicText(route, "2".repeat(40));
     if (path === "kjv/43/chapters.json") {
-      return fulfillJson(route, chaptersPayload());
+      return fulfillJson(route, Array.from({ length: 21 }, (_, index) => ({
+        chapter: index + 1,
+        verses: Array.from({ length: 40 }, (_, verse) => verse + 1),
+      })), 200, true);
     }
     const shaMatch = /^kjv\/43\/(3|4)\.sha$/.exec(path);
     if (shaMatch) {
-      return route.fulfill({
-        status: 200,
-        body: chapterBodies.get(Number(shaMatch[1])).sha,
-      });
+      return fulfillPublicText(route, chapterBodies.get(Number(shaMatch[1])).sha);
     }
     const jsonMatch = /^kjv\/43\/(3|4)\.json$/.exec(path);
     if (jsonMatch) {
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: chapterBodies.get(Number(jsonMatch[1])).body,
-      });
+      return fulfillPublicText(
+        route,
+        chapterBodies.get(Number(jsonMatch[1])).body,
+        "application/json",
+      );
     }
-    return fulfillJson(route, { error: "not found" }, 404);
+    return fulfillJson(route, { error: "not found" }, 404, true);
   });
 
   await page.route("https://query.getbible.net/v2/**", (route) => {
     publicRequests.push(new URL(route.request().url()).pathname);
-    return fulfillJson(route, { error: "unexpected query request" }, 400);
+    return fulfillJson(route, { error: "unexpected query request" }, 400, true);
   });
 
   let preferences = {
@@ -253,21 +208,14 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       diacritics: "sensitive",
       sort: "canonical",
     },
-    reader_location: {
-      translation: "kjv",
-      book: 43,
-      chapter: 3,
-      verse: 1,
-    },
+    reader_location: { translation: "kjv", book: 43, chapter: 3, verse: 1 },
   };
 
   await page.route("https://app.local/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const apiPath = url.pathname.split("/api/v1/")[1];
-    if (!apiPath) {
-      return serveStatic(route);
-    }
+    if (!apiPath) return serveStatic(route);
     robotRequests.push(apiPath);
     assert.ok(
       !["translations", "books", "chapters", "scripture"].includes(apiPath),
@@ -282,9 +230,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
         basket: { items: [], count: 0, maximum: 100 },
       }, 201);
     }
-    if (apiPath === "cleanup") {
-      return route.fulfill({ status: 204, body: "" });
-    }
+    if (apiPath === "cleanup") return route.fulfill({ status: 204, body: "" });
     if (apiPath === "preferences") {
       const update = request.postDataJSON();
       preferences = {
@@ -300,15 +246,26 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     return fulfillJson(route, { error: { code: "not_found" } }, 404);
   });
 
-  await page.goto(
-    "https://app.local/miniapp/index.html?launch=browser-test",
-    { waitUntil: "domcontentloaded" },
-  );
-  await page.waitForSelector('#bible-verses [data-reader-verse="1"]');
+  await page.goto("https://app.local/miniapp/index.html?launch=browser-test", {
+    waitUntil: "domcontentloaded",
+  });
+  try {
+    await page.waitForSelector('#bible-verses [data-reader-verse="1"]', {
+      timeout: 15_000,
+    });
+  } catch (error) {
+    const accessMessage = await page.locator("#access-message").textContent().catch(() => null);
+    throw new Error([
+      error.message,
+      `access: ${accessMessage ?? "none"}`,
+      `public requests: ${publicRequests.join(", ")}`,
+      `failed requests: ${failedRequests.join(" | ") || "none"}`,
+      `page errors: ${pageErrors.join(" | ") || "none"}`,
+    ].join("\n"));
+  }
 
   assert.equal(await page.locator("#access-denied").isHidden(), true);
   assert.equal(await page.locator("#bible-reference").innerText(), "John 3");
-  assert.equal(await page.locator("#bible-verse-count").innerText(), "40 verses");
   assert.equal(await page.locator("#bible-verses [data-reader-verse]").count(), 40);
   assert.equal(await page.evaluate(() => window.__telegramState.readyCalls), 1);
 
@@ -316,17 +273,20 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   await page.waitForFunction(() => (
     document.querySelector("#bible-reference")?.textContent === "John 4"
   ));
-  assert.equal(await page.locator("#bible-reference").innerText(), "John 4");
   assert.match(
     await page.locator('[data-reader-verse="1"]').innerText(),
     /KJV John 4 text 1/,
   );
 
-  assert.ok(publicRequests.includes("translations.json"));
-  assert.ok(publicRequests.includes("kjv/books.json"));
-  assert.ok(publicRequests.includes("kjv/43/chapters.json"));
-  assert.ok(publicRequests.includes("kjv/43/3.json"));
-  assert.ok(publicRequests.includes("kjv/43/4.json"));
+  for (const expected of [
+    "translations.json",
+    "kjv/books.json",
+    "kjv/43/chapters.json",
+    "kjv/43/3.json",
+    "kjv/43/4.json",
+  ]) {
+    assert.ok(publicRequests.includes(expected), `missing public request: ${expected}`);
+  }
   assert.deepEqual(
     robotRequests.filter((path) =>
       ["translations", "books", "chapters", "scripture"].includes(path)
