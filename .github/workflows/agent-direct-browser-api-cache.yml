@@ -65,13 +65,19 @@ jobs:
               raise SystemExit("Expected exactly one documentation patch anchor.")
           source = source.replace(documentation_before, documentation_after)
 
-          validator_call = "await alignTranslationValidators();"
-          if source.count(validator_call) != 1:
-              raise SystemExit("Expected exactly one translation-validator integration call.")
-          source = source.replace(
-              validator_call,
-              "// Translation validators are already aligned with API V2 on this branch.",
-          )
+          already_applied = {
+              "await alignTranslationValidators();": (
+                  "// Translation validators are already aligned with API V2 on this branch."
+              ),
+              "await patchPublicModel();": (
+                  "// Public model selection patterns are already aligned on this branch."
+              ),
+          }
+          for before, after in already_applied.items():
+              if source.count(before) != 1:
+                  raise SystemExit(f"Expected exactly one integration call: {before}")
+              source = source.replace(before, after)
+
           path.write_text(source, encoding="utf-8")
           PY
           node --check /tmp/direct-browser-api-cache.mjs
