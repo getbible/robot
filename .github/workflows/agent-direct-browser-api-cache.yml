@@ -20,7 +20,7 @@ permissions:
 
 concurrency:
   group: agent-direct-browser-api-cache
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   integrate-and-validate:
@@ -52,7 +52,7 @@ jobs:
           set -euo pipefail
           base64 --decode .github/agent/direct-browser-api-cache.mjs.gz.b64 \
             | gzip --decompress > /tmp/direct-browser-api-cache.mjs
-          echo "0521754f9327821898f826b97d9e884a8d17422c00716c77c72d84511963301b  /tmp/direct-browser-api-cache.mjs" \
+          echo "195069de4d66d0976ec8d22714309c9bde97bbbe7296786182774766fe284d52  /tmp/direct-browser-api-cache.mjs" \
             | sha256sum --check --strict
           node --check /tmp/direct-browser-api-cache.mjs
           node /tmp/direct-browser-api-cache.mjs
