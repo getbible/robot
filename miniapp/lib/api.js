@@ -102,8 +102,7 @@ export class MiniAppApi {
     this.#sessionToken = payload.session_token;
     this.#cleanupAttempted = false;
     this.#cleanupLaunch();
-    const translations = await this.translations();
-    return { ...payload, translations };
+    return payload;
   }
 
   async resumeSession(sessionToken) {
@@ -120,8 +119,7 @@ export class MiniAppApi {
     this.#cleanupAttempted = false;
     const payload = await this.#request("session");
     this.#cleanupLaunch();
-    const translations = await this.translations();
-    return { ...payload, translations };
+    return payload;
   }
 
   clearSession() {
