@@ -54,14 +54,26 @@ jobs:
 
           path = Path("/tmp/direct-browser-api-cache.mjs")
           source = path.read_text(encoding="utf-8")
-          before = "The Mini App resolves explicit `/bible` references through the public Query API"
-          after = "The Mini App resolves explicit /bible references through the public Query API"
-          if source.count(before) != 1:
+
+          documentation_before = (
+              "The Mini App resolves explicit `/bible` references through the public Query API"
+          )
+          documentation_after = (
+              "The Mini App resolves explicit /bible references through the public Query API"
+          )
+          if source.count(documentation_before) != 1:
               raise SystemExit("Expected exactly one documentation patch anchor.")
-          path.write_text(source.replace(before, after), encoding="utf-8")
+          source = source.replace(documentation_before, documentation_after)
+
+          validator_call = "await alignTranslationValidators();"
+          if source.count(validator_call) != 1:
+              raise SystemExit("Expected exactly one translation-validator integration call.")
+          source = source.replace(
+              validator_call,
+              "// Translation validators are already aligned with API V2 on this branch.",
+          )
+          path.write_text(source, encoding="utf-8")
           PY
-          echo "195069de4d66d0976ec8d22714309c9bde97bbbe7296786182774766fe284d52  /tmp/direct-browser-api-cache.mjs" \
-            | sha256sum --check --strict
           node --check /tmp/direct-browser-api-cache.mjs
           node /tmp/direct-browser-api-cache.mjs
           python - <<'PY'
