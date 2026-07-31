@@ -50,8 +50,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode .github/agent/direct-browser-api-cache.mjs.gz.b64 \
+          git show dee373f748664e562201cad57aa318fcd74cc20d:.github/agent/direct-browser-api-cache.mjs.gz.b64 \
+            | base64 --decode \
             | gzip --decompress > /tmp/direct-browser-api-cache.mjs
+          echo "0521754f9327821898f826b97d9e884a8d17422c00716c77c72d84511963301b  /tmp/direct-browser-api-cache.mjs" \
+            | sha256sum --check --strict
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("/tmp/direct-browser-api-cache.mjs")
+          source = path.read_text(encoding="utf-8")
+          before = "The Mini App resolves explicit `/bible` references through the public Query API"
+          after = "The Mini App resolves explicit /bible references through the public Query API"
+          if source.count(before) != 1:
+              raise SystemExit("Expected exactly one documentation patch anchor.")
+          path.write_text(source.replace(before, after), encoding="utf-8")
+          PY
           echo "195069de4d66d0976ec8d22714309c9bde97bbbe7296786182774766fe284d52  /tmp/direct-browser-api-cache.mjs" \
             | sha256sum --check --strict
           node --check /tmp/direct-browser-api-cache.mjs
