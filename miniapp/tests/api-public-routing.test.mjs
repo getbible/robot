@@ -57,7 +57,8 @@ test("Bible catalogs and chapters bypass the authenticated robot data routes", a
   });
 
   const bootstrap = await api.createSession("LaunchToken123456");
-  assert.deepEqual(bootstrap.translations, publicTranslations);
+  assert.equal("translations" in bootstrap, false);
+  assert.deepEqual(await api.translations(), publicTranslations);
   await api.books("kjv");
   await api.chapters("kjv", 43);
   await api.scripture("kjv", 43, 3, 16);
