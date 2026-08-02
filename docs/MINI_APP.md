@@ -1,88 +1,116 @@
-# Telegram Mini App deployment
+# Telegram Mini App
 
-The GetBible Mini App is part of the same isolated robot instance. Its existing
-Bible tab is a full chapter reader and selection surface alongside search,
-filtering, multi-selection, and review. Bare `/bible` resumes the user's last
-reader location, while direct commands such as `/bible John 3:16` retain their
-fast native posting path.
+The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, and temporary verse selection belong in the browser. Robot remains the authenticated Telegram control plane and the Librarian search adapter.
 
-The Mini App is independent of Telegram update delivery. A production instance
-may use polling and still serve the Mini App, or it may use a separate webhook
-listener. The three loopback services have different purposes and must not
-share ports:
+## Active doctrine
 
-| Listener | Default | Public exposure |
-|---|---:|---|
-| Health/readiness/metrics | `127.0.0.1:8081` | Never expose directly |
-| Telegram webhook | `127.0.0.1:9001` | Exact private webhook path only |
-| Telegram Mini App | `127.0.0.1:9201` | Mini App URL prefix through HTTPS |
+Only full-text search and search pagination use Robot/Librarian.
+
+| Capability | Owner |
+| --- | --- |
+| Translation catalog and metadata | Browser → `api.getbible.net/v2` |
+| Translation books | Browser → `api.getbible.net/v2` |
+| Book chapters and hashes | Browser → `api.getbible.net/v2` |
+| Chapter text and hashes | Browser → `api.getbible.net/v2` |
+| Explicit or grouped references | Browser → `query.getbible.net/v2` |
+| Persistent public cache | Browser IndexedDB |
+| Selected verse order and highlighting | Browser memory |
+| Full-text search and pagination | Robot → Librarian |
+| Telegram authentication and launch binding | Robot |
+| User preferences and reader position | Robot |
+| Final Telegram delivery | Robot |
+
+A normal reader action must never call Robot for translations, books, chapters, chapter text, selecting, unselecting, reordering, clearing, or copying.
+
+## Runtime flow
+
+```text
+Telegram WebView
+  ├─ signed initData / preferences / search / final post → Robot
+  ├─ catalogs / chapters / hashes                    → api.getbible.net/v2
+  ├─ explicit or grouped references                  → query.getbible.net/v2
+  └─ temporary ordered selection                     → BrowserSelectionStore
+```
+
+Reader and search results are normalized into one verse descriptor. Coordinate identity is:
+
+```text
+translation + book_number + chapter + verse
+```
+
+Opaque Librarian tokens and deterministic reader IDs are transport details, not selection identity. A verse selected from search therefore appears selected in the reader, and a second click from either surface removes it.
+
+## Browser selection lifecycle
+
+`BrowserSelectionStore` is the only owner of temporary selected state. It provides bounded add, remove, reorder, clear, snapshot, and final-coordinate operations. Snapshots are defensive copies, and display data cannot mutate the store accidentally.
+
+The following behavior is local and synchronous:
+
+- graphical selected styling and `aria-pressed`;
+- selection-range start/end styling;
+- select and unselect;
+- ordering and removal;
+- counters and navigation badges;
+- clipboard output;
+- persistence of selected state while navigating chapters during the active WebView session.
+
+A failed Robot request cannot undo a browser selection. A failed final Post leaves the complete ordered selection intact for retry. A successful Post clears it.
+
+## Public API transport
+
+The browser transport accepts only these fixed HTTPS origins:
+
+- `https://api.getbible.net/v2/`
+- `https://query.getbible.net/v2/`
+
+Requests omit cookies and credentials, never include Telegram data, reject redirects, use `no-referrer`, enforce time and response-size bounds, and validate response coordinates and schemas before use.
+
+Both CSP enforcement layers must contain the same allowlist:
+
+- the `Content-Security-Policy` meta element in `miniapp/index.html`;
+- the response header emitted by `MiniAppStaticHandler`.
+
+## Cache integrity
+
+Public content is stored under a versioned `public:v2:` IndexedDB namespace. The cache has bounded record count, bounded total estimated size, bounded per-record size, least-recently-used eviction, and in-flight request coalescing. An in-memory adapter is used when IndexedDB is unavailable.
+
+Every cached scope stores the exact published SHA-1 and is revalidated at least weekly. A changed translation hash invalidates descendants, a changed book hash invalidates chapter descendants, and a changed chapter hash replaces that chapter only.
+
+Chapter acceptance requires the pre-read and post-read `.sha` values to match, SHA-1 over the exact downloaded bytes to equal that value, bounded schema and coordinate validation, and atomic replacement after complete validation. Failed validation never overwrites a previously accepted record.
+
+## Search boundary
+
+`/search` is the sole content-discovery path that uses Robot and Librarian. Robot returns bounded normalized verse descriptors and paging metadata. The browser registers those descriptors with the same `BrowserSelectionStore` used by reader chapters.
+
+Search failure is isolated from reading. Reading failure is isolated from authentication. Neither may clear a valid Telegram session.
+
+## Post boundary
+
+Post is the only selection synchronization boundary. The browser submits the final ordered selection once. Browser text, book names, references, and UI IDs are display data only. Robot must validate the submitted coordinates and obtain authoritative Scripture before Telegram delivery.
+
+No ordinary click may create server basket state. Legacy per-click basket and Robot Scripture-read routes are not part of the active Mini App contract and must not be referenced by current browser code, tests, or documentation.
 
 ## Security boundary
 
-A Telegram Mini App is a web application, so its public HTTPS shell can be
-requested by an ordinary browser. It is not technically possible to make that
-HTML URL reachable by Telegram WebViews while making it unreachable by every
-other browser: Mini App traffic comes from users' devices, not a stable
-Telegram server IP range.
+The public HTML shell is not an authentication boundary. Robot action routes require fresh Telegram-signed `initData`, an owner-bound launch, and an active opaque session. The bot token remains server-side.
 
-GetBible therefore makes unauthenticated browser access inert:
+The browser is untrusted for final output. It may control display state, but it cannot determine the authoritative text delivered to Telegram. Final output remains bounded, escaped, idempotent, and tied to the originating user, chat, and topic.
 
-- the bot token remains server-side and is never placed in HTML, JavaScript,
-  URLs, logs, or browser storage;
-- every data or action API requires fresh, signature-verified Telegram
-  `initData`;
-- the server validates the signed user identity and authentication timestamp;
-- a short-lived, user-bound launch token ties the browser session to the bot
-  workflow and originating chat context; a generic Main Mini App launch is
-  deliberately restricted to the authenticated user's private bot chat;
-- authenticated sessions have a short absolute lifetime that API activity
-  cannot extend indefinitely;
-- if Telegram recreates a WebView and loses its browser session record, a fresh
-  signed `initData` value may rebind only to the still-active session carrying
-  the same opaque launch token, user, chat, and chat instance; the absolute
-  session lifetime is not extended;
-- expired, replayed, missing, mismatched, or malformed authorization fails
-  closed before Scripture lookup or posting;
-- submitted verse text is never authoritative—the server resolves selected
-  identifiers again before posting;
-- state, selection, and final output-message bounds are enforced server-side;
-- final posts are completely resolved and rendered before their first Telegram
-  send, and known partial sends are rolled back best-effort;
-- Telegram theme values are presentation hints, never authorization.
+Do not trust `Referer`, `User-Agent`, an obscure URL, or client IP as authentication. Do not expose the bot token, session token, or Telegram init data to GetBible API origins or browser persistent caches.
 
-Do not add an IP allowlist for Telegram clients, trust `Referer` or
-`User-Agent`, expose the bot token to the browser, or treat an obscure URL as
-authentication.
+## Listeners
 
-## Configure a new instance
+| Listener | Default | Exposure |
+| --- | ---: | --- |
+| Health/readiness/metrics | `127.0.0.1:8081` | private only |
+| Telegram webhook | `127.0.0.1:9001` | exact private webhook path |
+| Mini App | `127.0.0.1:9201` | HTTPS reverse proxy only |
 
-During `sudo ./setup.sh install`, answer yes to the Mini App question and
-provide a public URL such as:
+Polling and the Mini App can run together. The Mini App listener is unrelated to Telegram update delivery.
 
-```text
-https://bot.example.com/getbible/production
-```
+## Production configuration
 
-Create the public DNS `A` and/or `AAAA` record before running setup, and direct
-public TCP ports `80` and `443` to this host. The manager verifies that the
-hostname resolves publicly and, when Caddy is absent, installs Caddy through
-its official signed APT repository on Debian/Ubuntu or official COPR repository
-on DNF hosts. It assigns a unique loopback port beginning at `9201` and
-configures Caddy automatic HTTPS. Polling remains the recommended Telegram
-delivery mode and does not affect the Mini App HTTPS listener.
-
-Do not create a public cloud-firewall rule for `9201` or any other assigned
-Mini App port. The Robot binds that listener to `127.0.0.1`; Caddy is the only
-public entry point and proxies the configured HTTPS hostname/path to loopback.
-
-Setup refuses to continue when DNS is absent/private, Caddy is inactive while
-another process owns port `80` or `443`, an existing Caddy configuration
-conflicts, or the final public certificate/route/content probe fails. It never
-uses a downloaded shell installer or a curl-pipe package installation.
-
-## Manage an installed instance
-
-Use the transactional manager instead of editing listener settings directly:
+Setup and maintenance must be performed through `setup.sh` or `getbible-robot`, not by editing generated listener or Caddy files directly.
 
 ```bash
 sudo getbible-robot miniapp production
@@ -90,337 +118,40 @@ sudo getbible-robot status production
 sudo getbible-robot doctor production
 ```
 
-`miniapp` backs up the environment and Caddy files, validates DNS, the public
-HTTPS URL, loopback port, complete generated Caddy configuration, service
-reload, local shell, public certificate, route, and response content. Any
-failure restores the environment and both Caddy files byte-for-byte, reloads
-the prior Caddy configuration, and restores the prior robot service state.
-Disabling removes the public route while retaining its URL and reserved port
-for a later safe re-enable.
+| Variable | Rule |
+| --- | --- |
+| `MINI_APP_ENABLED` | Managed deployment toggle |
+| `MINI_APP_PUBLIC_URL` | Absolute HTTPS URL without credentials, query, or fragment |
+| `MINI_APP_LISTEN` | Loopback on host deployments |
+| `MINI_APP_PORT` | Unique per instance |
+| `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | Short Telegram authentication window |
+| `MINI_APP_LAUNCH_TTL_SECONDS` | Short owner-bound launch lifetime |
+| `MINI_APP_SESSION_TTL_SECONDS` | Absolute session lifetime |
+| `MINI_APP_SESSION_LIMIT` | Bounded active sessions |
+| `MINI_APP_SESSIONS_PER_USER` | Bounded sessions per user |
+| `MINI_APP_MAX_SEARCHES_PER_SESSION` | Bounded Librarian result snapshots |
+| `MINI_APP_MAX_SELECTIONS` | Browser and final-post selection limit |
+| `MINI_APP_TRUSTED_PROXY_CIDRS` | Exact ingress peers allowed to supply forwarded IPs |
 
-## Setup-managed Caddy
+The browser cache is identity-free. User preferences remain server-side and contain only the selected translation and reader coordinates.
 
-The supported production path uses the host's `caddy.service`. The manager
-adds one marked import to `/etc/caddy/Caddyfile` and writes deterministic,
-non-secret routes to:
+## Deployment consistency
 
-```text
-/etc/caddy/getbible-robot.caddy
-```
+Deploy HTML, JavaScript modules, server code, and documentation from one validated commit. `index.html` is served with `no-store`; static modules revalidate through ETags. This prevents a Telegram WebView from combining a new shell with old modules.
 
-Do not edit the marked import or generated route file. Existing unrelated
-Caddyfile content is preserved. Every candidate is checked with `caddy
-validate` before a zero-downtime reload. Duplicate and path-overlapping routes
-are rejected, and multiple Robot instances receive separate reserved loopback
-ports. Caddy is retained on uninstall because it may serve other Robot
-instances or unrelated sites; only the selected instance's route is removed.
+After deployment, verify:
 
-The application continues to emit its own restrictive security and cache
-headers. Caddy terminates public TLS and forwards the complete path prefix
-without weakening the loopback or application-authentication boundary.
+1. cold reader load uses the public Main API;
+2. warm reader load uses IndexedDB and hash policy correctly;
+3. explicit references use Query API;
+4. search alone uses Robot/Librarian;
+5. selecting highlights the verse number and body immediately;
+6. selecting the same verse from search and reader does not duplicate it;
+7. a second click unselects it;
+8. navigation preserves selected styling;
+9. no Robot basket or Scripture request occurs before Post;
+10. Post failure preserves selection and successful Post clears it.
 
-## Telegram configuration
+## Verification gate
 
-At startup the robot can register the configured Mini App URL in bot-owned Bot
-API controls. BotFather-only product settings remain an operator step.
-Configure the bot's Main Mini App in `@BotFather` when profile or group-context
-launches are required, using exactly the same reviewed HTTPS URL.
-`setup.sh` cannot configure or verify that BotFather-only setting. The robot
-uses the Main Mini App `startapp` deep link and does not require a separately
-named Mini App.
-
-Do not create a second bot or token for the Mini App. It uses the matching
-instance token only on the server to validate Telegram signatures and post the
-final server-resolved selection.
-
-## Configuration reference
-
-| Variable | Default | Production rule |
-|---|---:|---|
-| `MINI_APP_ENABLED` | `false` | Managed through `getbible-robot miniapp` |
-| `MINI_APP_PUBLIC_URL` | empty | Absolute HTTPS URL; no credentials, query, or fragment |
-| `MINI_APP_LISTEN` | `127.0.0.1` | Host manager keeps loopback; Docker uses a private ingress network |
-| `MINI_APP_PORT` | `9201` | Manager-owned, reserved per configured instance, and different from health/webhook ports |
-| `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | `300` | `30`–`900`; maximum Telegram authentication age |
-| `MINI_APP_LAUNCH_TTL_SECONDS` | `300` | `30`–`900`; lifetime of the user-bound launch token |
-| `MINI_APP_SESSION_TTL_SECONDS` | `900` | Absolute server session lifetime |
-| `MINI_APP_SESSION_LIMIT` | `200` | Maximum bounded active Mini App sessions |
-| `MINI_APP_SESSIONS_PER_USER` | `2` | Per-user active session bound |
-| `MINI_APP_MAX_SEARCHES_PER_SESSION` | `2` | Retained searches per session |
-| `MINI_APP_MAX_AVAILABLE_SELECTIONS` | `256` | Recent selectable verses per session, excluding the separately bounded basket; minimum 250 preserves a complete accepted chapter |
-| `MINI_APP_MAX_SELECTIONS` | `100` | Maximum selected verse items before final normalization |
-| `MINI_APP_TRUSTED_PROXY_CIDRS` | loopback | Exact proxy peers allowed to supply a forwarded client IP |
-| `MINI_APP_IP_RATE_CAPACITY` | `60` | Per-client authenticated API burst |
-| `MINI_APP_IP_RATE_REFILL_PER_SECOND` | `10` | Per-client sustained API refill |
-| `MINI_APP_SESSION_EXCHANGE_RATE_CAPACITY` | `10` | Per-client unauthenticated exchange burst |
-| `MINI_APP_SESSION_EXCHANGE_RATE_REFILL_PER_SECOND` | `0.2` | Per-client exchange refill |
-| `MINI_APP_NAVIGATION_RATE_COST` | `0.25` | Fractional cost for translation/book/chapter/verse navigation |
-| `MINI_APP_ACCESS_LOG` | `true` | Structured route/status/duration logging; failures are always logged |
-
-Keep the authentication and launch windows short. Lengthening them increases
-the useful replay window and is not a remedy for incorrect clocks. Maintain
-accurate host time with a trusted time-synchronization service.
-
-The backend independently limits request headers to 16 KiB, bodies to 64 KiB,
-body delivery to 10 seconds, and idle/incomplete-header connections to 30
-seconds.
-
-## Docker and external ingress
-
-The Docker image does not install or configure Caddy. It binds the configured
-container port and leaves HTTPS and routing to external ingress. Publish each
-`MINI_APP_PORT` only to a private proxy network or host loopback; do not make
-the plain backend port a public edge. Multiple bots in one container must use
-distinct Mini App and health ports. See [Docker deployment](DOCKER.md).
-
-Telegram command traffic does not reveal an end-user IP. Mini App HTTP traffic
-does, but a forwarded address is accepted only from
-`MINI_APP_TRUSTED_PROXY_CIDRS`. Configure the exact external ingress peer or
-network so clients cannot spoof the address used for audit and rate limiting.
-Identity event fields are controlled independently through
-`AUDIT_IDENTITY_MODE`.
-
-Normal authenticated navigation has a fractional request cost so moving
-through translation, book, chapter, and verse screens remains smooth. Session
-exchange and the expensive search, Scripture, and posting operations consume a
-full token.
-
-## Reader data and memory bounds
-
-Complete reader chapters are retrieved from the GetBible Main API through the
-authenticated Robot backend. Librarian remains responsible for reference
-parsing, search, direct `/bible <reference>` retrieval, and final
-server-authoritative basket posting.
-
-The chapter client verifies that the published hash is stable before and after
-the read and that the downloaded chapter bytes produce that exact hash. It
-retries once if the chapter changes mid-read. Accepted chapters share one
-process-wide, 64-entry least-recently-used cache with a 15-minute freshness
-window, and each upstream chapter body has an independent 1 MiB ceiling. Those
-bounds are independent of user count. Chapter text is never stored in user
-preferences.
-
-The existing bounded preference store retains only translation, book, chapter,
-and the nearest visible verse for reader continuation. Existing databases are
-migrated in place with an empty reader location. The position update is
-debounced in the browser and is written only when the visible verse changes.
-During a translation change, the backend resolves the closest available verse
-and commits translation plus reader location in one retry-safe preference
-transaction. Preference transitions share one per-user lock across that user's
-active Mini App sessions, so an older slow request cannot overwrite a newer
-queued choice. Repeating an identical translation/location PUT returns the same
-canonical location. A missing book or chapter clears only the location while
-retaining the new translation.
-
-The browser retains at most eight translation-specific book catalogs and 24
-book-specific chapter indexes, both as least-recently-used caches with
-single-flight requests. The session store reserves 250 recent unselected
-selection identities independently from the bounded basket, so every accepted
-chapter remains selectable even with an existing basket. Scripture text is
-still subject to the upstream response ceilings, a separate 4 KiB UTF-8
-per-verse retained-display ceiling, an 8 MiB retained-selection ceiling per
-session, a 32 MiB retained-selection ceiling for the session store, fixed
-selection-count ceilings, and the session lifetime. Selection accounting
-includes text, references, book/translation metadata, highlighting terms,
-tokens, and conservative object overhead.
-When the process ceiling is reached, the oldest other Mini App session is
-evicted through the normal expired-session path. These independent byte and
-count limits prevent valid extreme configuration values from turning retained
-reader/search results into unbounded process growth. The 32 MiB process budget
-fits below the supported 210 MiB child-RSS guard with the documented 148 MiB
-fully warmed workload, leaving capacity for transient requests.
-The per-session ceiling covers the worst-case configured 200-item basket plus
-one complete accepted 250-verse chapter, including maximum validated Unicode
-metadata, so an issued chapter selection ID cannot be evicted before use.
-An in-flight Telegram post pins its session until the outcome is recorded.
-Session admission or selection retention fails retryably if every eligible
-eviction target is temporarily pinned.
-When a session reaches its byte ceiling, the oldest retained Search snapshots
-are removed before any selection ID issued for the currently visible chapter.
-
-## Interface localization
-
-The Mini App follows the language of the selected Bible translation. The
-translation metadata returned by the session API supplies its BCP-47 `lang`
-value and text direction. Selecting another translation updates the document
-language, left-to-right or right-to-left direction, static labels,
-placeholders, accessibility labels, and generated search, Bible, and selection
-state immediately; a page reload is not required.
-
-The header chip is the exclusive translation selector. Search filters do not
-duplicate translation, and the Bible passage picker contains only book and
-chapter. While the Bible reader is open, a translation change invalidates and
-removes the old chapter immediately, then reloads the same canonical book,
-chapter, and nearest visible verse. The selector also displays the bounded
-translation name, language, and abbreviation returned by the existing session
-catalog.
-
-In Telegram fullscreen, every route uses one compact centered header that
-reserves a symmetric lane between Telegram's native Close/Back and menu
-controls. The selected translation remains visible at all times. Long API
-names are visually shortened inside the fixed-height pill, while the complete
-value remains in its title, accessible label, and translation selector.
-Scrolling down collapses only the small GetBible mark and moves the
-translation pill into Telegram's control row; scrolling upward restores the
-mark above the pill in step with the reader chapter toolbar. Home's separate
-logo over the hero image remains unchanged. Non-fullscreen clients retain the
-normal horizontal header.
-
-The passage picker is a partial-width modal side sheet. It opens directly to
-the current book's numbered chapters, offers Back to the translation-specific
-book grid, and supports Close, backdrop, Escape, and Telegram Back dismissal.
-Its book names come directly from the selected translation's GetBible API
-catalog. Short visible labels are collision-free presentation abbreviations;
-the full API name remains the accessible label. No chapter-section headings or
-translated hard-coded book list is maintained by Robot.
-
-The localization sources are:
-
-| Source | Purpose |
-|---|---|
-| `miniapp/lib/messages.en.js` | Canonical English interface catalog and message keys |
-| `miniapp/lib/locales.js` | Committed, same-origin catalogs for all language tags in the GetBible translation inventory |
-| `miniapp/lib/i18n.js` | Locale resolution, interpolation, plural selection, document language/direction, and DOM application |
-
-The browser does not contact a translation service. Every interface catalog is
-packaged with the application and served under the same Mini App origin. When
-editing English copy, update the canonical catalog and every localized catalog;
-`miniapp/tests/static.test.mjs` rejects missing keys or damaged interpolation
-placeholders.
-
-Telegram may retain its embedded browser cache between launches. The Mini App
-therefore serves `index.html` with `no-store` and requires revalidation of every
-packaged JavaScript, CSS, catalog, and image response. A normal
-`getbible-robot update` deployment restarts the static server with the complete
-new Git tree, preventing new HTML from being combined with assets from the
-previous deployment.
-
-Ancient and low-resource translation codes that do not have a stable modern UI
-locale use the nearest usable modern interface catalog or English. For example,
-Ancient Greek uses the Greek catalog, Biblical Hebrew uses Hebrew, Dari uses
-Persian, and Middle English uses modern English. This affects controls only;
-the selected Scripture text is always returned unchanged in its own
-translation.
-
-## Branding and look and feel
-
-The Mini App's presentation is contained in `miniapp/`; changing its branding
-does not require changes to Telegram authentication, Scripture lookup, or
-posting code.
-
-| Element | Source | Notes |
-|---|---|---|
-| Upright Bible | `miniapp/assets/getbible-upright.png` | Used by the opening gate, protected/expired gate, top bar, and home hero |
-| Browser icon | `miniapp/assets/favicon.png` | PNG favicon declared in `miniapp/index.html` |
-| Hero background | `miniapp/assets/ocean-light-hero.webp` | Optimized WebP referenced by `miniapp/styles.css` |
-| Wordmark and tagline | `miniapp/index.html` | Keep `getBible.Life` and “The words of eternal life” as real text |
-| Colors and themes | `miniapp/styles.css` | Light tokens are in `:root`; dark overrides are in `:root[data-theme="dark"]` |
-| Component sizing and layout | `miniapp/styles.css` | Brand, gate, hero, navigation, cards, and responsive rules live here |
-
-To replace the Bible icon, use a transparent PNG with a clean, uncropped
-boundary and preserve the `getbible-upright.png` filename. The current source
-has a portrait aspect ratio; CSS uses contained sizing at each placement, so do
-not add baked-in padding or crop the artwork. If the filename changes, update
-all four references in `miniapp/index.html` and the branding assertion in
-`miniapp/tests/static.test.mjs`.
-
-Theme colors should be changed through the custom properties at the top of
-`miniapp/styles.css`. Preserve the `--tg-theme-*` fallbacks so Telegram light
-and dark themes remain authoritative for page, surface, text, button, and
-separator colors. Use the `--brand*` variables for GetBible-specific accents
-instead of hard-coding the same color across individual components.
-
-After any presentation change, run:
-
-```bash
-cd miniapp
-npm run check
-npm run test:browser
-```
-
-Then verify the opening gate, home hero, top bar, protected/expired state,
-search keyboard behavior, and light/dark themes on a narrow phone viewport.
-Deploy the reviewed source through the normal instance upgrade command; do not
-edit files inside `/opt/getbible-robot/<instance>/app` by hand.
-
-On the normal production checkout:
-
-```bash
-cd ~/robot
-git switch master
-git pull --ff-only
-sudo ./setup.sh update production --source "$PWD"
-```
-
-## Verification
-
-After starting or upgrading:
-
-```bash
-sudo getbible-robot status production
-sudo getbible-robot doctor production
-sudo ss -ltnp | grep ':9201'
-sudo systemctl status caddy.service --no-pager
-sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-sudo getbible-robot logs production 200
-```
-
-Verify that the Mini App port appears only on `127.0.0.1`. Then test through a
-private conversation with the bot:
-
-1. open the Mini App from `/search grace`;
-2. confirm Telegram light and dark themes both remain legible;
-3. filter and page without creating chat messages;
-4. open a search result in Bible, return to the same search position, and also
-   select a result directly;
-5. open bare `/bible`, read and select compact verses across two chapters, then
-   review and post once;
-6. open the passage side sheet, move Book → Chapters → Psalm 150, then verify
-   Back, Close, backdrop, Escape, Telegram Back, current-item focus, and
-   keyboard arrows in both left-to-right and right-to-left translations;
-7. on a Bot API 8.0+ client, confirm the Mini App enters native fullscreen and
-   remains clear of Telegram's transparent header/close control and every
-   device content-safe area; repeat on an older or rejecting client and confirm
-   the expanded fallback remains usable;
-8. in Bible, scroll down and confirm only the arrow handle and safe-area
-   background remain; scroll upward and confirm the chapter heading returns
-   without reopening the bottom navigation; select a verse and confirm the
-   navigation and updated Selected count return;
-9. confirm the server posts only resolved Scripture, in the originating chat;
-10. submit a search with the phone keyboard's Search key and confirm the
-   keyboard closes before the results appear;
-11. close and reopen the same launch before its absolute session timeout and
-   confirm the active selection is safely recovered;
-12. start a new bare `/bible` launch and confirm it resumes the last visible
-    verse without persisting any chapter text;
-13. after posting in a group, confirm both the "Only visible to GetBibleBot"
-   command and the "Only visible to you" launch response are removed;
-14. retry a genuinely expired launch and confirm it fails closed, explains that
-   `/bible` or `/search` must be sent again, and offers a close action instead
-   of a reload loop;
-15. open the public URL in an ordinary browser and confirm no data or action API
-   is available.
-
-For group rollout, repeat through the configured Main Mini App/deep-link path
-and confirm the selection interface remains private while only the final
-Scripture is posted to the intended chat and topic.
-
-## Common failures
-
-- **Ordinary browser shows the shell:** expected; confirm protected APIs remain
-  inaccessible. The shell is not the security boundary.
-- **Authorization rejected:** close the expired Mini App and send `/bible` or
-  `/search` again. If a new launch is also rejected, verify host time and
-  confirm the instance token matches the bot that opened the app.
-- **DNS preflight fails:** create/fix the public `A`/`AAAA` record before
-  enabling the Mini App.
-- **Caddy validation or reload fails:** resolve the reported conflict in the
-  existing Caddyfile; the manager has already restored the previous files.
-- **502 or connection refused:** run `doctor` and confirm both the Robot and
-  Caddy services are active; do not bind the Robot publicly.
-- **Mini App works privately but not from a group:** verify the Main Mini App
-  URL and direct-link setting in BotFather.
-- **`doctor` reports no listener:** check configuration validation, port
-  collision, service logs, and `systemctl status`.
-- **Theme looks wrong:** use Telegram theme parameters and CSS variables; do
-  not hard-code a theme based on device preference alone.
+A release is not ready unless permanent CI proves Python 3.10–3.12, the production container, lint, strict typing, branch coverage, dependency and secret scans, CodeQL, public API routing, CSP parity, hash verification, bounded caches, bounded selections, real Chromium navigation, graphical select/unselect, cross-source identity, no pre-Post Robot mutation, and authoritative idempotent posting.
