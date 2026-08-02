@@ -28,8 +28,12 @@ export class BrowserSelectionStore {
   }
 
   register(selection) {
+    const sourceId = selection?.selection_id;
     const item = normalizeSelection(selection);
     this.#registry.set(item.selection_id, item);
+    if (typeof sourceId === "string" && sourceId.length > 0) {
+      this.#registry.set(sourceId, item);
+    }
     return cloneSelection(item);
   }
 
@@ -71,7 +75,7 @@ export class BrowserSelectionStore {
     if (!identity) {
       throw new TypeError("Scripture selection identity is invalid.");
     }
-    if (!this.#items.some((current) => selectionIdentity(current) === identity)) {
+    if (!this.#items.some((current) => current.selection_id === identity)) {
       if (this.#items.length >= this.#maximum) {
         throw new BrowserSelectionError("The Scripture basket is full.");
       }
@@ -86,7 +90,7 @@ export class BrowserSelectionStore {
     const identity = item ? selectionIdentity(item) : "";
     this.#items = this.#items.filter((current) =>
       current.selection_id !== selectionId &&
-      (!identity || selectionIdentity(current) !== identity)
+      (!identity || current.selection_id !== identity)
     );
     return this.snapshot();
   }
@@ -138,7 +142,7 @@ export class BrowserSelectionStore {
     if (
       identity &&
       this.#items.length < this.#maximum &&
-      !this.#items.some((current) => selectionIdentity(current) === identity)
+      !this.#items.some((current) => current.selection_id === identity)
     ) {
       this.#items.push(cloneSelection(item));
     }
@@ -155,8 +159,9 @@ function normalizeSelection(selection) {
   if (!isSelectionDescriptor(selection)) {
     throw new TypeError("A valid Scripture selection is required.");
   }
+  const canonicalId = selectionIdentity(selection);
   return {
-    selection_id: selection.selection_id,
+    selection_id: canonicalId,
     translation: selection.translation,
     reference: selection.reference,
     book_number: selection.book_number,
