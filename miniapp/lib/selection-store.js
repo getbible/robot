@@ -49,6 +49,7 @@ export class BrowserSelectionStore {
         // One malformed upstream row must not disable valid rows.
       }
     }
+    selections.splice(0, selections.length, ...registered.map(cloneSelection));
     return registered;
   }
 
