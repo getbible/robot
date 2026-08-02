@@ -1,213 +1,130 @@
 # Scripture interaction workflows
 
-GetBible deliberately keeps the shortest command path native and moves every
-browsing workflow into the contained Telegram Mini App.
+GetBible keeps immediate Telegram commands native and moves browsing, reading, searching, selecting, copying, and review into the Mini App.
 
 | Command | Result |
-|---|---|
-| `/bible John 3:16` | Validate, retrieve, and post the verse immediately |
-| `/bible John 3:16-18` | Validate, retrieve, and post the range immediately |
-| `/bible` | Resume the Mini App Bible reader at the last viewed verse |
-| `/search grace` | Open the Mini App on contained results for `grace` |
-| `/search` | Open the Mini App search form and filters |
-| `/help` | Show native command help |
-| Bot menu button | Open the Mini App home screen |
+| --- | --- |
+| `/bible John 3:16` | Native direct-reference post |
+| `/bible John 3:16-18` | Native direct-range post |
+| `/bible` | Open the Mini App reader at the saved location |
+| `/search grace` | Open the Mini App with Librarian search results |
+| `/search` | Open the Mini App search form |
+| `/help` | Native command help |
+| Bot menu | Open the Mini App home screen |
 
-`/get` and `/getbible` remain aliases for `/bible`. When `MINI_APP_ENABLED` is
-false, the existing Telegram-native picker remains available as a compatibility
-fallback.
+`/get` and `/getbible` remain aliases for `/bible`. The Telegram-native picker remains a compatibility fallback when the Mini App is disabled.
 
-## Bible reader
+## Reader workflow
 
-The existing **Bible** tab is both a compact chapter reader and the verse
-selection surface. It does not introduce a second reader route or a fifth
-bottom-navigation item. The normal sequence is:
+1. Open **Bible**.
+2. Choose a translation from the shared header selector.
+3. Choose a book and chapter.
+4. Read the complete chapter loaded directly from `api.getbible.net/v2`.
+5. Tap a verse to select it in browser memory.
+6. Tap it again to unselect it.
+7. Continue navigating; selected verses remain visibly selected during the active WebView session.
+8. Open **Selected** to reorder, remove, copy, or Post.
 
-1. choose the global translation from the header chip when needed;
-2. choose a book from the passage picker;
-3. choose a numbered chapter from the passage picker;
-4. read the chapter as continuous, edge-friendly Scripture text;
-5. tap a verse number or row to select or remove it;
-6. add verses from other chapters, books, searches, or translations;
-7. review, reorder, or clear the server-held basket;
-8. press **Post selected verses** or **Copy selected verses**.
+The browser does not call Robot for catalogs, books, chapters, chapter text, selecting, unselecting, reordering, clearing, or copying.
 
-The compact chapter heading contains previous/next controls and the current
-passage. It hides while scrolling down and returns while scrolling up, leaving
-the maximum practical space for Scripture. In the Bible route, downward
-scrolling reduces the fixed bottom navigation to its arrow handle and safe-area
-background. Upward scrolling does not reopen it. The user can reopen it
-explicitly with the handle, and selecting or removing a verse reopens it so the
-updated Selected count is immediately visible. Other routes retain the normal
-scroll-aware navigation behavior.
+## Visual selection contract
 
-The Telegram bridge first calls `expand()` for a reliable baseline and then
-requests native fullscreen on Bot API 8.0+ clients. Unsupported, rejected, or
-older clients continue in expanded-sheet mode without blocking startup.
-Fullscreen, viewport, device-safe-area, and content-safe-area events update the
-layout at runtime, keeping Telegram's close/header controls, device cutouts, and
-gesture area clear in portrait and landscape.
+A selected reader verse must expose all of the following immediately:
 
-Pressing the current passage opens a narrow side sheet over the Scripture
-instead of replacing the reader. When a chapter is already open, the sheet
-starts at that book's numbered chapter grid; **Back** reveals the book grid.
-The user can dismiss it with **Close**, Telegram Back, Escape, or the shaded
-backdrop. Choosing a chapter closes the sheet and loads it immediately.
+- `aria-pressed="true"`;
+- selected row styling;
+- selected verse-number styling;
+- contiguous selection start/end styling where applicable;
+- updated Selected count and navigation badge.
 
-Book buttons use the selected translation's authoritative names from the
-GetBible API. The visible labels are collision-free compact forms derived only
-for presentation; each button retains the complete API name for its accessible
-name and desktop title. Old Testament, New Testament, and additional books are
-separated without assuming that every translation contains exactly 66 books.
-Chapter grids contain numbers only and scroll independently through long books
-such as Psalms.
+A second click reverses all selected state immediately. The UI derives this state exclusively from `BrowserSelectionStore`; it does not wait for a network round trip.
 
-Chapter buttons remain compact numbers. Reader verses do not become separate
-raised cards; adjacent selected verses visually join while retaining a visible
-pressed state and accessible `aria-pressed` state. The basket can contain
-isolated verses or contiguous verses; the server normalizes adjacent selections
-into safe references at post time.
+## Search workflow
 
-The client receives an opaque selection identifier for each displayed verse.
-It never supplies authoritative verse text for posting. On **Post**, the server
-rebuilds and retrieves the Scripture references, applies the existing renderer
-and limits, and sends the final message through the bot. On **Copy**, the Mini
-App formats the current server-returned basket into the same visible reference,
-translation, verse-number, and verse-text structure and writes it to the device
-clipboard. Rich clipboard data retains linked references where supported, with
-plain text available everywhere. Copy never calls Telegram's posting route and
-does not clear the basket.
+Search is the sole Mini App Scripture-discovery operation that uses Robot/Librarian.
 
-## Search and filters
+1. Submit a query and optional filters.
+2. Robot/Librarian returns bounded normalized result verses.
+3. The browser registers those verses with the same selection store used by reader chapters.
+4. Selecting a search result highlights the same coordinate when opened in Reader.
+5. Selecting that coordinate in Reader updates its Search representation.
 
-`/search <words>` places the initial query only in short-lived server launch
-state; the query is not exposed in the launch URL. `/search` opens an empty
-search form. Results are complete verse cards and use the same tap-to-select
-behavior as Bible browsing.
+Opaque search tokens and deterministic reader IDs are not selection identity. Identity is translation, book number, chapter, and verse.
 
-The interface exposes the supported Librarian search controls:
+## Explicit reference workflow
 
-| Control | Values |
-|---|---|
-| Words | All, any, or phrase |
-| Match | Whole word or substring |
-| Scope | Bible, Old Testament, New Testament, or deuterocanon |
-| Case | Sensitive or insensitive |
-| Diacritics | Sensitive or insensitive |
-| Sort | Canonical or relevance |
-| Books | Optional translation-specific restriction |
-| Exclusions | Optional excluded words |
-| Proximity | Optional bounded word distance |
+Mini App explicit references use `query.getbible.net/v2` directly. Query results provide reader coordinates and grouped-reference results without routing through Robot or Librarian.
 
-Results use contained paging or incremental loading and never create a stream
-of Telegram messages. Selections persist across result pages and Bible
-navigation. Submitting through either the visible button or the mobile
-keyboard's Search key blurs the query input before results render so Telegram
-can dismiss the on-screen keyboard. Only a final server-resolved Post enters
-the target chat; Copy remains entirely on the user's device.
+A Query API failure affects explicit reference resolution only. It does not invalidate authentication, cached chapters, local selection, or Search state.
 
-## Translation and interface preferences
+## Selected workflow
 
-The translation chip in the application header is the only translation
-selector. It opens a dedicated selector containing the bounded translation
-name, language, and abbreviation. It never changes the current tab. The Search
-filter sheet contains only search filters, and the Bible passage picker contains
-only book and chapter controls.
+The Selected screen is a view of the browser-owned ordered selection.
 
-Selecting a translation updates the interface language and direction
-immediately, clears any old-translation Scripture before it can be relabelled,
-and reloads the current book, chapter, and visible verse when the Bible reader
-is open. Translation and the closest valid reader location are resolved and
-committed together, so an immediate close cannot leave a mixed or erased resume
-state. An in-flight response for an older translation is ignored. Search and
-Scripture reads are side-effect-free; only the serialized preferences endpoint
-may change the saved translation or reader location.
+Available actions:
 
-The selected Bible translation and the last reader location are stored per
-Telegram user. A reader location is only four bounded identifiers:
-translation, book, chapter, and verse. Safe search defaults may also be stored,
-but query text, excluded words, chapter contents, launch state, session
-credentials, and verse text are not durable preferences.
+- open a selected verse in Reader;
+- move it earlier or later;
+- remove it;
+- clear all selections;
+- copy formatted Scripture;
+- Post the final ordered selection.
 
-Opening bare `/bible` resumes that saved location. Opening a chapter from a
-search result focuses the matching verse and offers a return to the preserved
-search results. Search results can still be selected directly without opening
-the reader.
+Reorder, remove, clear, and copy are local. They issue no Robot request.
 
-Each translation exposes its authoritative `lang` metadata. The Mini App
-resolves the interface catalog in this order:
+## Post workflow
 
-1. exact normalized locale, such as `pt-br`;
-2. base language, such as `pt`;
-3. English.
+Post is the only selection synchronization boundary.
 
-The document language and accessible labels change with the resolved catalog.
-A missing or incomplete catalog always falls back key-by-key to English, so a
-translation can never leave navigation blank. Adding interface languages is a
-content-only extension to `miniapp/lib/i18n.js`; it does not change the
-authorization boundary. The selected Scripture text always comes from the
-chosen translation regardless of interface-catalog availability.
+1. Freeze one ordered browser snapshot.
+2. Submit the bounded final selection once.
+3. Robot validates ownership, coordinates, order, and idempotency.
+4. Robot obtains authoritative Scripture and renders the complete Telegram output.
+5. Robot sends to the originating chat/topic.
+6. Success clears the browser selection.
+7. Failure preserves it unchanged for retry.
 
-## Private and group launches
+Browser display text, names, references, and UI IDs are never final posting authority.
 
-In a private chat, an inline Web App button carries a one-time opaque launch
-token. In a group or forum topic, the robot sends the requesting user an
-ephemeral Main Mini App link. The server binds that token to the Telegram user,
-target chat, topic, and initial route. The URL contains no chat identifier,
-reference, search query, or verse text.
+## Copy workflow
 
-The initiating user-only command and the bot-created user-only launcher remain
-one cleanup unit. Once the signed Mini App session is ready, both rows have
-completed their purpose and are claimed together for deletion. Browsing,
-filtering, basket changes, Copy, and native Close therefore leave no
-application-created interaction row in the target chat. A final Post is sent by
-the bot to the launch-bound chat and topic, so only the requested Scripture
-remains. A generic menu-button launch has no group target and posts to the
-user's private conversation with the bot.
+Copy uses the browser snapshot and does not Post or mutate Robot state. It preserves Unicode, translation labels, reference grouping, and verse order. Copy success or failure leaves the selection unchanged.
 
-## Failure and cleanup behavior
+## Translation changes
 
-- When Telegram recreates a WebView, fresh signed `initData` can recover the
-  still-active session only for the same launch token, user, chat, and chat
-  instance. Its absolute expiry is unchanged.
-- A malformed, genuinely expired, replayed, or user-mismatched launch fails
-  closed with an explicit close-and-relaunch instruction.
-- An unopened launcher receives one best-effort cleanup attempt when its launch
-  lifetime expires. Pending launchers also receive one attempt during graceful
-  application shutdown.
-- Direct `/bible <reference>` commands are deleted only after successful
-  delivery. One unconfirmed transient Bot API deletion failure receives a
-  bounded retry; permission and unavailable-message failures do not retry.
-- The initiating ephemeral command and the bot's ephemeral Mini App response
-  are claimed as one immutable cleanup snapshot. Their live identifiers are
-  cleared before Telegram deletion calls, so concurrent ready, Post, expiry,
-  eviction, or shutdown paths cannot issue duplicate cleanup.
-- Telegram permission failures, unavailable messages, and deletion failures are
-  silent and cannot invalidate opening the Mini App, copying text, closing, or
-  delivering final Scripture.
-- Final Scripture message identifiers are never part of the launch cleanup
-  ledger.
-- The complete basket is resolved and rendered under one global output-message
-  limit before the first Telegram send.
-- Known messages from an incomplete send are deleted best-effort. Because a
-  timeout can leave an unknown Telegram outcome, the exact basket attempt is
-  then locked; relaunch or change the basket instead of blindly retrying it.
-- Idempotency is bound to the exact ordered basket. A new key cannot bypass a
-  pending, completed, or failed attempt for the same basket.
-- Process restart intentionally expires in-memory launches, Mini App sessions,
-  search results, and baskets.
+Changing translation immediately updates interface language/direction and reloads the same canonical reader location from Main API. Old chapter text is removed before the new request begins so translations cannot appear mixed.
 
-## Security and bounds
+Selections from different translations may coexist. Coordinate identity includes the translation code.
 
-Every protected API request is tied to signature-verified Telegram `initData`,
-the exact authenticated user, an absolute-lifetime server session, same-origin
-policy, rate limits, and server-side content/selection bounds. The bot token
-never reaches the browser.
+## Navigation and accessibility
 
-Complete reader chapters come from the GetBible Main API through one
-hash-verified, bounded server cache. Librarian remains responsible for
-reference parsing, search, direct command retrieval, and authoritative final
-posting.
+- The shared translation selector remains reachable in fullscreen and non-fullscreen layouts.
+- The passage picker supports keyboard, Escape, backdrop, Close, and Telegram Back behavior.
+- Selected state is communicated visually and through ARIA.
+- Focus returns to a useful reader or error target after navigation and retry.
+- Reduced-motion preference is respected.
+- RTL layout preserves the same interaction semantics.
 
-See [Telegram Mini App deployment](MINI_APP.md) for the HTTPS boundary,
-BotFather configuration, reverse-proxy examples, and production verification.
+## Failure behavior
+
+| Failure | Result |
+| --- | --- |
+| Main API unavailable | uncached reader request fails retryably; selection and authentication remain |
+| Query API unavailable | explicit reference resolution fails retryably |
+| Librarian unavailable | Search alone fails |
+| Robot unavailable | protected Search/preferences/Post fail; local selection remains usable |
+| Post fails | ordered selection remains intact |
+| Session expires | protected actions fail closed; identity-free cached Scripture remains public data |
+
+## Acceptance criteria
+
+A release must demonstrate in real Chromium and Telegram that:
+
+- reader selection highlights immediately;
+- verse number highlighting is visible;
+- second-click unselect works;
+- selected styling survives chapter navigation and source changes;
+- Search and Reader are interchangeable by coordinate identity;
+- no pre-Post Robot basket or Scripture mutation occurs;
+- failed Post preserves selection;
+- successful Post delivers authoritative Scripture and clears selection.
