@@ -76,7 +76,72 @@ test("Bible catalogs and chapters bypass the authenticated robot data routes", a
   ));
 });
 
-test("direct verse selection sends one bounded descriptor to the control plane", async () => {
+test("direct reader selection is registered authoritatively before basket mutation", async () => {
+  const requests = [];
+  const authoritativeSelection = {
+    selection_id: "AuthoritativeSelectionToken123",
+    translation: "kjv",
+    reference: "John 3:16",
+    book_number: 43,
+    book_name: "John",
+    chapter: 3,
+    verse: 16,
+    text: "For God so loved the world.",
+  };
+  const api = new MiniAppApi("signed-init-data", {
+    baseUrl: "https://robot.example/getbible/",
+    publicApi: {
+      async translations() {
+        return [{ code: "kjv" }];
+      },
+      async chapter() {
+        return {};
+      },
+    },
+    fetchImplementation: async (url, options) => {
+      const request = { url: String(url), options };
+      requests.push(request);
+      if (request.url.endsWith("/api/v1/session")) {
+        return json(SESSION, 201);
+      }
+      if (request.url.endsWith("/api/v1/cleanup")) {
+        return new Response(null, { status: 204 });
+      }
+      if (request.url.endsWith("/api/v1/scripture")) {
+        return json({ items: [authoritativeSelection] });
+      }
+      if (request.url.endsWith("/api/v1/basket/items")) {
+        return json({ items: [authoritativeSelection], count: 1, maximum: 100 });
+      }
+      return json({ error: { code: "not_found" } }, 404);
+    },
+  });
+  await api.createSession("LaunchToken123456");
+
+  await api.addBasketItem("gbd_kjv_043_0003_0016");
+
+  const scriptureRequest = requests.find((request) =>
+    request.url.endsWith("/api/v1/scripture"),
+  );
+  assert.ok(scriptureRequest);
+  assert.deepEqual(JSON.parse(scriptureRequest.options.body), {
+    translation: "kjv",
+    book: 43,
+    chapter: 3,
+    verse: 16,
+  });
+
+  const basketRequest = requests.find((request) =>
+    request.url.endsWith("/api/v1/basket/items"),
+  );
+  assert.ok(basketRequest);
+  assert.deepEqual(JSON.parse(basketRequest.options.body), {
+    selection_id: authoritativeSelection.selection_id,
+  });
+  assert.equal(basketRequest.options.headers.Authorization, "Bearer abcdefghijklmnop");
+});
+
+test("opaque search selections still go directly to the basket endpoint", async () => {
   const requests = [];
   const api = new MiniAppApi("signed-init-data", {
     baseUrl: "https://robot.example/getbible/",
@@ -89,34 +154,30 @@ test("direct verse selection sends one bounded descriptor to the control plane",
       },
     },
     fetchImplementation: async (url, options) => {
-      requests.push({ url: String(url), options });
-      if (requests.length === 1) {
+      const request = { url: String(url), options };
+      requests.push(request);
+      if (request.url.endsWith("/api/v1/session")) {
         return json(SESSION, 201);
       }
-      if (String(url).endsWith("/cleanup")) {
+      if (request.url.endsWith("/api/v1/cleanup")) {
         return new Response(null, { status: 204 });
       }
       return json({ items: [], count: 0, maximum: 100 });
     },
   });
   await api.createSession("LaunchToken123456");
-  const verse = {
-    selection_id: "gbd_kjv_043_0003_0016",
-    translation: "kjv",
-    reference: "John 3:16",
-    book_number: 43,
-    book_name: "John",
-    chapter: 3,
-    verse: 16,
-    text: "For God so loved the world.",
-  };
 
-  await api.addBasketItem(verse);
+  await api.addBasketItem("OpaqueSearchSelectionToken123");
 
+  assert.equal(
+    requests.some((request) => request.url.endsWith("/api/v1/scripture")),
+    false,
+  );
   const basketRequest = requests.find((request) =>
     request.url.endsWith("/api/v1/basket/items"),
   );
   assert.ok(basketRequest);
-  assert.deepEqual(JSON.parse(basketRequest.options.body), { selection: verse });
-  assert.equal(basketRequest.options.headers.Authorization, "Bearer abcdefghijklmnop");
+  assert.deepEqual(JSON.parse(basketRequest.options.body), {
+    selection_id: "OpaqueSearchSelectionToken123",
+  });
 });
