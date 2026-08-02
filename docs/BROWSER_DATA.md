@@ -1,144 +1,132 @@
 # Browser data architecture
 
-The Telegram Mini App is a browser application. Public Bible content therefore belongs in the browser data plane rather than in the robot process. This keeps reading available when the robot is under load and prevents repeated chapter navigation from consuming robot sessions, rate-limit budget, or server memory.
+The Telegram Mini App is a browser application. Public Bible content and temporary selection state therefore belong in the browser data plane rather than in the Robot process. This keeps reading responsive, avoids repeated server work, and isolates user interaction from Robot availability.
+
+## Doctrine
+
+Only full-text search and search pagination use Robot/Librarian.
+
+Everything else in the reading experience is browser-owned and backed by GetBible API V2:
+
+- `api.getbible.net/v2` supplies translation catalogs, books, chapter maps, chapter text, and hashes;
+- `query.getbible.net/v2` supplies explicit and grouped reference resolution;
+- IndexedDB stores validated public content;
+- browser memory owns the current ordered selection;
+- Robot authenticates Telegram, stores preferences, accepts the final ordered post request, validates it, and sends the authoritative Scripture to Telegram.
 
 ## Ownership boundaries
 
-| Capability | Browser / public GetBible API | Robot control plane | Librarian |
+| Capability | Browser / GetBible API | Robot | Librarian |
 | --- | --- | --- | --- |
 | Translation catalog | Yes | No | No |
 | Book catalog | Yes | No | No |
 | Chapter catalog | Yes | No | No |
 | Chapter text | Yes | No | No |
-| `/bible` reference resolution | Yes, Query API | No | No |
-| Search and search pagination | No | Authenticated transport | Yes |
+| Explicit/grouped references | Yes, Query API | No | No |
+| Full-text search | No | Authenticated transport | Yes |
+| Search pagination | No | Authenticated transport | Yes |
+| Selection highlighting | Yes | No | No |
+| Select/unselect/reorder/clear | Yes | No | No |
 | Telegram authentication | No | Yes | No |
 | User preferences | No | Yes | No |
-| Selection basket metadata | No | Yes | No |
-| Final Telegram posting | No | Yes | No |
-
-The authenticated robot endpoints for translations, books, chapters, and scripture remain temporarily available for older deployed Mini App assets. Current assets do not call them. They are compatibility routes, not the primary data plane.
+| Final Telegram posting | Coordinates submitted once | Yes | No |
 
 ## Request flow
 
 ```mermaid
 flowchart LR
     T[Telegram WebView] -->|signed init data| S[Robot session API]
-    S -->|opaque session + preferences + basket| T
-    T -->|translations / books / chapters / .sha| A[api.getbible.net/v2]
-    T -->|explicit reference| Q[query.getbible.net/v2]
+    S -->|opaque session + preferences| T
+    T -->|translations / books / chapters / chapter text / hashes| A[api.getbible.net/v2]
+    T -->|explicit and grouped references| Q[query.getbible.net/v2]
     T -->|search only| R[Robot search endpoint]
     R --> L[Librarian]
-    T -->|one selected verse descriptor| B[Robot basket]
-    B -->|coordinates revalidated and re-resolved| P[Authoritative final post]
+    A --> V[VerseSelection]
+    L --> V
+    V --> B[BrowserSelectionStore]
+    B -->|final ordered coordinates once| P[Robot post endpoint]
+    P -->|authoritative validation and Telegram send| G[Telegram]
 ```
 
-A normal read does not pass through the robot:
+No select, unselect, reorder, clear, reader navigation, catalog, chapter, or explicit-reference operation may call Robot.
 
-```mermaid
-sequenceDiagram
-    participant W as Mini App WebView
-    participant C as IndexedDB cache
-    participant A as GetBible API V2
+## Shared verse contract
 
-    W->>C: Read public:v2:chapter:<translation>:<book>:<chapter>
-    alt fresh cache entry
-        C-->>W: Validated chapter
-    else missing or revalidation due
-        W->>A: GET chapter .sha
-        A-->>W: SHA-1 validator
-        alt validator unchanged
-            W->>C: Mark checked
-            C-->>W: Cached chapter
-        else changed or missing
-            W->>A: GET .sha, JSON, .sha
-            A-->>W: Stable content and validator
-            W->>W: Verify SHA-1 over exact response bytes
-            W->>C: Atomically replace validated record
-            C-->>W: Fresh chapter
-        end
-    end
+Reader verses and Librarian search results are normalized into the same `VerseSelection` interface:
+
+```text
+selection_id   Stable UI identity
+translation    Translation code
+reference      Display reference
+book_number    Canonical book number
+book_name      Display book name
+chapter        Positive chapter number
+verse          Positive verse number
+text           Browser display text
+terms          Optional search metadata
+highlights     Optional search highlights
 ```
+
+Coordinate identity is `translation + book_number + chapter + verse`. Transport-specific tokens are not identity. A verse selected from search must appear selected when the same verse is opened in the reader, and vice versa.
+
+## Browser selection lifecycle
+
+1. A reader chapter or Librarian search response produces `VerseSelection` records.
+2. The browser selection store adds or removes records by coordinate identity.
+3. The UI derives `aria-pressed`, highlight styling, range boundaries, counters, copy output, and ordering from that store.
+4. No Robot request occurs while the selection changes.
+5. Post submits the final ordered coordinates once.
+6. Robot resolves authoritative Scripture before sending it to Telegram.
+7. A failed Post leaves browser state intact; a successful Post clears it.
+
+Browser text, names, and references are display data only and never posting authority.
 
 ## Public API origins
 
 The browser transport has two fixed HTTPS origins:
 
 - `https://api.getbible.net/v2/` for mappings, Scripture, and matching `.sha` resources;
-- `https://query.getbible.net/v2/` for explicit Bible-reference resolution.
+- `https://query.getbible.net/v2/` for explicit and grouped Bible-reference resolution.
 
-The Content Security Policy allows only these two external connection origins in addition to the Mini App's own origin. The transport omits credentials, disables redirects, sends no Telegram data, and applies `no-referrer` and `no-store` request semantics.
+The Content Security Policy allows only these two external connection origins in addition to the Mini App origin. Requests omit credentials, disable redirects, send no Telegram data, use `no-referrer`, and do not rely on HTTP cache state.
 
 ## Persistent cache
 
-Public GetBible content is stored in IndexedDB under the versioned `public:v2:` namespace. An in-memory implementation is used only when IndexedDB is unavailable or fails.
+Public GetBible content is stored in IndexedDB under the versioned `public:v2:` namespace. An in-memory implementation is used only when IndexedDB is unavailable.
 
-The cache is deliberately bounded:
-
-- 160 records;
-- 32 MiB total estimated JSON payload size;
-- 2 MiB per record;
-- least-recently-used eviction;
-- in-flight request coalescing so concurrent views share one download.
-
-Only public, identity-free payloads may enter this cache. Telegram init data, session tokens, user IDs, preferences, search terms/results, basket contents, and posting state are never written to it.
+The cache is bounded by record count, total estimated payload size, per-record size, least-recently-used eviction, and in-flight request coalescing. Only identity-free public payloads may enter this cache. Telegram init data, session tokens, user IDs, preferences, search results, selections, and posting state are excluded.
 
 ### Revalidation and invalidation
 
-Every cached scope is revalidated at least once every seven days. A matching scope `.sha` keeps the cached payload and advances only its checked time. A changed translation hash invalidates cached book descendants; a changed book hash invalidates chapter mappings and chapter descendants. A changed chapter hash replaces only that chapter.
+Every cached scope is revalidated at least weekly. A changed translation hash invalidates book descendants; a changed book hash invalidates chapter descendants; a changed chapter hash replaces that chapter. Chapter JSON is accepted only when the pre-read and post-read hashes match, SHA-1 over the exact bytes matches that hash, and the payload passes bounded schema and coordinate validation.
 
-Chapter JSON is accepted only after all of the following are true:
+A failed validation never replaces a previously accepted record.
 
-1. the validator before and after retrieval is identical;
-2. SHA-1 over the exact response bytes equals that validator;
-3. the response passes bounded schema and request-coordinate validation.
+## Failure isolation
 
-A failed validation cannot overwrite a previously accepted record. An overdue entry is not silently treated as current when revalidation cannot be completed.
+- A public API failure affects reading only and never invalidates Telegram authentication.
+- A Librarian failure affects search only.
+- A browser selection operation cannot fail because Robot is unavailable.
+- A failed final Post preserves the complete ordered browser selection for retry.
+- A malformed or tampered final selection is rejected by Robot before Telegram output.
 
-## Selection trust model
+## Compatibility and removal policy
 
-Verses rendered from the public API have deterministic browser identities derived from translation, book, chapter, and verse coordinates. These identities are for UI correlation; they are not trusted posting authority.
+Legacy Robot endpoints for translations, books, chapters, Scripture reads, and per-click basket mutation are deprecated compatibility surfaces. Current Mini App assets must not call them. Once the supported mixed-version deployment window ends, those routes, tests, documentation, and dormant helpers must be removed together in one release.
 
-When a reader selects a verse, the browser sends one bounded descriptor to the authenticated basket endpoint. The robot retains only selected verses and Librarian search results. It no longer retains every verse of every chapter a user opens.
-
-Before posting, the robot:
-
-1. looks up each selected translation and book from its authoritative service;
-2. validates the chapter and verse coordinates;
-3. rebuilds the canonical reference from authoritative catalog data;
-4. resolves the grouped references again;
-5. posts the authoritative Scripture returned by the service.
-
-Browser-supplied text, book names, references, and deterministic IDs can therefore affect only the temporary selection display. They cannot determine the final Scripture posted to Telegram.
-
-## Failure behaviour
-
-- Fresh validated cache entries continue to serve normal reads without a network call.
-- A public API timeout or malformed response produces a retryable reading error and never invalidates the Telegram session.
-- Query API failure falls back to local book/chapter parsing when the reference can still be resolved safely.
-- Search failure remains isolated to the Librarian-backed search route.
-- Basket and post failures remain isolated to authenticated robot control-plane operations.
-
-## Deployment requirements
-
-A deployment must serve both CSP declarations with the public API allowlist:
-
-- the `Content-Security-Policy` meta element in `miniapp/index.html`;
-- the `Content-Security-Policy` response header in `MiniAppStaticHandler`.
-
-Deploy the HTML, JavaScript modules, and server code atomically. Static assets continue to revalidate through ETags so a Telegram WebView cannot combine a new shell with stale JavaScript.
+No documentation or test may present legacy routes as the active design.
 
 ## Verification
 
 The release gate must prove:
 
-- public catalog and chapter calls never use authenticated robot data routes;
-- only search calls the Librarian-backed search endpoint;
-- cache namespace and capacity bounds are enforced;
-- exact-byte checksum mismatch is rejected;
-- scope changes invalidate descendants;
-- public API HTTP errors do not clear Telegram authentication;
-- direct selections retain only one verse server-side;
-- final posting reconstructs and validates authoritative references;
-- both CSP layers contain the same fixed-origin allowlist;
-- browser navigation works after a cold load and from a warm persistent cache.
+- catalog, chapter, and explicit/grouped reference traffic goes directly to GetBible API;
+- only full-text search and search pagination use Librarian;
+- select, unselect, reorder, and clear issue no Robot request;
+- reader and search records share coordinate identity;
+- selected verses remain highlighted after chapter navigation and source changes;
+- a second click unselects immediately;
+- final Post submits one ordered selection payload and preserves state on failure;
+- Robot re-resolves authoritative Scripture before Telegram output;
+- cache hashes, bounds, invalidation, and CSP origin parity remain enforced;
+- cold and warm real-browser flows pass.
