@@ -6,13 +6,16 @@ import {
   isDirectSelectionId,
   selectionIdentity,
 } from "./getbible-model.js";
+import {
+  BrowserSelectionError,
+  BrowserSelectionStore,
+} from "./selection-store.js";
 
 const API_ROOT = "api/v1/";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const DIRECT_SELECTION_COORDINATE_PATTERN =
   /^gbd_(.+)_([0-9]{3})_([0-9]{4})_([0-9]{4})$/;
-const DEFAULT_BASKET_MAXIMUM = 100;
 
 export class ApiError extends Error {
   constructor(message, {
@@ -40,9 +43,7 @@ export class MiniAppApi {
   #publicApi;
   #setTimeout;
   #clearTimeout;
-  #selectionRegistry = new Map();
-  #basket = [];
-  #basketMaximum = DEFAULT_BASKET_MAXIMUM;
+  #selections;
 
   constructor(initData, {
     timeoutMs = DEFAULT_TIMEOUT_MS,
@@ -51,6 +52,7 @@ export class MiniAppApi {
     setTimeoutImplementation = globalThis.setTimeout,
     clearTimeoutImplementation = globalThis.clearTimeout,
     publicApi = null,
+    selectionStore = null,
   } = {}) {
     if (typeof initData !== "string" || initData.length === 0) {
       throw new TypeError("Telegram initialization data is required.");
@@ -78,12 +80,20 @@ export class MiniAppApi {
     this.#clearTimeout = (...args) =>
       Reflect.apply(clearTimeoutImplementation, globalThis, args);
     this.#publicApi = publicApi ?? new GetBibleApi();
+    this.#selections = selectionStore ?? new BrowserSelectionStore();
     if (
       !this.#publicApi ||
       typeof this.#publicApi.translations !== "function" ||
       typeof this.#publicApi.chapter !== "function"
     ) {
       throw new TypeError("A GetBible public API client is required.");
+    }
+    if (
+      !this.#selections ||
+      typeof this.#selections.registerMany !== "function" ||
+      typeof this.#selections.snapshot !== "function"
+    ) {
+      throw new TypeError("A browser selection store is required.");
     }
   }
 
@@ -96,20 +106,10 @@ export class MiniAppApi {
       },
       authenticated: false,
     });
-    if (
-      !payload ||
-      typeof payload.session_token !== "string" ||
-      !SESSION_TOKEN_PATTERN.test(payload.session_token)
-    ) {
-      throw new ApiError("The secure Telegram session could not be created.", {
-        code: "invalid_session_response",
-      });
-    }
-    this.#sessionToken = payload.session_token;
-    this.#cleanupAttempted = false;
-    this.#hydrateBasket(payload.basket);
+    this.#acceptSession(payload);
+    this.#selections.setMaximum(Number(payload?.basket?.maximum));
     this.#cleanupLaunch();
-    return { ...payload, basket: this.#basketPayload() };
+    return { ...payload, basket: this.#selections.snapshot() };
   }
 
   async resumeSession(sessionToken) {
@@ -125,23 +125,23 @@ export class MiniAppApi {
     this.#sessionToken = sessionToken;
     this.#cleanupAttempted = false;
     const payload = await this.#request("session");
-    this.#hydrateBasket(payload?.basket);
+    this.#selections.setMaximum(Number(payload?.basket?.maximum));
     this.#cleanupLaunch();
-    return { ...payload, basket: this.#basketPayload() };
+    return { ...payload, basket: this.#selections.snapshot() };
   }
 
   clearSession() {
     this.#sessionToken = null;
     this.#cleanupAttempted = false;
-    this.#selectionRegistry.clear();
-    this.#basket = [];
-    this.#basketMaximum = DEFAULT_BASKET_MAXIMUM;
   }
 
   async revokeSession() {
     if (!this.#sessionToken) return;
     try {
-      await this.#request("session", { method: "DELETE", keepalive: true });
+      await this.#request("session", {
+        method: "DELETE",
+        keepalive: true,
+      });
     } finally {
       this.clearSession();
     }
@@ -198,66 +198,76 @@ export class MiniAppApi {
     });
   }
 
+  registerSelections(selections) {
+    return this.#selections.registerMany(selections);
+  }
+
   basket() {
-    return Promise.resolve(this.#basketPayload());
+    return Promise.resolve(this.#selections.snapshot());
   }
 
   addBasketItem(selection) {
-    const item = this.#resolveSelection(selection);
-    const identity = selectionIdentity(item);
-    if (!identity) throw new TypeError("Scripture selection identity is invalid.");
-    if (!this.#basket.some((current) => selectionIdentity(current) === identity)) {
-      if (this.#basket.length >= this.#basketMaximum) {
-        throw new ApiError("The Scripture basket is full.", {
-          code: "invalid_selection",
-        });
-      }
-      this.#basket.push(item);
-    }
-    return Promise.resolve(this.#basketPayload());
+    return this.#selectionOperation(() => this.#selections.add(selection));
   }
 
   removeBasketItem(selectionId) {
-    const item = this.#selectionRegistry.get(selectionId) ??
-      this.#basket.find((current) => current.selection_id === selectionId);
-    const identity = item ? selectionIdentity(item) : "";
-    this.#basket = this.#basket.filter((current) =>
-      current.selection_id !== selectionId &&
-      (!identity || selectionIdentity(current) !== identity)
-    );
-    return Promise.resolve(this.#basketPayload());
+    return this.#selectionOperation(() => this.#selections.remove(selectionId));
   }
 
   reorderBasket(selectionIds) {
-    if (!Array.isArray(selectionIds)) {
-      throw new TypeError("selectionIds must be an array.");
-    }
-    const existing = new Map(this.#basket.map((item) => [item.selection_id, item]));
-    if (
-      selectionIds.length !== existing.size ||
-      new Set(selectionIds).size !== selectionIds.length ||
-      selectionIds.some((selectionId) => !existing.has(selectionId))
-    ) {
-      throw new ApiError("Basket order is invalid.", { code: "invalid_selection" });
-    }
-    this.#basket = selectionIds.map((selectionId) => existing.get(selectionId));
-    return Promise.resolve(this.#basketPayload());
+    return this.#selectionOperation(() => this.#selections.reorder(selectionIds));
   }
 
   clearBasket() {
-    this.#basket = [];
-    return Promise.resolve(this.#basketPayload());
+    return Promise.resolve(this.#selections.clear());
   }
 
   async postSelection(idempotencyKey) {
-    await this.#synchronizeBasketForPost();
+    const snapshot = this.#selections.snapshot();
+    if (snapshot.items.length === 0) {
+      throw new ApiError("The Scripture basket is empty.", {
+        code: "invalid_selection",
+      });
+    }
+    await this.#synchronizeSelectionsForPost(snapshot.items);
     const payload = await this.#request("post", {
       method: "POST",
       body: { idempotency_key: idempotencyKey },
       timeoutMs: 25_000,
     });
-    this.#basket = [];
+    this.#selections.clear();
     return payload;
+  }
+
+  #acceptSession(payload) {
+    if (
+      !payload ||
+      typeof payload.session_token !== "string" ||
+      !SESSION_TOKEN_PATTERN.test(payload.session_token)
+    ) {
+      throw new ApiError("The secure Telegram session could not be created.", {
+        code: "invalid_session_response",
+      });
+    }
+    this.#sessionToken = payload.session_token;
+    this.#cleanupAttempted = false;
+  }
+
+  #selectionOperation(operation) {
+    try {
+      return Promise.resolve(operation());
+    } catch (error) {
+      if (error instanceof BrowserSelectionError) {
+        throw new ApiError(error.message, { code: error.code });
+      }
+      throw error;
+    }
+  }
+
+  #registerPayloadSelections(payload) {
+    this.#selections.registerMany(
+      Array.isArray(payload?.items) ? payload.items : [],
+    );
   }
 
   #cleanupLaunch() {
@@ -270,64 +280,10 @@ export class MiniAppApi {
     }).catch(() => undefined);
   }
 
-  #hydrateBasket(rawBasket) {
-    const maximum = Number(rawBasket?.maximum);
-    this.#basketMaximum = Number.isSafeInteger(maximum) && maximum > 0
-      ? maximum
-      : DEFAULT_BASKET_MAXIMUM;
-    this.#basket = [];
-    const items = Array.isArray(rawBasket?.items) ? rawBasket.items : [];
-    for (const item of items) {
-      if (!validSelectionDescriptor(item)) continue;
-      const copy = selectionDescriptor(item);
-      this.#selectionRegistry.set(copy.selection_id, copy);
-      if (!this.#basket.some((current) =>
-        selectionIdentity(current) === selectionIdentity(copy)
-      )) {
-        this.#basket.push(copy);
-      }
-    }
-  }
-
-  #registerPayloadSelections(payload) {
-    const items = Array.isArray(payload?.items) ? payload.items : [];
-    for (const item of items) {
-      if (!validSelectionDescriptor(item)) continue;
-      const copy = selectionDescriptor(item);
-      this.#selectionRegistry.set(copy.selection_id, copy);
-    }
-  }
-
-  #resolveSelection(selection) {
-    if (typeof selection === "string") {
-      const item = this.#selectionRegistry.get(selection);
-      if (!item) {
-        throw new ApiError("The selected Scripture is no longer available.", {
-          code: "invalid_selection",
-        });
-      }
-      return item;
-    }
-    if (!validSelectionDescriptor(selection)) {
-      throw new TypeError("A valid Scripture selection is required.");
-    }
-    const item = selectionDescriptor(selection);
-    this.#selectionRegistry.set(item.selection_id, item);
-    return item;
-  }
-
-  #basketPayload() {
-    return {
-      items: this.#basket.map((item) => ({ ...item })),
-      count: this.#basket.length,
-      maximum: this.#basketMaximum,
-    };
-  }
-
-  async #synchronizeBasketForPost() {
+  async #synchronizeSelectionsForPost(items) {
     await this.#request("basket", { method: "DELETE" });
     const authoritativeIds = [];
-    for (const item of this.#basket) {
+    for (const item of items) {
       const selectionId = isDirectSelectionId(item.selection_id)
         ? await this.#registerDirectSelection(item.selection_id)
         : item.selection_id;
@@ -428,7 +384,10 @@ export class MiniAppApi {
     }
     const controller = new AbortController();
     const timeout = this.#setTimeout(() => controller.abort(), timeoutMs);
-    const headers = { Accept: "application/json", "Cache-Control": "no-store" };
+    const headers = {
+      Accept: "application/json",
+      "Cache-Control": "no-store",
+    };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     if (authenticated) {
       headers.Authorization = `Bearer ${this.#sessionToken}`;
@@ -454,10 +413,10 @@ export class MiniAppApi {
           retryable: true,
         });
       }
-      throw new ApiError("getBible.Life could not connect. Check your connection and retry.", {
-        code: "network_error",
-        retryable: true,
-      });
+      throw new ApiError(
+        "getBible.Life could not connect. Check your connection and retry.",
+        { code: "network_error", retryable: true },
+      );
     } finally {
       this.#clearTimeout(timeout);
     }
@@ -481,8 +440,12 @@ export class MiniAppApi {
               ? error.code
               : "request_failed",
           status: response.status,
-          retryable: Boolean(error?.retryable) || response.status === 429 || response.status >= 500,
-          requestId: typeof error?.request_id === "string" ? error.request_id : null,
+          retryable:
+            Boolean(error?.retryable) ||
+            response.status === 429 ||
+            response.status >= 500,
+          requestId:
+            typeof error?.request_id === "string" ? error.request_id : null,
         },
       );
     }
@@ -508,48 +471,6 @@ function directSelectionCoordinates(selectionId) {
   return { translation: match[1], book, chapter, verse };
 }
 
-function validSelectionDescriptor(selection) {
-  return Boolean(
-    selection &&
-    typeof selection === "object" &&
-    !Array.isArray(selection) &&
-    typeof selection.selection_id === "string" &&
-    selection.selection_id.length > 0 &&
-    typeof selection.translation === "string" &&
-    selection.translation.length > 0 &&
-    typeof selection.reference === "string" &&
-    selection.reference.length > 0 &&
-    Number.isSafeInteger(selection.book_number) &&
-    selection.book_number > 0 &&
-    typeof selection.book_name === "string" &&
-    selection.book_name.length > 0 &&
-    Number.isSafeInteger(selection.chapter) &&
-    selection.chapter > 0 &&
-    Number.isSafeInteger(selection.verse) &&
-    selection.verse > 0 &&
-    typeof selection.text === "string" &&
-    selection.text.length > 0 &&
-    selectionIdentity(selection).length > 0
-  );
-}
-
-function selectionDescriptor(selection) {
-  return {
-    selection_id: selection.selection_id,
-    translation: selection.translation,
-    reference: selection.reference,
-    book_number: selection.book_number,
-    book_name: selection.book_name,
-    chapter: selection.chapter,
-    verse: selection.verse,
-    text: selection.text,
-    terms: Array.isArray(selection.terms) ? [...selection.terms] : [],
-    highlights: Array.isArray(selection.highlights)
-      ? selection.highlights.map((item) => ({ ...item }))
-      : [],
-  };
-}
-
 function publicApiError(error) {
   const code = error.code === "public_api_timeout"
     ? "request_timeout"
@@ -571,7 +492,9 @@ function publicApiError(error) {
 
 function params(values) {
   const query = new URLSearchParams();
-  for (const [key, value] of Object.entries(values)) query.set(key, String(value));
+  for (const [key, value] of Object.entries(values)) {
+    query.set(key, String(value));
+  }
   return query.toString();
 }
 
@@ -579,8 +502,14 @@ function statusMessage(status) {
   if (status === 401 || status === 403) {
     return "Your Telegram session is no longer valid. Reopen getBible.Life from the bot.";
   }
-  if (status === 409) return "That selection changed. Refresh it and try again.";
-  if (status === 429) return "Please wait a moment before trying again.";
-  if (status >= 500) return "getBible.Life is temporarily unavailable. Please retry.";
+  if (status === 409) {
+    return "That selection changed. Refresh it and try again.";
+  }
+  if (status === 429) {
+    return "Please wait a moment before trying again.";
+  }
+  if (status >= 500) {
+    return "getBible.Life is temporarily unavailable. Please retry.";
+  }
   return "getBible.Life could not complete that request.";
 }
