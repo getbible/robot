@@ -1,378 +1,135 @@
 # Testing
 
-Testing is divided into deterministic checks, security and packaging checks, local failure injection, and a final live Telegram smoke test. Only the final smoke test requires a bot token.
+The release gate verifies the Robot runtime and the browser data plane as one deployable system. Only a final live Telegram acceptance test requires a bot token.
 
-## Create the exact development environment
-
-Use a clean virtual environment and the checked-in hashed development lock:
+## Exact development environment
 
 ```bash
 python3 -m venv venv
 venv/bin/python -m pip install --upgrade pip
 venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
 venv/bin/python -m pip check
-```
-
-A clean environment matters. A globally installed package can hide a missing
-lock entry or incompatible dependency. Contributors also need Node.js
-22.17.1 with `npm` for the Mini App checks, matching the pinned CI environment.
-Install the exact browser-test dependency and Chromium build from the checked-in
-lock before the first run:
-
-```bash
 cd miniapp
 npm ci --ignore-scripts
 npx playwright install --with-deps chromium
 cd ..
 ```
 
-Node.js and Chromium are test-only dependencies; neither is required by the
-production service.
+Use the pinned Python, Node, npm, Playwright, and Chromium versions from the repository. Global packages may not substitute for locked dependencies.
 
-## Fast deterministic test cycle
-
-```bash
-venv/bin/python -m compileall -q bot.py config.py modules scripts tests
-venv/bin/coverage erase
-venv/bin/coverage run -m unittest discover -s tests -v
-venv/bin/coverage report -m
-venv/bin/ruff check .
-venv/bin/mypy
-(cd miniapp && npm run check)
-(cd miniapp && npm run test:browser)
-```
-
-The suite does not contact Telegram or the live GetBible API. It uses fakes and
-local fixtures for reproducibility. Coverage measures first-party Python source
-with branch coverage enabled and fails below the floor recorded in
-`pyproject.toml`; tests, generated/runtime data, virtual environments, and the
-separately tested Mini App are excluded.
-
-Run one module while developing:
+## Complete gate
 
 ```bash
-venv/bin/python -m unittest tests.test_service -v
-venv/bin/python -m unittest tests.test_catalog -v
-venv/bin/python -m unittest tests.test_interactions -v
-venv/bin/python -m unittest tests.test_commands -v
-venv/bin/python -m unittest tests.test_renderer -v
-venv/bin/python -m unittest tests.test_security -v
-venv/bin/python -m unittest tests.test_audit_runtime -v
-venv/bin/python -m unittest tests.test_audit -v
-venv/bin/python -m unittest tests.test_bot -v
-venv/bin/python -m unittest tests.test_interactive_features -v
-venv/bin/python -m unittest tests.test_logging -v
-venv/bin/python -m unittest tests.test_setup_script -v
-venv/bin/python -m unittest tests.test_utils -v
-venv/bin/python -m unittest tests.test_documentation -v
+bash scripts/run-checks.sh
 ```
 
-## Security and dependency checks
+This command is the local equivalent of the permanent CI quality job. It must pass before a branch is considered deployable.
 
-Run the same source-aware checks used by CI:
+## Required suites
 
-```bash
-librarian_path=$(
-  venv/bin/python - <<'PY'
-from pathlib import Path
+### Robot runtime
 
-import getbible
+- deterministic Python tests on Python 3.10, 3.11, and 3.12;
+- strict mypy and Ruff;
+- enforced branch coverage;
+- setup-manager and lifecycle checks;
+- production container build and smoke test;
+- Bandit/static security;
+- exact dependency audit;
+- secret scan;
+- systemd verification;
+- CodeQL.
 
-print(Path(getbible.__file__).resolve().parent)
-PY
-)
-venv/bin/bandit -q -r \
-  bot.py config.py modules scripts "$librarian_path" -ll
-venv/bin/python scripts/audit_runtime.py
-venv/bin/detect-secrets scan \
-  --all-files \
-  --exclude-files '(^|/)node_modules/' \
-  --exclude-files '(^|/)\.env\.template$' \
-  --exclude-files '(^|/)requirements(-dev)?\.txt$'
-```
+### Browser Scripture plane
 
-Librarian 1.2.1 is installed as a released, hashed package, so `scripts/audit_runtime.py` submits the complete lock to `pip-audit --strict` without filtering a dependency. The helper retains fail-closed validation for any future direct source declaration. A malformed source declaration, missing hash, audit error, or vulnerable dependency fails the check.
+Tests must prove:
 
-Review secret-scan output rather than blindly suppressing it. The `.env.template`
-contains a deliberate placeholder and is excluded; real tokens are never
-acceptable. `scripts/run-checks.sh` also excludes exact lock-installed
-`node_modules`, the configured in-repository virtual environment, and standard
-environment directory names so dependency bundles are not mistaken for
-first-party secrets. Package locks and all first-party source remain scanned.
+- translations, books, chapters, chapter text, and hashes use `api.getbible.net/v2` directly;
+- explicit and grouped references use `query.getbible.net/v2` directly;
+- no Telegram init data, Robot token, cookie, or credential reaches either public origin;
+- the CSP meta element and response header contain the same fixed allowlist;
+- redirects, oversized responses, malformed schemas, coordinate mismatches, and checksum mismatches are rejected;
+- exact-scope hashes are stored and revalidated at least weekly;
+- parent changes invalidate descendants;
+- atomic cache replacement preserves the last valid record on failure;
+- cold and warm IndexedDB paths produce the same normalized chapter model.
 
-Validate the manager:
+### Search boundary
 
-```bash
-bash -n setup.sh
-bash -n tests/setup_manager_lifecycle.sh
-bash setup.sh self-test
-bash tests/setup_manager_lifecycle.sh
-```
+Tests must prove:
 
-The lifecycle harness is hermetic: it redirects all managed paths into a
-temporary root and substitutes only host boundaries such as systemd, Telegram,
-and account management. It executes the real questionnaire and manager logic
-for two instances, including transactional cleanup, duplicate-token rejection,
-content-file permissions/editing, polling-to-webhook-to-polling switching,
-Mini App enable/disable and listener configuration,
-selectors, lifecycle commands, diagnostics, configuration restoration,
-upgrades, automatic failed-upgrade restoration, manual rollback, and isolated
-uninstall. It never contacts Telegram or changes the host.
+- full-text search and pagination alone use Robot/Librarian;
+- a Librarian failure does not affect reader navigation;
+- stale search and pagination responses cannot overwrite newer state;
+- search verses normalize to the same descriptor used by reader verses.
 
-The CI quality job creates an isolated `ci` service fixture and verifies `getbible-robot@ci.service`, then performs an isolated hashed install, Ruff, mypy, robot/Librarian Bandit scans, strict source-aware dependency auditing, secret scanning, and manager tests. CodeQL runs separately. A deployable commit must have both permanent gate statuses green.
+### Browser selection domain
 
-## What the regression suite must prove
+`BrowserSelectionStore` tests must cover:
 
-The tests cover at least these invariants:
+- add, remove, reorder, and clear;
+- bounded capacity;
+- defensive snapshots;
+- deterministic coordinate projection;
+- coordinate deduplication across reader and search transport IDs;
+- removal through either source token;
+- no Robot request during select, unselect, reorder, clear, copy, or rendering;
+- selected state surviving reader navigation within the active WebView session.
 
-- huge verse numbers and ranges are rejected before list materialization or repository access;
-- malformed references never silently become verse 1;
-- ordinary references do not trigger speculative translation lookups;
-- an empty `/bible` never substitutes a hidden default verse;
-- explicit `/bible <reference>` commands still post immediately;
-- bare `/bible` resumes only a bounded translation/book/chapter/verse location;
-- translation and its nearest valid reader location change atomically, including
-  an immediate-close boundary;
-- full reader chapters use one hash-consistent Main API request path and a
-  separately bounded response body rather than Librarian range chunking;
-- incomplete `/bible` and `/search` commands create short-lived, user-bound
-  Mini App launches without exposing chat/user identifiers or queries in URLs;
-- every protected Mini App data/action route requires fresh signed Telegram
-  `initData` plus the matching launch token;
-- expired, replayed, malformed, missing, and user-mismatched Mini App
-  authorization fails before repository access or posting;
-- `/search <words>` produces complete wrapping selectable verse cards in a
-  contained, bounded result set without posting automatically;
-- full corpus downloads and constructed search output enforce independent byte
-  ceilings;
-- slow searches use independent capacity and circuit state, leaving direct
-  references available;
-- default-translation prewarming builds the initial search index;
-- empty `/search` exposes Librarian 1.2 filters through a bounded dashboard;
-- every registered command alias and every implemented Mini App action appears
-  in an explicit test inventory;
-- every translation, testament, book, chapter, verse, navigation, back, reset,
-  cancel, filter, exclusion, proximity, selection, and confirmation server
-  transition has deterministic coverage;
-- the partial passage sheet preserves Scripture underneath, exposes API-localized
-  book names with unique compact labels, reaches chapter 150, restores focus,
-  and closes through Close, backdrop, Escape, or Telegram Back in a real
-  headless Chromium run;
-- the browser suite executes delayed book/chapter races, immediate translation
-  replacement, page-hide position persistence, LTR/RTL sheet placement,
-  retry-focus announcement, and expired-session focus isolation;
-- a complete 250-verse selectable response remains valid beside a populated
-  basket and never loses its earliest selection token to eviction;
-- retained selections have per-verse text, per-session payload/count, and
-  process-wide payload/count ceilings in addition to response, basket, search,
-  session, and TTL bounds; payload accounting includes references, terms,
-  tokens, metadata, and conservative object overhead, and the process ceiling
-  is tested against the supported container RSS headroom;
-- launch and authenticated sessions require the originating user and workflow
-  and expire under separate TTL/size bounds;
-- guided navigation rejects malformed catalogs, oversized responses, redirects, and book checksum mismatches;
-- selected search verses are compressed and revalidated before Librarian retrieval;
-- malformed explicit-translation commands do not trigger repository lookups;
-- request, response-message, queue, timeout, cache, and rate-limit state is bounded;
-- a timed-out worker retains its capacity permit until the actual thread exits;
-- Python 3.10 and newer enter the same typed timeout and queue-rejection paths;
-- repeated upstream failures open the circuit and one later probe can recover it;
-- cached mutable values cannot be corrupted by a caller;
-- Telegram HTML and URL segments are escaped and encoded;
-- Telegram limits are measured in UTF-16 code units, including emoji and other astral text;
-- user-facing errors never echo raw exceptions, paths, URLs, tokens, or hostile input;
-- deletion permission failures do not turn a successful lookup into a failed command;
-- consecutive verses use exactly one newline with no blank paragraph;
-- polling and webhook startup pass only the validated transport options;
-- a Telegram polling conflict stops once and records the non-restarting state;
-- Bot API command/profile synchronization and safe prewarm failure are covered;
-- the complete released Librarian lock is included in strict dependency auditing;
-- all required operator documents and relative links remain valid;
-- all public links use `https://getbible.life` and data access uses `https://api.getbible.net`.
-- missing optional translation-language labels cannot disable the `/bible` picker;
-- one malformed translation entry is ignored without weakening validation of entries
-  that become Telegram callback values;
-- instance, token, health-port, account, path, cache, and log isolation is preserved;
-- setup shell syntax and the manager's fail-closed validators pass;
-- the setup questionnaire installs two isolated instances in a temporary host fixture;
-- failed installation is cleaned transactionally without retaining an account, secret, cache, state, or application;
-- list, selection, start, stop, restart, status, runtime, logs, follow, doctor,
-  delivery, Mini App, content, configuration, upgrade, rollback, menu, and
-  uninstall manager paths execute;
-- setup-managed Caddy generation is idempotent, disabled instances retain
-  reserved ports, Caddy reload failure restores byte-identical environment and
-  proxy files, and uninstall removes only the selected route;
-- invalid configuration is restored, a failed upgrade restores the active application, and uninstalling one instance leaves the other intact;
-- metadata audit mode omits query/reference content;
-- content audit mode includes only the deliberately permitted normalized fields;
-- JSONL events include the selected instance and controlled audit object.
+### Real Chromium acceptance
 
-When a defect is found, first add a deterministic regression test that fails for the defect and then implement the fix. Never weaken an assertion or disable a security job merely to make CI green.
+The pinned Chromium test must exercise the production HTML, CSP, JavaScript modules, and browser APIs. It must verify:
 
-## Local failure-injection checks
+1. the reader loads from Main API;
+2. chapter navigation works;
+3. selecting a verse immediately sets `aria-pressed=true` and selected styling;
+4. the verse number and body retain the selected visual state;
+5. navigating away and back preserves highlighting;
+6. the same verse from Search and Reader is one selection;
+7. a second click unselects it;
+8. no Robot basket or Scripture request occurs before Post;
+9. failed Post preserves selection;
+10. successful Post clears selection.
 
-Use a dedicated test configuration, not production.
+### Post authority
 
-### Unreachable repository
+Backend tests must prove:
 
-Set a loopback endpoint that is not listening:
+- the submitted selection is bounded and ordered;
+- malformed, duplicate, or unavailable coordinates are rejected;
+- browser text, names, references, and UI IDs are not authoritative;
+- authoritative Scripture is obtained before rendering;
+- idempotency binds to the exact ordered selection;
+- ambiguous external outcomes remain locked;
+- output is escaped and split by Telegram UTF-16 limits;
+- known partial sends are rolled back best-effort.
 
-```dotenv
-GETBIBLE_API_BASE_URL="http://127.0.0.1:65534"
-GETBIBLE_CONNECT_TIMEOUT="0.2"
-GETBIBLE_READ_TIMEOUT="0.5"
-GETBIBLE_REQUEST_RETRIES="0"
-LOOKUP_TIMEOUT="2"
-CIRCUIT_FAILURE_THRESHOLD="2"
-```
+## Failure injection
 
-Expected behavior:
+Inject and verify independent failures for:
 
-- commands return a generic temporary-unavailable message;
-- no internal URL or exception appears in Telegram;
-- `/metrics` records repository failures;
-- after the configured threshold, `/readyz` returns 503 and the circuit metric is open;
-- after recovery time and restoration of the API URL, one probe is allowed.
+- Main API timeout and malformed content;
+- Query API timeout and unresolved references;
+- IndexedDB failure with in-memory fallback;
+- cache hash changes during download;
+- Librarian search timeout;
+- Robot session expiry;
+- final Telegram send failure.
 
-### Worker saturation
-
-With a controlled slow local repository, set:
-
-```dotenv
-MAX_CONCURRENT_LOOKUPS="1"
-LOOKUP_TIMEOUT="1"
-LOOKUP_QUEUE_TIMEOUT="0.2"
-```
-
-Expected behavior: one real worker remains occupied until it exits, later requests fail quickly as busy, and executor work does not accumulate without bound.
-
-### Telegram deletion permissions
-
-In a group where the bot can delete messages, exercise all three completion
-paths:
-
-1. `/bible John 3:16`;
-2. empty `/bible`, read and select verses in the compact reader, then press
-   **Post Scripture**;
-3. `/search grace`, select results in the Mini App, then press **Post selected**.
-
-For `/bible` and `/search` in a group, confirm all browsing, filtering, paging,
-and selection remains inside the initiating user's Mini App. No ordinary group
-message may be sent before the final confirmation action. Only final Scripture
-must remain. Also verify that **Cancel** closes the workflow without posting.
-
-Repeat in a group where the bot lacks deletion permission. Scripture must still
-be delivered; the workflow must not raise a user-facing failure merely because
-cleanup was refused. Logs may record the non-fatal permission failure.
-
-`DELETE_COMMAND_MESSAGES=true` additionally covers standalone handled commands
-such as `/start` and `/help`; it does not disable the mandatory successful
-`/bible` and `/search` workflow cleanup.
+Each failure must remain inside its ownership boundary. Public API errors must not invalidate authentication; search errors must not disable reading; Post errors must not erase local selections.
 
 ## Live Telegram smoke test
 
-Use a separate test bot token and a private test chat. Stop any other polling process that uses the same token.
+After all deterministic gates pass, deploy one validated commit and verify in Telegram:
 
-1. Copy `.env.template` to `.env`.
-2. Set the test token and an unused loopback `HEALTH_PORT`.
-3. For Mini App tests, set a dedicated HTTPS test URL, enable
-   `MINI_APP_ENABLED`, and route it to an unused loopback `MINI_APP_PORT`.
-4. Keep the production API/web boundaries:
+- bare `/bible` opens the reader;
+- direct reference launch resolves correctly;
+- chapter selection and navigation work;
+- selected styling and unselect behavior work;
+- Search and Reader selections interoperate;
+- Copy preserves selection;
+- Post delivers authoritative Scripture to the originating chat/topic;
+- successful Post clears the browser selection;
+- private command and launcher cleanup still behaves as documented.
 
-   ```text
-   GETBIBLE_API_BASE_URL=https://api.getbible.net
-   GETBIBLE_WEB_BASE_URL=https://getbible.life
-   ```
-
-5. Start the bot:
-
-   ```bash
-   venv/bin/python bot.py
-   ```
-
-6. Verify health and readiness:
-
-   ```bash
-   curl --fail http://127.0.0.1:8081/healthz
-   curl --fail http://127.0.0.1:8081/readyz
-   curl --fail http://127.0.0.1:8081/metrics
-   ```
-
-7. Exercise Telegram:
-
-   ```text
-   /start
-   /help
-   /bible
-   /bible John 3:16
-   /bible John 3:16-19;1 John 3:10-17
-   /bible Gen 1:1 aov
-   /bible John 3:16 kjv
-   /bible John 1:1-999999999
-   /bible John 1:16!
-   /search grace
-   /search
-   /unknown
-   ```
-
-8. In a group, open empty `/bible`; choose John 3:16 as one verse, add 17–18 as
-   a range, add a separate verse or another chapter, remove one basket entry,
-   review, and confirm that browsing stays in the Mini App and only **Post
-   selection** creates an ordinary message in the originating topic.
-9. Confirm `/search grace` opens contained Mini App results with every complete
-   verse wrapping inside its selectable card, pages without chat messages, and
-   posts nothing until **Post selected** is pressed.
-10. In empty `/search`, change word, match, scope, book, exclusion, and
-    proximity controls; run a search; switch between **All**, **Old**, **New**,
-    and **Other**; page, select, deselect, and post multiple results.
-11. Switch Telegram between light and dark themes, increase text size when the
-    client supports it, and confirm cards, filters, focus states, selected
-    states, safe areas, and the final action remain readable and usable.
-12. Open the public Mini App URL in an ordinary browser and call protected API
-    routes without valid Telegram authorization; no Scripture data, selection,
-    launch context, or posting action may be available.
-13. Close and reopen a launch with fresh signed Telegram `initData` while its
-    server session remains active; it must recover only for the same user,
-    chat, and chat instance without extending the absolute lifetime. Reuse a
-    genuinely expired launch and mismatched user authorization; both must fail
-    closed before lookup or posting and provide explicit close-and-relaunch
-    guidance rather than a reload loop.
-14. Choose a non-KJV translation, finish or cancel the workflow, restart the
-    bot, and confirm the same Telegram user receives that translation by
-    default in both `/bible` and `/search`; a different user must still receive
-    the application default.
-15. Search a Mandarin translation with an unspaced Han query such as `爱` and
-    confirm substring mode is selected automatically, complete matching verses
-    remain readable in their cards, and selection/posting works.
-16. Navigate and select rapidly and confirm there is no self-inflicted “Too
-    many requests” response, duplicate post, or state race.
-17. In a test group, verify `/bible@TestBotName John 3:16`, empty
-    `/bible@TestBotName`, `/search@TestBotName grace`, ownership isolation
-    between two users, and permission-safe command deletion. Complete one Mini
-    App post and confirm both the initiating "Only visible to GetBibleBot"
-    command and the bot's "Only visible to you" launch response are removed.
-    Submit a search with the phone keyboard's Search key and confirm the
-    keyboard closes before results render.
-18. Open a returned Scripture link and confirm its host is exactly
-    `getbible.life`.
-19. Leave the Mini App idle beyond `MINI_APP_SESSION_TTL_SECONDS` and confirm it
-    expires safely without losing the user's durable translation preference.
-20. Send a sustained rejected command/API burst and confirm bounded rejection
-    behavior, with no crash or memory growth.
-21. Stop with `Ctrl+C` and confirm the Mini App and health listeners, worker
-    pool, Librarian sessions, and preference database close cleanly.
-
-Do not paste tokens or private chat content into issues, CI logs, screenshots, or test artifacts. Use metadata audit mode for normal production smoke testing. If content mode is being tested, use synthetic references/search terms and remove the test log according to policy.
-
-## Production pre-rollout test
-
-After installation but before announcing availability:
-
-```bash
-sudo getbible-robot status production
-sudo getbible-robot doctor production
-sudo getbible-robot runtime production
-sudo getbible-robot logs production 100
-```
-
-Then repeat the small private Telegram smoke set using the production bot. If multiple instances share the host, confirm each selector resolves the intended service and that start/stop, cache, port, log, metrics, and token behavior do not cross instance boundaries. Record the deployed robot commit and lockfile checksums. Complete every item in [the release gate](RELEASE_GATE.md).
+Record the deployed commit SHA and CI/CodeQL run links with the release evidence.
