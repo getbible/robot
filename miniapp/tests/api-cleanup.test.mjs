@@ -165,11 +165,7 @@ test("browser platform callables retain the global receiver", async () => {
   assert.equal(requests.length, 2);
 });
 
-test("delayed basket transport remains data-only after local invalidation", async () => {
-  let releaseBasket;
-  const basketGate = new Promise((resolve) => {
-    releaseBasket = resolve;
-  });
+test("browser selection survives session invalidation without transport", async () => {
   const requests = [];
   const api = createApi("signed-init-data", {
     baseUrl: "https://robot.example/getbible/",
@@ -182,42 +178,35 @@ test("delayed basket transport remains data-only after local invalidation", asyn
       if (path.endsWith("/cleanup")) {
         return new Response(null, { status: 204 });
       }
-      await basketGate;
-      return jsonResponse({
-        items: [{
-          selection_id: "SelectionToken123",
-          translation: "kjv",
-          reference: "John 3:16",
-          book_number: 43,
-          book_name: "John",
-          chapter: 3,
-          verse: 16,
-          text: "For God so loved the world.",
-        }],
-        count: 1,
-        maximum: 100,
-      });
+      return jsonResponse({ error: { code: "unexpected_request" } }, 500);
     },
   });
   await api.createSession("OwnerBoundLaunch1");
+  api.registerSelections([{
+    selection_id: "gbd_kjv_043_0003_0016",
+    translation: "kjv",
+    reference: "John 3:16",
+    book_number: 43,
+    book_name: "John",
+    chapter: 3,
+    verse: 16,
+    text: "For God so loved the world.",
+    terms: [],
+    highlights: [],
+  }]);
 
-  const delayed = api.addBasketItem("SelectionToken123");
+  const selected = await api.addBasketItem("gbd_kjv_043_0003_0016");
   api.clearSession();
-  releaseBasket();
 
-  const payload = await delayed;
-  assert.equal(payload.count, 1);
-  await assert.rejects(
-    api.basket(),
-    (error) => error?.code === "session_not_ready",
-  );
+  assert.equal(selected.count, 1);
+  assert.equal((await api.basket()).count, 1);
   assert.equal(
-    requests.filter((request) => request.path.endsWith("/basket/items")).length,
-    1,
+    requests.some((request) => /\/basket|\/scripture/.test(request.path)),
+    false,
   );
 });
 
-test("explicit revocation calls DELETE session and clears local auth", async () => {
+test("explicit revocation calls DELETE session and clears Robot auth", async () => {
   const requests = [];
   const api = createApi("signed-init-data", {
     baseUrl: "https://robot.example/getbible/",
@@ -240,12 +229,12 @@ test("explicit revocation calls DELETE session and clears local auth", async () 
     ),
   );
   await assert.rejects(
-    api.basket(),
+    api.search("grace", { translation: "kjv" }),
     (error) => error?.code === "session_not_ready",
   );
 });
 
-test("failed explicit revocation still clears local auth", async () => {
+test("failed explicit revocation still clears Robot auth", async () => {
   const api = createApi("signed-init-data", {
     baseUrl: "https://robot.example/getbible/",
     fetchImplementation: async (url, options) => {
@@ -266,7 +255,7 @@ test("failed explicit revocation still clears local auth", async () => {
     (error) => error?.code === "network_error",
   );
   await assert.rejects(
-    api.basket(),
+    api.search("grace", { translation: "kjv" }),
     (error) => error?.code === "session_not_ready",
   );
 });
