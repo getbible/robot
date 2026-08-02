@@ -10,6 +10,8 @@ import {
 const API_ROOT = "api/v1/";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+const DIRECT_SELECTION_COORDINATE_PATTERN =
+  /^gbd_(.+)_([0-9]{3})_([0-9]{4})_([0-9]{4})$/;
 
 export class ApiError extends Error {
   constructor(message, {
@@ -193,13 +195,16 @@ export class MiniAppApi {
     return this.#request("basket");
   }
 
-  addBasketItem(selection) {
-    const body = typeof selection === "string"
-      ? { selection_id: selection }
-      : { selection: directSelectionPayload(selection) };
+  async addBasketItem(selection) {
+    const directSelectionId = directSelectionIdentity(selection);
+    const selectionId = directSelectionId
+      ? await this.#registerDirectSelection(directSelectionId)
+      : typeof selection === "string"
+        ? selection
+        : directSelectionPayload(selection).selection_id;
     return this.#request("basket/items", {
       method: "POST",
-      body,
+      body: { selection_id: selectionId },
     });
   }
 
@@ -239,6 +244,38 @@ export class MiniAppApi {
       keepalive: true,
       timeoutMs: 5_000,
     }).catch(() => undefined);
+  }
+
+  async #registerDirectSelection(selectionId) {
+    const coordinates = directSelectionCoordinates(selectionId);
+    if (!coordinates) {
+      throw new TypeError("Direct Scripture selection identity is invalid.");
+    }
+    const payload = await this.#request("scripture", {
+      method: "POST",
+      body: {
+        translation: coordinates.translation,
+        book: coordinates.book,
+        chapter: coordinates.chapter,
+        verse: coordinates.verse,
+      },
+    });
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    const authoritative = items.find((item) =>
+      item?.translation === coordinates.translation &&
+      item?.book_number === coordinates.book &&
+      item?.chapter === coordinates.chapter &&
+      item?.verse === coordinates.verse &&
+      typeof item?.selection_id === "string" &&
+      SESSION_TOKEN_PATTERN.test(item.selection_id)
+    );
+    if (!authoritative) {
+      throw new ApiError("The selected Scripture could not be verified.", {
+        code: "invalid_selection",
+        retryable: true,
+      });
+    }
+    return authoritative.selection_id;
   }
 
   async #publicRequest(operation) {
@@ -337,7 +374,7 @@ export class MiniAppApi {
           ? payload.message
           : typeof error?.message === "string"
             ? error.message
-          : statusMessage(response.status),
+            : statusMessage(response.status),
         {
           code:
             typeof error === "string"
@@ -364,6 +401,42 @@ export class MiniAppApi {
     }
     return payload;
   }
+}
+
+function directSelectionIdentity(selection) {
+  if (typeof selection === "string") {
+    return isDirectSelectionId(selection) ? selection : null;
+  }
+  if (!selection || typeof selection !== "object" || Array.isArray(selection)) {
+    return null;
+  }
+  const selectionId = selection.selection_id;
+  return isDirectSelectionId(selectionId) &&
+    selectionIdentity(selection) === selectionId
+    ? selectionId
+    : null;
+}
+
+function directSelectionCoordinates(selectionId) {
+  if (!isDirectSelectionId(selectionId)) {
+    return null;
+  }
+  const match = DIRECT_SELECTION_COORDINATE_PATTERN.exec(selectionId);
+  if (!match) {
+    return null;
+  }
+  const book = Number(match[2]);
+  const chapter = Number(match[3]);
+  const verse = Number(match[4]);
+  if (![book, chapter, verse].every(Number.isSafeInteger)) {
+    return null;
+  }
+  return {
+    translation: match[1],
+    book,
+    chapter,
+    verse,
+  };
 }
 
 function directSelectionPayload(selection) {
