@@ -1,317 +1,239 @@
 # Architecture
 
-## Request path
+## System doctrine
 
-```text
-Telegram update → command → direct-reference fast path or signed Mini App launch
-Mini App HTTPS → verified initData + user-bound launch token
-  → command/API rate limit and owner/session validation
-  → strict reference, search, and selection validation
-  → bounded ScriptureService capacity wait
-  → upstream circuit breaker
-  → fixed-size worker pool
-  → hardened GetBible Librarian client
-  → https://api.getbible.net
-  → validated result shape
-  → escaped HTML and percent-encoded getbible.life link
-  → UTF-16-aware, message-count-bounded Telegram chunks
+GetBible Robot has two deliberately separate data planes:
+
+1. **Browser Scripture plane** — public, read-only GetBible API V2 data and temporary UI state.
+2. **Robot control plane** — Telegram authentication, preferences, Librarian search, and final Telegram delivery.
+
+Only full-text search and search pagination use Librarian. Translation discovery, books, chapters, chapter text, hashes, and explicit reference resolution are browser-to-GetBible API operations.
+
+```mermaid
+flowchart LR
+    T[Telegram WebView]
+    A[api.getbible.net/v2]
+    Q[query.getbible.net/v2]
+    R[Robot control plane]
+    L[Librarian]
+    S[BrowserSelectionStore]
+    G[Telegram]
+
+    T -->|catalogs, chapters, hashes| A
+    T -->|explicit/grouped references| Q
+    T -->|signed session, preferences| R
+    T -->|search only| R
+    R -->|search/pagination| L
+    A -->|normalized verses| S
+    L -->|normalized verses| S
+    S -->|final ordered selection at Post| R
+    R -->|authoritative bounded output| G
 ```
 
-Handlers never call synchronous repository code on the event-loop thread.
-`ScriptureService` owns the Librarian client, separate fixed reference/search
-executors and semaphores, timeout behavior, circuit state, and aggregate
-metrics.
+No reader navigation, catalog load, chapter load, select, unselect, reorder, clear, or copy operation may call Robot.
 
-## Module ownership and dependency direction
+## Module ownership
 
-The runtime is one process, but its modules have explicit ownership layers.
-Dependencies may point inward or remain within one cohesive adapter layer; they
-must never point outward. The executable checks in `tests/test_architecture.py`
-also reject runtime import cycles and require every new runtime module to be
-assigned deliberately.
+### Browser
 
-| Layer | Ownership | Current modules |
-|---:|---|---|
-| 0 | Configuration, external adapters, validation, persistence, and leaf utilities | `config`, `container`, `audit`, `cache_maintenance`, `catalog`, `ephemeral`, `errors`, `miniapp_auth`, `preferences`, `runtime_notify`, `utils` |
-| 1 | Small domain models and policies | `interactions`, `rate_limit`, `renderer` |
-| 2 | Scripture use cases and bounded in-process Mini App state | `service`, `miniapp_sessions` |
-| 3 | Application coordination around health, cleanup, and posting | `health`, `miniapp_cleanup`, `posting` |
-| 4 | Framework-neutral Mini App HTTP use cases | `miniapp_api` |
-| 5 | Typed delivery dependencies plus Telegram and Tornado adapters | `dependencies`, `commands`, `miniapp_tornado` |
-| 6 | Composition root and process entry point | `bot` |
+| Module | Responsibility |
+| --- | --- |
+| `miniapp/lib/getbible-transport.js` | Fixed-origin, credential-free public HTTP transport with bounds and timeout policy |
+| `miniapp/lib/getbible-api.js` | Main API and Query API use cases, hash-aware retrieval, and public response orchestration |
+| `miniapp/lib/getbible-model.js` | GetBible response normalization and deterministic coordinate identities |
+| `miniapp/lib/public-cache.js` | IndexedDB/memory cache, LRU bounds, atomic replacement, and invalidation |
+| `miniapp/lib/selection-store.js` | Browser-owned ordered selection domain |
+| `miniapp/lib/api.js` | Robot session/search/preferences/Post transport facade and public API composition |
+| `miniapp/app.js` | UI orchestration and rendering only |
 
-`bot.py` is the only composition root. Lower layers must not obtain handlers,
-servers, or process wiring from it. Delivery adapters translate framework
-objects into application calls; they do not become a second source of
-Scripture, authentication, preference, or session truth.
+`BrowserSelectionStore` is the sole owner of temporary selected state. It enforces bounded capacity, coordinate deduplication, source-independent removal, explicit ordering, defensive snapshots, and final coordinate projection.
 
-The layer check deliberately enforces dependency direction, not file size or a
-particular preference for functions versus classes. Cohesive pure functions
-remain appropriate in rendering and validation code.
+`MiniAppApi` delegates selection rules to the store. It does not implement selection identity, ordering, or display-state invariants itself.
 
-## State ownership
+### Robot
 
-| State | Sole owner | Consumers |
-|---|---|---|
-| Librarian clients, worker capacity, and circuit state | `ScriptureService` | Telegram commands, Mini App API, health metrics |
-| Telegram callback fallback sessions | `InteractionStore` | Telegram command adapter |
-| Mini App launches, authenticated sessions, selections, and post attempts | `MiniAppLaunchStore` / `MiniAppSessionStore` | Mini App API and Tornado launch adapter |
-| User translation, search defaults, and reader position | `UserPreferenceStore` | Telegram and Mini App use cases |
-| Command/client rate budgets and abuse windows | `InboundRateLimiter` | Telegram and Mini App ingress |
-| Pending Telegram-row cleanup | `MiniAppLaunchCleanup` | Tornado readiness and post lifecycle |
-| Health readiness and aggregate exposition | `HealthServer` | Process lifecycle and probes |
-| Process readiness/watchdog notification | `RuntimeNotifier` | Composition root startup/shutdown |
+| Layer | Responsibility |
+| --- | --- |
+| Configuration and adapters | Validated settings, Telegram, Tornado, persistence, audit, and public ingress |
+| Domain policies | Search options, rendering, rate limiting, preference models, launch/session ownership |
+| Application services | Bounded Librarian search, health, cleanup, posting, and idempotency |
+| Delivery adapters | Telegram commands and Mini App HTTP translation |
+| Composition root | `bot.py` constructs and wires all dependencies |
 
-State changes must go through the owning object. In particular, browser data is
-never authoritative Scripture, delivery adapters must not mutate store
-internals, and process-global framework registries are wiring rather than a
-domain-state API.
+Dependencies point inward. Delivery adapters do not become a second Scripture repository or mutate store internals.
 
-## Trust boundaries
+## Shared verse contract
 
-Telegram command arguments are untrusted. The robot reconstructs them only from `context.args`, applies a length limit, splits a bounded number of references, and fully parses every reference before repository access.
-
-Repository JSON is also untrusted. Librarian caps response bytes and validates JSON and checksums. The renderer validates the minimum chapter and verse shape again before formatting.
-
-The guided reference picker additionally reads the v2 translation and books catalogs through a bounded navigation client. Catalog responses are size-limited and structurally validated. A selected full-book navigation response must match the SHA-1 published by its books index before chapter or verse controls are built.
-
-Telegram output is generated only by `modules.renderer`:
-
-- repository text is HTML escaped;
-- URL path components are percent encoded;
-- the configured web base is validated at startup;
-- message length is measured in Telegram UTF-16 code units;
-- blocks are split without cutting generated HTML entities;
-- one command may produce only a configured number of messages.
-
-## URL separation
+Reader chapters and Librarian search results normalize to the same browser descriptor:
 
 ```text
-Machine-readable data: https://api.getbible.net
-Human-facing links:    https://getbible.life
+selection_id
+translation
+reference
+book_number
+book_name
+chapter
+verse
+text
+terms
+highlights
 ```
 
-`GETBIBLE_API_BASE_URL` is passed to Librarian and the bounded navigation catalog client as their repository source. `GETBIBLE_WEB_BASE_URL` is passed only to the Scripture renderer. These roles must not be conflated.
+The canonical identity is:
 
-## Translation resolution
+```text
+translation + book_number + chapter + verse
+```
 
-An ordinary reference is parsed locally with the Telegram user's saved
-translation first, falling back to the configured application default.
-Therefore `John 3:16` never causes a speculative network lookup for a
-translation named `3:16`.
+A deterministic reader ID and an opaque Librarian result token may identify the same coordinate. The selection store treats them as one verse. This guarantees that:
 
-Only when the complete input is not a valid reference does the robot consider the final whitespace-delimited token as a translation abbreviation. The candidate must match the complete abbreviation grammar. The preceding reference is validated locally before the candidate is repository-checked. Explicit `kjv` remains supported.
+- selecting in Search highlights the same verse in Reader;
+- selecting in Reader highlights the same verse in Search;
+- a second click from either source unselects it;
+- one verse cannot appear twice under different transport tokens.
 
-An empty `/bible` does not enter the reference parser and never falls back to a
-configured verse. It creates a short-lived, owner-bound launch and resumes the
-Mini App Bible reader from four stored identifiers: translation, book, chapter,
-and verse. Complete chapters come from the Main API through a bounded,
-hash-verified process cache. Both the stability of the published hash and the
-digest of the downloaded chapter bytes are verified before content is cached.
-Search and chapter retrieval are read-only; explicit serialized preference
-updates are the sole writer of the global translation and reader position. The
-bounds-checked preference path resolves a translated book/chapter/verse and
-commits the new translation and nearest available reader location atomically.
-Translation-specific API book names remain authoritative; the browser derives
-only collision-free compact presentation labels and never maintains its own
-translated book-name table. The partial-width passage sheet keeps its
-book/chapter draft isolated from the active reader until a chapter is chosen.
-The basket can combine separate verses and ranges
-across chapters/books and compacts overlapping or adjacent intervals before
-final validation. Only the final Librarian-resolved Scripture is posted into
-the originating chat and forum topic.
+Display text and metadata are not posting authority.
 
-## Search and confirmation flow
+## Browser Scripture plane
 
-`/search <words>` launches the Mini App directly into results constructed with
-Librarian's defaults and the user's saved translation. An empty `/search`
-launches the full search and filter screen. For continuous-writing scripts,
-Robot uses Librarian 1.2.1's shared language policy to adapt default whole-word
-matching to substring matching. This covers Han, Japanese kana, Thai, Lao,
-Khmer, and Myanmar text without misclassifying whitespace-delimited Hangul,
-Arabic, Hebrew, Devanagari, Greek, Cyrillic, or Latin searches.
+### Main API
 
-Librarian returns exact totals, grouped verse data, and ordered match metadata.
-The server validates that every match points to a verse in the grouped results,
-retains only the configured bounded result set, and returns complete wrapping
-verse cards. A result can be selected directly or opened at its exact verse in
-the Bible reader. Search filters, paging, selection, reader context, and review
-remain inside the Mini App; they do not produce chat messages. No ordinary
-message is sent until the owner presses **Post selected**.
+`https://api.getbible.net/v2/` supplies:
 
-Selected match metadata is converted back into compressed canonical references.
-The final post performs a normal Librarian `select()` call and passes through the
-existing renderer. Displayed result text is therefore never the authoritative
-post payload.
+- translation catalog and copyright metadata;
+- translation book catalog;
+- chapter maps;
+- complete chapter text;
+- translation, book, and chapter `.sha` values.
 
-## Interactive session model
+### Query API
 
-The bot issues an opaque, high-entropy launch token rather than placing
-references, queries, chat identifiers, or verse text in the URL. The Mini App
-server accepts it only together with fresh Telegram-signed `initData`, verifies
-the signature using the bot token, validates the authentication time, and binds
-the session to the same Telegram user and originating workflow. Launch tokens
-and authenticated sessions have separate short expirations and bounded stores.
+`https://query.getbible.net/v2/` resolves explicit and grouped references. It is used for `/bible <reference>` Mini App entry and grouped-reference work that does not require full-text corpus search.
 
-Pagination, filter toggles, and local checkmarks do not create Telegram
-messages. API mutations for one session are serialized to prevent rapid taps
-from racing state transitions. Commands still consume normal per-user and
-per-chat inbound budgets. Catalog reads and final posts use the reference pool.
-Searches use their own smaller pool and circuit so CPU-heavy corpus work cannot
-consume every direct-reference permit.
+### Transport security
 
-The public HTML shell is not an authentication boundary. Protected data and
-action routes fail closed unless both authorization layers validate. Browser
-verse text and selections are treated as untrusted identifiers; final posting
-retrieves and renders authoritative Scripture server-side.
+Public requests:
 
-## Concurrency and timeout model
+- use fixed HTTPS origins only;
+- omit credentials, cookies, Telegram init data, and Robot tokens;
+- reject redirects;
+- use `no-referrer`;
+- enforce request and response bounds;
+- validate schema and requested coordinates.
 
-Telegram updates may run concurrently. Commands and session-owned text replies
-consume user/chat rate-limit tokens; callbacks are serialized by their
-owner-scoped session. Direct Scripture/catalog work and searches additionally
-require permits from their separate bounded pools.
+The HTML CSP and Tornado response CSP must contain the same two public origins.
 
-Each synchronous Librarian call runs in a fixed `ThreadPoolExecutor`. The
-asynchronous caller has an overall timeout, but Python cannot safely kill a
-running thread. Consequently:
+## Cache integrity
 
-1. a timed-out caller receives a safe temporary-unavailable response;
-2. the underlying thread is allowed to exit normally;
-3. its semaphore permit is released only when the real concurrent future completes;
-4. later requests reach the bounded queue timeout rather than entering the executor's internal unbounded queue.
+Identity-free public data is cached under the `public:v2:` namespace. Telegram data, sessions, preferences, search results, selections, and posting state are never persisted there.
 
-This distinction prevents repeated upstream stalls from turning cancellation
-into unlimited queued work. Reference and search failures also maintain
-separate circuit state, so an expensive or invalid search outage does not make
-ordinary `/bible` retrieval unavailable.
+The cache enforces:
 
-## Circuit breaker
+- bounded record count;
+- bounded total estimated bytes;
+- bounded per-record bytes;
+- least-recently-used eviction;
+- in-flight request coalescing;
+- exact-scope hash metadata;
+- at-least-weekly revalidation;
+- descendant invalidation;
+- atomic replacement.
 
-Repository failures and lookup timeouts increment circuit failures. Caller validation, output limits, and translation-not-found results do not represent an upstream outage.
+A chapter is accepted only when the pre-read and post-read hashes match, SHA-1 over the exact response bytes matches that hash, and bounded schema/coordinate validation succeeds. A failed refresh never overwrites a valid record.
 
-After the threshold:
+## Robot control plane
 
-- the circuit opens and calls fail quickly;
-- readiness returns false;
-- after the recovery interval, one half-open probe is allowed;
-- success closes and resets the circuit;
-- failure reopens it.
+Robot owns:
 
-## Caches and rate-limit state
+- Telegram-signed `initData` verification;
+- owner-bound launch exchange;
+- short-lived opaque sessions;
+- reader preferences;
+- full-text search and pagination through Librarian;
+- final Post authorization, idempotency, authoritative resolution, rendering, and Telegram delivery;
+- cleanup, audit, health, and operational limits.
 
-Librarian reference, chapter, book, translation, and search caches are bounded.
-The negative translation cache has a TTL and size limit. Navigation-catalog
-caches, interactive sessions, user/chat/client token buckets, abuse-window and
-temporary-block state, rejection-notification cooldown state, and the durable
-per-user translation table are all bounded.
+A public API error never invalidates a Telegram session. A Librarian failure affects search only. Browser selection remains usable while Robot is temporarily unavailable.
 
-Mini App retained selections have nested hard bounds: 4 KiB of display text per
-verse, 8 MiB of conservatively accounted selection payload per session, and
-32 MiB across the in-process session store, plus independent selection-object
-counts. Accounting includes reference/translation/book strings, highlighting
-terms, tokens, and object overhead. Preference writes are serialized by
-Telegram user rather than browser session, and canonical translation/location
-PUTs are idempotent under transport retry. The process ceiling deliberately
-leaves headroom between the documented 148 MiB fully warmed workload and the
-supported container profile's 210 MiB child-RSS restart guard.
-Sessions with an active Telegram post transaction are pinned until the
-idempotency outcome is recorded; bounded admission fails retryably rather than
-evicting an indeterminate external side effect.
-Within a session, oldest retained search snapshots are discarded before any
-fresh reader selection ID, keeping every accepted visible chapter selectable.
+## Selection lifecycle
 
-Arbitrary reference strings, translation names, user IDs, chat IDs, and client
-addresses therefore cannot create permanent process growth without limit.
+1. A chapter or search result registers normalized verses with `BrowserSelectionStore`.
+2. Select/unselect/reorder/clear update browser memory synchronously.
+3. UI styling, `aria-pressed`, range boundaries, counters, and clipboard output derive from a defensive store snapshot.
+4. No Robot mutation occurs during these operations.
+5. Post captures one immutable ordered snapshot.
+6. Robot validates and authoritatively resolves the final selection before Telegram delivery.
+7. Failure preserves the browser snapshot; success clears it.
 
-The small-host profile retains one parsed translation, one search corpus, 256
-chapters, 1000 parsed references, 200 Telegram interactions, 200 Mini App
-sessions, and no more than two Mini App sessions per Telegram user. Stale
-unreferenced corpus objects are pruned periodically; after a one-day race-safety
-grace, the oldest complete cache entries are also evicted until the disk budget
-is met. The optional JSONL file truncates in place at its byte ceiling;
-container deployments write only to stdout.
+The active WebView selection is intentionally ephemeral and identity-free outside that session. Reader content remains durable through the public cache, not through Robot session memory.
 
-## Startup and shutdown
+## Search
 
-Startup order:
+Search is the only Mini App content operation backed by Librarian. It uses a separate bounded executor, semaphore, timeout, and circuit state from reference delivery so expensive corpus work cannot consume every direct-reference permit.
 
-1. validate all configuration;
-2. construct bounded service objects;
-3. initialize Telegram and start liveness with readiness still false;
-4. when enabled, start the Mini App on its distinct listener and
-   synchronize bot-owned launch controls;
-5. synchronize the Telegram command menu and profile metadata;
-6. optionally load/index the default search translation;
-7. mark readiness true and start the runtime watchdog;
-8. start exactly one configured transport:
-   - polling, which removes any registered webhook; or
-   - an authenticated webhook on loopback behind public HTTPS.
+Search responses are bounded and normalized before reaching the browser. Search tokens are not selection identity and are not trusted for final text.
 
-Shutdown order:
+## Posting and trust
 
-1. stop accepting Mini App launches and requests;
-2. stop the Mini App and health listeners;
-3. mark the Scripture service closed;
-4. stop accepting work and wait for real worker threads;
-5. close Librarian HTTP sessions;
-6. close the per-instance preference database;
-7. complete Telegram shutdown.
+The browser is untrusted for final Telegram output. It may choose coordinates and ordering, but it cannot choose authoritative Scripture text.
 
-The Bot API does not offer a WebSocket update transport. Polling and webhooks
-are mutually exclusive. A polling `Conflict` stops the instance with a
-non-restarting exit status so duplicate processes do not continue fighting.
+Final Post must:
 
-The supplied `systemd` template gives every named instance its own locked
-`gb-<instance>` identity, root-owned application and secret configuration,
-writable cache/state/JSONL paths, restart behavior, filesystem protection, no
-capabilities, limited address families, task/file limits, event-loop watchdog,
-`MemoryHigh`, `MemoryMax`, a swap ceiling, and a restart-storm limit.
-Instances do not share a token, process, cache, preference database, health
-port, Mini App port/session state, log file, interaction state, or virtual
-environment.
+1. validate the bounded ordered selection;
+2. reject malformed, duplicate, or unavailable coordinates;
+3. reconstruct canonical references from authoritative data;
+4. obtain authoritative Scripture without trusting browser text;
+5. bind idempotency to the final ordered selection;
+6. render escaped, UTF-16-aware, message-count-bounded Telegram output;
+7. record the external outcome before clearing selection state.
 
-The Docker image contains none of the host-native systemd/Caddy/TLS stack. Its
-PID-1 supervisor reads one environment in the default single-bot mode or
-multiple instance files in explicit multi-bot mode, launches one child process
-per bot, checks liveness and RSS, applies restart backoff/circuit breaking, and
-forwards termination gracefully. A small in-container setup utility controls
-the supervisor without modifying the immutable image. Every child receives
-isolated cache and preference paths and unique ports. Cluster deployments
-should use one bot token per single-replica workload; current Mini App sessions
-are process-local.
+Known partial sends are rolled back best-effort. Ambiguous outcomes remain locked rather than being retried under a new key.
 
-## Errors and observability
+## Session and concurrency model
 
-Expected failures map to fixed user-safe messages. Unexpected failures receive a random correlation ID; raw exception strings are never reflected to Telegram.
+Launch tokens and sessions are owner-bound, short-lived, capacity-bounded, and independent. Telegram session lifetime is absolute and is not extended indefinitely by activity.
 
-Every structured event is tagged with `INSTANCE_NAME` and is written to
-journald plus the optional absolute `LOG_FILE`. Metadata audit mode records
-event names, filter modes, translations, counts, exception class names, and
-correlation IDs without Telegram message text. Content audit mode is an
-explicit operator choice that additionally permits normalized search terms and
-final references.
+Browser selection mutations are synchronous and single-threaded. Search pagination uses latest-request coordination so stale responses cannot overwrite current state. Preference writes are serialized per user. Final posting is serialized and idempotent.
 
-The independent identity audit mode is `disabled`, `pseudonymous`, or `raw`.
-Pseudonymous mode uses stable keyed identifiers; raw mode records numeric
-Telegram user/chat IDs and resolved Mini App client IP addresses for abuse
-investigation. Telegram updates never expose user IPs. Mini App forwarding
-headers are accepted only from configured trusted proxy networks, preventing a
-public client from choosing the logged or rate-limited address. No mode records
-tokens, names, usernames, verse bodies, repository payloads, browser
-authorization data, or secret paths. Metrics remain aggregate counters.
+Synchronous Librarian work runs in fixed executors. Timeouts do not release capacity until the underlying future exits, preventing cancellation from turning into an unbounded queue.
 
-## Privacy
+## Failure isolation
 
-In metadata audit mode the robot does not persist update text, references,
-searches, names, usernames, profiles, or chat history. Identity logging is
-configured separately: the default persists only keyed identifiers, while raw
-mode deliberately persists Telegram IDs and Mini App client IPs. The
-restricted per-instance preference database stores only Telegram user ID,
-translation code, and update time. In explicitly enabled content audit mode,
-final references and search terms are also persisted to the restricted
-per-instance log for its configured retention period. Short-lived launch,
-query, and selection state otherwise exists only in bounded process memory and
-expires on inactivity or restart. Telegram `initData` is used only for request
-authentication and is not written to application logs. Telegram and the
-configured GetBible API remain independent external services.
+| Failure | Impact |
+| --- | --- |
+| Main API unavailable | uncached reading only |
+| Query API unavailable | explicit/grouped reference resolution only |
+| Librarian unavailable | search only |
+| Robot temporarily unavailable | authentication/search/preferences/Post only; local selection remains |
+| Invalid public response | rejected without cache replacement |
+| Failed Post | ordered browser selection preserved |
+| Expired Robot session | protected operations fail closed; public cached data remains identity-free |
+
+## Deployment
+
+HTML, modules, server code, and documentation must deploy from one validated commit. `index.html` is served with `no-store`; static assets revalidate through ETags. This prevents a Telegram WebView from combining incompatible generations.
+
+Host deployment uses separate loopback listeners for health, webhook delivery, and Mini App HTTPS proxying. Docker deployments expose the Mini App only to private ingress. Polling and the Mini App are independent and may run together.
+
+## Observability and privacy
+
+Structured events contain route, status, duration, configured instance, and policy-controlled pseudonymous identity. They never contain tokens, Telegram init data, verse bodies, repository payloads, or browser cache content.
+
+The browser persistent cache contains public Scripture only. User translation and reader coordinates remain in the restricted preference store. Temporary selections remain in browser memory and expire with the WebView.
+
+## Release gate
+
+A release is production-ready only when permanent CI and CodeQL pass on the exact PR head and prove:
+
+- Python 3.10, 3.11, and 3.12;
+- production container build and smoke test;
+- lint, strict typing, branch coverage, dependency audit, secret scan, and systemd verification;
+- public Main API and Query API routing with no Robot content proxy;
+- CSP parity and fixed-origin enforcement;
+- hash verification, weekly revalidation, invalidation, bounds, and atomic cache replacement;
+- browser selection add/remove/reorder/clear and defensive snapshots;
+- reader/search coordinate interchangeability;
+- graphical highlight and second-click unselect in real Chromium;
+- no Robot selection mutation before Post;
+- failed Post preserves selection and successful Post clears it;
+- authoritative idempotent Telegram delivery.
