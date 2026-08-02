@@ -22,6 +22,7 @@ const READER_VERSE = {
   verse: 16,
   text: "For God so loved the world.",
   terms: [],
+  highlights: [],
 };
 
 function json(payload, status = 200) {
