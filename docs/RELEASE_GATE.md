@@ -1,248 +1,127 @@
 # Security and reliability release gate
 
-A robot commit is deployable only when every applicable item below is satisfied. A maintainer must review the actual code, workflow, dependency, and documentation diffs; automated green checks are necessary but not sufficient.
+A commit is deployable only when every applicable item below is satisfied on the exact pull-request head. Automated checks are necessary but do not replace review of the source, tests, workflows, dependencies, and documentation.
 
-## Container artifacts
+## Source integrity
 
-- `Dockerfile` installs the exact hashed production lock in a separate build
-  stage and runs as UID/GID 10001.
-- The image includes no Caddy, certificate manager, systemd, or host firewall.
-- `compose.yaml` uses a read-only root filesystem, drops every capability,
-  disables privilege escalation, and sets PID, CPU, memory, tmpfs, and graceful
-  shutdown bounds.
-- `compose.yaml` remains the environment-driven one-bot default and publishes
-  only the Mini App application port; `compose.multi.yaml` is explicit.
-- Missing application configuration produces structured container
-  stdout/stderr, and both host-side and in-container setup commands are
-  syntax/regression tested.
-- Multi-instance configuration rejects invalid names, unsafe process-loader
-  variables, missing health ports, and port collisions before child startup.
-- The container supervisor has liveness, RSS, restart-backoff, restart-circuit,
-  duplicate-poller, and signal-forwarding regression coverage.
-- The Kubernetes example keeps one replica per bot token and declares startup,
-  liveness, readiness, resource, secret, and persistent-state contracts.
+- The intended commit is identified by full SHA.
+- The branch contains one coherent implementation, not competing temporary workflows or divergent feature branches.
+- No generated patch payload, migration worker, debug artifact, obsolete code path, or contradictory documentation remains.
+- No test, assertion, supported Python version, coverage floor, or security job is removed merely to obtain green checks.
+- Module responsibilities and dependency direction remain explicit and cycle-free.
 
-## Source and review
+## Active Mini App doctrine
 
-- The intended robot commit is identified by full SHA.
-- No unrelated change is hidden in a dependency or documentation update.
-- Security bounds are not disabled or increased without load-test evidence.
-- No test, assertion, supported Python version, or security job is removed merely to obtain a green result.
-- New failure behavior has a deterministic regression test.
-- The source contains no temporary self-modifying or one-time repair workflow.
+- Only full-text search and search pagination use Robot/Librarian.
+- Translation metadata, books, chapters, chapter text, and hashes use `api.getbible.net/v2` directly from the browser.
+- Explicit and grouped references use `query.getbible.net/v2` directly from the browser.
+- Public API requests contain no Telegram or Robot credentials.
+- `BrowserSelectionStore` solely owns select, unselect, reorder, clear, counters, highlighting, and copy state.
+- Reader and search verses share coordinate identity.
+- No Robot basket or Scripture mutation occurs before final Post.
+- Browser text and references are never final posting authority.
 
-## Automated matrix
+Any code, test, OpenAPI path, or documentation that presents the former Robot-proxied reader or per-click server basket as the active design blocks release.
 
-- The exact runtime lock installs with `--require-hashes` on Python 3.10, 3.11, and 3.12.
-- `pip check` succeeds in every runtime environment.
-- Python source, maintenance helpers, and tests compile.
-- `setup.sh` passes `bash -n`, its fail-closed self-test, and the hermetic two-instance lifecycle test.
-- Deterministic unit, asynchronous, regression, documentation-contract, audit-contract, and symbol-fuzz tests pass on every supported Python version.
-- Ruff passes without new suppressions added solely for the release.
-- mypy passes with the configured strictness.
-- Bandit reports no medium/high finding in the robot, maintenance scripts, or exact installed Librarian source.
-- `scripts/audit_runtime.py` runs `pip-audit --strict` against the complete released Librarian 1.2.1 lock.
-- Secret scanning reports no real secret.
-- The hardened instantiated `getbible-robot@ci.service` passes `systemd-analyze verify`.
-- CodeQL succeeds.
-- The permanent `robot/security-gate` and `robot/codeql-gate` statuses are green for the exact commit.
-- CI validates the default, compatibility-single, multi-bot, and
-  environment-sourced secret Compose models, builds the image, verifies its
-  non-root user, and smoke-tests both supervisor and setup entrypoints.
-- Production Compose files pull a published image and contain no implicit local
-  build; `compose.build.yaml` is the explicit developer-only build overlay.
-- Successful complete CI on `master` publishes only `edge` and the immutable
-  full-commit tag to `ghcr.io/getbible/robot`.
-- A published stable GitHub release tag exactly matches the project version and
-  cannot publish semantic-version or `latest` image tags unless the exact
-  commit already has green `robot/security-gate` and `robot/codeql-gate`
-  statuses.
-- Published AMD64/ARM64 images carry OCI source/license metadata, BuildKit SBOM
-  and provenance records, and a signed GitHub artifact attestation.
+## Browser transport and cache
 
-## Dependency integrity
+- Main API and Query API origins are fixed HTTPS constants.
+- Redirects are rejected; credentials are omitted; `no-referrer` is used.
+- Request timeouts and response-size limits are enforced.
+- The HTML CSP and Tornado response CSP contain identical public-origin allowlists.
+- IndexedDB records are identity-free and versioned.
+- Record count, total bytes, per-record bytes, and in-flight requests are bounded.
+- Exact-scope SHA-1 values are stored and revalidated at least weekly.
+- Translation and book hash changes invalidate descendants.
+- Chapter replacement is atomic and requires stable pre/post hashes plus exact-byte verification.
+- Failed refreshes preserve the last valid record.
 
-- Direct intent files and generated locks are committed together when dependencies change.
-- Both lockfiles were generated using the documented Python and resolver versions.
-- The complete lock diff was reviewed, including transitive additions and removals.
-- GitHub Actions remain pinned to reviewed immutable commit SHAs.
-- The runtime does not resolve or upgrade dependencies during service startup.
-- Python 3.10 conditional requirements remain represented in the universal lock.
-- The direct-source audit contract test fails for a URL mismatch, missing hash, duplicate source, or unfiltered source requirement.
-- The robot uses `getbible>=1.2.1,<2` as compatible intent and an exact hashed resolved version.
+## Browser selection behavior
 
-## Parser and work budgets
+- Selection capacity is bounded.
+- Snapshots are defensive copies.
+- Reader and Librarian transport IDs deduplicate by translation/book/chapter/verse.
+- Selecting updates `aria-pressed`, verse number styling, verse body styling, range boundaries, counters, and navigation badges immediately.
+- A second click removes the selection.
+- Navigating away and back preserves selected styling for the active WebView session.
+- Reorder, clear, and copy are local.
+- A failed Post preserves the complete ordered selection.
+- A successful Post clears it.
 
-- A huge verse number or range terminates in bounded time and memory before repository access.
-- Reversed, malformed, empty, or hostile-symbol references fail closed.
-- Invalid input is never silently changed to verse 1 or another reference.
-- Reference count, verses per reference, total verses, and input length are enforced.
-- Ordinary references do not trigger speculative translation requests.
-- An invalid explicit-translation reference is rejected before translation repository access.
-- Per-user and per-chat state remains bounded under identifier churn.
-- Every command, including `/start`, `/help`, `/search`, and unknown commands, consumes both rate-limit budgets.
-- Authenticated Mini App clients have a separate bounded client budget;
-  lightweight navigation has fractional cost while exchange, search,
-  Scripture, and post operations retain full cost.
-- Forwarded client addresses affect logging and limiting only when the direct
-  peer belongs to an explicitly trusted proxy network.
-- Every public command alias and implemented callback action is present in the enforced feature inventory.
-- Repeated rejected commands produce one cooldown warning rather than one Telegram API call per rejection.
-- Repeated individual user/client exhaustion opens a bounded temporary block
-  and produces one private or per-user-ephemeral warning; chat-only saturation
-  never attributes abuse to one user.
-- Mini App launches and sessions remain owner-scoped and TTL/LRU bounded under
-  user, chat, and request churn.
+## Search isolation
 
-## Upstream and concurrency behavior
+- Search and pagination alone use Librarian.
+- Search has independent executor, semaphore, timeout, cache, and circuit behavior.
+- Search failure does not affect reader navigation.
+- Stale responses cannot overwrite current query/filter state.
+- Search output is bounded and normalized before registration in the browser selection store.
 
-- Connect, read, retry, full-corpus byte, search-output byte, queue, and overall
-  lookup limits are active.
-- The full-corpus ceiling holds the largest supported translation with measured
-  headroom; it does not enlarge the search-result or Telegram-output budgets.
-- Search and direct-reference pools/circuits are independent, and a slow search
-  does not consume all direct-reference capacity.
-- Repository stalls return a generic response within the configured outer timeout.
-- Python 3.10 and newer enter the same typed timeout and queue-saturation paths.
-- A timed-out worker retains its permit until the underlying thread actually exits.
-- Repeated stalls cannot accumulate work in the executor's internal queue without bound.
-- Repeated upstream failures open the circuit.
-- One later half-open probe can close the circuit after recovery.
-- Cancellation cannot permanently retain a half-open probe marker.
-- Validation and caller-limit errors do not incorrectly open the upstream circuit.
-- Shutdown waits for worker completion before closing Librarian HTTP sessions.
+## Final Post authority
 
-## Telegram behavior
+- Post accepts one bounded ordered selection snapshot.
+- Malformed, duplicate, unavailable, or mixed-owner input is rejected.
+- Browser text, names, references, and UI IDs cannot determine Telegram output.
+- Authoritative Scripture is obtained and validated before rendering.
+- Idempotency binds to the exact ordered selection.
+- The first Telegram send occurs only after complete validation and rendering.
+- Known partial sends are rolled back best-effort.
+- Ambiguous outcomes remain locked rather than being retried under another key.
+- Output is escaped, linked safely, and split by Telegram UTF-16/message-count limits.
 
-- Every Telegram chunk is valid escaped HTML.
-- Consecutive verses render with one newline and no blank paragraph.
-- URL path components are percent encoded.
-- Length is measured in Telegram UTF-16 code units and remains below 4096.
-- The configured maximum output-message count is enforced.
-- All public Scripture and search links begin with the configured `https://getbible.life` base.
-- All Scripture data requests use the configured `https://api.getbible.net` base.
-- Raw exceptions, user input, tokens, paths, and internal URLs are absent from user-facing errors.
-- Missing message-deletion permission does not fail an otherwise successful command.
-- `/bible@BotName John 3:16` works in a test group.
-- Empty `/bible` resumes the Mini App Bible reader with translation, book,
-  chapter, compact verse selection, basket, and confirmation controls.
-- `/search <words>` opens complete wrapping selectable Mini App results without
-  posting automatically.
-- Empty `/search` opens the documented Mini App filter dashboard.
-- Search result selection persists across pages and only **Post selected** sends Scripture.
-- Protected Mini App APIs require fresh signature-verified Telegram `initData`
-  plus a short-lived launch token tied to the same user and workflow.
-- Missing, expired, replayed, foreign, malformed, and stale authorization fails
-  before repository work or posting.
-- Browser-supplied verse text is never authoritative; final posting re-resolves
-  validated selected identifiers server-side.
-- Only required Telegram message and callback-query update types are subscribed.
-- Polling and webhook modes each start with only the validated transport
-  arguments and never run together.
-- Duplicate polling produces one critical event, stops the application, exits
-  with status 75, and is not restarted by systemd.
-- Webhook requests require the generated secret and reach only a loopback
-  listener behind public HTTPS.
-- The Mini App uses a separate private listener behind public HTTPS, and
-  polling remains supported while it is enabled.
-- The public browser shell exposes no data or action capability without
-  successful Telegram and launch authorization.
+## Authentication and privacy
 
-## Startup, health, and observability
+- Telegram `initData` signature, age, user, chat, chat instance, and launch ownership are validated.
+- Launches and sessions are short-lived, bounded, and owner-bound.
+- The bot token never enters HTML, JavaScript, URLs, logs, browser storage, or public API traffic.
+- Public cache contains no identity, session, preference, search, selection, or posting data.
+- Structured logs contain no tokens, init data, verse bodies, or repository payloads.
+- Forwarded client addresses are accepted only from configured trusted proxies.
 
-- Configuration validation fails closed for missing tokens, conflicting aliases, invalid instance/log/audit values, invalid URLs, and inconsistent bounds.
-- Metadata audit mode omits search terms and final references.
-- Content audit mode includes only the documented normalized query/reference fields.
-- Disabled identity mode omits user/chat/client identity; pseudonymous mode
-  records stable keyed identifiers; raw mode records only documented numeric
-  Telegram IDs and resolved Mini App client IPs.
-- No audit mode records a token, name, username, verse body, repository
-  payload, Telegram `initData`, or launch/session credential.
-- Every JSONL event is tagged with the selected instance.
-- Telegram initialization and command registration complete before readiness is exposed.
-- `/healthz`, `/readyz`, and `/metrics` behave as documented on loopback.
-- Readiness becomes false when the circuit is open or service is closing.
-- Metrics contain aggregate values only.
-- Logs contain no secrets; message-derived search/reference content is absent unless content audit mode is explicitly enabled.
-- A normal SIGTERM closes health, both worker pools, repository sessions, and
-  the active Telegram transport cleanly.
+## Runtime and concurrency
 
-## Documentation and operations
+- Python 3.10, 3.11, and 3.12 deterministic suites pass.
+- Ruff, strict mypy, and branch coverage pass.
+- Fixed executors and semaphores prevent unbounded queued work.
+- Timeout cancellation does not prematurely release real worker capacity.
+- Session, search, preference, and Post state transitions are serialized at their owning boundary.
+- Shutdown stops ingress, drains real workers, closes clients, and completes Telegram shutdown.
 
-- README links to the canonical documentation index.
-- The setup questionnaire completed successfully on a clean host or clean test image.
-- The hermetic setup lifecycle passes transactional failure cleanup, two-instance isolation, all manager command paths, configuration restoration, upgrade failure restoration, rollback, and isolated uninstall.
-- Managed Caddy routes pass DNS preflight, deterministic generation, complete
-  validation, reload rollback, local/public verification, retained-port
-  isolation, and per-instance uninstall cleanup.
-- Two test instances demonstrate distinct accounts, applications, environments, tokens, caches, ports, logs, processes, and state.
-- Instance selection resolves the intended target for list, start, stop,
-  restart, status, runtime, logs, follow, doctor, delivery, Mini App, content,
-  config, upgrade, rollback, and uninstall.
-- Setup rejects duplicate instance names, unmanaged account collisions, reused tokens, dirty source, unsupported Python, invalid ports, and malformed secrets.
-- Every current environment variable appears in the configuration reference and `.env.template`.
-- Required operator documents exist and every relative Markdown link resolves.
-- Deterministic and live test steps match the current commands and files.
-- Dependency refresh instructions reproduce the checked-in lock process.
-- Upgrade and rollback were rehearsed with the target and previous commits.
-- Uninstall steps were reviewed for the selected service, code, cache, state, secret, account, retained log, and token handling without affecting other instances.
-- Troubleshooting guidance matches current metrics, paths, and failure behavior.
-- The deployment record contains the robot SHA, lock checksum, Python version, unit checksum, CI URLs, smoke-test result, and rollback SHA.
+## Container and host deployment
 
-## Live pre-production smoke test
+- The production image installs the exact hashed lock and runs unprivileged.
+- The root filesystem is read-only; capabilities are dropped; privilege escalation is disabled.
+- CPU, memory, PID, tmpfs, restart, and graceful-shutdown bounds remain enforced.
+- Host Mini App, webhook, and health listeners remain separate and loopback/private behind ingress.
+- Caddy/systemd setup remains transactional and rollback-safe.
+- One bot token has one active polling/webhook workload.
+- Production container build and smoke test pass.
+- systemd verification passes.
 
-Using a dedicated test bot first, and then a private production-bot chat before announcement:
+## Security and supply chain
 
-- `/start`, `/help`, `/search`, and an unknown command behave safely.
-- A single verse, range, multiple references, default translation, and explicit translation return correct text.
-- The empty `/bible` Mini App flow posts a single verse and a range in private
-  chat and a group.
-- Default and filtered Mini App searches page, select, deselect, and post one
-  or multiple results.
-- Search never posts before explicit confirmation.
-- Light/dark themes, compact reader text, auto-hiding chapter and bottom
-  controls, safe-area layout, selected states, and accessible focus/contrast
-  are verified in Telegram clients.
-- Bot API 8.0+ clients enter native fullscreen while older, unsupported, and
-  rejecting clients remain usable in expanded-sheet mode. Fullscreen and
-  safe-area changes do not place content beneath Telegram controls, cutouts,
-  or the device gesture area.
-- Every route uses the same centered fullscreen header. A maximum-length
-  left-to-right or right-to-left translation name shortens without increasing
-  the compact capsule height, crossing either native-control lane, shifting
-  off center, or causing horizontal overflow; its complete value remains
-  accessible. Downward scrolling leaves only the pill, upward scrolling
-  restores the compact GetBible mark, and Home's separate hero logo plus the
-  expanded-sheet fallback remain unchanged.
-- In Bible, downward scrolling leaves only the arrow handle and safe-area
-  background. Upward scrolling restores the chapter heading without reopening
-  the bottom navigation; pressing the handle or changing a verse selection
-  reopens it.
-- The partial passage sheet leaves Scripture visible, opens at the current
-  chapters, returns to API-localized books, reaches Psalm 150, and closes via
-  Close, backdrop, Escape, and Telegram Back without trapping focus.
-- Changing translation immediately replaces the chapter and atomically retains
-  the nearest valid resume point, including when the Mini App closes during the
-  transition.
-- Ordinary-browser access and expired/mismatched launch attempts cannot read
-  protected data or trigger a post.
-- A right-to-left translation and a non-66-book translation navigate correctly.
-- Huge and malformed references fail safely.
-- A short burst exercises rate limiting without a crash.
-- A group mention command parses correctly.
-- Returned links open on `getbible.life`.
-- API failure injection produces generic errors and circuit/readiness behavior.
-- In metadata plus disabled-identity mode, no token, identity, exception detail,
-  secret path, query, reference, or private message appears in logs or
-  artifacts.
-- Pseudonymous and raw identity tests contain only the documented identity
-  fields; raw-mode testing uses synthetic Telegram IDs and client addresses.
-- In content-mode testing, only synthetic search terms and final references
-  appear; tokens, names, usernames, verse bodies, browser authorization data,
-  and repository payloads remain absent.
+- Exact Python and npm dependency installs pass integrity checks.
+- Dependency vulnerability audit passes.
+- Static security scan passes.
+- Secret scan passes without weakening rules or hiding real findings.
+- CodeQL passes.
+- Workflow actions remain pinned to immutable commit SHAs.
 
-## Final rollout decision
+## Documentation
 
-Release only after the exact commit satisfies the complete gate. If any item cannot be tested, record why, its risk, and a concrete compensating control; do not silently mark it complete.
+- `README.md`, `docs/ARCHITECTURE.md`, `docs/BROWSER_DATA.md`, `docs/MINI_APP.md`, `docs/INTERACTIONS.md`, `docs/TESTING.md`, API contracts, and operational guides describe the same active architecture.
+- No example directs reader traffic through Robot.
+- No example treats Robot session tokens as verse identity.
+- No example documents per-click basket persistence as active behavior.
+- Deployment and rollback instructions match the current source and artifacts.
 
-After deployment, monitor readiness, circuit state, timeouts, queue rejections, restarts, and memory. Keep the previous known-good commit and environment backup until the rollout is accepted.
+## Permanent CI evidence
+
+The exact PR head must have successful permanent runs for:
+
+- CI runtime matrices;
+- quality and security;
+- production container;
+- real Chromium Mini App acceptance;
+- CodeQL.
+
+The pull request remains draft while any required check is missing, cancelled, stale, or failing. Mark it ready only after the exact head is green and the diff has been reviewed for dormant or contradictory implementation.
