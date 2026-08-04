@@ -344,11 +344,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.limiter.details[-1][2:], (1.0, "192.0.2.1"))
 
         response = await self.api.handle(
-            self.request(
-                "GET",
-                "/getbible/api/v1/translations",
-                token=token,
-            )
+            self.request("GET", "/getbible/api/v1/translations", token=token)
         )
         self.assertEqual(response.status, 200)
         self.assertEqual(self.limiter.details[-1][2:], (0.25, "192.0.2.1"))
@@ -363,6 +359,46 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status, 200)
         self.assertEqual(self.limiter.details[-1][2:], (1.0, "192.0.2.1"))
+
+    async def test_unknown_routes_and_wrong_methods_are_rejected_before_auth(self) -> None:
+        invalid = await self.api.handle(
+            self.request("POST", "/getbible/api/v1/wp-admin", body={})
+        )
+        wrong_method = await self.api.handle(
+            self.request("GET", "/getbible/api/v1/post")
+        )
+
+        self.assertEqual(invalid.status, 404)
+        self.assertEqual(wrong_method.status, 405)
+        self.assertEqual(wrong_method.headers["Allow"], "POST, OPTIONS")
+        self.assertEqual(self.limiter.calls, [])
+
+    async def test_atomic_browser_post_handles_multiple_verses_as_one_action(self) -> None:
+        token = await self.exchange()
+        calls_before_post = len(self.limiter.details)
+        response = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/post",
+                token=token,
+                body={
+                    "idempotency_key": "abcdef0123456789",
+                    "selection_ids": [
+                        "gbd_kjv_043_0003_0001",
+                        "gbd_kjv_043_0003_0002",
+                        "gbd_kjv_043_0003_0016",
+                    ],
+                },
+            )
+        )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(self.limiter.details), calls_before_post + 1)
+        self.assertEqual(self.limiter.details[-1][2], 1.0)
+        self.assertEqual(
+            self.posted[0][1],
+            (ScriptureQuery("John 3:1;John 3:2;John 3:16", "kjv"),),
+        )
 
     async def test_books_include_canonical_testament_metadata(self) -> None:
         token = await self.exchange()

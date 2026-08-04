@@ -1118,10 +1118,51 @@ for host in sorted(routes):
     for instance, path, port in host_routes:
         matcher = "gb_" + re.sub(r"[^A-Za-z0-9_]", "_", instance)
         if path:
+            static_paths = (
+                path,
+                path + "/",
+                path + "/index.html",
+                path + "/app.js",
+                path + "/styles.css",
+                path + "/api-contract.json",
+                path + "/lib/*",
+                path + "/assets/*",
+            )
+            api_paths = (
+                path + "/api/v1/session",
+                path + "/api/v1/translations",
+                path + "/api/v1/books",
+                path + "/api/v1/chapters",
+                path + "/api/v1/scripture",
+                path + "/api/v1/search",
+                path + "/api/v1/basket",
+                path + "/api/v1/basket/items",
+                path + "/api/v1/basket/order",
+                path + "/api/v1/preferences",
+                path + "/api/v1/post",
+                path + "/api/v1/cleanup",
+            )
             lines.extend(
                 (
-                    f"    @{matcher} path {path} {path}/*",
-                    f"    handle @{matcher} {{",
+                    f"    @{matcher}_static path {' '.join(static_paths)}",
+                    f"    handle @{matcher}_static {{",
+                    f"        reverse_proxy 127.0.0.1:{port}",
+                    "    }",
+                    f"    @{matcher}_api {{",
+                    f"        path {' '.join(api_paths)}",
+                    "        method GET POST PUT PATCH DELETE OPTIONS",
+                    "    }",
+                    f"    handle @{matcher}_api {{",
+                    "        request_body {",
+                    "            max_size 64KB",
+                    "        }",
+                    f"        reverse_proxy 127.0.0.1:{port}",
+                    "    }",
+                    f"    @{matcher}_api_token {{",
+                    "        method GET DELETE OPTIONS",
+                    f"        path_regexp ^{re.escape(path)}/api/v1/(?:search|basket/items)/[A-Za-z0-9_-]{{16,128}}$",
+                    "    }",
+                    f"    handle @{matcher}_api_token {{",
                     "        request_body {",
                     "            max_size 64KB",
                     "        }",
@@ -1130,9 +1171,39 @@ for host in sorted(routes):
                 )
             )
         else:
+            static_paths = (
+                "/", "/index.html", "/app.js", "/styles.css",
+                "/api-contract.json", "/lib/*", "/assets/*",
+            )
+            api_paths = (
+                "/api/v1/session", "/api/v1/translations", "/api/v1/books",
+                "/api/v1/chapters", "/api/v1/scripture", "/api/v1/search",
+                "/api/v1/basket",
+                "/api/v1/basket/items",
+                "/api/v1/basket/order", "/api/v1/preferences",
+                "/api/v1/post", "/api/v1/cleanup",
+            )
             lines.extend(
                 (
-                    "    handle {",
+                    f"    @{matcher}_static path {' '.join(static_paths)}",
+                    f"    handle @{matcher}_static {{",
+                    f"        reverse_proxy 127.0.0.1:{port}",
+                    "    }",
+                    f"    @{matcher}_api {{",
+                    f"        path {' '.join(api_paths)}",
+                    "        method GET POST PUT PATCH DELETE OPTIONS",
+                    "    }",
+                    f"    handle @{matcher}_api {{",
+                    "        request_body {",
+                    "            max_size 64KB",
+                    "        }",
+                    f"        reverse_proxy 127.0.0.1:{port}",
+                    "    }",
+                    f"    @{matcher}_api_token {{",
+                    "        method GET DELETE OPTIONS",
+                    "        path_regexp ^/api/v1/(?:search|basket/items)/[A-Za-z0-9_-]{16,128}$",
+                    "    }",
+                    f"    handle @{matcher}_api_token {{",
                     "        request_body {",
                     "            max_size 64KB",
                     "        }",
@@ -1140,7 +1211,7 @@ for host in sorted(routes):
                     "    }",
                 )
             )
-    lines.append("}")
+    lines.extend(("    handle {", '        respond "" 404', "    }", "}"))
 destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
     rm -f -- "$input"

@@ -108,6 +108,13 @@ The cloud firewall must allow public TCP `80` and `443`, but must not expose
 `9201` or the instance's assigned Mini App port. Requests reach the Mini App
 through Caddy; they never connect to the loopback listener directly.
 
+Probes such as `/.env`, `/.git/*`, `/wp-admin`, and unknown `/api/v1/*` paths
+should return an empty `404` from Caddy and must not appear as Tornado access
+events. If they reach Python or become `502` responses while Robot is stopped,
+the generated Caddy routes are stale or were replaced by a catch-all proxy.
+Run `sudo getbible-robot doctor INSTANCE`, then use the manager's Mini App or
+upgrade flow to regenerate and transactionally validate them.
+
 If setup reports a DNS error, create or correct the public `A`/`AAAA` record
 and ensure inbound TCP `80` and `443` reach this host. If Caddy validation or
 reload fails, inspect the reported unmanaged Caddyfile conflict; the manager

@@ -490,7 +490,7 @@ https://bot.example.com/getbible/gamma
 n
 EOF
 assert_contains "$(environment_file_for gamma)" 'MINI_APP_ENABLED="true"'
-assert_contains "$CADDY_ROUTES" "path /getbible/gamma /getbible/gamma/*"
+assert_contains "$CADDY_ROUTES" "@gb_gamma_static path /getbible/gamma /getbible/gamma/"
 assert_file "$(service_enabled_file "$(service_name_for gamma)")"
 cmd_uninstall gamma <<EOF
 gamma
@@ -636,7 +636,10 @@ assert_file "$CADDYFILE"
 assert_file "$CADDY_ROUTES"
 assert_contains "$CADDYFILE" "$CADDY_IMPORT_BEGIN"
 assert_contains "$CADDY_ROUTES" "bot.example.com {"
-assert_contains "$CADDY_ROUTES" "path /getbible/alpha /getbible/alpha/*"
+assert_contains "$CADDY_ROUTES" "@gb_alpha_static path /getbible/alpha /getbible/alpha/"
+assert_contains "$CADDY_ROUTES" "/getbible/alpha/api/v1/session"
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/post'
+assert_contains "$CADDY_ROUTES" 'respond "" 404'
 assert_contains "$CADDY_ROUTES" "reverse_proxy 127.0.0.1:9201"
 assert_equal "$(grep -Fc "$CADDY_IMPORT_BEGIN" "$CADDYFILE")" "1"
 assert_file "$(service_enabled_file caddy.service)"
@@ -654,7 +657,7 @@ https://bot.example.com/getbible/alpha
 9201
 EOF
 assert_equal "$(grep -Fc "$CADDY_IMPORT_BEGIN" "$CADDYFILE")" "1"
-assert_equal "$(grep -Fc "reverse_proxy 127.0.0.1:9201" "$CADDY_ROUTES")" "1"
+assert_equal "$(grep -Fc "reverse_proxy 127.0.0.1:9201" "$CADDY_ROUTES")" "3"
 
 CADDYFILE_HASH=$(sha256sum "$CADDYFILE" | awk '{print $1}')
 CADDY_ROUTES_HASH=$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')
@@ -800,7 +803,7 @@ y
 https://bot.example.com/getbible/beta
 9202
 EOF
-assert_contains "$CADDY_ROUTES" "path /getbible/beta /getbible/beta/*"
+assert_contains "$CADDY_ROUTES" "@gb_beta_static path /getbible/beta /getbible/beta/"
 cmd_uninstall beta <<EOF
 beta
 y
@@ -814,7 +817,7 @@ assert_absent "$(help_file_for beta)"
 assert_absent "$(log_file_for beta)"
 ! grep -Fq "/getbible/beta" "$CADDY_ROUTES" ||
     fail "uninstall retained the removed instance's Caddy route"
-assert_contains "$CADDY_ROUTES" "path /getbible/alpha /getbible/alpha/*"
+assert_contains "$CADDY_ROUTES" "@gb_alpha_static path /getbible/alpha /getbible/alpha/"
 grep -Fxq -- "gb-alpha" "$USERS_FILE" || fail "alpha account was removed"
 ! grep -Fxq -- "gb-beta" "$USERS_FILE" || fail "beta account was retained"
 assert_file "$(metadata_file_for alpha)"
