@@ -3,10 +3,6 @@ import {
   PublicApiError,
 } from "./getbible-api.js";
 import {
-  isDirectSelectionId,
-  selectionIdentity,
-} from "./getbible-model.js";
-import {
   BrowserSelectionError,
   BrowserSelectionStore,
 } from "./selection-store.js";
@@ -14,8 +10,6 @@ import {
 const API_ROOT = "api/v1/";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
-const DIRECT_SELECTION_COORDINATE_PATTERN =
-  /^gbd_(.+)_([0-9]{3})_([0-9]{4})_([0-9]{4})$/;
 
 export class ApiError extends Error {
   constructor(message, {
@@ -229,10 +223,12 @@ export class MiniAppApi {
         code: "invalid_selection",
       });
     }
-    await this.#synchronizeSelectionsForPost(snapshot.items);
     const payload = await this.#request("post", {
       method: "POST",
-      body: { idempotency_key: idempotencyKey },
+      body: {
+        idempotency_key: idempotencyKey,
+        selection_ids: snapshot.items.map((item) => item.selection_id),
+      },
       timeoutMs: 25_000,
     });
     this.#selections.clear();
@@ -278,73 +274,6 @@ export class MiniAppApi {
       keepalive: true,
       timeoutMs: 5_000,
     }).catch(() => undefined);
-  }
-
-  async #synchronizeSelectionsForPost(items) {
-    await this.#request("basket", { method: "DELETE" });
-    const authoritativeIds = [];
-    for (const item of items) {
-      const selectionId = isDirectSelectionId(item.selection_id)
-        ? await this.#registerDirectSelection(item.selection_id)
-        : item.selection_id;
-      const payload = await this.#request("basket/items", {
-        method: "POST",
-        body: { selection_id: selectionId },
-      });
-      const responseItems = Array.isArray(payload?.items)
-        ? payload.items
-        : Array.isArray(payload?.basket?.items)
-          ? payload.basket.items
-          : [];
-      const authoritative = responseItems.find((candidate) =>
-        selectionIdentity(candidate) === selectionIdentity(item)
-      );
-      if (!authoritative || typeof authoritative.selection_id !== "string") {
-        throw new ApiError("The selected Scripture could not be verified.", {
-          code: "invalid_selection",
-          retryable: true,
-        });
-      }
-      authoritativeIds.push(authoritative.selection_id);
-    }
-    if (authoritativeIds.length > 1) {
-      await this.#request("basket/order", {
-        method: "PATCH",
-        body: { selection_ids: authoritativeIds },
-      });
-    }
-  }
-
-  async #registerDirectSelection(selectionId) {
-    const coordinates = directSelectionCoordinates(selectionId);
-    if (!coordinates) {
-      throw new TypeError("Direct Scripture selection identity is invalid.");
-    }
-    const payload = await this.#request("scripture", {
-      method: "POST",
-      body: {
-        translation: coordinates.translation,
-        book: coordinates.book,
-        chapter: coordinates.chapter,
-        verse: coordinates.verse,
-      },
-    });
-    const items = Array.isArray(payload?.items) ? payload.items : [];
-    const authoritative = items.find((item) =>
-      item?.translation === coordinates.translation &&
-      item?.book_number === coordinates.book &&
-      item?.chapter === coordinates.chapter &&
-      item?.verse === coordinates.verse &&
-      typeof item?.selection_id === "string" &&
-      SESSION_TOKEN_PATTERN.test(item.selection_id)
-    );
-    if (!authoritative) {
-      throw new ApiError("The selected Scripture could not be verified.", {
-        code: "invalid_selection",
-        retryable: true,
-      });
-    }
-    return authoritative.selection_id;
   }
 
   async #publicRequest(operation) {
@@ -458,17 +387,6 @@ export class MiniAppApi {
     }
     return payload;
   }
-}
-
-function directSelectionCoordinates(selectionId) {
-  if (!isDirectSelectionId(selectionId)) return null;
-  const match = DIRECT_SELECTION_COORDINATE_PATTERN.exec(selectionId);
-  if (!match) return null;
-  const book = Number(match[2]);
-  const chapter = Number(match[3]);
-  const verse = Number(match[4]);
-  if (![book, chapter, verse].every(Number.isSafeInteger)) return null;
-  return { translation: match[1], book, chapter, verse };
 }
 
 function publicApiError(error) {

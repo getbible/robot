@@ -135,6 +135,19 @@ sudo getbible-robot doctor production
 
 The browser cache is identity-free. User preferences remain server-side and contain only the selected translation and reader coordinates.
 
+The generated Caddy route is deny-by-default. It forwards only packaged
+shell/assets and documented API paths; every other request receives an empty
+`404` without contacting Tornado. Tornado independently recognizes routes and
+methods before session lookup, Telegram validation, or rate-limit accounting.
+Never replace the generated matchers with a catch-all reverse proxy.
+
+Posting is one bounded authenticated action. The browser sends ordered
+coordinate identities and an idempotency key. Robot validates every coordinate
+against authoritative catalogs and derives references server-side; it never
+trusts browser-provided Scripture text or references. A multi-verse post
+therefore consumes one action instead of a burst of basket synchronization
+requests.
+
 ## Deployment consistency
 
 Deploy HTML, JavaScript modules, server code, and documentation from one validated commit. `index.html` is served with `no-store`; static modules revalidate through ETags. This prevents a Telegram WebView from combining a new shell with old modules.

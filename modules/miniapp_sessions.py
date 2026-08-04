@@ -486,6 +486,11 @@ class MiniAppSessionStore:
             self._created += 1
             return session
 
+    @property
+    def max_basket_selections(self) -> int:
+        """Return the configured atomic-post selection bound."""
+        return self._max_basket
+
     def get(self, token: str, *, touch: bool = True) -> MiniAppSession | None:
         if _TOKEN_RE.fullmatch(token) is None:
             return None

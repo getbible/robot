@@ -62,6 +62,9 @@ from .service import (
 LOGGER = logging.getLogger(__name__)
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
 _BEARER_RE = re.compile(r"Bearer ([A-Za-z0-9_-]{16,128})\Z")
+_DIRECT_SELECTION_RE = re.compile(
+    r"gbd_([a-z0-9][a-z0-9._-]{0,63})_([0-9]{3})_([0-9]{4})_([0-9]{4})\Z"
+)
 MAX_MINIAPP_CHAPTER_VERSES = 250
 _PREFERENCE_UNCHANGED = object()
 _SEARCH_ENUMS: dict[str, frozenset[str]] = {
@@ -254,6 +257,12 @@ class MiniAppApi:
         ):
             return self._error_response(404, "not_found", "Resource not found.")
 
+        allowed_methods = self._allowed_methods(parts.path)
+        if allowed_methods is None:
+            return self._error_response(404, "not_found", "Resource not found.")
+        if method != "OPTIONS" and method not in allowed_methods:
+            return self._method_not_allowed(", ".join((*allowed_methods, "OPTIONS")))
+
         origin = _header(request.headers, "origin")
         if origin != self._origin and not (method in {"GET", "HEAD"} and origin is None):
             return self._error_response(403, "forbidden", "Request origin is not allowed.")
@@ -423,6 +432,30 @@ class MiniAppApi:
                 "internal_error",
                 "The request could not be completed.",
             )
+
+    def _allowed_methods(self, path: str) -> tuple[str, ...] | None:
+        """Recognize the complete API surface before authentication work."""
+        exact: dict[str, tuple[str, ...]] = {
+            f"{self._api_prefix}/session": ("GET", "POST", "DELETE"),
+            f"{self._api_prefix}/translations": ("GET",),
+            f"{self._api_prefix}/books": ("GET",),
+            f"{self._api_prefix}/chapters": ("GET",),
+            f"{self._api_prefix}/scripture": ("POST",),
+            f"{self._api_prefix}/search": ("POST",),
+            f"{self._api_prefix}/basket": ("GET", "DELETE"),
+            f"{self._api_prefix}/basket/items": ("POST",),
+            f"{self._api_prefix}/basket/order": ("PATCH",),
+            f"{self._api_prefix}/preferences": ("PUT",),
+            f"{self._api_prefix}/post": ("POST",),
+        }
+        allowed = exact.get(path)
+        if allowed is not None:
+            return allowed
+        if self._search_path_re.fullmatch(path) is not None:
+            return ("GET",)
+        if self._basket_item_path_re.fullmatch(path) is not None:
+            return ("DELETE",)
+        return None
 
     async def _exchange_session(
         self,
@@ -1222,19 +1255,29 @@ class MiniAppApi:
         request: MiniAppHttpRequest,
     ) -> MiniAppHttpResponse:
         payload = self._json_body(request)
-        if set(payload) != {"idempotency_key"}:
+        if set(payload) not in ({"idempotency_key"}, {"idempotency_key", "selection_ids"}):
             raise MiniAppApiInputError("Post request is invalid.")
         idempotency_key = _required_text(payload, "idempotency_key", 128)
         if re.fullmatch(r"[A-Fa-f0-9-]{16,64}", idempotency_key) is None:
             raise MiniAppApiInputError("idempotency_key is invalid.")
         async with session.post_lock:
+            raw_selection_ids = payload.get("selection_ids")
             selections = self._sessions.basket(session)
             previous = self._sessions.post_attempt(session, idempotency_key)
-            if previous is not None and not selections:
+            if raw_selection_ids is None and previous is not None and not selections:
                 return self._post_attempt_response(previous)
-            if not selections:
-                raise MiniAppApiInputError("The Scripture basket is empty.")
-            basket_digest = _basket_digest(selections)
+            resolved: list[tuple[str, str]]
+            if raw_selection_ids is not None:
+                resolved = await self._resolve_direct_selection_ids(raw_selection_ids)
+                basket_digest = _resolved_selection_digest(resolved)
+            else:
+                if not selections:
+                    raise MiniAppApiInputError("The Scripture basket is empty.")
+                resolved = [
+                    (selection.reference, selection.translation)
+                    for selection in selections
+                ]
+                basket_digest = _basket_digest(selections)
             attempt, created = self._sessions.begin_post(
                 session,
                 idempotency_key,
@@ -1242,10 +1285,6 @@ class MiniAppApi:
             )
             if not created:
                 return self._post_attempt_response(attempt)
-            resolved = [
-                (selection.reference, selection.translation)
-                for selection in selections
-            ]
             try:
                 queries = await self._resolve_grouped_queries(resolved)
                 raw_message_ids = await self._post_scripture(
@@ -1284,6 +1323,59 @@ class MiniAppApi:
                     "idempotent_replay": False,
                 },
             )
+
+    async def _resolve_direct_selection_ids(
+        self,
+        raw_selection_ids: object,
+    ) -> list[tuple[str, str]]:
+        if not isinstance(raw_selection_ids, list) or not raw_selection_ids:
+            raise MiniAppApiInputError("selection_ids must be a non-empty array.")
+        maximum = self._sessions.max_basket_selections
+        if len(raw_selection_ids) > maximum:
+            raise MiniAppApiInputError("The Scripture basket is full.")
+        coordinates: list[tuple[str, int, int, int]] = []
+        seen: set[tuple[str, int, int, int]] = set()
+        for raw_selection_id in raw_selection_ids:
+            if not isinstance(raw_selection_id, str):
+                raise MiniAppApiInputError("A selection identity is invalid.")
+            match = _DIRECT_SELECTION_RE.fullmatch(raw_selection_id)
+            if match is None:
+                raise MiniAppApiInputError("A selection identity is invalid.")
+            coordinate = (
+                match.group(1),
+                int(match.group(2)),
+                int(match.group(3)),
+                int(match.group(4)),
+            )
+            if coordinate in seen:
+                raise MiniAppApiInputError("Duplicate Scripture selections are not allowed.")
+            seen.add(coordinate)
+            coordinates.append(coordinate)
+
+        catalogs: dict[str, tuple[BookOption, ...]] = {}
+        chapters: dict[tuple[str, int], tuple[ChapterOption, ...]] = {}
+        resolved: list[tuple[str, str]] = []
+        for translation, book_number, chapter_number, verse_number in coordinates:
+            books = catalogs.get(translation)
+            if books is None:
+                books = tuple(await self._service.books(translation))
+                catalogs[translation] = books
+            book = next((item for item in books if item.number == book_number), None)
+            if book is None:
+                raise MiniAppApiInputError("A selected book is unavailable.")
+            chapter_key = (translation, book_number)
+            book_chapters = chapters.get(chapter_key)
+            if book_chapters is None:
+                book_chapters = tuple(await self._service.chapters(translation, book))
+                chapters[chapter_key] = book_chapters
+            chapter = next(
+                (item for item in book_chapters if item.number == chapter_number),
+                None,
+            )
+            if chapter is None or verse_number not in chapter.verses:
+                raise MiniAppApiInputError("A selected verse is unavailable.")
+            resolved.append((f"{book.name} {chapter_number}:{verse_number}", translation))
+        return resolved
 
     async def _revoke_session(
         self,
@@ -1673,5 +1765,15 @@ def _basket_digest(items: Sequence[MiniAppSelection]) -> bytes:
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.blake2s(encoded, digest_size=32).digest()
+
+
+def _resolved_selection_digest(items: Sequence[tuple[str, str]]) -> bytes:
+    """Bind an atomic browser post to its authoritative ordered references."""
+    encoded = json.dumps(
+        list(items),
+        ensure_ascii=False,
+        separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.blake2s(encoded, digest_size=32).digest()
