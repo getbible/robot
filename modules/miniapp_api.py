@@ -70,10 +70,6 @@ _SEARCH_ENUMS: dict[str, frozenset[str]] = {
     "diacritics": frozenset({"fold", "exact"}),
     "sort": frozenset({"canonical", "relevance"}),
 }
-#: The Mini App is a browser client that may still be cached on a device from
-#: before the Librarian 2 upgrade. Accept the vocabulary such a build sends and
-#: answer in the current one, so an unrefreshed client keeps searching.
-_DIACRITICS_ALIASES = {"insensitive": "fold", "sensitive": "exact"}
 
 
 class MiniAppApiInputError(ValueError):
@@ -1635,8 +1631,6 @@ def _search_options(
     enum_values: dict[str, str] = {}
     for key, allowed in _SEARCH_ENUMS.items():
         candidate = payload.get(key, getattr(defaults, key))
-        if key == "diacritics" and isinstance(candidate, str):
-            candidate = _DIACRITICS_ALIASES.get(candidate, candidate)
         if not isinstance(candidate, str) or candidate not in allowed:
             raise MiniAppApiInputError(f"options.{key} is invalid.")
         enum_values[key] = candidate

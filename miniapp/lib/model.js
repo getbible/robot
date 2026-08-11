@@ -712,18 +712,9 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Librarian 1.x spelled these "insensitive" and "sensitive". A device may still
-// hold either in its saved filters, so map rather than discard: falling back to
-// the default would quietly turn a reader's exact search into a folded one.
-const DIACRITICS_ALIASES = Object.freeze({
-  insensitive: "fold",
-  sensitive: "exact",
-});
-
 function normalizeDiacritics(value) {
-  const mapped = DIACRITICS_ALIASES[value] ?? value;
-  return ["fold", "exact"].includes(mapped)
-    ? mapped
+  return ["fold", "exact"].includes(value)
+    ? value
     : DEFAULT_FILTERS.diacritics;
 }
 

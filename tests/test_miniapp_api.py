@@ -1382,21 +1382,11 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.preferences.translation_for(42), "aov")
         self.assertNotIn(42, self.preferences.reader_locations)
 
-    async def test_search_accepts_the_librarian_one_diacritics_spellings(self) -> None:
-        """A Mini App build cached before the upgrade must keep working.
-
-        The client is a browser page, so a device can go on sending the 1.x
-        vocabulary long after the robot is upgraded. Rejecting it would break
-        search for that reader until the page happened to reload.
-        """
+    async def test_search_speaks_only_librarians_diacritics_vocabulary(self) -> None:
+        """The API forwards the engine's own values rather than mapping onto them."""
         token = await self.exchange()
-        for sent, expected in (
-            ("insensitive", "fold"),
-            ("sensitive", "exact"),
-            ("fold", "fold"),
-            ("exact", "exact"),
-        ):
-            with self.subTest(sent=sent):
+        for value in ("fold", "exact"):
+            with self.subTest(value=value):
                 response = await self.api.handle(
                     self.request(
                         "POST",
@@ -1404,7 +1394,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                         token=token,
                         body={
                             "query": "loved",
-                            "options": {"diacritics": sent},
+                            "options": {"diacritics": value},
                         },
                     )
                 )
@@ -1412,18 +1402,23 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 200)
                 self.assertEqual(
                     self.service.search_requests[-1][1].diacritics,
-                    expected,
+                    value,
                 )
 
-        rejected = await self.api.handle(
-            self.request(
-                "POST",
-                "/getbible/api/v1/search",
-                token=token,
-                body={"query": "loved", "options": {"diacritics": "folded"}},
-            )
-        )
-        self.assertEqual(rejected.status, 400)
+        for rejected in ("insensitive", "sensitive", "folded"):
+            with self.subTest(rejected=rejected):
+                response = await self.api.handle(
+                    self.request(
+                        "POST",
+                        "/getbible/api/v1/search",
+                        token=token,
+                        body={
+                            "query": "loved",
+                            "options": {"diacritics": rejected},
+                        },
+                    )
+                )
+                self.assertEqual(response.status, 400)
 
     async def test_search_forwards_the_requested_match_mode_unchanged(self) -> None:
         """The API must not second-guess the writing system on Librarian's behalf."""

@@ -139,12 +139,15 @@ following and see [Search](SEARCH.md) for the reasoning.
   and diacritics fold by default. Result-volume dashboards will step up. Confirm
   the step coincides with `getbible_robot_search_engine_version` moving to `4`
   before investigating it as a regression.
-- **Saved preferences carry over.** The diacritics values `insensitive` and
-  `sensitive` are read as `fold` and `exact`, so no user loses a translation or
-  reading position. A record is rewritten in the current vocabulary the next
-  time that user changes a preference.
-- **Cached Mini App clients keep working.** A browser build from before the
-  upgrade may go on sending the old vocabulary; the API accepts it.
+- **Saved search filters reset once; reading state does not.** The project uses
+  Librarian's `fold`/`exact` vocabulary and no other, so a profile holding the
+  1.x `insensitive`/`sensitive` falls back to default filters on first read.
+  Because a stored profile degrades field by field, the reader keeps their
+  translation and their place, and the record is rewritten in the current
+  vocabulary the next time they change a preference.
+- **A Mini App page open across the upgrade must reload.** The API accepts only
+  the current vocabulary, so a stale page's search is refused until it reopens.
+  Announce the upgrade if a reload mid-session would be disruptive.
 - **One new setting.** `SEARCH_INDEX_BUILD_SECONDS` (default `120`) bounds index
   construction. Add it deliberately like any other key.
 - **No cache to clear.** The robot keeps no durable search-result cache.

@@ -36,7 +36,7 @@ class UserPreferenceStoreTestCase(unittest.TestCase):
                     "match": "substring",
                     "scope": "new_testament",
                     "case_sensitive": True,
-                    "diacritics": "insensitive",
+                    "diacritics": "fold",
                     "sort": "relevance",
                 }
             )
@@ -59,13 +59,15 @@ class UserPreferenceStoreTestCase(unittest.TestCase):
         self.assertEqual(SearchDefaults().diacritics, "fold")
         self.assertEqual(SearchDefaults.validated({}).diacritics, "fold")
 
-    def test_profiles_written_before_the_upgrade_survive_intact(self) -> None:
-        """A 1.x row must keep its whole profile, not just its diacritics field.
+    def test_a_profile_written_before_the_upgrade_keeps_its_reading_state(
+        self,
+    ) -> None:
+        """Only the filters are lost when a 1.x row meets the current vocabulary.
 
-        `preferences_for()` answers with application defaults whenever a stored
-        record fails validation. A stricter allow-list alone would therefore
-        have taken every upgraded user's translation and reading position with
-        it, silently and on first read.
+        The store speaks Librarian's vocabulary and nothing else, so a row
+        holding the 1.x spelling no longer validates. Field-by-field degradation
+        is what keeps that from also costing the reader their translation and
+        the place they had reached.
         """
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "preferences.sqlite3"
@@ -107,9 +109,9 @@ class UserPreferenceStoreTestCase(unittest.TestCase):
                 preferences.reader_location,
                 ReaderLocation("aov", 43, 3, 16),
             )
-            self.assertEqual(preferences.search_defaults.diacritics, "exact")
-            self.assertEqual(preferences.search_defaults.words, "phrase")
-            self.assertTrue(preferences.search_defaults.case_sensitive)
+            # The blob is not translated, so the filters fall back as a set.
+            self.assertEqual(preferences.search_defaults, SearchDefaults())
+            self.assertEqual(preferences.search_defaults.diacritics, "fold")
 
     def test_an_unreadable_field_does_not_discard_the_whole_profile(self) -> None:
         """A record is one row, not one decision.
@@ -189,19 +191,18 @@ class UserPreferenceStoreTestCase(unittest.TestCase):
             self.assertEqual(preferences.translation, "kjv")
             self.assertIsNone(preferences.reader_location)
 
-    def test_both_diacritics_vocabularies_are_accepted(self) -> None:
-        for stored, expected in (
-            ("insensitive", "fold"),
-            ("sensitive", "exact"),
-            ("fold", "fold"),
-            ("exact", "exact"),
-        ):
-            with self.subTest(stored=stored):
-                defaults = SearchDefaults.validated({"diacritics": stored})
-                self.assertEqual(defaults.diacritics, expected)
+    def test_only_librarians_diacritics_vocabulary_is_stored(self) -> None:
+        """The store speaks the engine's vocabulary, with nothing mapped onto it."""
+        for value in ("fold", "exact"):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    SearchDefaults.validated({"diacritics": value}).diacritics,
+                    value,
+                )
 
-        with self.assertRaises(ValueError):
-            SearchDefaults.validated({"diacritics": "folded"})
+        for rejected in ("insensitive", "sensitive", "folded", ""):
+            with self.subTest(rejected=rejected), self.assertRaises(ValueError):
+                SearchDefaults.validated({"diacritics": rejected})
 
     def test_reader_location_persists_only_small_content_free_identifiers(
         self,

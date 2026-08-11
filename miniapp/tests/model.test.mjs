@@ -420,24 +420,20 @@ test("bounds filters and counts only non-default search controls", () => {
   assert.equal(activeFilterCount(filters), 4);
 });
 
-test("folds diacritics by default and maps the Librarian 1.x spellings", () => {
+test("carries Librarian's diacritics vocabulary without translating it", () => {
   assert.equal(DEFAULT_FILTERS.diacritics, "fold");
 
-  // A device that has not reloaded the Mini App since the Librarian 2 upgrade
-  // still holds the old vocabulary. Mapping it keeps the reader's intent;
-  // falling back to the default would turn an exact search into a folded one.
-  for (const [stored, expected] of [
-    ["insensitive", "fold"],
-    ["sensitive", "exact"],
-    ["fold", "fold"],
-    ["exact", "exact"],
-  ]) {
-    const filters = normalizeFilters({ ...DEFAULT_FILTERS, diacritics: stored });
-    assert.equal(filters.diacritics, expected);
+  for (const value of ["fold", "exact"]) {
+    const filters = normalizeFilters({ ...DEFAULT_FILTERS, diacritics: value });
+    assert.equal(filters.diacritics, value);
   }
 
-  const unusable = normalizeFilters({ ...DEFAULT_FILTERS, diacritics: "nonsense" });
-  assert.equal(unusable.diacritics, "fold");
+  // Nothing else is a diacritics policy, including the vocabulary Librarian 1.x
+  // used. The client sends what the engine accepts rather than mapping onto it.
+  for (const value of ["insensitive", "sensitive", "nonsense", "", null]) {
+    const filters = normalizeFilters({ ...DEFAULT_FILTERS, diacritics: value });
+    assert.equal(filters.diacritics, "fold");
+  }
 });
 
 test("reorders immutable basket arrays and deduplicates appended pages", () => {
