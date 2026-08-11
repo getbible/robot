@@ -67,26 +67,24 @@ Unicode decomposition alone cannot reach, which is what lets `Duc Chua Troi`
 reach `Ðức Chúa Trời`. `exact` turns folding off and distinguishes pointed from
 unpointed text.
 
-### The 1.x vocabulary
+### One vocabulary, end to end
 
-Librarian 1.x spelled the diacritics policy `insensitive` and `sensitive`. Both
-spellings are still accepted at every boundary where a value can predate the
-upgrade, and both map to the current pair:
+`fold` and `exact` are Librarian's own words, and they are the only ones this
+project uses. The Mini App radio group carries those values, the JSON API
+accepts those values, the preference store persists those values, and the
+Telegram filter dashboard prints those values. Nothing is translated onto
+anything else at any boundary.
 
-```text
-insensitive -> fold
-sensitive   -> exact
-```
+The 1.x spellings `insensitive` and `sensitive` are not accepted. Mapping them
+would have meant every layer carrying two names for one thing, and a reader's
+setting passing through a translation table on each hop — the kind of shim that
+survives long after anyone remembers why it exists.
 
-This is a correctness requirement, not a courtesy. A stored profile that fails
-validation is answered with application defaults, so rejecting the old spelling
-would have silently reset every upgraded reader's search filters. It would have
-cost more than that before this release: a profile was validated as one record,
-so one unreadable field took the translation and reading position with it. Both
-protections are now in place — the aliases above, and field-by-field degradation
-in the preference store. The Mini App is a browser page that can stay cached on
-a device for days, so its API accepts the old vocabulary too and answers in the
-new one.
+The cost is bounded and paid once. A profile stored before the upgrade holds the
+1.x spelling, so its filters fall back to defaults on first read; because a
+stored profile degrades field by field, the reader keeps their translation and
+their place. A Mini App page still open from before the upgrade sends the old
+value and is refused until it reloads, which it does on next open.
 
 ## Highlighting
 

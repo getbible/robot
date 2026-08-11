@@ -557,14 +557,19 @@
               </span>
               <input id="filter-case" name="case_sensitive" type="checkbox">
             </label>
-            <label class="toggle-control">
-              <span>
-                <strong data-i18n="filters.diacritics">Ignore diacritics</strong>
-                <small data-i18n="filters.diacritics_hint">Treat accented characters as equal</small>
-              </span>
-              <input id="filter-diacritics" name="ignore_diacritics" type="checkbox">
-            </label>
           </div>
+
+          <fieldset class="choice-group">
+            <legend data-i18n="filters.diacritics">Diacritics</legend>
+            <label>
+              <input id="filter-diacritics-fold" type="radio" name="diacritics" value="fold" checked>
+              <span data-i18n="filters.fold">Fold</span>
+            </label>
+            <label>
+              <input type="radio" name="diacritics" value="exact">
+              <span data-i18n="filters.exact">Exact</span>
+            </label>
+          </fieldset>
 
           <label class="field-control">
             <span data-i18n="filters.exclude">Exclude words</span>

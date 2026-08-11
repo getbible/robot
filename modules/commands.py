@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import TypeVar, cast
 
+import regex
 from getbible import (
     ReferenceValidationError,
     RequestLimitError,
@@ -85,6 +86,9 @@ _CALLBACK_RE = re.compile(r"gb:([A-Za-z0-9_-]{8,16}):([a-z]{1,8}):([A-Za-z0-9_-]
 _INCOMPLETE_REFERENCE_RE = re.compile(r"[\w\s-]{1,512}\Z")
 _T = TypeVar("_T")
 
+#: Grapheme clusters, so composition and folding cannot desynchronise a span
+#: from the text it points into. `regex` supplies `\X`; `re` has no equivalent.
+_GRAPHEME = regex.compile(r"\X")
 #: Writing systems whose marks are accents or optional pointing, and so fold.
 #: Brahmic and continuous scripts are absent because their marks carry vowels.
 _FOLDED_FAMILIES = frozenset({ScriptFamily.ALPHABETIC, ScriptFamily.ABJAD})
@@ -2369,7 +2373,7 @@ def _search_dashboard_text(session: InteractionSession) -> str:
         f"Match: {_display(options.match)}\n"
         f"Scope: {_display(options.scope)}\n"
         f"Case: {'sensitive' if options.case_sensitive else 'insensitive'}\n"
-        f"Diacritics: {_diacritics_label(options.diacritics)}\n"
+        f"Diacritics: {_display(options.diacritics)}\n"
         f"Sort: {options.sort}\n"
         f"Books: {books}\n"
         f"Exclude: {exclusions}\n"
@@ -2408,7 +2412,7 @@ def _search_dashboard_keyboard(session: InteractionSession) -> InlineKeyboardMar
                     callback_data=_callback(session, "sc"),
                 ),
                 InlineKeyboardButton(
-                    f"Diacritics: {_diacritics_label(options.diacritics)}",
+                    f"Diacritics: {_display(options.diacritics)}",
                     callback_data=_callback(session, "sdi"),
                 ),
             ],
@@ -3240,7 +3244,7 @@ def _search_match_spans(
     highlighting silently empty for the languages 2.x newly reaches.
     """
     spans: list[tuple[int, int]] = []
-    prepared: dict[bool, tuple[str, tuple[int, ...]]] = {}
+    prepared: dict[bool, tuple[str, tuple[int, ...], tuple[int, ...]]] = {}
     for term in terms[:64]:
         stripped = term.strip()
         if not stripped:
@@ -3256,10 +3260,10 @@ def _search_match_spans(
                 fold=fold,
                 case_sensitive=options.case_sensitive,
             )
-        normalized, positions = prepared[fold]
-        if not normalized or not positions:
+        normalized, starts, ends = prepared[fold]
+        if not normalized or not starts:
             continue
-        needle, _ = _normalized_search_value(
+        needle, _, _ = _normalized_search_value(
             stripped,
             fold=fold,
             case_sensitive=options.case_sensitive,
@@ -3287,16 +3291,11 @@ def _search_match_spans(
                 if leading or trailing:
                     continue
 
-            original_start = positions[match_at]
-            original_end = positions[match_end - 1] + 1
-            if fold:
-                # A mark that folded away left no normalized character to end the
-                # span on, so it sits outside it. Closing the highlight between a
-                # letter and its own vowel point is not what the engine matched.
-                while original_end < len(text) and unicodedata.category(
-                    text[original_end]
-                ).startswith("M"):
-                    original_end += 1
+            # A span runs to the end of the grapheme it landed in, so a mark that
+            # folded away — and left no normalized character to end on — stays
+            # inside the highlight instead of being orphaned past its own letter.
+            original_start = starts[match_at]
+            original_end = ends[match_end - 1]
             if options.match == "substring" and delimited:
                 while _continues_search_word(text, original_start - 1):
                     original_start -= 1
@@ -3320,29 +3319,46 @@ def _normalized_search_value(
     *,
     fold: bool,
     case_sensitive: bool,
-) -> tuple[str, tuple[int, ...]]:
-    """Normalize search text while retaining positions in the original value.
+) -> tuple[str, tuple[int, ...], tuple[int, ...]]:
+    """Normalize search text, mapping each result character to its grapheme.
 
-    Folding is Librarian's own, so a letter the engine folds folds here too.
-    Unicode decomposition alone cannot reach `đ`, `ø`, `ł` or `Ð`, which is why
-    a locally written NFKD pass used to leave `Duc` unable to mark `Ðức`.
+    Returns the normalized text and, per normalized character, the start and end
+    offsets of the grapheme in `value` that produced it. Two maps rather than one
+    because normalization is not one-to-one in either direction: casefolding can
+    expand a character and composition can contract several.
 
-    Case is applied before marks, which is the order Librarian's analyzer uses:
-    it casefolds in `prepare()` and folds afterwards. The order is not cosmetic.
-    Casefolding a Greek iota subscript expands it into a full iota, so `ῷ`
-    becomes `ωι` this way round and a bare `ω` the other — and a term the engine
-    indexed as `τωι` would then never be found in the verse to mark.
+    The pipeline is Librarian's, in Librarian's order — compose, then case, then
+    marks — because a query can only match what the same analysis produced from
+    the verse:
+
+    * **Compose (NFC).** `Analyzer.prepare()` composes before anything else. A
+      corpus served as decomposed Hangul jamo is indexed under its composed form,
+      so without this a term the engine matched is absent from the text here.
+      Composing per grapheme is what allows the offsets above to stay exact.
+    * **Case.** Casefolding a Greek iota subscript expands it into a full iota,
+      so `ῷ` becomes `ωι` in this order and a bare `ω` in the other. A term the
+      engine indexed as `τωι` would then never be found in the verse to mark.
+    * **Marks.** Folding is Librarian's own, so a letter the engine folds folds
+      here too. Unicode decomposition alone cannot reach `đ`, `ø`, `ł` or `Ð`,
+      which is why a locally written NFKD pass left `Duc` unable to mark `Ðức`.
     """
     characters: list[str] = []
-    positions: list[int] = []
-    for index, character in enumerate(value):
-        normalized = character if case_sensitive else casefold_text(character)
+    starts: list[int] = []
+    ends: list[int] = []
+    offset = 0
+    for grapheme in _GRAPHEME.findall(value):
+        end = offset + len(grapheme)
+        normalized = unicodedata.normalize("NFC", grapheme)
+        if not case_sensitive:
+            normalized = casefold_text(normalized)
         if fold:
             normalized = fold_marks(normalized)
         for item in normalized:
             characters.append(item)
-            positions.append(index)
-    return "".join(characters), tuple(positions)
+            starts.append(offset)
+            ends.append(end)
+        offset = end
+    return "".join(characters), tuple(starts), tuple(ends)
 
 
 def _continues_search_word(value: str, index: int) -> bool:
@@ -3366,16 +3382,6 @@ def _continues_search_word(value: str, index: int) -> bool:
 
 def _display(value: str) -> str:
     return value.replace("_", " ").title()
-
-
-def _diacritics_label(value: str) -> str:
-    """Say what the policy does rather than what Librarian calls it.
-
-    `fold` and `exact` are the engine's words. A reader choosing whether an
-    accent has to match wants "Ignored" or "Exact", which is also the wording
-    the Mini App checkbox uses.
-    """
-    return "Ignored" if value == "fold" else "Exact"
 
 
 def _require_kind(session: InteractionSession, kind: str) -> None:

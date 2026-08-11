@@ -198,7 +198,6 @@ const elements = mapElements({
   filtersDialog: "filters-dialog",
   filtersForm: "filters-form",
   filterCase: "filter-case",
-  filterDiacritics: "filter-diacritics",
   filterExclude: "filter-exclude",
   filterProximity: "filter-proximity",
   filterBooks: "filter-books",
@@ -1173,7 +1172,7 @@ function syncFilterForm(filters = state.filters) {
   setCheckedRadio("match", filters.match);
   setCheckedRadio("scope", filters.scope);
   elements.filterCase.checked = filters.case_sensitive;
-  elements.filterDiacritics.checked = filters.diacritics === "fold";
+  setCheckedRadio("diacritics", filters.diacritics);
   elements.filterExclude.value = filters.exclude.join(" ");
   elements.filterProximity.value =
     filters.proximity === null ? "" : String(filters.proximity);
@@ -1190,7 +1189,7 @@ function applyFilters() {
       match: data.get("match"),
       scope: data.get("scope"),
       case_sensitive: data.has("case_sensitive"),
-      diacritics: data.has("ignore_diacritics") ? "fold" : "exact",
+      diacritics: data.get("diacritics"),
       sort: state.filters.sort,
       books: [...elements.filterBooks.querySelectorAll("input:checked")].map(
         (input) => Number(input.value),

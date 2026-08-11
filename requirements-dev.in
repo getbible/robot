@@ -6,4 +6,5 @@ mypy==2.3.0
 pip-audit==2.10.1
 pip-tools==7.6.0
 ruff==0.16.1
+types-regex==2026.7.19.20260720
 types-requests==2.33.0.20260712

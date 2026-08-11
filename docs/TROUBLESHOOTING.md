@@ -317,6 +317,13 @@ curl -s http://127.0.0.1:${HEALTH_PORT}/metrics | grep search_engine_version
 moved, investigate the query, the filters and the translation SHA instead. See
 [Search](SEARCH.md).
 
+## A Mini App search returns "options.diacritics is invalid"
+
+A page left open across the Librarian 2 upgrade is still sending the 1.x
+vocabulary. The project speaks only `fold` and `exact`, so the request is
+refused rather than guessed at. Reopening the Mini App loads the current build
+and the error stops. See [Search](SEARCH.md).
+
 ## The first search of a translation times out
 
 An index is built once per translation. The build is bounded by

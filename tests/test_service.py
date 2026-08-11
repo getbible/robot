@@ -381,6 +381,37 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.warm_calls, ["kjv"])
         self.assertEqual(service.metrics.snapshot()["search_warmups"], 1)
 
+    async def test_only_search_reaches_librarian(self) -> None:
+        """Navigation belongs to the Main API; Librarian answers search alone.
+
+        The browser drives catalogs, chapters and references against the public
+        API directly, and the robot's own catalog reads go to the same host. That
+        is what keeps the heavy, high-volume traffic on the stable endpoints and
+        leaves Librarian doing only the one thing it is needed for. A catalog
+        read that quietly acquired a corpus would put every navigation tap behind
+        an index.
+        """
+        client = _Client()
+        service = ScriptureService(_settings(), client=client)
+        self.addAsyncCleanup(service.close)
+
+        book = BookOption(43, "John", "a" * 40)
+        service._catalog.translations = lambda: ()
+        service._catalog.books = lambda translation: (book,)
+        service._catalog.chapters = lambda translation, book: ()
+
+        await service.translations()
+        await service.books("kjv")
+        await service.chapters("kjv", book)
+
+        self.assertEqual(client.search_calls, [])
+        self.assertEqual(client.warm_calls, [])
+        self.assertEqual(client.translation_calls, [])
+
+        # Search is the one path that does reach it.
+        await service.search("loved", SearchOptions(translation="kjv"))
+        self.assertEqual(len(client.search_calls), 1)
+
     async def test_shared_corpus_registry_is_sized_for_reuse(self) -> None:
         """The registry is the cache that stops a repeat search re-reading a corpus.
 

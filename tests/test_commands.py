@@ -1,4 +1,5 @@
 import logging
+import unicodedata
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -1822,6 +1823,28 @@ class SelectionFormattingTestCase(unittest.TestCase):
         # The kasra after the hamza belongs to the matched stem, so the closing
         # marker goes after it rather than between the letter and its vowel.
         self.assertEqual(rendered, "فِي الْ【بَدْءِ】 كَانَ")
+
+    def test_search_highlight_composes_before_matching(self) -> None:
+        """Librarian composes to NFC before analysing, so this must too.
+
+        A corpus served as decomposed Hangul jamo is indexed under its composed
+        form and returns the verse. Without composing here, the term the engine
+        matched is simply absent from the text being marked.
+        """
+        decomposed = unicodedata.normalize(
+            "NFD",
+            "하나님이 세상을 이처럼 사랑하사",
+        )
+        rendered = _highlight_search_terms_plain(
+            decomposed,
+            ("사랑",),
+            SearchOptions(),
+        )
+
+        self.assertEqual(
+            unicodedata.normalize("NFC", rendered),
+            "하나님이 세상을 이처럼 【사랑】하사",
+        )
 
     def test_search_highlight_keeps_brahmic_vowel_marks(self) -> None:
         """Brahmic marks carry vowels, so folding them would change the word."""
