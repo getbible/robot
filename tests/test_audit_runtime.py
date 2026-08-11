@@ -37,8 +37,8 @@ class RuntimeAuditTestCase(unittest.TestCase):
         self.assertIn("requests==2.0", filtered)
 
     def test_released_requirement_audits_the_complete_lock(self) -> None:
-        input_text = "getbible>=1.2,<2\npython-telegram-bot==22.8\n"
-        lock = "getbible==1.2.0\npython-telegram-bot==22.8\n"
+        input_text = "getbible>=2.0.0,<3\npython-telegram-bot==22.8\n"
+        lock = "getbible==2.0.0\npython-telegram-bot==22.8\n"
 
         requirement = declared_direct_getbible(input_text)
         filtered, changed = filter_verified_direct_requirement(lock, requirement)

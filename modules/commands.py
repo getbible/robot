@@ -2369,7 +2369,7 @@ def _search_dashboard_text(session: InteractionSession) -> str:
         f"Match: {_display(options.match)}\n"
         f"Scope: {_display(options.scope)}\n"
         f"Case: {'sensitive' if options.case_sensitive else 'insensitive'}\n"
-        f"Diacritics: {options.diacritics}\n"
+        f"Diacritics: {_diacritics_label(options.diacritics)}\n"
         f"Sort: {options.sort}\n"
         f"Books: {books}\n"
         f"Exclude: {exclusions}\n"
@@ -2408,7 +2408,7 @@ def _search_dashboard_keyboard(session: InteractionSession) -> InlineKeyboardMar
                     callback_data=_callback(session, "sc"),
                 ),
                 InlineKeyboardButton(
-                    f"Diacritics: {_display(options.diacritics)}",
+                    f"Diacritics: {_diacritics_label(options.diacritics)}",
                     callback_data=_callback(session, "sdi"),
                 ),
             ],
@@ -3343,6 +3343,16 @@ def _is_search_word_char(value: str) -> bool:
 
 def _display(value: str) -> str:
     return value.replace("_", " ").title()
+
+
+def _diacritics_label(value: str) -> str:
+    """Say what the policy does rather than what Librarian calls it.
+
+    `fold` and `exact` are the engine's words. A reader choosing whether an
+    accent has to match wants "Ignored" or "Exact", which is also the wording
+    the Mini App checkbox uses.
+    """
+    return "Ignored" if value == "fold" else "Exact"
 
 
 def _require_kind(session: InteractionSession, kind: str) -> None:

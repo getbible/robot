@@ -11,6 +11,7 @@ from getbible import (
     ReferenceValidationError,
     RequestLimitError,
 )
+from getbible.search import shared_registry
 
 from config import Settings
 from modules.catalog import BookOption
@@ -116,17 +117,42 @@ class _Client:
         # stops passing the policy explicitly is caught here.
         self.warm_calls.append(translation)
         self.warm_policies.append((case_sensitive, diacritics))
+        fold = diacritics in {"fold", "insensitive"}
+        # Shaped after the real return value: corpus.cache_info() merged with
+        # index.analysis_report(). Inventing a shape here would let the suite
+        # pass against a response Librarian does not produce.
         return {
             "abbreviation": translation,
+            "sha": "a" * 40,
+            "checked_at": 0.0,
+            "stale": False,
             "verses": 31_102,
             "indexes": [
-                {"case_sensitive": False, "fold_diacritics": True}
+                {"case_sensitive": case_sensitive, "fold_diacritics": fold}
             ],
-            "analysis": {"script": "alphabetic"},
+            "analysis": {
+                "dominant_script": "alphabetic",
+                "scripts": {"alphabetic": 1.0},
+                "case_sensitive": case_sensitive,
+                "fold_diacritics": fold,
+                "terms": 12_345,
+            },
         }
 
     def cache_info(self) -> dict:
-        return {"test": True}
+        return {
+            "search_corpora": {
+                "kjv": {
+                    "sha": "a" * 40,
+                    "checked_at": 0.0,
+                    "stale": False,
+                    "verses": 31_102,
+                    "indexes": [
+                        {"case_sensitive": False, "fold_diacritics": True}
+                    ],
+                }
+            },
+        }
 
     def close(self) -> None:
         self.closed = True
@@ -354,6 +380,42 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["abbreviation"], "kjv")
         self.assertEqual(client.warm_calls, ["kjv"])
         self.assertEqual(service.metrics.snapshot()["search_warmups"], 1)
+
+    async def test_configured_corpus_limit_bounds_the_process_wide_registry(
+        self,
+    ) -> None:
+        """`SEARCH_CORPUS_LIMIT` must bound what is actually resident.
+
+        In Librarian 2 corpora live in a registry shared by every client in the
+        process, holding strong references under its own default of eight.
+        Dropping a client's reference frees nothing, so a host sized for one
+        resident corpus could hold eight — each with an index per case and
+        diacritics policy the filter dashboard can reach.
+        """
+        registry = shared_registry()
+        self.addCleanup(registry.resize, 8)
+        registry.resize(8)
+
+        service = ScriptureService(replace(_settings(), search_corpus_limit=2))
+        self.addAsyncCleanup(service.close)
+
+        self.assertEqual(registry._limit, 2)
+
+    async def test_index_build_budget_reaches_librarian(self) -> None:
+        """The budget governing the new cold-start failure mode must be wired.
+
+        An index build is bounded separately from a request, so a build that
+        serves every later search is not abandoned because one caller's clock
+        ran out. Unasserted, the setting could stop reaching Librarian silently.
+        """
+        settings = replace(_settings(), search_index_build_seconds=42.0)
+        service = ScriptureService(settings)
+        self.addAsyncCleanup(service.close)
+
+        limits = service._client.search_limits
+        self.assertEqual(limits.index_build_seconds, 42.0)
+        self.assertEqual(limits.deadline_seconds, settings.search_deadline_seconds)
+        self.assertNotEqual(limits.index_build_seconds, limits.deadline_seconds)
 
     async def test_prewarm_builds_the_index_a_default_search_will_use(self) -> None:
         """An index is keyed by its case and diacritics policy.

@@ -30,6 +30,7 @@ from getbible import (
     SearchValidationError,
     TranslationNotFoundError,
 )
+from getbible.search import shared_registry
 
 from config import Settings
 
@@ -194,6 +195,14 @@ class ScriptureService:
             search_corpus_limit=settings.search_corpus_limit,
             translation_cache_limit=settings.translation_cache_limit,
         )
+        # `search_corpus_limit` bounds this client's own corpus dictionary. In
+        # Librarian 2 the corpora themselves live in a process-wide registry that
+        # keeps its own strong references under a separate default of eight, so
+        # dropping a client reference no longer frees anything. Bound the registry
+        # to the same number the operator configured, or a small host sized for
+        # one resident corpus can hold eight — each with an index per case and
+        # diacritics policy a user can reach from the filter dashboard.
+        shared_registry().resize(settings.search_corpus_limit)
         self._catalog = CatalogClient(
             base_url=settings.api_base_url,
             timeout=(settings.connect_timeout, settings.read_timeout),
