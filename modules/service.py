@@ -418,10 +418,23 @@ class ScriptureService:
         A cold build is bounded by the index budget rather than the interactive
         lookup timeout. Paying it once here is what keeps every later request off
         the build path, and Librarian shares the result process-wide.
+
+        The case and diacritics policy must be passed explicitly and must match
+        the policy a default search uses. An index is keyed by that pair, so
+        warming under a different one builds an index no search will read: the
+        prewarm becomes dead work and the first real search pays the whole build
+        inside the request path. Librarian's hardened facade still defaults this
+        argument to the 1.x spelling, which resolves to `exact`, so relying on
+        its default would warm the wrong index.
         """
+        policy = SearchOptions()
         return await self._search_call(
             "search_warmups",
-            self._client.warm_translation,
+            partial(
+                self._client.warm_translation,
+                case_sensitive=policy.case_sensitive,
+                diacritics=policy.diacritics,
+            ),
             self.settings.default_translation,
             timeout=self.settings.search_index_build_seconds,
         )

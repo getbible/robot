@@ -43,6 +43,7 @@ class _Client:
         self.translation_calls: list[str] = []
         self.search_calls: list[tuple[str, str, object]] = []
         self.warm_calls: list[str] = []
+        self.warm_policies: list[tuple[bool, str]] = []
         self.closed = False
 
     def valid_translation(self, code: str) -> bool:
@@ -103,8 +104,18 @@ class _Client:
             ],
         }
 
-    def warm_translation(self, translation: str) -> dict:
+    def warm_translation(
+        self,
+        translation: str,
+        *,
+        case_sensitive: bool = False,
+        diacritics: str = "sensitive",
+    ) -> dict:
+        # The hardened Librarian facade still defaults this to the 1.x spelling,
+        # which resolves to `exact`. The fake keeps that default so a caller that
+        # stops passing the policy explicitly is caught here.
         self.warm_calls.append(translation)
+        self.warm_policies.append((case_sensitive, diacritics))
         return {
             "abbreviation": translation,
             "verses": 31_102,
@@ -343,6 +354,29 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["abbreviation"], "kjv")
         self.assertEqual(client.warm_calls, ["kjv"])
         self.assertEqual(service.metrics.snapshot()["search_warmups"], 1)
+
+    async def test_prewarm_builds_the_index_a_default_search_will_use(self) -> None:
+        """An index is keyed by its case and diacritics policy.
+
+        Warming under a different policy builds an index no search reads: the
+        prewarm becomes dead work and the first real search pays the whole build
+        inside the request path. Librarian's hardened facade defaults this
+        argument to the 1.x spelling, which resolves to `exact`, so the policy
+        has to be passed explicitly and has to track the search default.
+        """
+        client = _Client()
+        service = ScriptureService(_settings(), client=client)
+        self.addAsyncCleanup(service.close)
+
+        await service.warm_default_translation()
+        await service.search("loved", SearchOptions(translation="kjv"))
+
+        searched = client.search_calls[-1][2]
+        self.assertEqual(
+            client.warm_policies,
+            [(searched.case_sensitive, searched.diacritics)],
+        )
+        self.assertEqual(client.warm_policies, [(False, "fold")])
 
     async def test_slow_search_does_not_consume_lightweight_lookup_capacity(self) -> None:
         search_started = threading.Event()
