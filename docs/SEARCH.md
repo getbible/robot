@@ -125,6 +125,14 @@ index budget rather than the interactive lookup timeout. A warm index means no
 request ever pays for a build. A failed prewarm is logged and startup continues;
 the first search then pays the build instead.
 
+An index is keyed by its case and diacritics policy, so the prewarm passes the
+same policy a default search uses. Warming under a different one is not a
+partial win but a total loss: it builds an index no search reads, and the first
+real search still pays the whole build inside the request path. Librarian's
+hardened client still defaults that argument to the 1.x spelling, which resolves
+to `exact`, so the robot passes it explicitly and a test asserts the two cannot
+drift apart.
+
 Searching a *non-default* translation still triggers a cold build. That request
 is bounded by `LOOKUP_TIMEOUT` and may time out, but the build continues in its
 worker and serves every later search of that translation.
