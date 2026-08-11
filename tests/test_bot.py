@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import unittest
 from types import SimpleNamespace
@@ -204,11 +205,20 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         application.bot.set_my_short_description.assert_awaited_once_with(
             settings.bot_short_description
         )
-        service.warm_default_translation.assert_awaited_once()
         health.start.assert_awaited_once()
-        health.mark_ready.assert_called_once_with()
         janitor.start.assert_called_once_with()
+
+        # Readiness does not wait on the corpus. An index build is bounded by
+        # SEARCH_INDEX_BUILD_SECONDS, which can outlast the unit's
+        # TimeoutStartSec, so blocking READY=1 behind it would report a healthy
+        # service as a failed start. The build runs behind readiness instead.
+        health.mark_ready.assert_called_once_with()
         notifier.ready.assert_called_once_with()
+
+        prewarm = application.bot_data[bot.PREWARM_SLOT]
+        self.assertIsInstance(prewarm, asyncio.Task)
+        await prewarm
+        service.warm_default_translation.assert_awaited_once()
 
         await bot._post_shutdown(application)
         health.mark_not_ready.assert_called_once_with()

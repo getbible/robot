@@ -105,6 +105,48 @@ Search runs on its own executor, semaphore, timeout and circuit breaker,
 separate from reference delivery, so corpus work cannot consume every direct
 reference permit.
 
+### What one instance can serve
+
+Measured against a KJV-shaped corpus — 30,888 verses, 11,908 distinct terms,
+four cores:
+
+| | |
+|---|---|
+| Corpus parse | 67 ms |
+| Index build | 2.9 s, about 27 MB resident |
+| Search, ordinary query | 20–35 ms |
+| Search, very common word (26,915 matches) | 106 ms |
+| Sustained throughput | **~45 searches/second per process** |
+
+Searches share one already-parsed corpus and one already-built index; nothing is
+re-read or re-analysed per request. What they do not share is the interpreter.
+Matching is CPU-bound Python and holds the GIL, so throughput is flat in the
+number of workers while latency grows with it:
+
+| Concurrent workers | Throughput | Mean latency |
+|---:|---:|---:|
+| 1 | 44.6/s | 22 ms |
+| 2 | 42.1/s | 48 ms |
+| 4 | 42.6/s | 94 ms |
+| 8 | 35.4/s | 226 ms |
+| 16 | 29.3/s | 546 ms |
+
+`MAX_CONCURRENT_SEARCHES` therefore defaults to 4 — enough that one expensive
+query cannot stall every other reader, and not so many that everyone waits
+behind a saturated interpreter. Setting it to 100 would not serve 100 readers
+faster; it would serve them at roughly the same total rate with latencies near
+the search deadline.
+
+**Scale out with processes, not threads.** Each additional instance brings its
+own interpreter and its own ~45/s, and the deployment already supports running
+several. The cost is one resident corpus set per process, so size
+`SEARCH_SHARED_CORPUS_LIMIT` per instance rather than assuming one figure covers
+the host.
+
+The per-process ceiling is Librarian's matching loop. Raising it means letting
+that loop run without the GIL, which is a change in the library rather than
+here.
+
 ### Index construction
 
 An index is built once per **translation and policy** — the pair of case

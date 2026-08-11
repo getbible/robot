@@ -722,7 +722,7 @@ migrate_instance_configuration() {
     ensure_env_value "$python_bin" "$env_file" "CACHE_MAX_BYTES" "268435456"
     ensure_env_value "$python_bin" "$env_file" \
         "CACHE_MAINTENANCE_INTERVAL_SECONDS" "21600"
-    ensure_env_value "$python_bin" "$env_file" "MAX_CONCURRENT_SEARCHES" "1"
+    ensure_env_value "$python_bin" "$env_file" "MAX_CONCURRENT_SEARCHES" "4"
     migrate_env_default "$python_bin" "$env_file" "MAX_CONCURRENT_LOOKUPS" "4" "2"
     migrate_env_default "$python_bin" "$env_file" "MAX_CONCURRENT_UPDATES" "16" "4"
     migrate_env_default "$python_bin" "$env_file" "RATE_LIMIT_CACHE_SIZE" "20000" "2000"
