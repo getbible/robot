@@ -370,6 +370,7 @@ class Settings:
     max_output_chunks: int
     search_result_limit: int
     search_deadline_seconds: float
+    search_index_build_seconds: float
     max_concurrent_lookups: int
     max_concurrent_searches: int
     max_concurrent_updates: int
@@ -602,6 +603,9 @@ class Settings:
             search_result_limit=_integer("SEARCH_RESULT_LIMIT", 50, 1, 200),
             search_deadline_seconds=_number(
                 "SEARCH_DEADLINE_SECONDS", 5.0, 0.1, 30.0
+            ),
+            search_index_build_seconds=_number(
+                "SEARCH_INDEX_BUILD_SECONDS", 120.0, 1.0, 600.0
             ),
             max_concurrent_lookups=_integer("MAX_CONCURRENT_LOOKUPS", 2, 1, 32),
             max_concurrent_searches=_integer("MAX_CONCURRENT_SEARCHES", 1, 1, 8),

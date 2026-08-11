@@ -59,11 +59,7 @@ from modules.miniapp_tornado import MiniAppServer
 from modules.posting import post_scripture
 from modules.preferences import UserPreferenceStore
 from modules.rate_limit import InboundRateLimiter
-from modules.service import (
-    ScriptureQuery,
-    ScriptureService,
-    effective_search_options,
-)
+from modules.service import ScriptureQuery, ScriptureService
 from modules.utils import safe_delete_command, safe_delete_messages, send_typing
 
 LOGGER = logging.getLogger(__name__)
@@ -1612,10 +1608,8 @@ async def _run_search(
 ) -> None:
     if not query:
         raise RobotInputError("Search words are required.")
-    session.search_options = effective_search_options(
-        query,
-        session.search_options,
-    )
+    # Librarian 2 reads the query's writing system itself, so the user's chosen
+    # match mode survives the search instead of being rewritten under them.
     page = await service.search(query, session.search_options)
     session.search_query = page.query
     session.search_total = page.total

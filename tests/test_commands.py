@@ -843,7 +843,9 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         service.search.assert_awaited_once()
         options = service.search.await_args.args[1]
         self.assertEqual(options.translation, "chiuns")
-        self.assertEqual(options.match, "substring")
+        # Librarian 2 reads the Han query itself, so the default whole-word mode
+        # survives instead of being rewritten to substring under the user.
+        self.assertEqual(options.match, "whole_word")
 
     async def test_group_direct_bible_posts_only_scripture_publicly(self) -> None:
         context = self.context(_Limiter())

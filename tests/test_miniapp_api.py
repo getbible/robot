@@ -1382,55 +1382,44 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.preferences.translation_for(42), "aov")
         self.assertNotIn(42, self.preferences.reader_locations)
 
-    async def test_search_uses_librarian_multilingual_match_policy(self) -> None:
+    async def test_search_forwards_the_requested_match_mode_unchanged(self) -> None:
+        """The API must not second-guess the writing system on Librarian's behalf."""
         token = await self.exchange()
-        cases = (
-            ("神", "substring"),
-            ("イエス", "substring"),
-            ("예수", "whole_word"),
-            ("พระ", "substring"),
-            ("ພຣະ", "substring"),
-            ("ព្រះ", "substring"),
-            ("ယေရှု", "substring"),
-            ("المسيح", "whole_word"),
-            ("משיח", "whole_word"),
-            ("यीशु", "whole_word"),
-            ("Jesus", "whole_word"),
+        queries = (
+            "神",  # Han
+            "イエス",  # Katakana
+            "예수",  # Hangul
+            "พระ",  # Thai
+            "ພຣະ",  # Lao
+            "ព្រះ",  # Khmer
+            "ယေရှု",  # Myanmar
+            "المسيح",  # Arabic
+            "משיח",  # Hebrew
+            "यीशु",  # Devanagari
+            "Jesus",  # Latin
+            "Jesus 耶稣",  # mixed Latin and Han
         )
 
-        for query, expected_match in cases:
-            with self.subTest(query=query):
-                response = await self.api.handle(
-                    self.request(
-                        "POST",
-                        "/getbible/api/v1/search",
-                        token=token,
-                        body={
-                            "query": query,
-                            "options": {"match": "whole_word"},
-                        },
+        for requested in ("whole_word", "substring"):
+            for query in queries:
+                with self.subTest(query=query, match=requested):
+                    response = await self.api.handle(
+                        self.request(
+                            "POST",
+                            "/getbible/api/v1/search",
+                            token=token,
+                            body={
+                                "query": query,
+                                "options": {"match": requested},
+                            },
+                        )
                     )
-                )
 
-                self.assertEqual(response.status, 200)
-                self.assertEqual(
-                    self.service.search_requests[-1][1].match,
-                    expected_match,
-                )
-
-        explicit = await self.api.handle(
-            self.request(
-                "POST",
-                "/getbible/api/v1/search",
-                token=token,
-                body={
-                    "query": "예수",
-                    "options": {"match": "substring"},
-                },
-            )
-        )
-        self.assertEqual(explicit.status, 200)
-        self.assertEqual(self.service.search_requests[-1][1].match, "substring")
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(
+                        self.service.search_requests[-1][1].match,
+                        requested,
+                    )
 
     async def test_preferences_accept_only_non_content_allow_list(self) -> None:
         token = await self.exchange()
