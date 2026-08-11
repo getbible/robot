@@ -1846,6 +1846,43 @@ class SelectionFormattingTestCase(unittest.TestCase):
             "하나님이 세상을 이처럼 【사랑】하사",
         )
 
+    def test_search_highlight_respects_an_exact_diacritics_request(self) -> None:
+        """Under `exact` the engine distinguishes pointed from unpointed text.
+
+        An unaccented term is then not something the engine matched, so it is
+        not something to mark. Folding regardless would highlight what the
+        reader deliberately excluded.
+        """
+        exact = SearchOptions(diacritics="exact")
+
+        self.assertEqual(
+            _highlight_search_terms_plain("λόγος ἦν", ("λογος",), exact),
+            "λόγος ἦν",
+        )
+        self.assertEqual(
+            _highlight_search_terms_plain("λόγος ἦν", ("λόγος",), exact),
+            "【λόγος】 ἦν",
+        )
+
+    def test_search_highlight_marks_thai_without_word_boundaries(self) -> None:
+        """Thai reaches the continuous family through Unicode line-break class."""
+        rendered = _highlight_search_terms_plain(
+            "พระเจ้าทรงรักโลก",
+            ("พระเจ้า",),
+            SearchOptions(),
+        )
+
+        self.assertEqual(rendered, "【พระเจ้า】ทรงรักโลก")
+
+    def test_search_highlight_never_returns_overlapping_spans(self) -> None:
+        rendered = _highlight_search_terms_plain(
+            "grace upon grace",
+            ("grace", "grace"),
+            SearchOptions(),
+        )
+
+        self.assertEqual(rendered, "【grace】 upon 【grace】")
+
     def test_search_highlight_keeps_brahmic_vowel_marks(self) -> None:
         """Brahmic marks carry vowels, so folding them would change the word."""
         rendered = _highlight_search_terms_plain(
