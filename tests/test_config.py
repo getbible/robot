@@ -28,7 +28,17 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.search_max_response_bytes, 4 * 1024 * 1024)
         self.assertEqual(settings.reference_cache_limit, 1000)
         self.assertEqual(settings.chapter_cache_limit, 256)
-        self.assertEqual(settings.max_concurrent_searches, 1)
+        # Searches share one parsed corpus and one built index, so several can
+        # run at once. Measured throughput is flat past the core count because
+        # matching is CPU-bound Python, so this stays modest: enough that one
+        # expensive query cannot stall every reader, not so many that everyone
+        # waits behind a saturated interpreter. Scale out with instances.
+        self.assertEqual(settings.max_concurrent_searches, 4)
+        self.assertEqual(settings.search_shared_corpus_limit, 8)
+        self.assertGreater(
+            settings.search_shared_corpus_limit,
+            settings.search_corpus_limit,
+        )
         self.assertEqual(settings.max_concurrent_lookups, 2)
         self.assertEqual(settings.max_concurrent_updates, 4)
         self.assertTrue(settings.prewarm_default_translation)

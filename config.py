@@ -612,7 +612,7 @@ class Settings:
                 "SEARCH_INDEX_BUILD_SECONDS", 120.0, 1.0, 600.0
             ),
             max_concurrent_lookups=_integer("MAX_CONCURRENT_LOOKUPS", 2, 1, 32),
-            max_concurrent_searches=_integer("MAX_CONCURRENT_SEARCHES", 1, 1, 8),
+            max_concurrent_searches=_integer("MAX_CONCURRENT_SEARCHES", 4, 1, 64),
             max_concurrent_updates=_integer("MAX_CONCURRENT_UPDATES", 4, 1, 64),
             user_rate_capacity=_integer("USER_RATE_CAPACITY", 4, 1, 100),
             user_rate_refill_per_second=_number(

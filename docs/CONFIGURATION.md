@@ -185,7 +185,7 @@ A lookup timeout does not pretend that its worker thread stopped. The capacity p
 | `SEARCH_INDEX_BUILD_SECONDS` | `120` | `1`–`600` | Bound on building one translation's search index, and the budget startup prewarming spends |
 | `SEARCH_MAX_RESPONSE_BYTES` | `4194304` (4 MiB) | `65536`–`16777216` | Maximum constructed Librarian search result, separate from corpus downloads |
 | `MAX_CONCURRENT_LOOKUPS` | `2` | `1`–`32` | Direct-reference/catalog worker threads and permits |
-| `MAX_CONCURRENT_SEARCHES` | `1` | `1`–`8` | Independent expensive-search worker threads and permits |
+| `MAX_CONCURRENT_SEARCHES` | `4` | `1`–`64` | Concurrent searches over the shared corpus. Past the core count this adds latency, not throughput — scale out with instances |
 | `MAX_CONCURRENT_UPDATES` | `4` | `1`–`64` | Telegram updates processed concurrently |
 
 `MAX_TOTAL_VERSES` may not be lower than `MAX_VERSES_PER_REFERENCE`. Telegram text is measured in UTF-16 code units, not Python characters, before chunks are sent.
@@ -334,7 +334,7 @@ GETBIBLE_API_BASE_URL="https://api.getbible.net"
 GETBIBLE_WEB_BASE_URL="https://getbible.life"
 GETBIBLE_MAX_RESPONSE_BYTES="41943040"
 SEARCH_MAX_RESPONSE_BYTES="4194304"
-MAX_CONCURRENT_SEARCHES="1"
+MAX_CONCURRENT_SEARCHES="4"
 PREWARM_DEFAULT_TRANSLATION="true"
 HEALTH_HOST="127.0.0.1"
 HEALTH_PORT="8081"

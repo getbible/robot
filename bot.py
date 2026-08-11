@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import sqlite3
 import sys
 from collections.abc import Awaitable
+from contextlib import suppress
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
@@ -66,6 +68,7 @@ from modules.service import ScriptureQuery, ScriptureService
 HEALTH_SLOT = "health_server"
 CACHE_JANITOR_SLOT = "cache_janitor"
 NOTIFIER_SLOT = "runtime_notifier"
+PREWARM_SLOT = "prewarm_task"
 LOGGER = logging.getLogger(__name__)
 ALLOWED_UPDATES = ("message", "callback_query")
 
@@ -467,23 +470,49 @@ async def _post_init(application: Application) -> None:
     if mini_app is not None:
         await mini_app.start()
     await _synchronize_telegram_profile(application, settings)
-    if settings.prewarm_default_translation:
-        try:
-            metadata = await service.warm_default_translation()
-        except ScriptureUnavailable as error:
-            LOGGER.warning(
-                "Default search corpus prewarm failed safely (%s)",
-                type(error).__name__,
-            )
-        else:
-            LOGGER.info(
-                "Default search corpus ready (%s, %s verses)",
-                metadata.get("abbreviation", settings.default_translation),
-                metadata.get("verses", "unknown"),
-            )
+    # Readiness is not gated on the corpus. An index build is bounded by
+    # SEARCH_INDEX_BUILD_SECONDS, which can exceed the unit's TimeoutStartSec,
+    # and blocking READY=1 behind it would let a cold corpus on a slow host
+    # register as a failed start on a service that is fine. Reference delivery,
+    # navigation and the Mini App do not need the index at all, so the robot
+    # reports ready and warms behind it. Search stays correct throughout: a
+    # query arriving first simply waits on the same build.
     health.mark_ready()
     notifier.ready()
+    if settings.prewarm_default_translation:
+        application.bot_data[PREWARM_SLOT] = asyncio.create_task(
+            _prewarm_default_translation(service, settings),
+            name="prewarm-default-translation",
+        )
     LOGGER.info("GetBible Robot initialized")
+
+
+async def _prewarm_default_translation(
+    service: ScriptureService,
+    settings: Settings,
+) -> None:
+    """Build the default corpus and index without holding up readiness."""
+    try:
+        metadata = await service.warm_default_translation()
+    except ScriptureUnavailable as error:
+        LOGGER.warning(
+            "Default search corpus prewarm failed safely (%s)",
+            type(error).__name__,
+        )
+    except asyncio.CancelledError:
+        LOGGER.info("Default search corpus prewarm cancelled during shutdown")
+        raise
+    except Exception as error:  # never let a background task kill the process
+        LOGGER.warning(
+            "Default search corpus prewarm failed safely (%s)",
+            type(error).__name__,
+        )
+    else:
+        LOGGER.info(
+            "Default search corpus ready (%s, %s verses)",
+            metadata.get("abbreviation", settings.default_translation),
+            metadata.get("verses", "unknown"),
+        )
 
 
 async def _post_shutdown(application: Application) -> None:
@@ -493,8 +522,15 @@ async def _post_shutdown(application: Application) -> None:
     service: ScriptureService = application.bot_data[SERVICE_SLOT]
     preferences: UserPreferenceStore = application.bot_data[PREFERENCES_SLOT]
     mini_app: MiniAppServer | None = application.bot_data.get(MINI_APP_SLOT)
+    prewarm: asyncio.Task[None] | None = application.bot_data.get(PREWARM_SLOT)
     health.mark_not_ready()
     await notifier.stopping()
+    if prewarm is not None and not prewarm.done():
+        # The executor below refuses new work once closed, so a build still in
+        # flight has to be released here rather than left to fail on shutdown.
+        prewarm.cancel()
+        with suppress(asyncio.CancelledError):
+            await prewarm
     if mini_app is not None:
         await mini_app.close()
     await health.close()
