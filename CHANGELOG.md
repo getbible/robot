@@ -203,8 +203,10 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 - Stopped charging ordinary owner-scoped menu callbacks against command token
   buckets and serialized callbacks per session, preventing normal rapid
   navigation from rate-limiting or racing itself.
-- Added unsegmented-script detection so default Mandarin/CJK searches use
-  substring matching instead of whitespace-dependent whole-word matching.
+- Made default Mandarin/CJK searches reach the text. Librarian 2 indexes
+  continuous scripts as positioned character n-grams, so whole-word — the
+  default — reaches them without the application detecting the script or
+  substituting a match mode.
 - Moved complete search verses into full-width selectable result buttons instead
   of duplicating them in the panel text above compact reference buttons. Match
   text is visibly bracketed inside each untruncated button, pages contain up to
