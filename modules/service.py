@@ -17,6 +17,7 @@ from functools import partial
 from typing import Any, TypeVar, cast
 
 from getbible import (
+    SEARCH_ENGINE_VERSION,
     CacheIntegrityError,
     GetBible,
     GetBibleReference,
@@ -439,6 +440,10 @@ class ScriptureService:
             "metrics": self.metrics.snapshot(),
             "circuit": repository_circuit,
             "search_circuit": search_circuit,
+            # Matching semantics can change without a translation SHA changing.
+            # Publishing the engine version is what lets an operator tell an
+            # upgrade apart from a regression when result counts move.
+            "search_engine_version": SEARCH_ENGINE_VERSION,
         }
         try:
             state["librarian"] = self._client.cache_info()
