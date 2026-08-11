@@ -7,8 +7,9 @@ GetBible source requirement declared in `requirements.in`, verifies that the loc
 contains the same URL plus a SHA-256 hash, removes only that logical requirement,
 and strictly audits every remaining registry dependency.
 
-After `requirements.in` moves to a normal released `getbible>=1.2,<2` requirement,
-the helper passes the complete lock to pip-audit without filtering anything.
+`requirements.in` now declares the normal released `getbible>=2.0.0,<3` requirement,
+so the helper passes the complete lock to pip-audit without filtering anything. The
+source-archive path below is retained for pre-release Librarian verification.
 """
 
 from __future__ import annotations
