@@ -38,7 +38,7 @@ No reader navigation, catalog load, chapter load, select, unselect, reorder, cle
 
 | Module | Responsibility |
 | --- | --- |
-| `miniapp/lib/getbible-transport.js` | Fixed-origin, credential-free public HTTP transport with bounds and timeout policy |
+| `miniapp/lib/getbible-transport.js` | Fixed-origin, credential-free public HTTP transport with size bounds, stall-based deadlines, and bounded retry |
 | `miniapp/lib/getbible-api.js` | Main API and Query API use cases, hash-aware retrieval, and public response orchestration |
 | `miniapp/lib/getbible-model.js` | GetBible response normalization and deterministic coordinate identities |
 | `miniapp/lib/public-cache.js` | IndexedDB/memory cache, LRU bounds, atomic replacement, and invalidation |
@@ -180,7 +180,10 @@ this repository. Corpora and their indexes live in a Librarian registry keyed by
 repository, translation and source SHA, shared by every client object in the
 process, so the parse-and-analyse cost is paid once per translation version.
 Index construction is bounded separately from a request deadline because one
-build serves every later search. See [Search](SEARCH.md).
+build serves every later search, and a search waits for the build it provokes
+rather than abandoning it: `SEARCH_TIMEOUT` must cover that build, and the Mini
+App waits on the budget the robot declares at session bootstrap rather than
+guessing one. See [Search](SEARCH.md).
 
 ## Posting and trust
 

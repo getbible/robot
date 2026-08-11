@@ -398,6 +398,12 @@ class ScriptureService:
         habit of flipping ``whole_word`` to ``substring`` on seeing a continuous
         script is gone: it loosened the space-delimited terms of a mixed query,
         so ``all`` began matching inside ``shall``.
+
+        The wait is the search budget, not the reference-lookup budget. The first
+        search of a translation builds that translation's index, and the generic
+        lookup timeout was shorter than the build it was waiting on, so searching
+        anything other than the prewarmed default reliably failed on its first
+        attempt while the build ran on in its worker.
         """
         criteria = SearchBible(
             words=options.words,
@@ -418,6 +424,7 @@ class ScriptureService:
             query,
             options.translation,
             criteria,
+            timeout=self.settings.search_timeout,
         )
         return self._search_page(response, query, options.translation)
 

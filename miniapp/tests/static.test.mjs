@@ -294,4 +294,18 @@ test("ships parseable OpenAPI JSON at the documented relative root", async () =>
   assert.equal(sessionToken.minLength, 16);
   assert.equal(sessionToken.maxLength, 128);
   assert.equal(sessionToken.pattern, "^[A-Za-z0-9_-]+$");
+
+  // The page waits on a budget the robot states, rather than guessing one and
+  // reporting a timeout for a search the robot was still running.
+  assert.ok(
+    contract.components.schemas.SessionState.required.includes("limits"),
+  );
+  assert.equal(
+    contract.components.schemas.SessionState.properties.limits.$ref,
+    "#/components/schemas/Limits",
+  );
+  const searchBudget =
+    contract.components.schemas.Limits.properties.search_timeout_seconds;
+  assert.equal(searchBudget.minimum, 1);
+  assert.equal(searchBudget.maximum, 900);
 });

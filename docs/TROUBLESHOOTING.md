@@ -324,17 +324,24 @@ vocabulary. The project speaks only `fold` and `exact`, so the request is
 refused rather than guessed at. Reopening the Mini App loads the current build
 and the error stops. See [Search](SEARCH.md).
 
-## The first search of a translation times out
+## The first search of a translation is slow
 
-An index is built once per translation. The build is bounded by
-`SEARCH_INDEX_BUILD_SECONDS`, but the request that triggered it is still bounded
-by `LOOKUP_TIMEOUT`, so a cold build of a large translation can exceed the
-request while the build itself continues in its worker. Searches after it are
-served from the built index.
+An index is built once per translation, and the first search of a translation
+waits for that build instead of being abandoned partway through it. A first
+search of a cold translation is therefore slower than every search after it —
+seconds rather than milliseconds — and the ones that follow are served from the
+built index.
 
 Keep `PREWARM_DEFAULT_TRANSLATION` enabled so the default translation is never
-built inside a request. A `lookup_timed_out` event followed by successful
-searches of the same translation is this pattern, not a failing repository.
+built inside a request at all.
+
+If that first search *fails* rather than merely taking its time, compare
+`SEARCH_TIMEOUT` with `SEARCH_INDEX_BUILD_SECONDS`. Before this was fixed,
+searches were charged `LOOKUP_TIMEOUT` — a budget sized for delivering a
+reference, and shorter than the build the search was waiting on — so the reader
+was told the search timed out while the build they triggered completed without
+them. A `lookup_timed_out` audit event on a `scripture_searches` operation is
+that fault; the loader now refuses a configuration that can reproduce it.
 
 ## Upgrade fails
 

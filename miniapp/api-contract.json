@@ -1150,7 +1150,14 @@
       "SessionState": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["user", "preferences", "entrypoint", "translations", "basket"],
+        "required": [
+          "user",
+          "preferences",
+          "entrypoint",
+          "translations",
+          "basket",
+          "limits"
+        ],
         "properties": {
           "user": {
             "type": "object",
@@ -1178,6 +1185,23 @@
           },
           "basket": {
             "$ref": "#/components/schemas/Basket"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/Limits"
+          }
+        }
+      },
+      "Limits": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Server-declared budgets the page must honour. The browser cannot infer how long the robot will work on a request, and abandoning one early reports a timeout for work that was still in progress.",
+        "required": ["search_timeout_seconds"],
+        "properties": {
+          "search_timeout_seconds": {
+            "type": "number",
+            "description": "Longest the robot will spend on one search, including the one-off index build the first search of a translation triggers.",
+            "minimum": 1,
+            "maximum": 900
           }
         }
       },

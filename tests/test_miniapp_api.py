@@ -151,6 +151,7 @@ class _Service:
             max_total_verses=50,
             max_verses_per_reference=50,
             mini_app_max_selections=50,
+            search_timeout=150.0,
         )
         self.selected: list[ScriptureQuery] = []
         self.search_requests: list[tuple[str, SearchOptions]] = []
@@ -708,6 +709,39 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(replay.status, 409)
+
+    async def test_session_declares_the_search_budget_the_page_must_wait_out(
+        self,
+    ) -> None:
+        # The browser cannot infer how long the robot will work on a search, and
+        # a page that gives up first reports a timeout for work still in flight.
+        # The budget is stated once, at bootstrap, and again on resume so a
+        # reopened WebView does not fall back to a guess.
+        created = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": _init_data()},
+            )
+        )
+        payload = json.loads(created.body)
+        self.assertEqual(created.status, 201)
+        self.assertEqual(
+            payload["limits"],
+            {"search_timeout_seconds": self.service.settings.search_timeout},
+        )
+
+        resumed = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/session",
+                token=payload["session_token"],
+            )
+        )
+        self.assertEqual(
+            json.loads(resumed.body)["limits"],
+            payload["limits"],
+        )
 
     async def test_reopened_webview_recovers_the_active_owner_bound_session(
         self,

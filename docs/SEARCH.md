@@ -197,9 +197,17 @@ hardened client still defaults that argument to the 1.x spelling, which resolves
 to `exact`, so the robot passes it explicitly and a test asserts the two cannot
 drift apart.
 
-Searching a *non-default* translation still triggers a cold build. That request
-is bounded by `LOOKUP_TIMEOUT` and may time out, but the build continues in its
-worker and serves every later search of that translation.
+Searching a *non-default* translation still triggers a cold build, and that
+request waits for it. `SEARCH_TIMEOUT` bounds the request and must cover
+`SEARCH_INDEX_BUILD_SECONDS` plus `SEARCH_DEADLINE_SECONDS`; the loader refuses
+a configuration where it does not.
+
+This is the correction of a real defect. The request used to be bounded by
+`LOOKUP_TIMEOUT` — twenty seconds, sized for delivering a reference — while the
+build it was waiting on was granted two minutes. The first search of any
+translation but the prewarmed default therefore reported a timeout to the reader
+while the build they had triggered ran on to completion without them. The
+searcher paid the whole cost and received nothing for it.
 
 ## Result volume
 

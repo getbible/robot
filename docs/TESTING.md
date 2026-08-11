@@ -52,7 +52,11 @@ Tests must prove:
 - exact-scope hashes are stored and revalidated at least weekly;
 - parent changes invalidate descendants;
 - atomic cache replacement preserves the last valid record on failure;
-- cold and warm IndexedDB paths produce the same normalized chapter model.
+- cold and warm IndexedDB paths produce the same normalized chapter model;
+- a response that is still arriving is never abandoned, however long it takes,
+  and one that has gone silent is abandoned as a retryable timeout;
+- reads that may succeed on a second attempt are retried, and refusals that
+  will repeat are raised on the first.
 
 ### Search boundary
 
@@ -65,7 +69,12 @@ Tests must prove:
 - a query reaches Librarian with the match mode the reader asked for, in every
   writing system, so no layer reintroduces a match-mode detector;
 - both diacritics vocabularies are accepted, and a profile stored before the
-  Librarian 2 upgrade keeps its translation and reading position.
+  Librarian 2 upgrade keeps its translation and reading position;
+- a search is charged the search budget and not the reference-delivery budget,
+  so the first search of a translation waits for the index build it provokes;
+- the loader refuses a `SEARCH_TIMEOUT` shorter than the build it must cover;
+- the session response declares that budget and the page waits it out, falling
+  back to a search-shaped floor when a robot declares nothing.
 
 ### Browser selection domain
 

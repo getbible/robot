@@ -259,8 +259,13 @@ export class GetBibleApi {
     const translation = scripture.translation;
     const bookNumber = scripture.book.number;
     const chapterNumber = scripture.chapter;
-    const books = await this.books(translation);
-    const chapters = await this.chapters(translation, bookNumber);
+    // A cold chapter costs a chain of public round trips, and these two owe
+    // each other nothing. Running them in sequence made every reader wait one
+    // catalogue read longer than the data required.
+    const [books, chapters] = await Promise.all([
+      this.books(translation),
+      this.chapters(translation, bookNumber),
+    ]);
     const navigation = await this.#navigation(
       books.items,
       chapters.items,
