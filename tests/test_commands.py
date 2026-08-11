@@ -1846,6 +1846,36 @@ class SelectionFormattingTestCase(unittest.TestCase):
             "하나님이 세상을 이처럼 【사랑】하사",
         )
 
+    def test_search_highlight_marks_only_the_abjad_stems_librarian_derives(
+        self,
+    ) -> None:
+        """A stem is reachable behind a particle, not behind any prefix at all.
+
+        Librarian analyses `ויאמר` into `ויאמר` and `יאמר` — never `אמר` —
+        because `וי` is not a closed-class particle. Skipping the leading
+        boundary for all abjad text marked a match the engine never made.
+        Verified against `analyzer_for(False, True).terms()` for each word here.
+        """
+        rendered = _highlight_search_terms_plain(
+            "ויאמר אלהים ולאמר הנביא אמר יהוה",
+            ("אמר",),
+            SearchOptions(),
+        )
+
+        # ולאמר -> ['ולאמר', 'אמר'] (ול is a particle); ויאמר -> ['ויאמר', 'יאמר'].
+        self.assertEqual(rendered, "ויאמר אלהים ול【אמר】 הנביא 【אמר】 יהוה")
+
+    def test_search_highlight_will_not_invent_a_short_abjad_stem(self) -> None:
+        """Librarian requires three letters before it derives a stem at all."""
+        rendered = _highlight_search_terms_plain(
+            "ובן האיש בן",
+            ("בן",),
+            SearchOptions(),
+        )
+
+        # ובן -> ['ובן'] only, so the two-letter term reaches the bare word.
+        self.assertEqual(rendered, "ובן האיש 【בן】")
+
     def test_search_highlight_respects_an_exact_diacritics_request(self) -> None:
         """Under `exact` the engine distinguishes pointed from unpointed text.
 

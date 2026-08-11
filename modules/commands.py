@@ -89,6 +89,22 @@ _T = TypeVar("_T")
 #: Grapheme clusters, so composition and folding cannot desynchronise a span
 #: from the text it points into. `regex` supplies `\X`; `re` has no equivalent.
 _GRAPHEME = regex.compile(r"\X")
+#: Closed-class particles that attach to the front of an abjad word. Librarian
+#: indexes the stem behind one of these and nothing else, so `אור` reaches
+#: `והאור` while `אמר` never reaches `ויאמר` — that word yields `יאמר`, not
+#: `אמר`. Highlighting has to agree, or it marks a match nobody made.
+_ABJAD_PROCLITICS = frozenset(
+    {
+        "ו", "ה", "ב", "ל", "כ", "מ", "ש",
+        "וה", "וב", "ול", "וכ", "ומ", "וש",
+        "ال", "و", "ف", "ب", "ل", "ك",
+        "وال", "فال", "بال", "لل", "كال",
+    }
+)
+#: Hebrew and Arabic roots are overwhelmingly triliteral, and Librarian will not
+#: invent a stem shorter than this out of a word that merely starts with a
+#: particle letter.
+_MIN_ABJAD_STEM = 3
 #: Writing systems whose marks are accents or optional pointing, and so fold.
 #: Brahmic and continuous scripts are absent because their marks carry vowels.
 _FOLDED_FAMILIES = frozenset({ScriptFamily.ALPHABETIC, ScriptFamily.ABJAD})
@@ -3283,10 +3299,17 @@ def _search_match_spans(
                 # boundary to test. In an abjad a closed-class particle attaches
                 # to the front and Librarian still matches the stem behind it,
                 # so only the trailing edge is a real boundary there.
-                leading = (
-                    family is not ScriptFamily.ABJAD
-                    and _continues_search_word(normalized, match_at - 1)
-                )
+                leading = _continues_search_word(normalized, match_at - 1)
+                if leading and family is ScriptFamily.ABJAD:
+                    # Only a closed-class particle may sit in front, and only
+                    # ahead of a stem long enough for Librarian to have derived.
+                    start = match_at
+                    while _continues_search_word(normalized, start - 1):
+                        start -= 1
+                    leading = not (
+                        len(needle) >= _MIN_ABJAD_STEM
+                        and normalized[start:match_at] in _ABJAD_PROCLITICS
+                    )
                 trailing = _continues_search_word(normalized, match_end)
                 if leading or trailing:
                     continue

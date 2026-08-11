@@ -725,6 +725,18 @@ const ABJAD_RE =
   /[\p{Script_Extensions=Hebrew}\p{Script_Extensions=Arabic}\p{Script_Extensions=Syriac}\p{Script_Extensions=Thaana}\p{Script_Extensions=Samaritan}]/u;
 const BRAHMIC_RE =
   /[\p{Script_Extensions=Devanagari}\p{Script_Extensions=Bengali}\p{Script_Extensions=Gurmukhi}\p{Script_Extensions=Gujarati}\p{Script_Extensions=Oriya}\p{Script_Extensions=Tamil}\p{Script_Extensions=Telugu}\p{Script_Extensions=Kannada}\p{Script_Extensions=Malayalam}\p{Script_Extensions=Sinhala}]/u;
+// Closed-class particles that attach to the front of an abjad word. Librarian
+// indexes the stem behind one of these and nothing else, so `אור` reaches
+// `והאור` while `אמר` never reaches `ויאמר` — that word yields `יאמר`.
+const ABJAD_PROCLITICS = new Set([
+  "ו", "ה", "ב", "ל", "כ", "מ", "ש",
+  "וה", "וב", "ול", "וכ", "ומ", "וש",
+  "ال", "و", "ف", "ب", "ل", "ك",
+  "وال", "فال", "بال", "لل", "كال",
+]);
+// Hebrew and Arabic roots are overwhelmingly triliteral; Librarian will not
+// invent a stem shorter than this.
+const MIN_ABJAD_STEM = 3;
 const LETTER_RE = /[\p{L}\p{N}]/u;
 const MARK_RE = /\p{M}/u;
 const COMBINING_RE = /\p{Mn}/u;
@@ -830,7 +842,17 @@ function termHighlights(text, terms, diacritics = DEFAULT_FILTERS.diacritics) {
       const stop = at + needle.length;
       from = Math.max(stop, at + 1);
       if (delimited) {
-        const leading = family !== "abjad" && continuesWord(normalized, at - 1);
+        let leading = continuesWord(normalized, at - 1);
+        if (leading && family === "abjad") {
+          // Only a closed-class particle may sit in front, and only ahead of a
+          // stem long enough for Librarian to have derived one.
+          let wordStart = at;
+          while (continuesWord(normalized, wordStart - 1)) wordStart -= 1;
+          leading = !(
+            needle.length >= MIN_ABJAD_STEM &&
+            ABJAD_PROCLITICS.has(normalized.slice(wordStart, at))
+          );
+        }
         if (leading || continuesWord(normalized, stop)) continue;
       }
       candidates.push({ start: starts[at], end: ends[stop - 1] });
