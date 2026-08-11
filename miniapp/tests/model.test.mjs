@@ -581,3 +581,16 @@ test("survives terms that normalize away or are absent", () => {
   // A verse carrying no text is not a verse; the model drops it outright.
   assert.deepEqual(normalizeVerses([{ ...verse, text: "" }]), []);
 });
+
+test("marks only the abjad stems Librarian actually derives", () => {
+  // `ולאמר` analyses to ['ולאמר','אמר'] because `ול` is a closed-class
+  // particle; `ויאמר` analyses to ['ויאמר','יאמר'] and never yields `אמר`.
+  assert.deepEqual(
+    marked("ויאמר אלהים ולאמר הנביא אמר יהוה", ["אמר"]),
+    ["אמר", "אמר"],
+  );
+  assert.deepEqual(marked("יהי אור והאור טוב", ["אור"]), ["אור", "אור"]);
+  // Three letters is the floor below which no stem is derived, so `ובן` keeps
+  // its particle and only the bare word matches.
+  assert.deepEqual(marked("ובן האיש בן", ["בן"]), ["בן"]);
+});
