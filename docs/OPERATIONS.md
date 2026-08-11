@@ -240,6 +240,14 @@ Alert on:
 
 Runtime metrics contain aggregates only. Do not expose the loopback listener publicly without an authenticated, access-controlled proxy.
 
+`/metrics` publishes `getbible_robot_search_engine_version`. Librarian moves
+that number whenever matching semantics change, independent of any translation
+SHA, so it is the value that separates an intended upgrade from a regression
+when result counts move under a stable corpus. Record it alongside result-volume
+dashboards. A first search of a translation that has no index yet may report
+`lookup_timed_out` while the build completes in its worker; the searches after
+it are served from the built index. See [Search](SEARCH.md).
+
 The structured events used for capacity diagnosis are
 `capacity_queue_rejected`, `lookup_timed_out`,
 `upstream_circuit_rejected`, `instance_memory_pressure`,

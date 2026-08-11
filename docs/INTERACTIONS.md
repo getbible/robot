@@ -51,6 +51,12 @@ Search is the sole Mini App Scripture-discovery operation that uses Robot/Librar
 
 Opaque search tokens and deterministic reader IDs are not selection identity. Identity is translation, book number, chapter, and verse.
 
+Filters narrow a search; they never tell Librarian how to read a script. The
+words, match, scope, case, diacritics, sort, books, exclusion and proximity
+controls are documented with their values and defaults in [Search](SEARCH.md),
+which also covers why a Chinese or Thai query needs no special handling and why
+the diacritics filter now folds by default.
+
 ## Explicit reference workflow
 
 Mini App explicit references use `query.getbible.net/v2` directly. Query results provide reader coordinates and grouped-reference results without routing through Robot or Librarian.

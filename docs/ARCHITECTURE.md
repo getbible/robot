@@ -173,6 +173,15 @@ Search is the only Mini App content operation backed by Librarian. It uses a sep
 
 Search responses are bounded and normalized before reaching the browser. Search tokens are not selection identity and are not trusted for final text.
 
+The robot supplies a query and narrowing filters; Librarian derives the matching
+strategy from the text of the translation and of the query. No layer here
+inspects a query to choose a match mode, and no per-language branch exists in
+this repository. Corpora and their indexes live in a Librarian registry keyed by
+repository, translation and source SHA, shared by every client object in the
+process, so the parse-and-analyse cost is paid once per translation version.
+Index construction is bounded separately from a request deadline because one
+build serves every later search. See [Search](SEARCH.md).
+
 ## Posting and trust
 
 The browser is untrusted for final Telegram output. It may choose coordinates and ordering, but it cannot choose authoritative Scripture text.

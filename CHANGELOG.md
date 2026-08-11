@@ -4,17 +4,41 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
-### Multilingual search integration
+### Librarian 2 script-aware search
 
-- Upgraded the reviewed Librarian dependency to 1.2.1 and made that release
-  the minimum compatible version.
-- Replaced Robot's private CJK-only detector with Librarian's shared
-  multilingual search policy.
-- Applied the same language-aware match adaptation to Telegram-native,
-  Mini App, and direct service searches, while preserving explicitly selected
-  substring mode.
-- Added regression coverage for Han, Japanese, Korean, Thai, Lao, Khmer,
-  Myanmar, Arabic, Hebrew, Devanagari, and Latin queries.
+- Upgraded the reviewed Librarian dependency to 2.0.0 and made that release the
+  minimum compatible version.
+- Removed the match-mode detector from the service, the command handler, and the
+  Mini App API. Librarian 2 derives the matching strategy from the query text,
+  so no layer here inspects a query to choose one. The 1.x branch flipped the
+  whole query to substring on seeing one continuous-script character, which also
+  loosened the space-delimited terms beside it and rewrote the match mode stored
+  in the reader's own session.
+- Continuous scripts — Han, kana, Hangul, Thai, Lao, Khmer, Myanmar, Tibetan —
+  now match under the default filters, which returned nothing under 1.x.
+- Adopted the `fold`/`exact` diacritics vocabulary with `fold` as the default,
+  so unaccented Greek, unpointed Hebrew and unvowelled Arabic reach the text.
+- Accepted the 1.x `insensitive`/`sensitive` spellings wherever a value can
+  predate the upgrade, so saved profiles and Mini App clients cached on a device
+  keep working.
+- Made a stored preference record degrade field by field. An unreadable filter
+  blob no longer discards the reader's translation and reading position with it.
+- Rebuilt search-term highlighting on Librarian's own folding and script
+  classification: no word boundary is tested in a continuous script, only the
+  trailing edge is tested for an abjad stem, Brahmic and continuous marks are
+  never folded, and precomposed letters that Unicode decomposition cannot reach
+  now fold.
+- Bounded index construction with the new `SEARCH_INDEX_BUILD_SECONDS` setting
+  and spent it on startup prewarming rather than the interactive lookup timeout,
+  so one build serves every later search instead of failing the request that
+  paid for it and caching nothing.
+- Published `getbible_robot_search_engine_version` on `/metrics` so an operator
+  can tell a matching-semantics upgrade apart from a regression.
+- Added `docs/SEARCH.md` and revised the architecture, configuration,
+  dependency, interaction, operations, troubleshooting and upgrade documents.
+- Replaced the 1.x match-policy regression tests with coverage asserting that
+  twelve scripts reach Librarian exactly as asked, in both match modes, and
+  added coverage for the preference migration and highlighting rules.
 
 ### Container deployment and small-host hardening
 

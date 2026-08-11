@@ -96,6 +96,13 @@ Search and pagination alone use Librarian. They have separate bounded execution,
 
 Search failure does not affect reader navigation. Main API or Query API failure does not invalidate Telegram authentication.
 
+Librarian derives the matching strategy from the query text, so the robot ships
+no per-language branch and no match-mode detector. Chinese, Japanese, Korean,
+Thai, Lao, Khmer, Myanmar and Tibetan queries reach the index under the default
+filters, unaccented Greek reaches accented text, and an unpointed Hebrew or
+Arabic stem reaches the word behind its attached particle. See
+[Search](docs/SEARCH.md).
+
 ## Runtime and deployment
 
 Supported runtime:
@@ -157,10 +164,10 @@ Do not edit generated Caddy/systemd configuration directly.
 
 Human-maintained intent lives in `requirements.in` and `requirements-dev.in`. Production and CI install exact hashed locks from `requirements.txt` and `requirements-dev.txt`.
 
-Robot supports compatible Librarian 1.x releases beginning with 1.2.1:
+Robot supports compatible Librarian 2.x releases beginning with 2.0.0:
 
 ```text
-getbible>=1.2.1,<2
+getbible>=2.0.0,<3
 ```
 
 The reviewed runtime lock currently selects a specific released version. Production never resolves an unreviewed latest dependency during startup.

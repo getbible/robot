@@ -180,13 +180,22 @@ A lookup timeout does not pretend that its worker thread stopped. The capacity p
 | `MAX_TOTAL_VERSES` | `100` | `1`–`200` | Maximum verses in the whole command |
 | `MAX_OUTPUT_CHUNKS` | `8` | `1`–`32` | Maximum Telegram messages produced by one command or final Mini App post |
 | `SEARCH_RESULT_LIMIT` | `50` | `1`–`200` | Maximum selectable matches retained from one Librarian search |
-| `SEARCH_DEADLINE_SECONDS` | `5` | `0.1`–`30` | Librarian's cooperative per-search execution deadline |
+| `SEARCH_DEADLINE_SECONDS` | `5` | `0.1`–`30` | Librarian's cooperative per-search execution deadline, covering request-owned work only |
+| `SEARCH_INDEX_BUILD_SECONDS` | `120` | `1`–`600` | Bound on building one translation's search index, and the budget startup prewarming spends |
 | `SEARCH_MAX_RESPONSE_BYTES` | `4194304` (4 MiB) | `65536`–`16777216` | Maximum constructed Librarian search result, separate from corpus downloads |
 | `MAX_CONCURRENT_LOOKUPS` | `2` | `1`–`32` | Direct-reference/catalog worker threads and permits |
 | `MAX_CONCURRENT_SEARCHES` | `1` | `1`–`8` | Independent expensive-search worker threads and permits |
 | `MAX_CONCURRENT_UPDATES` | `4` | `1`–`64` | Telegram updates processed concurrently |
 
 `MAX_TOTAL_VERSES` may not be lower than `MAX_VERSES_PER_REFERENCE`. Telegram text is measured in UTF-16 code units, not Python characters, before chunks are sent.
+
+An index build serves every later search of that translation, so it is bounded
+by `SEARCH_INDEX_BUILD_SECONDS` instead of being charged to whichever request
+happened to arrive first. Within a request, `LOOKUP_TIMEOUT` still applies: a
+cold build of a non-default translation may exceed it, in which case that one
+search fails while the build continues and serves the searches after it. Keeping
+`PREWARM_DEFAULT_TRANSLATION` enabled is what keeps requests off the build path
+entirely. See [Search](SEARCH.md).
 
 On 26 July 2026, the largest published corpus measured by uncompressed
 `Content-Length` was `thai` at 30,950,679 bytes; KJV was 8,862,703 bytes. The

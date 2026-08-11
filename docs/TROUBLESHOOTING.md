@@ -302,6 +302,33 @@ GETBIBLE_WEB_BASE_URL=https://getbible.life
 
 Data comes from the API host; Telegram links use the website host. Run the renderer, service, catalog, and command tests before deploying any fix.
 
+## Search returns more results than it used to
+
+This is expected after moving to Librarian 2 and is not a regression.
+Continuous scripts match under the default filters for the first time and
+diacritics fold by default. Confirm the change coincides with the engine version
+rather than with your own deployment:
+
+```bash
+curl -s http://127.0.0.1:${HEALTH_PORT}/metrics | grep search_engine_version
+```
+
+`getbible_robot_search_engine_version 4` is the current value. If it has not
+moved, investigate the query, the filters and the translation SHA instead. See
+[Search](SEARCH.md).
+
+## The first search of a translation times out
+
+An index is built once per translation. The build is bounded by
+`SEARCH_INDEX_BUILD_SECONDS`, but the request that triggered it is still bounded
+by `LOOKUP_TIMEOUT`, so a cold build of a large translation can exceed the
+request while the build itself continues in its worker. Searches after it are
+served from the built index.
+
+Keep `PREWARM_DEFAULT_TRANSLATION` enabled so the default translation is never
+built inside a request. A `lookup_timed_out` event followed by successful
+searches of the same translation is this pattern, not a failing repository.
+
 ## Upgrade fails
 
 The manager builds `app.next` before stopping the service. If the new application fails readiness after the swap, it automatically restores the prior `app`.

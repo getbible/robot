@@ -162,12 +162,23 @@ class UserPreferenceStore:
             ).fetchone()
             if row is None:
                 return self._defaults()
+            # Each field degrades on its own. A record is one row but not one
+            # decision: an unreadable filter blob is no reason to forget which
+            # translation someone reads or where they had reached in it. Only an
+            # unusable translation — the value the other two hang off — forces
+            # the whole profile back to application defaults.
             try:
                 translation = self._translation(row[0])
-                search_defaults = self._decode_search_defaults(row[1])
-                reader_location = self._decode_reader_location(row[2])
             except (ValueError, TypeError):
                 return self._defaults()
+            try:
+                search_defaults = self._decode_search_defaults(row[1])
+            except (ValueError, TypeError):
+                search_defaults = SearchDefaults()
+            try:
+                reader_location = self._decode_reader_location(row[2])
+            except (ValueError, TypeError):
+                reader_location = None
             return UserPreferences(translation, search_defaults, reader_location)
 
     def set_translation(self, user_id: int, translation: str) -> None:

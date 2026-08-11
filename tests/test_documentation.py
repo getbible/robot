@@ -23,6 +23,7 @@ REQUIRED_DOCUMENTS = {
     ROOT / "docs" / "WEBHOOKS.md",
     ROOT / "docs" / "MINI_APP.md",
     ROOT / "docs" / "RELEASE_GATE.md",
+    ROOT / "docs" / "SEARCH.md",
 }
 
 EXPECTED_TEMPLATE_KEYS = {

@@ -55,6 +55,8 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - Search failure does not affect reader navigation.
 - Stale responses cannot overwrite current query/filter state.
 - Search output is bounded and normalized before registration in the browser selection store.
+- The requested match mode reaches Librarian unaltered in every writing system.
+- Index construction is bounded separately from a request deadline.
 
 ## Final Post authority
 

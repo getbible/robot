@@ -6,6 +6,7 @@ Use this index as the starting point for development and production operation.
 - [Docker deployment](DOCKER.md) — published GHCR images, release tags, attestations, non-root Compose operation, cluster probes, and resource budgets.
 - [Configuration](CONFIGURATION.md) — every environment variable, default, range, and trust boundary.
 - [Interactive workflows](INTERACTIONS.md) — direct commands, guided Bible selection, search filters, result confirmation, and rollout roadmap.
+- [Search](SEARCH.md) — what Librarian decides, what the robot decides, the filter vocabulary, index construction, and result volume.
 - [Telegram Mini App](MINI_APP.md) — authentication boundary, same-instance listener, HTTPS reverse proxy, BotFather settings, and verification.
 - [Telegram delivery](WEBHOOKS.md) — polling, HTTPS webhooks, reverse-proxy setup, mode switching, and editable bot content.
 - [Testing](TESTING.md) — deterministic checks, security checks, failure injection, and live smoke testing.
