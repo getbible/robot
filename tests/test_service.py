@@ -105,8 +105,9 @@ class _Client:
             "abbreviation": translation,
             "verses": 31_102,
             "indexes": [
-                {"case_sensitive": False, "diacritics": "sensitive"}
+                {"case_sensitive": False, "fold_diacritics": True}
             ],
+            "analysis": {"script": "alphabetic"},
         }
 
     def cache_info(self) -> dict:

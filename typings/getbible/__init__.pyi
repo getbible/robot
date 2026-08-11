@@ -13,7 +13,7 @@ class SearchValidationError(ValueError, GetBibleError): ...
 class SearchLimitError(SearchValidationError, RequestLimitError): ...
 class SearchDeadlineExceeded(SearchLimitError, TimeoutError): ...
 
-def requires_substring_matching(query: str) -> bool: ...
+SEARCH_ENGINE_VERSION: int
 
 class BookReference:
     book: int
@@ -44,12 +44,17 @@ class SearchLimits:
         max_query_terms: int = ...,
         min_substring_length: int = ...,
         max_books: int = ...,
+        max_book_length: int = ...,
+        max_books_length: int = ...,
         max_exclusions: int = ...,
+        max_exclusion_length: int = ...,
+        max_exclusions_length: int = ...,
         max_exclusion_terms: int = ...,
         max_offset: int = ...,
         max_limit: int = ...,
         deadline_seconds: float = ...,
         deadline_check_interval: int = ...,
+        index_build_seconds: float = ...,
     ) -> None: ...
 
 class SearchBible:

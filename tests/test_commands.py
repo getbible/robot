@@ -1728,7 +1728,7 @@ class SelectionFormattingTestCase(unittest.TestCase):
             ("grace", "love"),
             SearchOptions(
                 match="substring",
-                diacritics="insensitive",
+                diacritics="fold",
             ),
         )
 
@@ -1737,13 +1737,67 @@ class SelectionFormattingTestCase(unittest.TestCase):
             "<b>Grâce</b> &amp; truth; <b>beloved</b>.",
         )
 
+    def test_search_highlight_marks_continuous_scripts_under_whole_word(self) -> None:
+        """Nothing delimits a word in Han, so a boundary test finds no match.
+
+        Librarian 2 returns these verses under the default criteria, which 1.x
+        never did. Testing for a word boundary anyway left the languages the
+        upgrade exists to serve with every match unmarked.
+        """
+        rendered = _highlight_search_terms_plain(
+            "神爱世人，甚至将他的独生子赐给他们。",
+            ("神爱",),
+            SearchOptions(match="whole_word"),
+        )
+
+        self.assertEqual(
+            rendered,
+            "【神爱】世人，甚至将他的独生子赐给他们。",
+        )
+
+    def test_search_highlight_marks_an_abjad_stem_behind_its_particle(self) -> None:
+        """Librarian matches `אור` inside `והאור`, so the leading edge is not a boundary."""
+        rendered = _highlight_search_terms_plain(
+            "ויאמר אלהים יהי אור והאור טוב",
+            ("אור",),
+            SearchOptions(match="whole_word"),
+        )
+
+        # The stem itself is marked where it occurs, leaving the attached
+        # particle outside the span rather than swallowing it.
+        self.assertEqual(rendered, "ויאמר אלהים יהי 【אור】 וה【אור】 טוב")
+
+    def test_search_highlight_folds_letters_decomposition_cannot_reach(self) -> None:
+        """`Ðức` is reachable by `Duc` in Librarian, so it must be markable here.
+
+        NFKD leaves `Ð` alone, so a locally written folding pass could not mark
+        what the engine had already matched. Librarian's own folding can.
+        """
+        rendered = _highlight_search_terms_plain(
+            "Ðức Chúa Trời yêu thương thế gian",
+            ("duc", "troi"),
+            SearchOptions(match="whole_word"),
+        )
+
+        self.assertEqual(rendered, "【Ðức】 Chúa 【Trời】 yêu thương thế gian")
+
+    def test_search_highlight_keeps_brahmic_vowel_marks(self) -> None:
+        """Brahmic marks carry vowels, so folding them would change the word."""
+        rendered = _highlight_search_terms_plain(
+            "यीशु ने कहा",
+            ("यीशु",),
+            SearchOptions(match="whole_word"),
+        )
+
+        self.assertEqual(rendered, "【यीशु】 ने कहा")
+
     def test_search_button_highlight_preserves_full_unescaped_verse_text(self) -> None:
         rendered = _highlight_search_terms_plain(
             "Grâce & truth; beloved.",
             ("grace", "love"),
             SearchOptions(
                 match="substring",
-                diacritics="insensitive",
+                diacritics="fold",
             ),
         )
 

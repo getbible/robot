@@ -26,7 +26,7 @@ class SearchOptions:
     match: str = "whole_word"
     scope: str = "bible"
     case_sensitive: bool = False
-    diacritics: str = "sensitive"
+    diacritics: str = "fold"
     sort: str = "canonical"
     books: tuple[int, ...] = ()
     exclude: tuple[str, ...] = ()

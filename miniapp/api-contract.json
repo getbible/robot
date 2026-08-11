@@ -984,7 +984,9 @@
           },
           "diacritics": {
             "type": "string",
-            "enum": ["sensitive", "insensitive"]
+            "enum": ["fold", "exact"],
+            "default": "fold",
+            "description": "Folding removes accents, vowel pointing and precomposed letters so unaccented Greek, unpointed Hebrew and unvowelled Arabic reach the text. The Librarian 1.x spellings \"insensitive\" and \"sensitive\" are still accepted on request and map to \"fold\" and \"exact\"; responses always use the current vocabulary."
           },
           "sort": {
             "type": "string",
@@ -1103,7 +1105,9 @@
           },
           "diacritics": {
             "type": "string",
-            "enum": ["sensitive", "insensitive"]
+            "enum": ["fold", "exact"],
+            "default": "fold",
+            "description": "Folding removes accents, vowel pointing and precomposed letters so unaccented Greek, unpointed Hebrew and unvowelled Arabic reach the text. The Librarian 1.x spellings \"insensitive\" and \"sensitive\" are still accepted on request and map to \"fold\" and \"exact\"; responses always use the current vocabulary."
           },
           "sort": {
             "type": "string",

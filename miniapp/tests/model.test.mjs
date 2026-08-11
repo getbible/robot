@@ -47,7 +47,7 @@ test("normalizes the backend session bootstrap without retaining identity", () =
         match: "whole_word",
         scope: "bible",
         case_sensitive: false,
-        diacritics: "sensitive",
+        diacritics: "exact",
         sort: "canonical",
       },
       reader_location: {
@@ -418,6 +418,26 @@ test("bounds filters and counts only non-default search controls", () => {
   assert.deepEqual(filters.exclude, ["grace", "law"]);
   assert.equal(filters.proximity, null);
   assert.equal(activeFilterCount(filters), 4);
+});
+
+test("folds diacritics by default and maps the Librarian 1.x spellings", () => {
+  assert.equal(DEFAULT_FILTERS.diacritics, "fold");
+
+  // A device that has not reloaded the Mini App since the Librarian 2 upgrade
+  // still holds the old vocabulary. Mapping it keeps the reader's intent;
+  // falling back to the default would turn an exact search into a folded one.
+  for (const [stored, expected] of [
+    ["insensitive", "fold"],
+    ["sensitive", "exact"],
+    ["fold", "fold"],
+    ["exact", "exact"],
+  ]) {
+    const filters = normalizeFilters({ ...DEFAULT_FILTERS, diacritics: stored });
+    assert.equal(filters.diacritics, expected);
+  }
+
+  const unusable = normalizeFilters({ ...DEFAULT_FILTERS, diacritics: "nonsense" });
+  assert.equal(unusable.diacritics, "fold");
 });
 
 test("reorders immutable basket arrays and deduplicates appended pages", () => {

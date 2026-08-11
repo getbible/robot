@@ -4,7 +4,9 @@ export const DEFAULT_FILTERS = Object.freeze({
   match: "whole_word",
   scope: "bible",
   case_sensitive: false,
-  diacritics: "sensitive",
+  // Librarian folds accents, vowel pointing and precomposed letters by default,
+  // which is what lets unaccented Greek and unpointed Hebrew reach the text.
+  diacritics: "fold",
   sort: "canonical",
   books: [],
   exclude: [],
@@ -507,9 +509,7 @@ export function normalizeFilters(value, fallbackTranslation = "kjv") {
       ? filters.scope
       : DEFAULT_FILTERS.scope,
     case_sensitive: Boolean(filters.case_sensitive),
-    diacritics: ["sensitive", "insensitive"].includes(filters.diacritics)
-      ? filters.diacritics
-      : DEFAULT_FILTERS.diacritics,
+    diacritics: normalizeDiacritics(filters.diacritics),
     sort: ["canonical", "relevance"].includes(filters.sort)
       ? filters.sort
       : DEFAULT_FILTERS.sort,
@@ -710,6 +710,21 @@ function termHighlights(text, terms) {
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Librarian 1.x spelled these "insensitive" and "sensitive". A device may still
+// hold either in its saved filters, so map rather than discard: falling back to
+// the default would quietly turn a reader's exact search into a folded one.
+const DIACRITICS_ALIASES = Object.freeze({
+  insensitive: "fold",
+  sensitive: "exact",
+});
+
+function normalizeDiacritics(value) {
+  const mapped = DIACRITICS_ALIASES[value] ?? value;
+  return ["fold", "exact"].includes(mapped)
+    ? mapped
+    : DEFAULT_FILTERS.diacritics;
 }
 
 function normalizeNumberList(value, maximum) {

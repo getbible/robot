@@ -15,7 +15,12 @@ _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
 _WORDS = frozenset({"all", "any", "phrase"})
 _MATCHES = frozenset({"whole_word", "substring"})
 _SCOPES = frozenset({"bible", "old_testament", "new_testament", "deuterocanon"})
-_DIACRITICS = frozenset({"sensitive", "insensitive"})
+_DIACRITICS = frozenset({"fold", "exact"})
+#: Librarian 1.x spellings for the same two policies. A profile saved before the
+#: 2.x upgrade still holds them, and a stricter allow-list would reject the whole
+#: record — costing the user their translation and reading position, not just
+#: this field. Librarian accepts both spellings for the same reason.
+_DIACRITICS_ALIASES = {"insensitive": "fold", "sensitive": "exact"}
 _SORTS = frozenset({"canonical", "relevance"})
 _UNCHANGED = object()
 
@@ -28,7 +33,7 @@ class SearchDefaults:
     match: str = "whole_word"
     scope: str = "bible"
     case_sensitive: bool = False
-    diacritics: str = "sensitive"
+    diacritics: str = "fold"
     sort: str = "canonical"
 
     @classmethod
@@ -57,11 +62,7 @@ class SearchDefaults:
                 payload.get("case_sensitive", False),
                 "case_sensitive",
             ),
-            diacritics=_choice(
-                payload.get("diacritics", "sensitive"),
-                _DIACRITICS,
-                "diacritics",
-            ),
+            diacritics=_diacritics(payload.get("diacritics", "fold")),
             sort=_choice(payload.get("sort", "canonical"), _SORTS, "sort"),
         )
         return result
@@ -420,6 +421,13 @@ class UserPreferenceStore:
         if _TRANSLATION_RE.fullmatch(code) is None:
             raise ValueError("Translation code is invalid.")
         return code
+
+
+def _diacritics(value: object) -> str:
+    """Accept either vocabulary and store the Librarian 2 spelling."""
+    if isinstance(value, str) and value in _DIACRITICS_ALIASES:
+        return _DIACRITICS_ALIASES[value]
+    return _choice(value, _DIACRITICS, "diacritics")
 
 
 def _choice(value: object, allowed: frozenset[str], label: str) -> str:

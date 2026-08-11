@@ -55,6 +55,76 @@ class UserPreferenceStoreTestCase(unittest.TestCase):
             self.assertEqual(preferences.search_defaults, expected)
             self.assertNotIn("query", preferences.as_dict())
 
+    def test_defaults_fold_diacritics_under_librarian_two(self) -> None:
+        self.assertEqual(SearchDefaults().diacritics, "fold")
+        self.assertEqual(SearchDefaults.validated({}).diacritics, "fold")
+
+    def test_profiles_written_before_the_upgrade_survive_intact(self) -> None:
+        """A 1.x row must keep its whole profile, not just its diacritics field.
+
+        `preferences_for()` answers with application defaults whenever a stored
+        record fails validation. A stricter allow-list alone would therefore
+        have taken every upgraded user's translation and reading position with
+        it, silently and on first read.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "preferences.sqlite3"
+            store = UserPreferenceStore(
+                path=str(path),
+                default_translation="kjv",
+                max_users=100,
+            )
+            store.update_preferences(
+                200,
+                translation="aov",
+                reader_location=ReaderLocation("aov", 43, 3, 16),
+            )
+            store.close()
+
+            # Rewrite the row exactly as the 1.x robot stored it.
+            legacy = (
+                '{"case_sensitive":true,"diacritics":"sensitive","match":"substring",'
+                '"scope":"new_testament","sort":"relevance","words":"phrase"}'
+            )
+            connection = sqlite3.connect(path)
+            with connection:
+                connection.execute(
+                    "UPDATE user_preferences SET search_defaults = ? WHERE user_id = ?",
+                    (legacy, 200),
+                )
+            connection.close()
+
+            reopened = UserPreferenceStore(
+                path=str(path),
+                default_translation="kjv",
+                max_users=100,
+            )
+            self.addCleanup(reopened.close)
+            preferences = reopened.preferences_for(200)
+
+            self.assertEqual(preferences.translation, "aov")
+            self.assertEqual(
+                preferences.reader_location,
+                ReaderLocation("aov", 43, 3, 16),
+            )
+            self.assertEqual(preferences.search_defaults.diacritics, "exact")
+            self.assertEqual(preferences.search_defaults.words, "phrase")
+            self.assertTrue(preferences.search_defaults.case_sensitive)
+
+    def test_both_diacritics_vocabularies_are_accepted(self) -> None:
+        for stored, expected in (
+            ("insensitive", "fold"),
+            ("sensitive", "exact"),
+            ("fold", "fold"),
+            ("exact", "exact"),
+        ):
+            with self.subTest(stored=stored):
+                defaults = SearchDefaults.validated({"diacritics": stored})
+                self.assertEqual(defaults.diacritics, expected)
+
+        with self.assertRaises(ValueError):
+            SearchDefaults.validated({"diacritics": "folded"})
+
     def test_reader_location_persists_only_small_content_free_identifiers(
         self,
     ) -> None:
