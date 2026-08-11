@@ -309,6 +309,12 @@ flood cannot create a second outbound-message flood.
 
 ## Resource profile for the 500 MB host
 
+The measurements below were taken against Librarian 1.x. Librarian 2 stores
+positional postings and generates trigram candidates, so a warmed index is
+larger than these figures show, and a continuous-script translation now builds a
+real index where 1.x built almost nothing. Re-measure on your own corpus before
+trusting the headroom, and see [Search](SEARCH.md) for what is resident and why.
+
 Current KJV measurements are approximately:
 
 | State | Robot RSS |
