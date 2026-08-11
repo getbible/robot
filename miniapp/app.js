@@ -985,6 +985,7 @@ async function runSearch(rawQuery) {
     results: [],
     loadingMore: false,
     translation,
+    diacritics: filters.diacritics,
   };
   elements.searchQuery.value = query;
   renderSearch();
@@ -992,6 +993,9 @@ async function runSearch(rawQuery) {
     const result = normalizeSearch(
       await api.search(query, filters),
       translation,
+      // Highlighting reads the verse the way the search read it, so it needs
+      // the same diacritics policy the query ran under.
+      filters.diacritics,
     );
     if (
       requestId !== searchRequestId ||
@@ -1042,6 +1046,7 @@ async function loadNextSearchPage() {
       await api.searchPage(searchId, state.search.page + 1),
       searchId,
       translation,
+      state.search.diacritics ?? state.filters.diacritics,
     );
     if (
       !searchPageRequests.isCurrent(request) ||
