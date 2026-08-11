@@ -28,31 +28,34 @@ Using an unbounded `pip install --upgrade` during service startup would allow an
 
 ## Current Librarian policy
 
-Librarian 1.2.1 is published and contains the hardened reference parser,
+Librarian 2.0.0 is published and contains the hardened reference parser,
 request limits, typed repository failures, checksum-validated translation
-cache, and shared multilingual search policy required by the robot.
+cache, and the script-aware search engine required by the robot.
 
 The compatible input policy is:
 
 ```text
-getbible>=1.2.1,<2
+getbible>=2.0.0,<3
 ```
 
 The exact runtime and development locks currently select:
 
 ```text
-getbible==1.2.1
+getbible==2.0.0
 ```
 
 The lock also records both published artifact hashes. Production therefore
-installs the reviewed 1.2.1 artifact exactly; it does not resolve a moving
-branch or an unreviewed later 1.x release.
+installs the reviewed 2.0.0 artifact exactly; it does not resolve a moving
+branch or an unreviewed later 2.x release.
 
-Dependabot proposes newer compatible Librarian releases within the 1.x series. Each proposal must regenerate both locks, pass the complete robot gate, and demonstrate unchanged command/search contracts before merge. A future 2.x release requires an intentional compatibility review and input-range change.
+Dependabot proposes newer compatible Librarian releases within the 2.x series. Each proposal must regenerate both locks, pass the complete robot gate, and demonstrate unchanged command/search contracts before merge. A future 3.x release requires an intentional compatibility review and input-range change.
 
-The compatible range deliberately begins at 1.2.1 because Robot imports its
-shared `requires_substring_matching()` policy. The exact lock moves only after
-the new release passes Robot's complete gate.
+The compatible range deliberately begins at 2.0.0 because Robot depends on
+search deriving its matching strategy from the query text. Under 1.x the
+application had to detect continuous scripts itself, and the detector it
+imported — `requires_substring_matching()` — could not express a query that
+mixed writing systems. See [Search](SEARCH.md) for what the robot now relies
+on. The exact lock moves only after a new release passes Robot's complete gate.
 
 ## Regenerating locks
 

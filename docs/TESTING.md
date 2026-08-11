@@ -61,7 +61,11 @@ Tests must prove:
 - full-text search and pagination alone use Robot/Librarian;
 - a Librarian failure does not affect reader navigation;
 - stale search and pagination responses cannot overwrite newer state;
-- search verses normalize to the same descriptor used by reader verses.
+- search verses normalize to the same descriptor used by reader verses;
+- a query reaches Librarian with the match mode the reader asked for, in every
+  writing system, so no layer reintroduces a match-mode detector;
+- both diacritics vocabularies are accepted, and a profile stored before the
+  Librarian 2 upgrade keeps its translation and reading position.
 
 ### Browser selection domain
 

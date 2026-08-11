@@ -120,13 +120,42 @@ manager-owned. Mini App and webhook ports must be unique and must not match.
 
 Maintainers edit `requirements.in` or `requirements-dev.in`, regenerate both locks with `scripts/refresh-locks.sh`, review the complete generated diff, and run the full Python 3.10–3.12 matrix. Production installs only the exact reviewed `requirements.txt` with hashes.
 
-The Librarian policy remains:
+The Librarian policy is:
 
 ```text
-getbible>=1.2.1,<2
+getbible>=2.0.0,<3
 ```
 
 The generated lock selects the exact tested artifact. Production does not resolve a newer package during service start.
+
+### Upgrading across Librarian 2
+
+Librarian 2 changes search behaviour, so plan this upgrade rather than treating
+it as a routine dependency bump. Nothing needs migrating by hand, but expect the
+following and see [Search](SEARCH.md) for the reasoning.
+
+- **Searches return more.** Continuous scripts — Han, kana, Hangul, Thai, Lao,
+  Khmer, Myanmar, Tibetan — match under the default filters for the first time,
+  and diacritics fold by default. Result-volume dashboards will step up. Confirm
+  the step coincides with `getbible_robot_search_engine_version` moving to `4`
+  before investigating it as a regression.
+- **Saved preferences carry over.** The diacritics values `insensitive` and
+  `sensitive` are read as `fold` and `exact`, so no user loses a translation or
+  reading position. A record is rewritten in the current vocabulary the next
+  time that user changes a preference.
+- **Cached Mini App clients keep working.** A browser build from before the
+  upgrade may go on sending the old vocabulary; the API accepts it.
+- **One new setting.** `SEARCH_INDEX_BUILD_SECONDS` (default `120`) bounds index
+  construction. Add it deliberately like any other key.
+- **No cache to clear.** The robot keeps no durable search-result cache.
+
+Rollback is lossy for preferences, so back up the preference database first.
+This release writes `fold` and `exact`, which a pre-upgrade robot cannot read,
+and that older code discards a profile as one record rather than field by field
+— taking the translation and reading position with the filters. Restoring the
+database file alongside the older release is what makes the rollback clean.
+Reverting only the Librarian pin while keeping this release is not a supported
+rollback: Librarian 1.x rejects the current diacritics vocabulary outright.
 
 ## Docker upgrade and rollback
 
