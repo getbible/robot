@@ -78,12 +78,15 @@ insensitive -> fold
 sensitive   -> exact
 ```
 
-This is a correctness requirement, not a courtesy. Stored preferences are
-validated as one record, and an invalid record is answered with application
-defaults — so rejecting the old spelling would have discarded each upgraded
-user's translation and reading position along with it. The Mini App is a browser
-page that can stay cached on a device for days, so its API accepts the old
-vocabulary too and answers in the new one.
+This is a correctness requirement, not a courtesy. A stored profile that fails
+validation is answered with application defaults, so rejecting the old spelling
+would have silently reset every upgraded reader's search filters. It would have
+cost more than that before this release: a profile was validated as one record,
+so one unreadable field took the translation and reading position with it. Both
+protections are now in place — the aliases above, and field-by-field degradation
+in the preference store. The Mini App is a browser page that can stay cached on
+a device for days, so its API accepts the old vocabulary too and answers in the
+new one.
 
 ## Highlighting
 
@@ -106,16 +109,27 @@ reference permit.
 
 ### Index construction
 
-An index is built once per translation and shared by every later request.
-Librarian bounds that build with `SEARCH_INDEX_BUILD_SECONDS` rather than
-charging it to a request's `SEARCH_DEADLINE_SECONDS`. Under 1.x the build was
-charged to whichever request arrived first: that request failed, nothing was
-cached, and the next request repeated the work and failed the same way.
+An index is built once per **translation and policy** — the pair of case
+sensitivity and diacritics folding — and is then shared by every later request
+using that pair. Because the filter dashboard exposes both toggles, one
+translation can hold up to four indexes, and they are not evicted individually.
+
+Librarian bounds a build with `SEARCH_INDEX_BUILD_SECONDS` rather than charging
+it to a request's `SEARCH_DEADLINE_SECONDS`. A build serves every later search,
+so abandoning it because one caller's clock ran out made that caller fail and
+left the next caller to repeat the same work.
 
 Concurrent first requests now wait on one build rather than each starting their
 own, and corpora live in a process-wide registry keyed by repository,
 translation and source SHA, so the parse-and-analyse cost is paid once per
 translation version rather than once per client object.
+
+That registry is the reason `SEARCH_CORPUS_LIMIT` means something different in
+2.x than it did in 1.x. It bounds one client's corpus dictionary, but the
+corpora themselves are held by the shared registry under its own default of
+eight, so dropping a client reference frees nothing. The robot resizes the
+registry to the configured limit at startup; without that, a host sized for one
+resident corpus could hold eight, each with up to four indexes.
 
 ### Prewarming
 

@@ -305,7 +305,7 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 - Made non-vulnerable `requests==2.34.2` an explicit runtime dependency.
 - Updated mypy to 2.3.0.
 - Made Python 3.10's `exceptiongroup` requirement explicit in the universal runtime input.
-- Moved to the released `getbible>=1.2.1,<2` policy with `getbible==1.2.1` selected and hashed in both locks.
+- Moved to the released `getbible>=2.0.0,<3` policy with `getbible==2.0.0` selected and hashed in both locks.
 
 ### Documentation
 
