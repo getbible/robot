@@ -381,25 +381,47 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.warm_calls, ["kjv"])
         self.assertEqual(service.metrics.snapshot()["search_warmups"], 1)
 
-    async def test_configured_corpus_limit_bounds_the_process_wide_registry(
-        self,
-    ) -> None:
-        """`SEARCH_CORPUS_LIMIT` must bound what is actually resident.
+    async def test_shared_corpus_registry_is_sized_for_reuse(self) -> None:
+        """The registry is the cache that stops a repeat search re-reading a corpus.
 
-        In Librarian 2 corpora live in a registry shared by every client in the
-        process, holding strong references under its own default of eight.
-        Dropping a client's reference frees nothing, so a host sized for one
-        resident corpus could hold eight — each with an index per case and
-        diacritics policy the filter dashboard can reach.
+        It is configured on its own rather than from `search_corpus_limit`, which
+        bounds only this client's handle dictionary. Sizing the registry down to
+        that number would make every switch between translations re-parse and
+        re-index from scratch — the opposite of what sharing them is for.
         """
         registry = shared_registry()
         self.addCleanup(registry.resize, 8)
-        registry.resize(8)
 
-        service = ScriptureService(replace(_settings(), search_corpus_limit=2))
+        service = ScriptureService(
+            replace(
+                _settings(),
+                search_corpus_limit=1,
+                search_shared_corpus_limit=6,
+            )
+        )
         self.addAsyncCleanup(service.close)
 
-        self.assertEqual(registry._limit, 2)
+        self.assertEqual(registry._limit, 6)
+
+    async def test_shared_corpus_registry_defaults_to_reuse_not_frugality(
+        self,
+    ) -> None:
+        registry = shared_registry()
+        self.addCleanup(registry.resize, 8)
+        registry.resize(1)
+
+        settings = _settings()
+        self.assertEqual(settings.search_shared_corpus_limit, 8)
+        service = ScriptureService(settings)
+        self.addAsyncCleanup(service.close)
+
+        # Comfortably above the per-client handle limit, so a reader moving
+        # between translations keeps hitting parsed, analysed corpora.
+        self.assertEqual(registry._limit, 8)
+        self.assertGreater(
+            settings.search_shared_corpus_limit,
+            settings.search_corpus_limit,
+        )
 
     async def test_index_build_budget_reaches_librarian(self) -> None:
         """The budget governing the new cold-start failure mode must be wired.

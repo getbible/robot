@@ -309,11 +309,17 @@ flood cannot create a second outbound-message flood.
 
 ## Resource profile for the 500 MB host
 
-The measurements below were taken against Librarian 1.x. Librarian 2 stores
-positional postings and generates trigram candidates, so a warmed index is
-larger than these figures show, and a continuous-script translation now builds a
-real index where 1.x built almost nothing. Re-measure on your own corpus before
-trusting the headroom, and see [Search](SEARCH.md) for what is resident and why.
+The measurements below were taken against Librarian 1.x and are retained only as
+a floor. They are not a baseline to hold Librarian 2 against: 1.x returned
+nothing at all for continuous scripts under default criteria, so part of what it
+was not spending was the cost of search that worked. A resident 2.x index is the
+price of correct results, and it is paid once per translation and policy rather
+than per search — see [Search](SEARCH.md).
+
+Budget for that resident set rather than trying to shrink it. Lowering
+`SEARCH_SHARED_CORPUS_LIMIT` does not save steady-state memory so much as force
+the same corpora to be parsed and analysed again on the next search, which
+trades a bounded, one-off cost for an unbounded, repeated one.
 
 Current KJV measurements are approximately:
 

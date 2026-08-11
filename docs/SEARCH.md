@@ -124,12 +124,22 @@ own, and corpora live in a process-wide registry keyed by repository,
 translation and source SHA, so the parse-and-analyse cost is paid once per
 translation version rather than once per client object.
 
-That registry is the reason `SEARCH_CORPUS_LIMIT` means something different in
-2.x than it did in 1.x. It bounds one client's corpus dictionary, but the
-corpora themselves are held by the shared registry under its own default of
-eight, so dropping a client reference frees nothing. The robot resizes the
-registry to the configured limit at startup; without that, a host sized for one
-resident corpus could hold eight, each with up to four indexes.
+### Two caches, sized for different things
+
+`SEARCH_CORPUS_LIMIT` bounds one client's dictionary of corpus handles.
+`SEARCH_SHARED_CORPUS_LIMIT` bounds the process-wide registry that holds the
+corpora themselves. Only the second one decides whether work is repeated.
+
+Reuse is the point of that registry. A translation that is already parsed and
+analysed is answered from it, so a second search of the same translation — and a
+reader moving back and forth between two — does no parsing and no indexing at
+all. Sizing it down to the per-client limit would undo that: every switch would
+re-read and re-analyse a corpus the process had already built. It therefore
+defaults to eight, comfortably above the handle limit, and should be raised on
+an instance serving many translations rather than lowered to save memory.
+
+Lowering it does not really save memory; it converts a bounded, one-off cost
+into an unbounded, repeated one.
 
 ### Prewarming
 

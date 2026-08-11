@@ -163,7 +163,8 @@ their manager-owned paths in the environment file.
 | `REFERENCE_CACHE_LIMIT` | `1000` | `100`–`50000` | Parsed reference and selection cache entries |
 | `BOOKS_CACHE_LIMIT` | `16` | `1`–`1000` | In-memory translation book indexes |
 | `CHAPTER_CACHE_LIMIT` | `256` | `16`–`10000` | In-memory chapter payloads |
-| `SEARCH_CORPUS_LIMIT` | `1` | `1`–`4` | Full translation search corpora retained, in this client and in Librarian's process-wide registry |
+| `SEARCH_CORPUS_LIMIT` | `1` | `1`–`4` | Corpus handles retained by one Librarian client |
+| `SEARCH_SHARED_CORPUS_LIMIT` | `8` | `1`–`32` | Translations kept parsed and indexed for reuse across every search in the process |
 | `TRANSLATION_CACHE_LIMIT` | `1` | `1`–`8` | Parsed full translation payloads retained |
 | `CACHE_MAX_BYTES` | `268435456` | 32 MiB–8 GiB | Disk-cache budget enforced after the one-day race-safety grace |
 | `CACHE_MAINTENANCE_INTERVAL_SECONDS` | `21600` | `300`–`604800` | Interval for pruning stale objects and over-budget cache entries |
