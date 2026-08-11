@@ -354,7 +354,7 @@ class InteractiveFeatureTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.search_options.match, "substring")
         self.assertEqual(session.search_options.scope, "old_testament")
         self.assertTrue(session.search_options.case_sensitive)
-        self.assertEqual(session.search_options.diacritics, "insensitive")
+        self.assertEqual(session.search_options.diacritics, "exact")
         self.assertEqual(session.search_options.sort, "relevance")
 
         await self.dispatch(session, "sb")

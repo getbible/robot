@@ -1,0 +1,11 @@
+from enum import Enum
+
+class ScriptFamily(str, Enum):
+    ALPHABETIC = "alphabetic"
+    CONTINUOUS = "continuous"
+    ABJAD = "abjad"
+    BRAHMIC = "brahmic"
+
+def casefold_text(text: str) -> str: ...
+def classify_text(text: str) -> ScriptFamily: ...
+def fold_marks(text: str) -> str: ...

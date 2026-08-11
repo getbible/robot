@@ -18,6 +18,7 @@ from getbible import (
     SearchValidationError,
     TranslationNotFoundError,
 )
+from getbible.search import ScriptFamily, casefold_text, classify_text, fold_marks
 from telegram import (
     ForceReply,
     InlineKeyboardButton,
@@ -83,6 +84,15 @@ BUTTON_LABEL_LIMIT = 60
 _CALLBACK_RE = re.compile(r"gb:([A-Za-z0-9_-]{8,16}):([a-z]{1,8}):([A-Za-z0-9_-]{0,32})\Z")
 _INCOMPLETE_REFERENCE_RE = re.compile(r"[\w\s-]{1,512}\Z")
 _T = TypeVar("_T")
+
+#: Writing systems whose marks are accents or optional pointing, and so fold.
+#: Brahmic and continuous scripts are absent because their marks carry vowels.
+_FOLDED_FAMILIES = frozenset({ScriptFamily.ALPHABETIC, ScriptFamily.ABJAD})
+#: Writing systems that put a boundary between words. A continuous script has
+#: none, so whole-word and substring resolve identically there.
+_DELIMITED_FAMILIES = frozenset(
+    {ScriptFamily.ALPHABETIC, ScriptFamily.ABJAD, ScriptFamily.BRAHMIC}
+)
 
 CALLBACK_ACTIONS = frozenset(
     {
@@ -1268,9 +1278,7 @@ async def _dispatch_callback(
         session.search_options = replace(
             session.search_options,
             diacritics=(
-                "insensitive"
-                if session.search_options.diacritics == "sensitive"
-                else "sensitive"
+                "exact" if session.search_options.diacritics == "fold" else "fold"
             ),
         )
         await _show_search_dashboard(session, context)
@@ -3224,16 +3232,41 @@ def _search_match_spans(
     terms: Sequence[str],
     options: SearchOptions,
 ) -> tuple[tuple[int, int], ...]:
-    """Locate merged match spans while retaining original Unicode positions."""
-    normalized, positions = _normalized_search_value(text, options)
-    if not normalized or not positions:
-        return ()
+    """Locate merged match spans while retaining original Unicode positions.
 
+    Each term is read under the rules of its own writing system, the way
+    Librarian reads it, so a verse the engine matched is a verse this can
+    highlight. Applying one set of rules to every script is what made 1.x
+    highlighting silently empty for the languages 2.x newly reaches.
+    """
     spans: list[tuple[int, int]] = []
+    prepared: dict[bool, tuple[str, tuple[int, ...]]] = {}
     for term in terms[:64]:
-        needle, _ = _normalized_search_value(term.strip(), options)
+        stripped = term.strip()
+        if not stripped:
+            continue
+        family = classify_text(stripped)
+        # Marks are accents or optional pointing in alphabetic and abjad text.
+        # In Brahmic and continuous text they carry vowels, so folding them
+        # would change the word; Librarian leaves them alone and so must this.
+        fold = options.diacritics == "fold" and family in _FOLDED_FAMILIES
+        if fold not in prepared:
+            prepared[fold] = _normalized_search_value(
+                text,
+                fold=fold,
+                case_sensitive=options.case_sensitive,
+            )
+        normalized, positions = prepared[fold]
+        if not normalized or not positions:
+            continue
+        needle, _ = _normalized_search_value(
+            stripped,
+            fold=fold,
+            case_sensitive=options.case_sensitive,
+        )
         if not needle:
             continue
+        delimited = family in _DELIMITED_FAMILIES
         offset = 0
         while True:
             match_at = normalized.find(needle, offset)
@@ -3241,18 +3274,25 @@ def _search_match_spans(
                 break
             match_end = match_at + len(needle)
             offset = max(match_end, match_at + 1)
-            if options.match == "whole_word" and (
-                (match_at > 0 and _is_search_word_char(normalized[match_at - 1]))
-                or (
-                    match_end < len(normalized)
-                    and _is_search_word_char(normalized[match_end])
+            if options.match == "whole_word" and delimited:
+                # Nothing delimits a word in a continuous script, so there is no
+                # boundary to test. In an abjad a closed-class particle attaches
+                # to the front and Librarian still matches the stem behind it,
+                # so only the trailing edge is a real boundary there.
+                leading = (
+                    family is not ScriptFamily.ABJAD
+                    and match_at > 0
+                    and _is_search_word_char(normalized[match_at - 1])
                 )
-            ):
-                continue
+                trailing = match_end < len(normalized) and _is_search_word_char(
+                    normalized[match_end]
+                )
+                if leading or trailing:
+                    continue
 
             original_start = positions[match_at]
             original_end = positions[match_end - 1] + 1
-            if options.match == "substring":
+            if options.match == "substring" and delimited:
                 while original_start > 0 and _is_search_word_char(text[original_start - 1]):
                     original_start -= 1
                 while original_end < len(text) and _is_search_word_char(text[original_end]):
@@ -3272,23 +3312,22 @@ def _search_match_spans(
 
 def _normalized_search_value(
     value: str,
-    options: SearchOptions,
+    *,
+    fold: bool,
+    case_sensitive: bool,
 ) -> tuple[str, tuple[int, ...]]:
-    """Normalize search text while retaining positions in the original value."""
+    """Normalize search text while retaining positions in the original value.
+
+    Folding is Librarian's own, so a letter the engine folds folds here too.
+    Unicode decomposition alone cannot reach `đ`, `ø`, `ł` or `Ð`, which is why
+    a locally written NFKD pass used to leave `Duc` unable to mark `Ðức`.
+    """
     characters: list[str] = []
     positions: list[int] = []
     for index, character in enumerate(value):
-        normalized = (
-            unicodedata.normalize("NFKD", character)
-            if options.diacritics == "insensitive"
-            else character
-        )
-        if options.diacritics == "insensitive":
-            normalized = "".join(
-                item for item in normalized if not unicodedata.category(item).startswith("M")
-            )
-        if not options.case_sensitive:
-            normalized = normalized.casefold()
+        normalized = fold_marks(character) if fold else character
+        if not case_sensitive:
+            normalized = casefold_text(normalized)
         for item in normalized:
             characters.append(item)
             positions.append(index)

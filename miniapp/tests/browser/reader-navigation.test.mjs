@@ -213,7 +213,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       match: "whole_word",
       scope: "bible",
       case_sensitive: false,
-      diacritics: "sensitive",
+      diacritics: "exact",
       sort: "canonical",
     },
     reader_location: { translation: "kjv", book: 43, chapter: 3, verse: 1 },
