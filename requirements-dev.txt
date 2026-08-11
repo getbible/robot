@@ -306,18 +306,16 @@ detect-secrets==1.5.0 \
 exceptiongroup==1.3.1 \
     --hash=sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219 \
     --hash=sha256:a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598
-    # via
-    #   -r requirements.in
-    #   anyio
+    # via -r requirements.in
 filelock==3.31.0 \
     --hash=sha256:739b73e580fe88bb78d830aeddbc492519ece3d97ac8368de13a2032c61010c1 \
     --hash=sha256:c188cbc4307c18894c5424fa73f97ea7fa127ddf62192487546da3a214d0a381
     # via
     #   cachecontrol
     #   getbible
-getbible==1.2.1 \
-    --hash=sha256:0dc98cdb00bff4f0d9f41eeb7d4ffb67ed5b16d64d2568f8906934873131fec7 \
-    --hash=sha256:c7c0c65aa1b18b0dbd675039557a652c6f625a48363c957a47e48f292f6fb3c9
+getbible==2.0.0 \
+    --hash=sha256:b4f1fba5ae333eed18f83acb4ca02d53dca1cb2a6598d16994ea976af038d2fc \
+    --hash=sha256:ced6fd053ebb25df1784d43ec6b16b0931f245620d6ded8a534b2b31a194230d
     # via -r requirements.in
 h11==0.16.0 \
     --hash=sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1 \
@@ -909,11 +907,7 @@ tomli==2.4.1 \
     --hash=sha256:fd0409a3653af6c147209d267a0e4243f0ae46b011aa978b1080359fddc9b6cf \
     --hash=sha256:ff18e6a727ee0ab0388507b89d1bc6a22b138d1e2fa56d1ad494586d61d2eae9 \
     --hash=sha256:ff2983983d34813c1aeb0fa89091e76c3a22889ee83ab27c5eeb45100560c049
-    # via
-    #   build
-    #   mypy
-    #   pip-audit
-    #   pip-tools
+    # via pip-audit
 tomli-w==1.2.0 \
     --hash=sha256:188306098d013b691fcadc011abd66727d3c414c571bb01b1a174ba8c983cf90 \
     --hash=sha256:2dd14fac5a47c27be9cd4c976af5a12d87fb1f0b4512f81d69cce3b35ae25021
