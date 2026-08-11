@@ -3281,21 +3281,26 @@ def _search_match_spans(
                 # so only the trailing edge is a real boundary there.
                 leading = (
                     family is not ScriptFamily.ABJAD
-                    and match_at > 0
-                    and _is_search_word_char(normalized[match_at - 1])
+                    and _continues_search_word(normalized, match_at - 1)
                 )
-                trailing = match_end < len(normalized) and _is_search_word_char(
-                    normalized[match_end]
-                )
+                trailing = _continues_search_word(normalized, match_end)
                 if leading or trailing:
                     continue
 
             original_start = positions[match_at]
             original_end = positions[match_end - 1] + 1
+            if fold:
+                # A mark that folded away left no normalized character to end the
+                # span on, so it sits outside it. Closing the highlight between a
+                # letter and its own vowel point is not what the engine matched.
+                while original_end < len(text) and unicodedata.category(
+                    text[original_end]
+                ).startswith("M"):
+                    original_end += 1
             if options.match == "substring" and delimited:
-                while original_start > 0 and _is_search_word_char(text[original_start - 1]):
+                while _continues_search_word(text, original_start - 1):
                     original_start -= 1
-                while original_end < len(text) and _is_search_word_char(text[original_end]):
+                while _continues_search_word(text, original_end):
                     original_end += 1
             spans.append((original_start, original_end))
 
@@ -3321,24 +3326,42 @@ def _normalized_search_value(
     Folding is Librarian's own, so a letter the engine folds folds here too.
     Unicode decomposition alone cannot reach `đ`, `ø`, `ł` or `Ð`, which is why
     a locally written NFKD pass used to leave `Duc` unable to mark `Ðức`.
+
+    Case is applied before marks, which is the order Librarian's analyzer uses:
+    it casefolds in `prepare()` and folds afterwards. The order is not cosmetic.
+    Casefolding a Greek iota subscript expands it into a full iota, so `ῷ`
+    becomes `ωι` this way round and a bare `ω` the other — and a term the engine
+    indexed as `τωι` would then never be found in the verse to mark.
     """
     characters: list[str] = []
     positions: list[int] = []
     for index, character in enumerate(value):
-        normalized = fold_marks(character) if fold else character
-        if not case_sensitive:
-            normalized = casefold_text(normalized)
+        normalized = character if case_sensitive else casefold_text(character)
+        if fold:
+            normalized = fold_marks(normalized)
         for item in normalized:
             characters.append(item)
             positions.append(index)
     return "".join(characters), tuple(positions)
 
 
-def _is_search_word_char(value: str) -> bool:
-    return bool(value) and (
-        unicodedata.category(value).startswith(("L", "M", "N"))
-        or value in {"'", "’"}
-    )
+def _continues_search_word(value: str, index: int) -> bool:
+    """Report whether the character at `index` continues the word beside it.
+
+    Mirrors Librarian's word pattern, where an apostrophe carries a word onward
+    only when a letter or number follows it. Treating a trailing apostrophe as
+    part of the word made `priests` fail to mark `priests'` — the engine returns
+    that verse, because it indexed the unit as `priests` too.
+    """
+    if not 0 <= index < len(value):
+        return False
+    character = value[index]
+    if character in {"'", "’"}:
+        following = value[index + 1] if index + 1 < len(value) else ""
+        return bool(following) and unicodedata.category(following).startswith(
+            ("L", "N")
+        )
+    return unicodedata.category(character).startswith(("L", "M", "N"))
 
 
 def _display(value: str) -> str:

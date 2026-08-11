@@ -360,6 +360,7 @@ class Settings:
     books_cache_limit: int
     chapter_cache_limit: int
     search_corpus_limit: int
+    search_shared_corpus_limit: int
     translation_cache_limit: int
     cache_max_bytes: int
     cache_maintenance_interval_seconds: int
@@ -580,6 +581,9 @@ class Settings:
                 "CHAPTER_CACHE_LIMIT", 256, 16, 10_000
             ),
             search_corpus_limit=_integer("SEARCH_CORPUS_LIMIT", 1, 1, 4),
+            search_shared_corpus_limit=_integer(
+                "SEARCH_SHARED_CORPUS_LIMIT", 8, 1, 32
+            ),
             translation_cache_limit=_integer(
                 "TRANSLATION_CACHE_LIMIT", 1, 1, 8
             ),

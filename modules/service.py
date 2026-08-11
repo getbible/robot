@@ -195,14 +195,14 @@ class ScriptureService:
             search_corpus_limit=settings.search_corpus_limit,
             translation_cache_limit=settings.translation_cache_limit,
         )
-        # `search_corpus_limit` bounds this client's own corpus dictionary. In
-        # Librarian 2 the corpora themselves live in a process-wide registry that
-        # keeps its own strong references under a separate default of eight, so
-        # dropping a client reference no longer frees anything. Bound the registry
-        # to the same number the operator configured, or a small host sized for
-        # one resident corpus can hold eight — each with an index per case and
-        # diacritics policy a user can reach from the filter dashboard.
-        shared_registry().resize(settings.search_corpus_limit)
+        # Two different caches, deliberately sized apart. `search_corpus_limit`
+        # bounds this client's handle dictionary; the corpora themselves live in
+        # Librarian's process-wide registry, and that registry is what lets a
+        # second search of a translation skip the parse-and-analyse entirely.
+        # Sizing it down to the per-client limit would defeat the point: every
+        # switch between translations would re-read and re-index from scratch.
+        # It is therefore configured on its own, for reuse first.
+        shared_registry().resize(settings.search_shared_corpus_limit)
         self._catalog = CatalogClient(
             base_url=settings.api_base_url,
             timeout=(settings.connect_timeout, settings.read_timeout),

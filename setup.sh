@@ -716,6 +716,8 @@ migrate_instance_configuration() {
     ensure_env_value "$python_bin" "$env_file" "BOOKS_CACHE_LIMIT" "16"
     ensure_env_value "$python_bin" "$env_file" "CHAPTER_CACHE_LIMIT" "256"
     ensure_env_value "$python_bin" "$env_file" "SEARCH_CORPUS_LIMIT" "1"
+    ensure_env_value "$python_bin" "$env_file" \
+        "SEARCH_SHARED_CORPUS_LIMIT" "8"
     ensure_env_value "$python_bin" "$env_file" "TRANSLATION_CACHE_LIMIT" "1"
     ensure_env_value "$python_bin" "$env_file" "CACHE_MAX_BYTES" "268435456"
     ensure_env_value "$python_bin" "$env_file" \

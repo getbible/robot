@@ -1781,6 +1781,48 @@ class SelectionFormattingTestCase(unittest.TestCase):
 
         self.assertEqual(rendered, "【Ðức】 Chúa 【Trời】 yêu thương thế gian")
 
+    def test_search_highlight_casefolds_before_folding_marks(self) -> None:
+        """The order is Librarian's: `prepare()` casefolds, `_fold()` follows.
+
+        Casefolding a Greek iota subscript expands it into a full iota, so `ῷ`
+        normalizes to `ωι` this way round and to a bare `ω` the other. The
+        engine indexes the term as `τωι`, which the wrong order can never find.
+        """
+        rendered = _highlight_search_terms_plain(
+            "ἐν τῷ κόσμῳ ἦν",
+            ("τωι",),
+            SearchOptions(),
+        )
+
+        self.assertEqual(rendered, "ἐν 【τῷ】 κόσμῳ ἦν")
+
+    def test_search_highlight_ends_a_word_at_a_trailing_apostrophe(self) -> None:
+        """Librarian carries a word through an apostrophe only if a letter follows.
+
+        It indexes `priests'` as the unit `priests` and returns the verse, so
+        treating the trailing apostrophe as part of the word left the match the
+        engine had already made with nothing highlighted.
+        """
+        rendered = _highlight_search_terms_plain(
+            "minister in the priests' office",
+            ("priests",),
+            SearchOptions(),
+        )
+
+        self.assertEqual(rendered, "minister in the 【priests】' office")
+
+    def test_search_highlight_span_keeps_a_folded_trailing_mark(self) -> None:
+        """A mark that folded away must not fall outside the span it belongs to."""
+        rendered = _highlight_search_terms_plain(
+            "فِي الْبَدْءِ كَانَ",
+            ("بدء",),
+            SearchOptions(),
+        )
+
+        # The kasra after the hamza belongs to the matched stem, so the closing
+        # marker goes after it rather than between the letter and its vowel.
+        self.assertEqual(rendered, "فِي الْ【بَدْءِ】 كَانَ")
+
     def test_search_highlight_keeps_brahmic_vowel_marks(self) -> None:
         """Brahmic marks carry vowels, so folding them would change the word."""
         rendered = _highlight_search_terms_plain(
