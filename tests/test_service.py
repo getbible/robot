@@ -560,6 +560,44 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CircuitOpen):
             await service.select(query)
 
+    async def test_search_waits_on_the_search_budget_not_the_lookup_budget(
+        self,
+    ) -> None:
+        # The first search of a translation builds that translation's index.
+        # Charging it the reference-delivery budget — shorter than the build it
+        # is waiting on — failed the searcher while the build they triggered ran
+        # on to completion without them.
+        client = _Client(search_delay=0.2)
+        settings = replace(
+            _settings(),
+            lookup_timeout=0.01,
+            search_timeout=30.0,
+        )
+        service = ScriptureService(settings, client=client)
+        self.addAsyncCleanup(service.close)
+
+        page = await service.search("loved", SearchOptions(translation="kjv"))
+
+        self.assertEqual(page.translation, "kjv")
+        self.assertEqual(len(client.search_calls), 1)
+
+    async def test_search_still_gives_up_once_its_own_budget_is_spent(self) -> None:
+        client = _Client(search_delay=0.2)
+        settings = replace(
+            _settings(),
+            lookup_timeout=30.0,
+            search_timeout=0.01,
+        )
+        service = ScriptureService(settings, client=client)
+        self.addAsyncCleanup(service.close)
+
+        with self.assertRaises(ScriptureUnavailable):
+            await service.search("loved", SearchOptions(translation="kjv"))
+        self.assertEqual(
+            (await service.snapshot())["metrics"].get("lookup_timeouts"),
+            1,
+        )
+
     async def test_timed_out_worker_keeps_capacity_until_thread_finishes(self) -> None:
         select_started = threading.Event()
         select_release = threading.Event()

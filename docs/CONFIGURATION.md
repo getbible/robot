@@ -158,7 +158,7 @@ their manager-owned paths in the environment file.
 | `GETBIBLE_READ_TIMEOUT` | `6` seconds | `0.5`–`60` | Per-response read timeout |
 | `GETBIBLE_REQUEST_RETRIES` | `1` | `0`–`5` | Retries for Librarian and navigation-catalog GET requests |
 | `GETBIBLE_MAX_RESPONSE_BYTES` | `41943040` (40 MiB) | `1024`–`134217728` | Maximum accepted full repository/corpus response body |
-| `LOOKUP_TIMEOUT` | `20` seconds | `1`–`90` | Overall asynchronous wait for one lookup |
+| `LOOKUP_TIMEOUT` | `20` seconds | `1`–`90` | Overall asynchronous wait for one direct reference or catalogue lookup |
 | `LOOKUP_QUEUE_TIMEOUT` | `2` seconds | `0.1`–`30` | Maximum wait for bounded worker capacity |
 | `REFERENCE_CACHE_LIMIT` | `1000` | `100`–`50000` | Parsed reference and selection cache entries |
 | `BOOKS_CACHE_LIMIT` | `16` | `1`–`1000` | In-memory translation book indexes |
@@ -183,6 +183,7 @@ A lookup timeout does not pretend that its worker thread stopped. The capacity p
 | `SEARCH_RESULT_LIMIT` | `50` | `1`–`200` | Maximum selectable matches retained from one Librarian search |
 | `SEARCH_DEADLINE_SECONDS` | `5` | `0.1`–`30` | Librarian's cooperative per-search execution deadline, covering request-owned work only |
 | `SEARCH_INDEX_BUILD_SECONDS` | `120` | `1`–`600` | Bound on building one translation's search index, and the budget startup prewarming spends |
+| `SEARCH_TIMEOUT` | `150` seconds | `1`–`900` | Overall wait for one search, including the index build its first query provokes |
 | `SEARCH_MAX_RESPONSE_BYTES` | `4194304` (4 MiB) | `65536`–`16777216` | Maximum constructed Librarian search result, separate from corpus downloads |
 | `MAX_CONCURRENT_LOOKUPS` | `2` | `1`–`32` | Direct-reference/catalog worker threads and permits |
 | `MAX_CONCURRENT_SEARCHES` | `4` | `1`–`64` | Concurrent searches over the shared corpus. Past the core count this adds latency, not throughput — scale out with instances |
@@ -192,11 +193,15 @@ A lookup timeout does not pretend that its worker thread stopped. The capacity p
 
 An index build serves every later search of that translation, so it is bounded
 by `SEARCH_INDEX_BUILD_SECONDS` instead of being charged to whichever request
-happened to arrive first. Within a request, `LOOKUP_TIMEOUT` still applies: a
-cold build of a non-default translation may exceed it, in which case that one
-search fails while the build continues and serves the searches after it. Keeping
-`PREWARM_DEFAULT_TRANSLATION` enabled is what keeps requests off the build path
-entirely. See [Search](SEARCH.md).
+happened to arrive first. A search waits for that build rather than abandoning
+it: `SEARCH_TIMEOUT` bounds the request and must cover
+`SEARCH_INDEX_BUILD_SECONDS` plus `SEARCH_DEADLINE_SECONDS`, which the loader
+refuses to start without. `LOOKUP_TIMEOUT` sizes direct reference and catalogue
+delivery and is not charged to a search; it used to be, and being shorter than
+the build it waited on it made the first search of any translation but the
+prewarmed default fail while the build ran on without its caller. Keeping
+`PREWARM_DEFAULT_TRANSLATION` enabled still spares the default translation that
+first wait. See [Search](SEARCH.md).
 
 On 26 July 2026, the largest published corpus measured by uncompressed
 `Content-Length` was `thai` at 30,950,679 bytes; KJV was 8,862,703 bytes. The
@@ -204,8 +209,10 @@ On 26 July 2026, the largest published corpus measured by uncompressed
 translations, including larger non-66-book corpora, with bounded headroom.
 It does not permit a 40 MiB search result: `SEARCH_MAX_RESPONSE_BYTES`,
 `SEARCH_RESULT_LIMIT`, and Telegram message limits remain independent. Search
-also has its own single-worker default so corpus parsing/indexing cannot occupy
-the four direct-reference workers.
+also has its own worker pool, semaphore, timeout and circuit — four workers by
+default against two for direct references — so corpus parsing and indexing
+cannot occupy a reference reader's permit, and a search that waits out an index
+build cannot delay one.
 
 Do not increase these values merely to make an abusive request succeed.
 Load-test memory, API behavior, Telegram output, and the `MemoryMax` service

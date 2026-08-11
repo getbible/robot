@@ -4,6 +4,37 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Waiting for Scripture instead of reporting a timeout for it
+
+- Stopped charging a search the reference-delivery budget. `LOOKUP_TIMEOUT` is
+  twenty seconds, sized for fetching a reference; the index build a search can
+  provoke is granted two minutes. The first search of any translation but the
+  prewarmed default therefore reported a timeout to the reader while the build
+  they had triggered ran on to completion without them — searching Greek, or
+  any translation the instance had not warmed, reliably failed on the first
+  attempt. Searches now wait on `SEARCH_TIMEOUT`, which defaults to 150 seconds
+  and which the loader refuses to start below `SEARCH_INDEX_BUILD_SECONDS` plus
+  `SEARCH_DEADLINE_SECONDS`.
+- Made the Mini App wait for the budget the robot declares. The page allowed a
+  search fifteen seconds while the robot was still working, so it abandoned the
+  request and showed a timeout of its own making. The session response now
+  carries `limits.search_timeout_seconds` and the page waits it out, falling
+  back to a search-shaped floor when an older robot declares nothing.
+- Replaced the reader's ten-second wall clock over a whole chapter download with
+  a bound on inactivity. The stall timer is rearmed by every chunk of body, so a
+  chapter that is still arriving is never abandoned for taking a long time — a
+  long chapter on a slow connection is now slow, not failed — while a second,
+  much larger ceiling still prevents a connection that trickles forever from
+  holding a request open. The abort is raced against the response stream, so a
+  deadline can end a read that is already waiting.
+- Added bounded retry with exponential backoff to public reads. A stalled
+  transfer, a dropped connection, a 429 or a 5xx is attempted again; a 404, an
+  oversized body, a malformed payload or a checksum mismatch is raised on the
+  first attempt and never retried.
+- Stopped loading a chapter's book list and chapter list one after the other.
+  They owe each other nothing, and running them in sequence made every cold
+  chapter cost one extra public round trip before any text appeared.
+
 ### Librarian 2 script-aware search
 
 - Upgraded the reviewed Librarian dependency to 2.0.0 and made that release the

@@ -372,6 +372,7 @@ class Settings:
     search_result_limit: int
     search_deadline_seconds: float
     search_index_build_seconds: float
+    search_timeout: float
     max_concurrent_lookups: int
     max_concurrent_searches: int
     max_concurrent_updates: int
@@ -480,6 +481,24 @@ class Settings:
         if max_total_verses < max_verses_per_reference:
             raise ConfigurationError(
                 "MAX_TOTAL_VERSES cannot be lower than MAX_VERSES_PER_REFERENCE."
+            )
+
+        # A search waits for its own work, including the one-off index build the
+        # first search of a translation triggers. Granting the build 120 seconds
+        # and then abandoning the caller after 20 produced the worst of both: the
+        # reader was told the search timed out while the build they paid for ran
+        # on without them. The request budget must therefore cover the build it
+        # can provoke, plus the matching deadline inside it.
+        search_deadline_seconds = _number("SEARCH_DEADLINE_SECONDS", 5.0, 0.1, 30.0)
+        search_index_build_seconds = _number(
+            "SEARCH_INDEX_BUILD_SECONDS", 120.0, 1.0, 600.0
+        )
+        search_timeout = _number("SEARCH_TIMEOUT", 150.0, 1.0, 900.0)
+        minimum_search_timeout = search_index_build_seconds + search_deadline_seconds
+        if search_timeout < minimum_search_timeout:
+            raise ConfigurationError(
+                "SEARCH_TIMEOUT cannot be lower than "
+                "SEARCH_INDEX_BUILD_SECONDS plus SEARCH_DEADLINE_SECONDS."
             )
 
         health_host = _listener(
@@ -605,12 +624,9 @@ class Settings:
             max_total_verses=max_total_verses,
             max_output_chunks=_integer("MAX_OUTPUT_CHUNKS", 8, 1, 32),
             search_result_limit=_integer("SEARCH_RESULT_LIMIT", 50, 1, 200),
-            search_deadline_seconds=_number(
-                "SEARCH_DEADLINE_SECONDS", 5.0, 0.1, 30.0
-            ),
-            search_index_build_seconds=_number(
-                "SEARCH_INDEX_BUILD_SECONDS", 120.0, 1.0, 600.0
-            ),
+            search_deadline_seconds=search_deadline_seconds,
+            search_index_build_seconds=search_index_build_seconds,
+            search_timeout=search_timeout,
             max_concurrent_lookups=_integer("MAX_CONCURRENT_LOOKUPS", 2, 1, 32),
             max_concurrent_searches=_integer("MAX_CONCURRENT_SEARCHES", 4, 1, 64),
             max_concurrent_updates=_integer("MAX_CONCURRENT_UPDATES", 4, 1, 64),

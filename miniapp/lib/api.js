@@ -9,6 +9,17 @@ import {
 
 const API_ROOT = "api/v1/";
 const DEFAULT_TIMEOUT_MS = 15_000;
+// A search may have to build a translation's index before it can answer, which
+// the robot budgets in minutes rather than seconds. The page therefore waits on
+// the budget the server announces at session bootstrap, and only falls back to
+// this floor when an older robot announces nothing. Waiting less than the server
+// works is the one thing that cannot be right: it turns a slow answer into a
+// timeout the reader can do nothing about.
+const DEFAULT_SEARCH_TIMEOUT_MS = 150_000;
+const MAX_SEARCH_TIMEOUT_MS = 900_000;
+// Covers the queue wait and the round trip either side of the robot's own
+// deadline, so a server that gives up first can say why.
+const SEARCH_TIMEOUT_GRACE_MS = 10_000;
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 
 export class ApiError extends Error {
@@ -30,6 +41,7 @@ export class ApiError extends Error {
 export class MiniAppApi {
   #initData;
   #sessionToken = null;
+  #searchTimeoutMs = DEFAULT_SEARCH_TIMEOUT_MS;
   #timeoutMs;
   #cleanupAttempted = false;
   #baseUrl;
@@ -101,6 +113,7 @@ export class MiniAppApi {
       authenticated: false,
     });
     this.#acceptSession(payload);
+    this.#acceptLimits(payload);
     this.#selections.setMaximum(Number(payload?.basket?.maximum));
     this.#cleanupLaunch();
     return { ...payload, basket: this.#selections.snapshot() };
@@ -119,6 +132,7 @@ export class MiniAppApi {
     this.#sessionToken = sessionToken;
     this.#cleanupAttempted = false;
     const payload = await this.#request("session");
+    this.#acceptLimits(payload);
     this.#selections.setMaximum(Number(payload?.basket?.maximum));
     this.#cleanupLaunch();
     return { ...payload, basket: this.#selections.snapshot() };
@@ -171,6 +185,7 @@ export class MiniAppApi {
     const payload = await this.#request("search", {
       method: "POST",
       body: { query, options: filters },
+      timeoutMs: this.#searchTimeoutMs,
     });
     this.#registerPayloadSelections(payload);
     return payload;
@@ -247,6 +262,21 @@ export class MiniAppApi {
     }
     this.#sessionToken = payload.session_token;
     this.#cleanupAttempted = false;
+  }
+
+  #acceptLimits(payload) {
+    const seconds = Number(payload?.limits?.search_timeout_seconds);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      this.#searchTimeoutMs = DEFAULT_SEARCH_TIMEOUT_MS;
+      return;
+    }
+    this.#searchTimeoutMs = Math.min(
+      MAX_SEARCH_TIMEOUT_MS,
+      Math.max(
+        DEFAULT_TIMEOUT_MS,
+        Math.round(seconds * 1_000) + SEARCH_TIMEOUT_GRACE_MS,
+      ),
+    );
   }
 
   #selectionOperation(operation) {

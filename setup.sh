@@ -712,6 +712,7 @@ migrate_instance_configuration() {
         "SEARCH_MAX_RESPONSE_BYTES" "4194304"
     ensure_env_value "$python_bin" "$env_file" \
         "SEARCH_INDEX_BUILD_SECONDS" "120"
+    ensure_env_value "$python_bin" "$env_file" "SEARCH_TIMEOUT" "150"
     ensure_env_value "$python_bin" "$env_file" "REFERENCE_CACHE_LIMIT" "1000"
     ensure_env_value "$python_bin" "$env_file" "BOOKS_CACHE_LIMIT" "16"
     ensure_env_value "$python_bin" "$env_file" "CHAPTER_CACHE_LIMIT" "256"

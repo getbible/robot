@@ -623,6 +623,14 @@ class MiniAppApi:
                 },
                 "translations": [_translation_payload(option) for option in options],
                 "basket": self._basket_payload(session),
+                # The browser cannot guess how long the robot is willing to work
+                # on a search, and guessing short is what made a cold index build
+                # look like a failure: the page abandoned the request and showed
+                # a timeout while the answer was still being computed. The server
+                # states its own budget once, and the page waits for it.
+                "limits": {
+                    "search_timeout_seconds": self._service.settings.search_timeout,
+                },
             },
         )
 

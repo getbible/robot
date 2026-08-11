@@ -371,6 +371,54 @@ class SettingsTestCase(unittest.TestCase):
         ):
             Settings.from_env(load_environment_file=False)
 
+    def test_search_budget_covers_the_index_build_it_can_provoke(self) -> None:
+        with patch.dict(os.environ, self.environment(), clear=True):
+            settings = Settings.from_env(load_environment_file=False)
+        # A search waits for the build its first query triggers rather than
+        # reporting a timeout for work that is still running. The default must
+        # therefore leave room for a full build plus the matching deadline, and
+        # must not be the reference-delivery budget.
+        self.assertEqual(settings.search_timeout, 150.0)
+        self.assertGreaterEqual(
+            settings.search_timeout,
+            settings.search_index_build_seconds + settings.search_deadline_seconds,
+        )
+        self.assertGreater(settings.search_timeout, settings.lookup_timeout)
+
+    def test_search_budget_shorter_than_its_index_build_is_refused(self) -> None:
+        for overrides in (
+            {"SEARCH_TIMEOUT": "20"},
+            {"SEARCH_TIMEOUT": "100", "SEARCH_INDEX_BUILD_SECONDS": "120"},
+            {
+                "SEARCH_TIMEOUT": "121",
+                "SEARCH_INDEX_BUILD_SECONDS": "120",
+                "SEARCH_DEADLINE_SECONDS": "5",
+            },
+        ):
+            with (
+                self.subTest(**overrides),
+                patch.dict(
+                    os.environ,
+                    self.environment(**overrides),
+                    clear=True,
+                ),
+                self.assertRaises(ConfigurationError),
+            ):
+                Settings.from_env(load_environment_file=False)
+
+    def test_a_raised_index_build_budget_can_be_matched(self) -> None:
+        with patch.dict(
+            os.environ,
+            self.environment(
+                SEARCH_INDEX_BUILD_SECONDS="600",
+                SEARCH_DEADLINE_SECONDS="30",
+                SEARCH_TIMEOUT="700",
+            ),
+            clear=True,
+        ):
+            settings = Settings.from_env(load_environment_file=False)
+        self.assertEqual(settings.search_timeout, 700.0)
+
     def test_output_chunk_budget_is_bounded(self) -> None:
         for value in ("0", "33"):
             with (
