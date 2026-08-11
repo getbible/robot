@@ -266,39 +266,54 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.items[0].terms, ("loved",))
         self.assertEqual(len(client.search_calls), 1)
 
-    async def test_search_applies_librarian_multilingual_match_policy(self) -> None:
+    async def test_search_never_rewrites_the_requested_match_mode(self) -> None:
+        """Librarian 2 reads the script itself; the application must not guess.
+
+        Under 1.x a single Han character flipped the whole query to substring,
+        which also loosened its space-delimited terms, so ``all`` matched inside
+        ``shall``. Every script must now reach Librarian exactly as asked.
+        """
         client = _Client()
         service = ScriptureService(_settings(), client=client)
         self.addAsyncCleanup(service.close)
-        cases = (
-            ("神", "substring"),
-            ("イエス", "substring"),
-            ("예수", "whole_word"),
-            ("พระ", "substring"),
-            ("ພຣະ", "substring"),
-            ("ព្រះ", "substring"),
-            ("ယေရှု", "substring"),
-            ("المسيح", "whole_word"),
-            ("משיח", "whole_word"),
-            ("यीशु", "whole_word"),
-            ("Jesus", "whole_word"),
+        queries = (
+            "神",  # Han
+            "イエス",  # Katakana
+            "예수",  # Hangul
+            "พระ",  # Thai
+            "ພຣະ",  # Lao
+            "ព្រះ",  # Khmer
+            "ယေရှု",  # Myanmar
+            "المسيح",  # Arabic
+            "משיח",  # Hebrew
+            "यीशु",  # Devanagari
+            "Jesus",  # Latin
+            "Jesus 耶稣",  # mixed Latin and Han
         )
 
-        for query, expected_match in cases:
-            with self.subTest(query=query):
+        for requested in ("whole_word", "substring"):
+            for query in queries:
+                with self.subTest(query=query, match=requested):
+                    await service.search(
+                        query,
+                        SearchOptions(translation="kjv", match=requested),
+                    )
+                    criteria = client.search_calls[-1][2]
+                    self.assertEqual(criteria.match, requested)
+
+    async def test_search_passes_the_requested_diacritics_policy(self) -> None:
+        client = _Client()
+        service = ScriptureService(_settings(), client=client)
+        self.addAsyncCleanup(service.close)
+
+        for policy in ("fold", "exact"):
+            with self.subTest(diacritics=policy):
                 await service.search(
-                    query,
-                    SearchOptions(translation="kjv", match="whole_word"),
+                    "λογος",
+                    SearchOptions(translation="moderngreek", diacritics=policy),
                 )
                 criteria = client.search_calls[-1][2]
-                self.assertEqual(criteria.match, expected_match)
-
-        await service.search(
-            "예수",
-            SearchOptions(translation="kjv", match="substring"),
-        )
-        criteria = client.search_calls[-1][2]
-        self.assertEqual(criteria.match, "substring")
+                self.assertEqual(criteria.diacritics, policy)
 
     async def test_search_total_matches_the_public_contract_bound(self) -> None:
         client = _Client()

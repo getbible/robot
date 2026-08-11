@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, TypeVar, cast
 
@@ -28,7 +28,6 @@ from getbible import (
     SearchLimits,
     SearchValidationError,
     TranslationNotFoundError,
-    requires_substring_matching,
 )
 
 from config import Settings
@@ -64,13 +63,6 @@ class SearchPage:
     translation: str
     total: int
     items: tuple[SearchResult, ...]
-
-
-def effective_search_options(query: str, options: SearchOptions) -> SearchOptions:
-    """Apply Librarian's language-aware match policy to the default mode."""
-    if options.match == "whole_word" and requires_substring_matching(query):
-        return replace(options, match="substring")
-    return options
 
 
 class Metrics:
@@ -187,6 +179,10 @@ class ScriptureService:
                 max_query_length=settings.max_input_length,
                 max_limit=settings.search_result_limit,
                 deadline_seconds=settings.search_deadline_seconds,
+                # An index build serves every later request, so Librarian 2 bounds
+                # it separately instead of charging it to whichever request arrived
+                # first and leaving nothing cached behind the failure.
+                index_build_seconds=settings.search_index_build_seconds,
             ),
             negative_translation_cache_limit=64,
             negative_translation_ttl=300.0,
@@ -385,8 +381,14 @@ class ScriptureService:
         query: str,
         options: SearchOptions,
     ) -> SearchPage:
-        """Run one bounded Librarian 1.2.1 search and validate its public contract."""
-        options = effective_search_options(query, options)
+        """Run one bounded Librarian search and validate its public contract.
+
+        Librarian 2 derives the matching strategy from the query text itself, so
+        the application passes the user's criteria through unaltered. The 1.x
+        habit of flipping ``whole_word`` to ``substring`` on seeing a continuous
+        script is gone: it loosened the space-delimited terms of a mixed query,
+        so ``all`` began matching inside ``shall``.
+        """
         criteria = SearchBible(
             words=options.words,
             match=options.match,
@@ -410,11 +412,17 @@ class ScriptureService:
         return self._search_page(response, query, options.translation)
 
     async def warm_default_translation(self) -> dict[str, Any]:
-        """Load the default corpus and index before Telegram accepts traffic."""
+        """Load the default corpus and index before Telegram accepts traffic.
+
+        A cold build is bounded by the index budget rather than the interactive
+        lookup timeout. Paying it once here is what keeps every later request off
+        the build path, and Librarian shares the result process-wide.
+        """
         return await self._search_call(
             "search_warmups",
             self._client.warm_translation,
             self.settings.default_translation,
+            timeout=self.settings.search_index_build_seconds,
         )
 
     async def ready(self) -> bool:
@@ -494,6 +502,7 @@ class ScriptureService:
         metric: str,
         function: Callable[..., _T],
         *arguments: object,
+        timeout: float | None = None,
     ) -> _T:
         return await self._bounded_call(
             metric,
@@ -503,6 +512,7 @@ class ScriptureService:
             semaphore=self._search_semaphore,
             circuit=self._search_circuit,
             queue_metric="search_queue_rejections",
+            timeout=timeout,
         )
 
     async def _bounded_call(
@@ -514,9 +524,13 @@ class ScriptureService:
         semaphore: asyncio.Semaphore,
         circuit: CircuitBreaker,
         queue_metric: str,
+        timeout: float | None = None,
     ) -> _T:
         if self._closed:
             raise ScriptureUnavailable("The Scripture service is closed.")
+        effective_timeout = (
+            self.settings.lookup_timeout if timeout is None else timeout
+        )
 
         try:
             await asyncio.wait_for(
@@ -553,7 +567,7 @@ class ScriptureService:
             wrapped_future = asyncio.wrap_future(raw_future)
             result = await asyncio.wait_for(
                 asyncio.shield(wrapped_future),
-                timeout=self.settings.lookup_timeout,
+                timeout=effective_timeout,
             )
         except CircuitOpen:
             self.metrics.increment("circuit_rejections")
@@ -581,7 +595,7 @@ class ScriptureService:
                 "lookup_timed_out",
                 metadata={
                     "operation": metric,
-                    "timeout_seconds": self.settings.lookup_timeout,
+                    "timeout_seconds": effective_timeout,
                 },
                 level=logging.WARNING,
             )
