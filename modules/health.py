@@ -137,6 +137,12 @@ class HealthServer:
             "getbible_robot_search_circuit_open "
             f"{1 if search_circuit['state'] == 'open' else 0}"
         )
+        # Scraped by alerting, so an absent key must not cost the whole endpoint.
+        engine_version = service.get("search_engine_version")
+        if isinstance(engine_version, int):
+            lines.append(
+                f"getbible_robot_search_engine_version {engine_version}"
+            )
         body = ("\n".join(lines) + "\n").encode("utf-8")
         await self._write_bytes(writer, 200, body, "text/plain; version=0.0.4")
 

@@ -6,7 +6,11 @@ import unittest
 from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
-from getbible import ReferenceValidationError, RequestLimitError
+from getbible import (
+    SEARCH_ENGINE_VERSION,
+    ReferenceValidationError,
+    RequestLimitError,
+)
 
 from config import Settings
 from modules.catalog import BookOption
@@ -385,6 +389,10 @@ class ScriptureServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("kjv_43_3", selected)
         self.assertEqual(snapshot["circuit"]["state"], "closed")
         self.assertEqual(snapshot["search_circuit"]["state"], "open")
+        # Published so an operator can tell a matching-semantics upgrade apart
+        # from a regression when result counts move under a stable corpus.
+        self.assertEqual(snapshot["search_engine_version"], SEARCH_ENGINE_VERSION)
+        self.assertGreaterEqual(SEARCH_ENGINE_VERSION, 4)
 
     async def test_timeout_opens_circuit_and_followup_fails_fast(self) -> None:
         client = _Client(delay=0.05)

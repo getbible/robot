@@ -19,6 +19,7 @@ class _Service:
             "metrics": {"scripture_lookups": 2},
             "circuit": {"state": "closed"},
             "search_circuit": {"state": "open"},
+            "search_engine_version": 4,
         }
 
 
@@ -84,6 +85,9 @@ class HealthServerTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"getbible_robot_rate_limit_rejected 1", metrics)
         self.assertIn(b"getbible_robot_interaction_sessions 0", metrics)
         self.assertIn(b"getbible_robot_search_circuit_open 1", metrics)
+        # Matching semantics can move without a translation SHA moving, so the
+        # engine version is what tells an upgrade apart from a regression.
+        self.assertIn(b"getbible_robot_search_engine_version 4", metrics)
 
         rejected = await self.request("/healthz", method="POST")
         self.assertIn(b"405 Method Not Allowed", rejected)
