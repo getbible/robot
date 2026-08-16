@@ -36,9 +36,9 @@ Store the token outside Git with restrictive permissions. Revoke and replace it 
 | `BOT_SHORT_DESCRIPTION` | built-in text | 1–120 characters | Bot API short description synchronized at startup |
 
 The public reverse proxy terminates TLS and forwards the exact private URL path
-to the configured backend. Keep loopback for a same-host proxy; for a remote
-HAProxy, choose the bot host's private IP and firewall the port so only HAProxy
-can reach it. Do not expose `TELEGRAM_WEBHOOK_PORT` generally. See
+to the configured backend. Keep loopback for a same-host proxy; for a proxy on
+another host, choose a reachable bot-host address. The operator owns firewall
+and routing policy. Do not expose `TELEGRAM_WEBHOOK_PORT` generally. See
 [Telegram delivery](WEBHOOKS.md).
 
 ## Telegram Mini App
@@ -46,9 +46,9 @@ can reach it. Do not expose `TELEGRAM_WEBHOOK_PORT` generally. See
 | Variable | Default | Validation | Purpose |
 |---|---:|---|---|
 | `MINI_APP_ENABLED` | `false` | `true` or `false`; URL required when true | Enables the same-instance Telegram Mini App |
-| `REVERSE_PROXY_MODE` | `caddy` | `caddy` or `external` | Selects setup-managed Caddy or an operator-managed proxy such as HAProxy |
+| `REVERSE_PROXY_MODE` | `caddy` | `caddy` or `external` | Selects setup-managed Caddy or an existing operator-managed reverse proxy |
 | `MINI_APP_PUBLIC_URL` | empty | Absolute HTTPS URL; optional fixed path; no credentials, query, or fragment | URL opened by Telegram and routed by the public proxy |
-| `MINI_APP_LISTEN` | `127.0.0.1` | Loopback, a specific IP in external mode, or wildcard only in a container | Private Mini App HTTP listener |
+| `MINI_APP_LISTEN` | `127.0.0.1` | Loopback, a specific IP, or wildcard in external mode | Mini App HTTP listener used by the reverse proxy |
 | `MINI_APP_PORT` | `9201` | `1024`–`65535`; manager-reserved and different from health/webhook ports | Per-instance Mini App listener port |
 | `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | `300` | `30`–`900` | Maximum accepted age of signed Telegram `initData` |
 | `MINI_APP_LAUNCH_TTL_SECONDS` | `300` | `30`–`900` | Lifetime of the user-bound bot launch token |
@@ -61,7 +61,7 @@ can reach it. Do not expose `TELEGRAM_WEBHOOK_PORT` generally. See
 | `MINI_APP_BODY_TIMEOUT_SECONDS` | `10` | `1`–`60` | Maximum time to receive one HTTP request body |
 | `MINI_APP_IDLE_TIMEOUT_SECONDS` | `30` | `5`–`300` | Idle connection and incomplete-header timeout |
 | `MINI_APP_MAX_HEADER_BYTES` | `16384` | `4096`–`65536` | Maximum accepted HTTP header block |
-| `MINI_APP_TRUSTED_PROXY_CIDRS` | `127.0.0.1/32,::1/128` | Comma-separated IPv4/IPv6 networks | Direct peers allowed to supply a forwarded client address |
+| `MINI_APP_TRUSTED_PROXY_CIDRS` | mode-dependent | Optional comma-separated IPv4/IPv6 networks | Advanced restriction for peers supplying forwarded client addresses |
 | `MINI_APP_IP_RATE_CAPACITY` | `60` | `10`–`10000` | Per-client burst capacity for authenticated Mini App API requests |
 | `MINI_APP_IP_RATE_REFILL_PER_SECOND` | `10` | `0.1`–`10000` | Per-client sustained refill rate |
 | `MINI_APP_SESSION_EXCHANGE_RATE_CAPACITY` | `10` | `1`–`10000` | Per-client burst for unauthenticated session-exchange attempts |
@@ -82,16 +82,16 @@ Caddy routes, validation, reload, public verification, and rollback remain one
 transaction.
 
 Telegram Bot API updates do not expose an end-user IP address. Mini App HTTP
-requests do. Forwarded addresses are trusted only when the direct connection
-comes from `MINI_APP_TRUSTED_PROXY_CIDRS`; untrusted forwarding headers are
-ignored. Configure the exact proxy address or network rather than a public or
-unnecessarily broad range.
+requests do. Managed Caddy mode accepts forwarded addresses from loopback by
+default. External mode assumes the operator controls access to the backend and
+accepts the reverse proxy's forwarded client address. The optional
+`MINI_APP_TRUSTED_PROXY_CIDRS` setting can narrow that behavior when desired.
 
-With `REVERSE_PROXY_MODE=external`, HAProxy forwards the public URL path to the
-bot host's exact `MINI_APP_LISTEN:MINI_APP_PORT`. Use a different port per bot,
-bind a specific private address rather than a wildcard, and firewall the port
-so only `MINI_APP_TRUSTED_PROXY_CIDRS` can reach it. An all-addresses trusted
-network such as `0.0.0.0/0` is rejected.
+With `REVERSE_PROXY_MODE=external`, the existing reverse proxy forwards the
+public URL path to `MINI_APP_LISTEN:MINI_APP_PORT`. Keep `127.0.0.1` when the
+proxy runs on the bot host; use a private address or wildcard listener when it
+runs elsewhere. Use a different port per bot. The application does not impose
+firewall policy on this operator-managed network path.
 
 ## Instance identity and audit logging
 
@@ -342,7 +342,7 @@ LOG_FILE="/var/log/getbible-robot/production.jsonl"
 LOG_MAX_BYTES="10485760"
 AUDIT_LOG_MODE="metadata"
 AUDIT_IDENTITY_MODE="pseudonymous"
-MINI_APP_TRUSTED_PROXY_CIDRS="127.0.0.1/32,::1/128"
+MINI_APP_TRUSTED_PROXY_CIDRS=""
 MINI_APP_IP_RATE_CAPACITY="60"
 MINI_APP_IP_RATE_REFILL_PER_SECOND="10"
 MINI_APP_SESSION_EXCHANGE_RATE_CAPACITY="10"

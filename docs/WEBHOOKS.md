@@ -66,15 +66,15 @@ The manager generates a high-entropy webhook secret. Telegram includes it in
 the `X-Telegram-Bot-Api-Secret-Token` request header, and the application
 rejects requests that do not match.
 
-For HAProxy on another host, use a private bot-host address:
+For a reverse proxy on another host, use a reachable bot-host address:
 
 ```text
 Public: https://bot.example.com/telegram/production
 Backend: http://10.0.0.20:9001/telegram/production
 ```
 
-Allow port 9001 only from the HAProxy source address in the host and cloud
-firewalls. Use `127.0.0.1` instead when the proxy runs on the bot host.
+Use `127.0.0.1` instead when the proxy runs on the bot host. Network access to
+the remote backend is controlled by the operator's host and cloud firewalls.
 
 ## Optional webhook proxy
 

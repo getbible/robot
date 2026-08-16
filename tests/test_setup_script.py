@@ -241,7 +241,6 @@ class SetupScriptTestCase(unittest.TestCase):
         for option in (
             "--mini-app-port",
             "--mini-app-listen",
-            "--trusted-proxy-cidrs",
             "--webhook-port",
             "--health-port",
             "--reverse-proxy",
@@ -363,7 +362,6 @@ cat "$dropin_root/alpha.conf"
         for option in (
             "--mini-app-port",
             "--mini-app-listen",
-            "--trusted-proxy-cidrs",
             "--health-port",
             "--webhook-port",
             "--memory-max-mb",
@@ -372,6 +370,8 @@ cat "$dropin_root/alpha.conf"
             self.assertIn(option, script)
         self.assertIn("write_resource_dropin", script)
         self.assertIn('REVERSE_PROXY_MODE" "$reverse_proxy_mode"', script)
+        self.assertNotIn("Trusted HAProxy source CIDR", script)
+        self.assertNotIn("--trusted-proxy-cidrs", script)
 
     def test_root_manager_does_not_write_the_operator_git_index(self) -> None:
         script = SETUP.read_text(encoding="utf-8")

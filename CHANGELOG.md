@@ -28,10 +28,10 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   transactionally through install, configuration, upgrade, rollback, and
   uninstall instead of documenting environment variables that systemd could
   not consume.
-- Added external HAProxy mode for native Mini Apps. Setup records a specific
-  bot-host bind IP, unique per-bot backend port, and narrow trusted proxy CIDR,
-  skips Caddy, rejects wildcard listeners and all-address trust networks, and
-  preserves the mode through status, diagnostics, upgrades, and removal.
+- Added generic external reverse-proxy mode for native Mini Apps. Setup asks
+  only for the backend port and listen address, keeps loopback as the default,
+  skips Caddy, and leaves the proxy/firewall boundary under operator control.
+  The mode works with HAProxy, Traefik, Nginx, or another HTTP reverse proxy.
 - Made webhook backends independently configurable. Polling opens no webhook
   listener; webhook mode records a separate specific bind IP and per-instance
   port so a same-host or remote proxy can forward HTTPS without sharing the

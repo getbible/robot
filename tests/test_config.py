@@ -103,62 +103,41 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.mini_app_listen, "10.0.0.20")
         self.assertEqual(settings.mini_app_trusted_proxy_cidrs, ("10.0.0.5/32",))
 
-    def test_external_proxy_requires_an_explicit_safe_network_boundary(self) -> None:
+    def test_external_proxy_defaults_to_operator_managed_network_boundary(self) -> None:
         with patch.dict(
             os.environ,
             self.environment(
                 REVERSE_PROXY_MODE="external",
                 MINI_APP_ENABLED="true",
                 MINI_APP_PUBLIC_URL="https://bot.example.com/getbible/app",
-                MINI_APP_LISTEN="10.20.30.40",
-                MINI_APP_TRUSTED_PROXY_CIDRS="10.20.30.5/32,2001:db8::5/128",
+                MINI_APP_LISTEN="0.0.0.0",
+                MINI_APP_TRUSTED_PROXY_CIDRS="",
             ),
             clear=True,
         ):
             settings = Settings.from_env(load_environment_file=False)
 
         self.assertEqual(settings.reverse_proxy_mode, "external")
-        self.assertEqual(settings.mini_app_listen, "10.20.30.40")
+        self.assertEqual(settings.mini_app_listen, "0.0.0.0")
         self.assertEqual(
             settings.mini_app_trusted_proxy_cidrs,
-            ("10.20.30.5/32", "2001:db8::5/128"),
+            ("0.0.0.0/0", "::/0"),
         )
 
-        invalid = (
-            {"REVERSE_PROXY_MODE": "nginx"},
-            {
-                "REVERSE_PROXY_MODE": "external",
-                "MINI_APP_ENABLED": "true",
-                "MINI_APP_PUBLIC_URL": "https://bot.example.com/getbible/app",
-                "MINI_APP_LISTEN": "0.0.0.0",
-                "MINI_APP_TRUSTED_PROXY_CIDRS": "10.20.30.5/32",
-            },
-            {
-                "REVERSE_PROXY_MODE": "external",
-                "MINI_APP_ENABLED": "true",
-                "MINI_APP_PUBLIC_URL": "https://bot.example.com/getbible/app",
-                "MINI_APP_LISTEN": "10.20.30.40",
-                "MINI_APP_TRUSTED_PROXY_CIDRS": "0.0.0.0/0",
-            },
-            {
-                "REVERSE_PROXY_MODE": "external",
-                "MINI_APP_ENABLED": "true",
-                "MINI_APP_PUBLIC_URL": "https://bot.example.com/getbible/app",
-                "MINI_APP_LISTEN": "2001:db8::40",
-                "MINI_APP_TRUSTED_PROXY_CIDRS": "::/0",
-            },
-        )
-        for overrides in invalid:
-            with (
-                self.subTest(overrides=overrides),
-                patch.dict(
-                    os.environ,
-                    self.environment(**overrides),
-                    clear=True,
+    def test_managed_proxy_rejects_an_all_addresses_forwarding_network(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                self.environment(
+                    MINI_APP_ENABLED="true",
+                    MINI_APP_PUBLIC_URL="https://bot.example.com/getbible/app",
+                    MINI_APP_TRUSTED_PROXY_CIDRS="0.0.0.0/0",
                 ),
-                self.assertRaises(ConfigurationError),
-            ):
-                Settings.from_env(load_environment_file=False)
+                clear=True,
+            ),
+            self.assertRaises(ConfigurationError),
+        ):
+            Settings.from_env(load_environment_file=False)
 
     def test_enabled_listener_ports_must_be_pairwise_distinct(self) -> None:
         common = {
@@ -229,6 +208,7 @@ class SettingsTestCase(unittest.TestCase):
 
     def test_mini_app_configuration_fails_closed(self) -> None:
         invalid = (
+            {"REVERSE_PROXY_MODE": "nginx"},
             {"MINI_APP_ENABLED": "true"},
             {
                 "MINI_APP_ENABLED": "true",
@@ -269,13 +249,6 @@ class SettingsTestCase(unittest.TestCase):
                 "MINI_APP_ENABLED": "true",
                 "MINI_APP_PUBLIC_URL": "https://bot.example.com/app",
                 "MINI_APP_TRUSTED_PROXY_CIDRS": "not-a-network",
-            },
-            {
-                "MINI_APP_ENABLED": "true",
-                "MINI_APP_PUBLIC_URL": "https://bot.example.com/app",
-                "REVERSE_PROXY_MODE": "external",
-                "MINI_APP_LISTEN": "10.0.0.20",
-                "MINI_APP_TRUSTED_PROXY_CIDRS": "0.0.0.0/0",
             },
             {
                 "MINI_APP_ENABLED": "true",

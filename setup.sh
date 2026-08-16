@@ -168,9 +168,10 @@ numbered selector. Non-interactive commands must provide the instance name.
 
 Install options:
   --source DIR                  Reviewed source checkout
-  --mini-app-port PORT          HAProxy/Caddy backend for Mini App traffic
+  --mini-app-listen IP          Mini App listen address (default 127.0.0.1)
+  --mini-app-port PORT          Reverse-proxy backend port for the Mini App
   --webhook-listen IP           Bot-host IP reachable by the webhook proxy
-  --webhook-port PORT           HAProxy backend for Telegram webhook traffic
+  --webhook-port PORT           Reverse-proxy backend port for webhook traffic
   --health-port PORT            Private health/metrics listener (0 disables)
   --max-concurrent-lookups N    Direct-reference/catalog workers (default 8)
   --max-concurrent-searches N   CPU-bound search workers (default 4)
@@ -231,27 +232,15 @@ resource_dropin_for() {
     printf '%s/resources.conf\n' "$(resource_dropin_dir_for "$1")"
 }
 
-validate_external_proxy_network() {
+validate_proxy_listener() {
     local python_bin=$1
     local listen_address=$2
-    local trusted_cidrs=$3
-    "$python_bin" - "$listen_address" "$trusted_cidrs" <<'PY' >/dev/null
-from ipaddress import ip_address, ip_network
+    "$python_bin" - "$listen_address" <<'PY' >/dev/null
+from ipaddress import ip_address
 import sys
 
 address = ip_address(sys.argv[1])
-if address.is_unspecified or address.is_multicast or address.is_link_local:
-    raise SystemExit(1)
-networks = [item.strip() for item in sys.argv[2].split(",")]
-if not networks or any(not item for item in networks):
-    raise SystemExit(1)
-parsed = []
-for item in networks:
-    network = ip_network(item, strict=False)
-    if network.prefixlen == 0:
-        raise SystemExit(1)
-    parsed.append(network)
-if not address.is_loopback and not any(not network.is_loopback for network in parsed):
+if address.is_multicast or address.is_link_local:
     raise SystemExit(1)
 PY
 }
@@ -1859,7 +1848,6 @@ cmd_install() {
     local source_request=""
     local requested_mini_app_port=""
     local requested_mini_app_listen=""
-    local requested_trusted_proxy_cidrs=""
     local requested_webhook_listen=""
     local requested_webhook_port=""
     local requested_health_port=""
@@ -1888,11 +1876,6 @@ cmd_install() {
             --mini-app-listen)
                 (($# >= 2)) || die "--mini-app-listen requires an IP address."
                 requested_mini_app_listen=$2
-                shift 2
-                ;;
-            --trusted-proxy-cidrs)
-                (($# >= 2)) || die "--trusted-proxy-cidrs requires a CIDR list."
-                requested_trusted_proxy_cidrs=$2
                 shift 2
                 ;;
             --webhook-port)
@@ -2128,20 +2111,19 @@ cmd_install() {
     local mini_app_public_url=""
     local mini_app_port="9201"
     local mini_app_listen="127.0.0.1"
-    local mini_app_trusted_proxy_cidrs="127.0.0.1/32,::1/128"
     local reverse_proxy_mode="caddy"
     if confirm "Enable the authenticated Telegram Mini App?" yes; then
         mini_app_enabled="true"
         printf '\nThe Mini App needs a public HTTPS URL whose DNS already points to this host.\n'
         if [[ -n "$requested_reverse_proxy_mode" ]]; then
             reverse_proxy_mode=$requested_reverse_proxy_mode
-        elif confirm "Use an external reverse proxy such as HAProxy?" no; then
+        elif confirm "Use an existing external reverse proxy?" no; then
             reverse_proxy_mode="external"
         fi
         if [[ "$reverse_proxy_mode" == "caddy" ]]; then
             printf 'The manager configures Caddy automatic HTTPS and keeps the app on loopback.\n'
         else
-            printf 'HAProxy terminates public HTTPS and forwards this bot URL to one private backend port.\n'
+            printf 'Your reverse proxy terminates public HTTPS and forwards this URL to one Mini App port.\n'
         fi
         while true; do
             mini_app_public_url=$(
@@ -2169,26 +2151,17 @@ cmd_install() {
             mini_app_listen=${requested_mini_app_listen:-127.0.0.1}
             if [[ -z "$requested_mini_app_listen" ]]; then
                 mini_app_listen=$(
-                    prompt "Bot-host bind IP reachable by HAProxy (127.0.0.1 if local)" \
+                    prompt "Mini App listen address (127.0.0.1 for a same-host proxy)" \
                         "$mini_app_listen"
                 )
             fi
-            mini_app_trusted_proxy_cidrs=$requested_trusted_proxy_cidrs
-            if [[ -z "$mini_app_trusted_proxy_cidrs" ]]; then
-                mini_app_trusted_proxy_cidrs=$(
-                    prompt "Trusted HAProxy source CIDR (for example 10.0.0.5/32)" ""
-                )
-            fi
-            validate_external_proxy_network \
-                "$python_bin" "$mini_app_listen" "$mini_app_trusted_proxy_cidrs" ||
-                die "Use a specific non-link-local bind IP and one or more narrow trusted proxy CIDRs; all-address networks are forbidden."
-        elif [[ -n "$requested_mini_app_listen" ||
-            -n "$requested_trusted_proxy_cidrs" ]]; then
-            die "--mini-app-listen and --trusted-proxy-cidrs require --reverse-proxy external."
+            validate_proxy_listener "$python_bin" "$mini_app_listen" ||
+                die "Mini App listen address must be a valid non-link-local IP address."
+        elif [[ -n "$requested_mini_app_listen" ]]; then
+            die "--mini-app-listen requires --reverse-proxy external."
         fi
     elif [[ -n "$requested_mini_app_port" ||
         -n "$requested_mini_app_listen" ||
-        -n "$requested_trusted_proxy_cidrs" ||
         -n "$requested_reverse_proxy_mode" ]]; then
         die "Mini App proxy options require enabling the Mini App."
     fi
@@ -2248,11 +2221,10 @@ cmd_install() {
         fi
     fi
     if [[ "$mini_app_enabled" == "true" && "$reverse_proxy_mode" == "external" ]]; then
-        printf 'Configure HAProxy to forward %s to http://%s:%s before starting.\n' \
+        printf 'Configure the external reverse proxy to forward %s to http://%s:%s before starting.\n' \
             "$mini_app_public_url" "$mini_app_listen" "$mini_app_port"
-        warn "Restrict the bot-host firewall so only the declared HAProxy source can reach this backend port."
         if ! confirm "Is the external Mini App HTTPS route ready?" no; then
-            warn "The instance will be installed but not started. Configure HAProxy, then run '${PROGRAM} start ${instance}'."
+            warn "The instance will be installed but not started. Configure the reverse proxy, then run '${PROGRAM} start ${instance}'."
             start_now="no"
         fi
     fi
@@ -2282,7 +2254,6 @@ cmd_install() {
         printf '  Proxy mode:     %s\n' "$reverse_proxy_mode"
         printf '  Proxy backend:  http://%s:%s\n' \
             "$mini_app_listen" "$mini_app_port"
-        printf '  Trusted proxy:  %s\n' "$mini_app_trusted_proxy_cidrs"
     fi
     printf '  Worker profile: lookups=%s searches=%s updates=%s\n' \
         "$max_concurrent_lookups" "$max_concurrent_searches" \
@@ -2353,8 +2324,7 @@ cmd_install() {
     replace_env_value "$python_bin" "$env_file" "MINI_APP_PUBLIC_URL" "$mini_app_public_url"
     replace_env_value "$python_bin" "$env_file" "MINI_APP_LISTEN" "$mini_app_listen"
     replace_env_value "$python_bin" "$env_file" "MINI_APP_PORT" "$mini_app_port"
-    replace_env_value "$python_bin" "$env_file" \
-        "MINI_APP_TRUSTED_PROXY_CIDRS" "$mini_app_trusted_proxy_cidrs"
+    replace_env_value "$python_bin" "$env_file" "MINI_APP_TRUSTED_PROXY_CIDRS" ""
     replace_env_value "$python_bin" "$env_file" \
         "MAX_CONCURRENT_LOOKUPS" "$max_concurrent_lookups"
     replace_env_value "$python_bin" "$env_file" \
@@ -2552,7 +2522,6 @@ cmd_status() {
     local mini_app_listen
     local mini_app_port
     local reverse_proxy_mode
-    local trusted_proxy_cidrs
     local active
     local enabled
     service=$(service_name_for "$ACTIVE_INSTANCE")
@@ -2601,13 +2570,9 @@ cmd_status() {
             mini_app_port=$(
                 dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT"
             )
-            trusted_proxy_cidrs=$(
-                dotenv_value "$app_dir" "$env_file" "MINI_APP_TRUSTED_PROXY_CIDRS"
-            )
             printf 'Mini App URL:  %s\n' "$mini_app_public_url"
             printf 'Proxy mode:    %s\n' "$reverse_proxy_mode"
             printf 'Proxy backend: %s:%s\n' "$mini_app_listen" "$mini_app_port"
-            printf 'Trusted proxy: %s\n' "$trusted_proxy_cidrs"
         fi
     fi
     printf 'JSON log:      %s\n' "$log_file"
@@ -3213,7 +3178,6 @@ cmd_config() {
     local edited_mini_app_listen
     local edited_mini_app_port
     local edited_reverse_proxy_mode
-    local edited_trusted_proxy_cidrs
     local edited_webhook_port
     local edited_delivery_mode
     edited_instance=$(dotenv_value "$app_dir" "$env_file" "INSTANCE_NAME")
@@ -3229,9 +3193,6 @@ cmd_config() {
     edited_mini_app_listen=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_LISTEN")
     edited_mini_app_port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
     edited_reverse_proxy_mode=$(dotenv_value "$app_dir" "$env_file" "REVERSE_PROXY_MODE")
-    edited_trusted_proxy_cidrs=$(
-        dotenv_value "$app_dir" "$env_file" "MINI_APP_TRUSTED_PROXY_CIDRS"
-    )
     edited_webhook_port=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT")
     edited_delivery_mode=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_DELIVERY_MODE")
     if [[ "$edited_instance" != "$ACTIVE_INSTANCE" ||
@@ -3243,7 +3204,6 @@ cmd_config() {
         "$edited_mini_app_public_url" != "$(dotenv_value "$app_dir" "$backup" "MINI_APP_PUBLIC_URL")" ||
         "$edited_mini_app_listen" != "$(dotenv_value "$app_dir" "$backup" "MINI_APP_LISTEN")" ||
         "$edited_reverse_proxy_mode" != "$(dotenv_value "$app_dir" "$backup" "REVERSE_PROXY_MODE")" ||
-        "$edited_trusted_proxy_cidrs" != "$(dotenv_value "$app_dir" "$backup" "MINI_APP_TRUSTED_PROXY_CIDRS")" ||
         "$edited_mini_app_port" != "$(dotenv_value "$app_dir" "$backup" "MINI_APP_PORT")" ]]; then
         cp -a "$backup" "$env_file"
         rm -f "$backup"

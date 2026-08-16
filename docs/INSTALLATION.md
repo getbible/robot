@@ -46,10 +46,10 @@ Running `sudo getbible-robot` without a command opens the operations menu.
   documented environment variables and per-instance limits for the actual
   host and workload.
 - Public DNS plus HTTPS when the Mini App is enabled. Setup can manage Caddy or
-  preserve an external HAProxy deployment.
+  use an existing external reverse proxy such as HAProxy, Traefik, or Nginx.
 - In Caddy mode, keep the Mini App, webhook, and health ports on loopback. In
-  external mode, expose each Mini App backend port only to the HAProxy source
-  CIDR; never expose health or webhook listeners as general public services.
+  external mode, the operator owns firewall and proxy access to the Mini App
+  backend port; never expose health listeners as public services.
 - Administrator access for the bot in every group where private Bible/search
   workflows and clean-chat deletion are required. Bot API 10.2 permits an
   administrator to deliver per-user ephemeral panels even when a catalog or
@@ -69,9 +69,9 @@ On Debian, Ubuntu, Fedora, or another `dnf` host, the manager offers to install 
 6. polling or HTTPS webhook delivery;
 7. for webhook mode, the public URL, private backend bind IP and port, optional
    fixed public IP, and confirmation that the reverse proxy is ready;
-8. whether to enable the Telegram Mini App and use managed Caddy or external
-   HAProxy; external mode asks for one unique backend port, bot-host bind IP,
-   and the exact trusted HAProxy source CIDR;
+8. whether to enable the Telegram Mini App and use managed Caddy or an existing
+   external reverse proxy; external mode asks only for the backend port and
+   listen address (loopback remains the default);
 9. a unique loopback health/metrics port;
 10. metadata-only or content audit logging;
 11. whether handled Telegram command messages should be deleted;
