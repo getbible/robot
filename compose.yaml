@@ -28,6 +28,7 @@ services:
       AUDIT_IDENTITY_MODE: "${AUDIT_IDENTITY_MODE:-pseudonymous}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       MINI_APP_ENABLED: "${MINI_APP_ENABLED:-true}"
+      REVERSE_PROXY_MODE: "${REVERSE_PROXY_MODE:-external}"
       MINI_APP_PUBLIC_URL: "${MINI_APP_PUBLIC_URL:-}"
       MINI_APP_PORT: "${MINI_APP_PORT:-9201}"
       MINI_APP_INIT_DATA_MAX_AGE_SECONDS: "${MINI_APP_INIT_DATA_MAX_AGE_SECONDS:-300}"
@@ -49,7 +50,7 @@ services:
       MINI_APP_NAVIGATION_RATE_COST: "${MINI_APP_NAVIGATION_RATE_COST:-0.25}"
       MINI_APP_ACCESS_LOG: "${MINI_APP_ACCESS_LOG:-true}"
       HEALTH_PORT: "${HEALTH_PORT:-8081}"
-      CONTAINER_INSTANCE_MEMORY_LIMIT_MB: "${CONTAINER_INSTANCE_MEMORY_LIMIT_MB:-210}"
+      CONTAINER_INSTANCE_MEMORY_LIMIT_MB: "${CONTAINER_INSTANCE_MEMORY_LIMIT_MB:-1792}"
       CONTAINER_INSTANCE_MEMORY_WARNING_PERCENT: "${CONTAINER_INSTANCE_MEMORY_WARNING_PERCENT:-80}"
       PREWARM_DEFAULT_TRANSLATION: "${PREWARM_DEFAULT_TRANSLATION:-true}"
       GETBIBLE_CONNECT_TIMEOUT: "${GETBIBLE_CONNECT_TIMEOUT:-3.05}"
@@ -76,9 +77,9 @@ services:
       SEARCH_DEADLINE_SECONDS: "${SEARCH_DEADLINE_SECONDS:-5}"
       SEARCH_INDEX_BUILD_SECONDS: "${SEARCH_INDEX_BUILD_SECONDS:-120}"
       SEARCH_TIMEOUT: "${SEARCH_TIMEOUT:-150}"
-      MAX_CONCURRENT_LOOKUPS: "${MAX_CONCURRENT_LOOKUPS:-2}"
+      MAX_CONCURRENT_LOOKUPS: "${MAX_CONCURRENT_LOOKUPS:-8}"
       MAX_CONCURRENT_SEARCHES: "${MAX_CONCURRENT_SEARCHES:-4}"
-      MAX_CONCURRENT_UPDATES: "${MAX_CONCURRENT_UPDATES:-4}"
+      MAX_CONCURRENT_UPDATES: "${MAX_CONCURRENT_UPDATES:-16}"
       USER_RATE_CAPACITY: "${USER_RATE_CAPACITY:-4}"
       USER_RATE_REFILL_PER_SECOND: "${USER_RATE_REFILL_PER_SECOND:-0.2}"
       CHAT_RATE_CAPACITY: "${CHAT_RATE_CAPACITY:-20}"
@@ -100,10 +101,11 @@ services:
     volumes:
       - robot-data:/data
     # Only the Mini App application port is published. Health stays inside the
-    # container. Bind this port to an existing HTTPS reverse proxy or attach an
-    # override network and let that proxy reach port 9201 directly.
+    # container. Bind these application ports to an existing HTTPS reverse
+    # proxy. The webhook mapping is idle while polling mode is selected.
     ports:
       - "${MINI_APP_BIND_ADDRESS:-127.0.0.1}:${MINI_APP_HOST_PORT:-9201}:${MINI_APP_PORT:-9201}"
+      - "${TELEGRAM_WEBHOOK_BIND_ADDRESS:-127.0.0.1}:${TELEGRAM_WEBHOOK_HOST_PORT:-9001}:${TELEGRAM_WEBHOOK_PORT:-9001}"
     read_only: true
     tmpfs:
       - "/tmp:size=${ROBOT_TMPFS_SIZE:-16m},mode=1777"
@@ -111,10 +113,10 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    pids_limit: "${ROBOT_PIDS_LIMIT:-48}"
-    mem_limit: "${ROBOT_MEMORY_LIMIT:-256m}"
-    mem_reservation: "${ROBOT_MEMORY_RESERVATION:-160m}"
-    cpus: "${ROBOT_CPU_LIMIT:-1}"
+    pids_limit: "${ROBOT_PIDS_LIMIT:-256}"
+    mem_limit: "${ROBOT_MEMORY_LIMIT:-2g}"
+    mem_reservation: "${ROBOT_MEMORY_RESERVATION:-1536m}"
+    cpus: "${ROBOT_CPU_LIMIT:-2}"
     stop_grace_period: "${ROBOT_STOP_GRACE_PERIOD:-45s}"
     logging:
       driver: local

@@ -3,8 +3,9 @@
 The recommended Docker layout runs one Telegram bot in one container. The
 image contains only GetBible Robot and its non-root supervisor. It does not
 install Caddy, systemd, a firewall, certificates, or listeners on ports 80 and
-443. The container serves the Mini App on one configurable application port;
-TLS, DNS, and routing remain outside the container.
+443. The container serves the Mini App and, when selected, Telegram webhook
+delivery on independently configurable application ports; TLS, DNS, and
+routing remain outside the container.
 
 The same image also supports an explicit multi-bot mode for compact
 deployments, but separate containers are the operational default because each
@@ -180,22 +181,31 @@ mapped to container UID 10001.
 
 ## Ports and external routing
 
-The default container publishes only the Mini App port:
+The default container publishes the Mini App backend and the optional Telegram
+webhook backend on loopback:
 
 ```dotenv
 MINI_APP_PORT=9201
 MINI_APP_HOST_PORT=9201
 MINI_APP_BIND_ADDRESS=127.0.0.1
+TELEGRAM_WEBHOOK_PORT=9001
+TELEGRAM_WEBHOOK_HOST_PORT=9001
+TELEGRAM_WEBHOOK_BIND_ADDRESS=127.0.0.1
 ```
 
-This produces `127.0.0.1:9201 -> container:9201`. Point an existing HTTPS
-reverse proxy at that host port. If the reverse proxy is another container,
-use a Compose override to attach both services to a private Docker network and
-route directly to `robot:9201`; the host port can then be removed.
+This produces `127.0.0.1:9201 -> container:9201` and
+`127.0.0.1:9001 -> container:9001`. Point an existing HTTPS reverse proxy at
+the first port for the Mini App. When `TELEGRAM_DELIVERY_MODE=webhook`, route
+the exact private path in `TELEGRAM_WEBHOOK_PUBLIC_URL` to the second port. In
+polling mode nothing listens on the webhook mapping. If the reverse proxy is
+another container, use a Compose override to attach both services to a private
+Docker network and route directly to the matching container ports; host
+publishing can then be removed.
 
 The health listener remains inside the container on port 8081 and is used by
 the image `HEALTHCHECK`. It does not need a public or host mapping. Polling is
-the default Telegram delivery mode, so no webhook port is required.
+the default Telegram delivery mode, so its deployment does not need a routed
+webhook endpoint even though Compose retains the configurable mapping.
 
 `MINI_APP_PUBLIC_URL` must remain the externally reachable HTTPS URL used by
 Telegram. Its path must be forwarded unchanged to the application port.
@@ -248,14 +258,14 @@ posting, or Mini App interface. The expensive search worker has an independent
 bounded executor. A slow search therefore does not consume the direct
 Scripture lookup workers or block ordinary Telegram update handling.
 
-The supplied small-host defaults use:
+The supplied production defaults use:
 
-- four concurrent Telegram updates;
-- two direct Scripture/catalog workers;
-- one expensive search worker;
+- sixteen concurrent Telegram updates;
+- eight direct Scripture/catalog workers;
+- four CPU-bound search workers;
 - bounded interactive and Mini App sessions;
-- one resident search corpus and one translation cache;
-- a 210 MiB per-bot RSS guard inside a 256 MiB container limit.
+- up to eight resident shared search corpora and one translation cache;
+- a 1792 MiB per-bot RSS guard inside a 2 GiB container limit.
 
 When capacity is temporarily exhausted, the application returns a controlled
 retry message while liveness remains responsive. Three consecutive liveness
@@ -307,7 +317,7 @@ sends `ABUSE_WARNING_MESSAGE` privately or as an ephemeral group notice.
 Warnings use a cooldown and a new block produces one immediate notice, so a
 flood cannot create a second outbound-message flood.
 
-## Resource profile for the 500 MB host
+## Resource profile for an 8 GiB host
 
 The measurements below were taken against Librarian 1.x and are retained only as
 a floor. They are not a baseline to hold Librarian 2 against: 1.x returned
@@ -329,11 +339,14 @@ Current KJV measurements are approximately:
 | Default KJV search index warmed | 111 MiB |
 | All four KJV search modes exercised | 148 MiB |
 
-The default 256 MiB container limit is the recommended one-bot profile for a
-500 MB RAM, 2-vCPU host. It leaves memory outside the container for the kernel,
-SSH, Docker, and an external reverse proxy. The child supervisor restarts the
-bot before it can cross 210 MiB RSS, while Docker remains the final aggregate
-limit.
+The default one-bot profile has a 2 GiB hard memory ceiling, a 1536 MiB
+reservation, two CPUs, and a 256-task ceiling. The recommended host has at
+least 8 GiB RAM and four logical CPUs—an operational baseline for an i3-class
+or stronger server. This leaves capacity for the kernel, SSH, Docker, an
+external reverse proxy, and controlled additional workloads. The child
+supervisor restarts the bot before it can cross 1792 MiB RSS, while Docker
+remains the final aggregate limit. These values are environment-driven
+ceilings, not a promise that every workload will consume them.
 
 Translations vary in size. The largest corpus observed in July 2026 was about
 31 MB before Python parsing and indexing. Load-test non-default translations
@@ -367,10 +380,13 @@ docker exec getbible-robot getbible-robot-container reload
 The supervisor rejects port collisions before starting a second bot and
 isolates cache and SQLite state under `/data/<instance>`.
 
-Budget about 210 MiB per warmed bot plus supervisor overhead. Two warmed bots
-do not fit safely in the supplied 320 MiB multi-container limit or on the
-current 500 MB host. Separate containers improve isolation but do not remove
-the physical host memory requirement.
+The supplied multi-bot file starts with the same one-bot aggregate profile:
+1536 MiB reserved, 2 GiB hard limit, and two CPUs. Before adding another bot,
+raise `ROBOT_MEMORY_RESERVATION`, `ROBOT_MEMORY_LIMIT`, `ROBOT_CPU_LIMIT`, and
+`ROBOT_PIDS_LIMIT` for the combined workload. Each instance retains its own
+`CONTAINER_INSTANCE_MEMORY_LIMIT_MB` guard. Budget from observed per-bot RSS,
+preserve host headroom, and prefer separate containers when independent
+failure and deployment boundaries matter.
 
 ## Cluster deployment
 
@@ -381,8 +397,8 @@ one-bot-per-workload cluster example. It includes:
 - a mounted token Secret;
 - persistent bounded cache and preference state;
 - startup, liveness, and readiness probes;
-- CPU, memory, PID, and ephemeral-storage controls;
-- a Service exposing only the Mini App application port.
+- CPU, memory, and ephemeral-storage controls;
+- a Service exposing the Mini App and optional Telegram webhook backends.
 
 Keep `replicas: 1` for polling and for the current process-local Mini App
 session model. Deploy additional bot tokens as separate workloads.

@@ -83,6 +83,22 @@ INIT_OUTPUT=$(
     printf 'Docker init environment permissions are not private.\n' >&2
     exit 1
 }
+for expected in \
+    'ROBOT_MEMORY_LIMIT=2g' \
+    'ROBOT_MEMORY_RESERVATION=1536m' \
+    'CONTAINER_INSTANCE_MEMORY_LIMIT_MB=1792' \
+    'ROBOT_CPU_LIMIT=2' \
+    'ROBOT_PIDS_LIMIT=256' \
+    'MAX_CONCURRENT_LOOKUPS=8' \
+    'MAX_CONCURRENT_SEARCHES=4' \
+    'MAX_CONCURRENT_UPDATES=16' \
+    'MINI_APP_HOST_PORT=9201' \
+    'TELEGRAM_WEBHOOK_HOST_PORT=9001'; do
+    grep -Fqx -- "$expected" "$ENV_FILE" || {
+        printf 'Docker init omitted recommended override: %s\n' "$expected" >&2
+        exit 1
+    }
+done
 
 LIST_OUTPUT=$(bash "${ROOT}/setup.sh" docker-list)
 [[ "$LIST_OUTPUT" == *"getbible-robot-production"* ]] || {

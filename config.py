@@ -69,13 +69,29 @@ def _boolean(name: str, default: bool) -> bool:
     raise ConfigurationError(f"{name} must be true or false.")
 
 
-def _listener(name: str, default: str, *, containerized: bool) -> str:
+def _listener(
+    name: str,
+    default: str,
+    *,
+    containerized: bool,
+    allow_specific_address: bool = False,
+) -> str:
     value = _env(name, default) or ""
     if value in _LOCAL_HOSTS:
         return value
     if containerized and value in _WILDCARD_LISTENERS:
         return value
+    if allow_specific_address:
+        try:
+            address = ip_address(value)
+        except ValueError:
+            pass
+        else:
+            if not (address.is_unspecified or address.is_multicast or address.is_link_local):
+                return str(address)
     suffix = " or a wildcard container address" if containerized else ""
+    if allow_specific_address:
+        suffix += " or a specific non-link-local IP address in external proxy mode"
     raise ConfigurationError(
         f"{name} must be localhost or a loopback address{suffix}."
     )
@@ -157,6 +173,19 @@ def _network_list(name: str, default: str) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _trusted_proxy_networks() -> tuple[str, ...]:
+    values = _network_list(
+        "MINI_APP_TRUSTED_PROXY_CIDRS",
+        "127.0.0.1/32,::1/128",
+    )
+    for value in values:
+        if ip_network(value, strict=False).prefixlen == 0:
+            raise ConfigurationError(
+                "MINI_APP_TRUSTED_PROXY_CIDRS cannot trust an all-addresses network."
+            )
+    return values
+
+
 def _profile_text(name: str, default: str, maximum: int) -> str:
     value = _env(name, default) or ""
     value = value.replace(r"\n", "\n").strip()
@@ -169,6 +198,13 @@ def _delivery_mode() -> str:
     value = (_env("TELEGRAM_DELIVERY_MODE", "polling") or "").casefold()
     if value not in _DELIVERY_MODES:
         raise ConfigurationError("TELEGRAM_DELIVERY_MODE must be polling or webhook.")
+    return value
+
+
+def _reverse_proxy_mode() -> str:
+    value = (_env("REVERSE_PROXY_MODE", "caddy") or "").casefold()
+    if value not in {"caddy", "external"}:
+        raise ConfigurationError("REVERSE_PROXY_MODE must be caddy or external.")
     return value
 
 
@@ -402,6 +438,7 @@ class Settings:
     audit_log_mode: str
     audit_identity_mode: str
     log_level: int
+    reverse_proxy_mode: str = "caddy"
     containerized: bool = False
     mini_app_enabled: bool = False
     mini_app_public_url: str | None = None
@@ -462,11 +499,13 @@ class Settings:
             )
 
         containerized = _boolean("CONTAINERIZED", False)
+        reverse_proxy_mode = _reverse_proxy_mode()
         delivery_mode = _delivery_mode()
         webhook_listen = _listener(
             "TELEGRAM_WEBHOOK_LISTEN",
             "127.0.0.1",
             containerized=containerized,
+            allow_specific_address=True,
         )
 
         log_name = (_env("LOG_LEVEL", "INFO") or "").upper()
@@ -512,10 +551,26 @@ class Settings:
             "MINI_APP_LISTEN",
             "127.0.0.1",
             containerized=containerized,
+            allow_specific_address=(reverse_proxy_mode == "external"),
         )
         webhook_port = _integer("TELEGRAM_WEBHOOK_PORT", 9001, 1024, 65_535)
         health_port = _integer("HEALTH_PORT", 8081, 0, 65_535)
         mini_app_port = _integer("MINI_APP_PORT", 9201, 1024, 65_535)
+        mini_app_trusted_proxy_cidrs = _trusted_proxy_networks()
+        if reverse_proxy_mode == "external" and mini_app_listen not in _WILDCARD_LISTENERS:
+            listen_address = ip_address(mini_app_listen)
+            if not listen_address.is_loopback and not any(
+                not ip_network(network, strict=False).is_loopback
+                for network in mini_app_trusted_proxy_cidrs
+            ):
+                raise ConfigurationError(
+                    "A non-loopback MINI_APP_LISTEN requires a non-loopback "
+                    "MINI_APP_TRUSTED_PROXY_CIDRS entry."
+                )
+        if delivery_mode == "webhook" and health_port != 0 and webhook_port == health_port:
+            raise ConfigurationError(
+                "TELEGRAM_WEBHOOK_PORT must differ from the enabled health port."
+            )
         if mini_app_enabled:
             occupied = {port for port in (health_port,) if port != 0}
             if delivery_mode == "webhook":
@@ -627,9 +682,9 @@ class Settings:
             search_deadline_seconds=search_deadline_seconds,
             search_index_build_seconds=search_index_build_seconds,
             search_timeout=search_timeout,
-            max_concurrent_lookups=_integer("MAX_CONCURRENT_LOOKUPS", 2, 1, 32),
+            max_concurrent_lookups=_integer("MAX_CONCURRENT_LOOKUPS", 8, 1, 32),
             max_concurrent_searches=_integer("MAX_CONCURRENT_SEARCHES", 4, 1, 64),
-            max_concurrent_updates=_integer("MAX_CONCURRENT_UPDATES", 4, 1, 64),
+            max_concurrent_updates=_integer("MAX_CONCURRENT_UPDATES", 16, 1, 64),
             user_rate_capacity=_integer("USER_RATE_CAPACITY", 4, 1, 100),
             user_rate_refill_per_second=_number(
                 "USER_RATE_REFILL_PER_SECOND", 0.2, 0.01, 100.0
@@ -686,6 +741,7 @@ class Settings:
             audit_log_mode=audit_log_mode,
             audit_identity_mode=audit_identity_mode,
             log_level=log_level,
+            reverse_proxy_mode=reverse_proxy_mode,
             containerized=containerized,
             mini_app_enabled=mini_app_enabled,
             mini_app_public_url=_mini_app_public_url(mini_app_enabled),
@@ -724,10 +780,7 @@ class Settings:
             mini_app_max_header_bytes=_integer(
                 "MINI_APP_MAX_HEADER_BYTES", 16 * 1024, 4096, 64 * 1024
             ),
-            mini_app_trusted_proxy_cidrs=_network_list(
-                "MINI_APP_TRUSTED_PROXY_CIDRS",
-                "127.0.0.1/32,::1/128",
-            ),
+            mini_app_trusted_proxy_cidrs=mini_app_trusted_proxy_cidrs,
             mini_app_ip_rate_capacity=_integer(
                 "MINI_APP_IP_RATE_CAPACITY", 60, 10, 10_000
             ),

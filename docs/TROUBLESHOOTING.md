@@ -17,12 +17,12 @@ Common causes:
 
 - source is not a Git checkout or has tracked modifications;
 - source lacks `setup.sh`, `.env.template`, the lock, or unit template;
-- Python is outside 3.10–3.12;
+- Python is outside 3.10–3.14;
 - required host packages cannot be installed;
 - instance name is invalid or already exists;
 - derived `gb-<instance>` account already exists unmanaged;
 - token shape is invalid or token belongs to another local instance;
-- webhook public URL, loopback port, fixed IP, or secret is invalid;
+- webhook public URL, private backend address/port, fixed IP, or secret is invalid;
 - Mini App public URL or loopback port is invalid, already used, or matches the
   webhook port;
 - health port is already listening;
@@ -46,8 +46,8 @@ Typical causes:
 
 - Telegram rejected or revoked the token;
 - another host/process is polling with the same token;
-- the configured webhook URL does not reach the exact loopback path;
-- the enabled Mini App listener cannot bind its assigned loopback port;
+- the configured webhook URL does not reach the exact private backend path;
+- the enabled Mini App listener cannot bind its assigned private backend port;
 - outbound DNS, TCP 443, system time, or CA trust is broken;
 - selected health port became occupied;
 - file ownership was changed after setup;

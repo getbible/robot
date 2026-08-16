@@ -62,9 +62,9 @@ on. The exact lock moves only after a new release passes Robot's complete gate.
 Use the same Python and resolver versions every time:
 
 ```bash
-python3.12 -m venv .lock-venv
+python3.14 -m venv .lock-venv
 .lock-venv/bin/python -m pip install \
-  pip==24.3.1 \
+  pip==26.1.2 \
   pip-tools==7.6.0
 
 .lock-venv/bin/python -m piptools compile \
@@ -84,7 +84,10 @@ python3.12 -m venv .lock-venv
 
 The repository also provides `scripts/refresh-locks.sh` for these commands.
 
-Because the generated lock supports Python 3.10 through 3.12, `exceptiongroup` is an explicit runtime input. This prevents a lock compiled on Python 3.12 from omitting a package required on Python 3.10.
+Because the generated lock supports Python 3.10 through 3.14, `exceptiongroup`
+and `typing-extensions` are explicit runtime inputs. This prevents the
+canonical lock compiled on Python 3.14 from omitting dependencies whose package
+metadata selects them only on an older supported interpreter.
 
 ## Validating a dependency update
 
@@ -98,8 +101,16 @@ python3.11 -m venv /tmp/robot-py311
 /tmp/robot-py311/bin/python -m pip check
 
 python3.12 -m venv /tmp/robot-py312
-/tmp/robot-py312/bin/python -m pip install --require-hashes -r requirements-dev.txt
+/tmp/robot-py312/bin/python -m pip install --require-hashes -r requirements.txt
 /tmp/robot-py312/bin/python -m pip check
+
+python3.13 -m venv /tmp/robot-py313
+/tmp/robot-py313/bin/python -m pip install --require-hashes -r requirements.txt
+/tmp/robot-py313/bin/python -m pip check
+
+python3.14 -m venv /tmp/robot-py314
+/tmp/robot-py314/bin/python -m pip install --require-hashes -r requirements-dev.txt
+/tmp/robot-py314/bin/python -m pip check
 ```
 
 Then run tests, Ruff, mypy, Bandit, strict source-aware dependency auditing, secret scanning, systemd verification, and CodeQL. Review release notes and the actual diff; a green dependency bot PR is evidence, not a substitute for review.

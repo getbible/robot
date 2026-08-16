@@ -54,12 +54,13 @@ AmbientCapabilities=
 SystemCallArchitectures=native
 UMask=0077
 
-MemoryHigh=180M
-MemoryMax=256M
-MemorySwapMax=16M
+MemoryHigh=1536M
+MemoryMax=2048M
+MemorySwapMax=512M
 OOMPolicy=stop
-TasksMax=48
-LimitNOFILE=512
+TasksMax=256
+LimitNOFILE=4096
+CPUQuota=200%
 
 StandardOutput=journal
 StandardError=journal

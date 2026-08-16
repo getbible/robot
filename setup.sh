@@ -48,6 +48,18 @@ CADDY_TRANSACTION_DIR=""
 CADDY_WAS_ACTIVE=""
 CADDY_WAS_ENABLED=""
 
+RECOMMENDED_HOST_MEMORY_KIB=$((8 * 1024 * 1024))
+RECOMMENDED_HOST_LOGICAL_CPUS=4
+DEFAULT_SYSTEMD_MEMORY_HIGH_MB=1536
+DEFAULT_SYSTEMD_MEMORY_MAX_MB=2048
+DEFAULT_SYSTEMD_MEMORY_SWAP_MAX_MB=512
+DEFAULT_SYSTEMD_TASKS_MAX=256
+DEFAULT_SYSTEMD_NOFILE_LIMIT=4096
+DEFAULT_SYSTEMD_CPU_QUOTA_PERCENT=200
+DEFAULT_MAX_CONCURRENT_LOOKUPS=8
+DEFAULT_MAX_CONCURRENT_SEARCHES=4
+DEFAULT_MAX_CONCURRENT_UPDATES=16
+
 info() {
     printf '==> %s\n' "$*"
 }
@@ -84,6 +96,8 @@ cleanup() {
             "$(log_file_for "$INSTALLING_INSTANCE")" \
             "$(welcome_file_for "$INSTALLING_INSTANCE")" \
             "$(help_file_for "$INSTALLING_INSTANCE")"
+        rm -rf --one-file-system -- \
+            "$(resource_dropin_dir_for "$INSTALLING_INSTANCE")"
         if [[ -n "$INSTALLING_USER" ]] && id "$INSTALLING_USER" >/dev/null 2>&1; then
             userdel "$INSTALLING_USER" >/dev/null 2>&1 || true
         fi
@@ -99,7 +113,7 @@ usage() {
 GetBible Robot secure multi-instance setup and operations manager.
 
 Usage:
-  sudo ./setup.sh install [--source DIR]
+  sudo ./setup.sh install [options]
   sudo getbible-robot <command> [instance]
 
 Commands:
@@ -153,6 +167,23 @@ Commands:
 
 When an instance argument is omitted, an interactive terminal presents a
 numbered selector. Non-interactive commands must provide the instance name.
+
+Install options:
+  --source DIR                  Reviewed source checkout
+  --mini-app-port PORT          HAProxy/Caddy backend for Mini App traffic
+  --webhook-listen IP           Bot-host IP reachable by the webhook proxy
+  --webhook-port PORT           HAProxy backend for Telegram webhook traffic
+  --health-port PORT            Private health/metrics listener (0 disables)
+  --max-concurrent-lookups N    Direct-reference/catalog workers (default 8)
+  --max-concurrent-searches N   CPU-bound search workers (default 4)
+  --max-concurrent-updates N    Telegram update concurrency (default 16)
+  --memory-high-mb N            systemd memory pressure threshold (default 1536)
+  --memory-max-mb N             systemd hard memory ceiling (default 2048)
+  --memory-swap-max-mb N        systemd swap ceiling (default 512)
+  --tasks-max N                 systemd task ceiling (default 256)
+  --nofile-limit N              Open-file ceiling (default 4096)
+  --cpu-quota-percent N         systemd CPU quota; 200 means two CPUs
+  --allow-undersized-host       Explicitly allow less than 8 GiB RAM or 4 CPUs
 EOF
 }
 
@@ -187,8 +218,140 @@ validate_port() {
     (( value >= 0 && value <= 65535 ))
 }
 
+validate_bounded_integer() {
+    local value=${1:-}
+    local minimum=$2
+    local maximum=$3
+    [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    ((value >= minimum && value <= maximum))
+}
+
+resource_dropin_dir_for() {
+    printf '%s/getbible-robot@%s.service.d\n' "$(dirname "$UNIT_PATH")" "$1"
+}
+
+resource_dropin_for() {
+    printf '%s/resources.conf\n' "$(resource_dropin_dir_for "$1")"
+}
+
+host_capacity_preflight() {
+    local allow_undersized=${1:-false}
+    local memory_kib=0
+    local logical_cpus=0
+    if [[ -r /proc/meminfo ]]; then
+        memory_kib=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo)
+    fi
+    if command -v nproc >/dev/null 2>&1; then
+        logical_cpus=$(nproc)
+    else
+        logical_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '0\n')
+    fi
+    if ((memory_kib >= RECOMMENDED_HOST_MEMORY_KIB &&
+        logical_cpus >= RECOMMENDED_HOST_LOGICAL_CPUS)); then
+        return
+    fi
+    warn "The recommended production host has at least 8 GiB RAM and 4 logical CPUs (an operational proxy for an i3-class or stronger server)."
+    warn "Detected: $((memory_kib / 1024)) MiB RAM and ${logical_cpus} logical CPU(s)."
+    [[ "$allow_undersized" == "true" ]] ||
+        die "Use --allow-undersized-host only after choosing lower per-instance limits intentionally."
+}
+
+validate_external_proxy_network() {
+    local python_bin=$1
+    local listen_address=$2
+    local trusted_cidrs=$3
+    "$python_bin" - "$listen_address" "$trusted_cidrs" <<'PY' >/dev/null
+from ipaddress import ip_address, ip_network
+import sys
+
+address = ip_address(sys.argv[1])
+if address.is_unspecified or address.is_multicast or address.is_link_local:
+    raise SystemExit(1)
+networks = [item.strip() for item in sys.argv[2].split(",")]
+if not networks or any(not item for item in networks):
+    raise SystemExit(1)
+parsed = []
+for item in networks:
+    network = ip_network(item, strict=False)
+    if network.prefixlen == 0:
+        raise SystemExit(1)
+    parsed.append(network)
+if not address.is_loopback and not any(not network.is_loopback for network in parsed):
+    raise SystemExit(1)
+PY
+}
+
+validate_specific_listener() {
+    local python_bin=$1
+    local listen_address=$2
+    "$python_bin" - "$listen_address" <<'PY' >/dev/null
+from ipaddress import ip_address
+import sys
+
+address = ip_address(sys.argv[1])
+if address.is_unspecified or address.is_multicast or address.is_link_local:
+    raise SystemExit(1)
+PY
+}
+
+validate_resource_profile() {
+    local memory_high_mb=$1
+    local memory_max_mb=$2
+    local memory_swap_max_mb=$3
+    local tasks_max=$4
+    local nofile_limit=$5
+    local cpu_quota_percent=$6
+    validate_bounded_integer "$memory_high_mb" 128 262144 ||
+        die "MemoryHigh must be 128-262144 MiB."
+    validate_bounded_integer "$memory_max_mb" 256 262144 ||
+        die "MemoryMax must be 256-262144 MiB."
+    ((memory_high_mb <= memory_max_mb)) ||
+        die "MemoryHigh cannot exceed MemoryMax."
+    validate_bounded_integer "$memory_swap_max_mb" 0 262144 ||
+        die "MemorySwapMax must be 0-262144 MiB."
+    validate_bounded_integer "$tasks_max" 32 65536 ||
+        die "TasksMax must be 32-65536."
+    validate_bounded_integer "$nofile_limit" 256 1048576 ||
+        die "LimitNOFILE must be 256-1048576."
+    validate_bounded_integer "$cpu_quota_percent" 10 6400 ||
+        die "CPUQuota must be 10-6400 percent."
+}
+
+write_resource_dropin() {
+    local instance=$1
+    local memory_high_mb=$2
+    local memory_max_mb=$3
+    local memory_swap_max_mb=$4
+    local tasks_max=$5
+    local nofile_limit=$6
+    local cpu_quota_percent=$7
+    local directory
+    local file
+    validate_resource_profile \
+        "$memory_high_mb" "$memory_max_mb" "$memory_swap_max_mb" \
+        "$tasks_max" "$nofile_limit" "$cpu_quota_percent"
+    directory=$(resource_dropin_dir_for "$instance")
+    file=$(resource_dropin_for "$instance")
+    install -d -o root -g root -m 0755 "$directory"
+    {
+        printf '[Service]\n'
+        printf 'MemoryHigh=%sM\n' "$memory_high_mb"
+        printf 'MemoryMax=%sM\n' "$memory_max_mb"
+        printf 'MemorySwapMax=%sM\n' "$memory_swap_max_mb"
+        printf 'TasksMax=%s\n' "$tasks_max"
+        printf 'LimitNOFILE=%s\n' "$nofile_limit"
+        printf 'CPUQuota=%s%%\n' "$cpu_quota_percent"
+    } >"$file"
+    chown root:root "$file"
+    chmod 0644 "$file"
+}
+
 validate_delivery_mode() {
     [[ ${1:-} == "polling" || ${1:-} == "webhook" ]]
+}
+
+validate_reverse_proxy_mode() {
+    [[ ${1:-} == "caddy" || ${1:-} == "external" ]]
 }
 
 validate_docker_container_name() {
@@ -318,14 +481,14 @@ install_host_prerequisites() {
         dnf install --assumeyes \
             ca-certificates curl git iproute logrotate python3 shadow-utils tar util-linux
     else
-        die "Automatic package installation supports apt-get and dnf. Install git, curl, tar, systemd, logrotate, Python 3.10-3.12, and the matching venv package."
+        die "Automatic package installation supports apt-get and dnf. Install git, curl, tar, systemd, logrotate, Python 3.10-3.14, and the matching venv package."
     fi
 }
 
 python_supported() {
     "$1" - <<'PY' >/dev/null 2>&1
 import sys
-raise SystemExit(0 if (3, 10) <= sys.version_info[:2] <= (3, 12) else 1)
+raise SystemExit(0 if (3, 10) <= sys.version_info[:2] <= (3, 14) else 1)
 PY
 }
 
@@ -335,14 +498,14 @@ select_python() {
     if [[ -n "${PYTHON_BIN:-}" ]]; then
         candidates+=("$PYTHON_BIN")
     fi
-    candidates+=(python3.12 python3.11 python3.10 python3)
+    candidates+=(python3.14 python3.13 python3.12 python3.11 python3.10 python3)
     for candidate in "${candidates[@]}"; do
         if command -v "$candidate" >/dev/null 2>&1 && python_supported "$candidate"; then
             command -v "$candidate"
             return
         fi
     done
-    die "A supported Python 3.10, 3.11, or 3.12 interpreter is required."
+    die "A supported Python 3.10 through 3.14 interpreter is required."
 }
 
 git_source_read() {
@@ -723,9 +886,12 @@ migrate_instance_configuration() {
     ensure_env_value "$python_bin" "$env_file" "CACHE_MAX_BYTES" "268435456"
     ensure_env_value "$python_bin" "$env_file" \
         "CACHE_MAINTENANCE_INTERVAL_SECONDS" "21600"
-    ensure_env_value "$python_bin" "$env_file" "MAX_CONCURRENT_SEARCHES" "4"
-    migrate_env_default "$python_bin" "$env_file" "MAX_CONCURRENT_LOOKUPS" "4" "2"
-    migrate_env_default "$python_bin" "$env_file" "MAX_CONCURRENT_UPDATES" "16" "4"
+    ensure_env_value "$python_bin" "$env_file" "MAX_CONCURRENT_SEARCHES" \
+        "$DEFAULT_MAX_CONCURRENT_SEARCHES"
+    migrate_env_default "$python_bin" "$env_file" "MAX_CONCURRENT_LOOKUPS" "2" \
+        "$DEFAULT_MAX_CONCURRENT_LOOKUPS"
+    migrate_env_default "$python_bin" "$env_file" "MAX_CONCURRENT_UPDATES" "4" \
+        "$DEFAULT_MAX_CONCURRENT_UPDATES"
     migrate_env_default "$python_bin" "$env_file" "RATE_LIMIT_CACHE_SIZE" "20000" "2000"
     migrate_env_default \
         "$python_bin" "$env_file" "INTERACTION_SESSION_LIMIT" "2000" "200"
@@ -747,6 +913,7 @@ migrate_instance_configuration() {
     ensure_env_value "$python_bin" "$env_file" \
         "BOT_SHORT_DESCRIPTION" "Read and search Scripture with GetBible."
     ensure_env_value "$python_bin" "$env_file" "MINI_APP_ENABLED" "false"
+    ensure_env_value "$python_bin" "$env_file" "REVERSE_PROXY_MODE" "caddy"
     ensure_env_value "$python_bin" "$env_file" "MINI_APP_PUBLIC_URL" ""
     ensure_env_value "$python_bin" "$env_file" "MINI_APP_LISTEN" "127.0.0.1"
     ensure_env_value "$python_bin" "$env_file" "MINI_APP_PORT" "9201"
@@ -770,6 +937,18 @@ migrate_instance_configuration() {
         "$python_bin" "$env_file" "MINI_APP_IDLE_TIMEOUT_SECONDS" "30"
     ensure_env_value "$python_bin" "$env_file" "MINI_APP_MAX_HEADER_BYTES" "16384"
     ensure_env_value "$python_bin" "$env_file" "LOG_MAX_BYTES" "10485760"
+    ensure_env_value "$python_bin" "$env_file" "SYSTEMD_MEMORY_HIGH_MB" \
+        "$DEFAULT_SYSTEMD_MEMORY_HIGH_MB"
+    ensure_env_value "$python_bin" "$env_file" "SYSTEMD_MEMORY_MAX_MB" \
+        "$DEFAULT_SYSTEMD_MEMORY_MAX_MB"
+    ensure_env_value "$python_bin" "$env_file" "SYSTEMD_MEMORY_SWAP_MAX_MB" \
+        "$DEFAULT_SYSTEMD_MEMORY_SWAP_MAX_MB"
+    ensure_env_value "$python_bin" "$env_file" "SYSTEMD_TASKS_MAX" \
+        "$DEFAULT_SYSTEMD_TASKS_MAX"
+    ensure_env_value "$python_bin" "$env_file" "SYSTEMD_NOFILE_LIMIT" \
+        "$DEFAULT_SYSTEMD_NOFILE_LIMIT"
+    ensure_env_value "$python_bin" "$env_file" "SYSTEMD_CPU_QUOTA_PERCENT" \
+        "$DEFAULT_SYSTEMD_CPU_QUOTA_PERCENT"
     ensure_env_value "$python_bin" "$env_file" "CONTAINERIZED" "false"
     chown root:root "$env_file"
     chmod 0600 "$env_file"
@@ -804,6 +983,32 @@ from dotenv import dotenv_values
 value = dotenv_values(sys.argv[1]).get(sys.argv[2])
 print("" if value is None else value)
 PY
+}
+
+sync_resource_dropin_from_env() {
+    local app_dir=$1
+    local env_file=$2
+    local instance=$3
+    local memory_high_mb
+    local memory_max_mb
+    local memory_swap_max_mb
+    local tasks_max
+    local nofile_limit
+    local cpu_quota_percent
+    memory_high_mb=$(dotenv_value "$app_dir" "$env_file" "SYSTEMD_MEMORY_HIGH_MB")
+    memory_max_mb=$(dotenv_value "$app_dir" "$env_file" "SYSTEMD_MEMORY_MAX_MB")
+    memory_swap_max_mb=$(
+        dotenv_value "$app_dir" "$env_file" "SYSTEMD_MEMORY_SWAP_MAX_MB"
+    )
+    tasks_max=$(dotenv_value "$app_dir" "$env_file" "SYSTEMD_TASKS_MAX")
+    nofile_limit=$(dotenv_value "$app_dir" "$env_file" "SYSTEMD_NOFILE_LIMIT")
+    cpu_quota_percent=$(
+        dotenv_value "$app_dir" "$env_file" "SYSTEMD_CPU_QUOTA_PERCENT"
+    )
+    write_resource_dropin \
+        "$instance" "$memory_high_mb" "$memory_max_mb" \
+        "$memory_swap_max_mb" "$tasks_max" "$nofile_limit" \
+        "$cpu_quota_percent"
 }
 
 preflight_mini_app_dns() {
@@ -1052,6 +1257,7 @@ render_caddy_routes() {
     local app_dir
     local env_file
     local enabled
+    local proxy_mode
     local public_url
     local port
     local python_bin
@@ -1063,6 +1269,8 @@ render_caddy_routes() {
         [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]] || continue
         enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
         [[ "$enabled" == "true" ]] || continue
+        proxy_mode=$(dotenv_value "$app_dir" "$env_file" "REVERSE_PROXY_MODE")
+        [[ "${proxy_mode:-caddy}" == "caddy" ]] || continue
         public_url=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")
         port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
         validate_mini_app_url "$public_url" ||
@@ -1303,8 +1511,11 @@ from dotenv import dotenv_values
 values = dotenv_values(sys.argv[1])
 public = urlsplit(values["MINI_APP_PUBLIC_URL"])
 port = int(values["MINI_APP_PORT"])
+listen = values.get("MINI_APP_LISTEN", "127.0.0.1")
+if ":" in listen and not listen.startswith("["):
+    listen = f"[{listen}]"
 path = public.path.rstrip("/")
-print(f"http://127.0.0.1:{port}{path}/")
+print(f"http://{listen}:{port}{path}/")
 PY
 }
 
@@ -1671,14 +1882,143 @@ cmd_install() {
     require_root
     require_tty
     local source_request=""
-    if [[ ${1:-} == "--source" ]]; then
-        [[ -n ${2:-} ]] || die "--source requires a directory."
-        source_request=$2
-        shift 2
-    fi
-    (($# == 0)) || die "Unexpected install arguments: $*"
+    local requested_mini_app_port=""
+    local requested_mini_app_listen=""
+    local requested_trusted_proxy_cidrs=""
+    local requested_webhook_listen=""
+    local requested_webhook_port=""
+    local requested_health_port=""
+    local requested_reverse_proxy_mode=""
+    local allow_undersized_host="false"
+    local max_concurrent_lookups=$DEFAULT_MAX_CONCURRENT_LOOKUPS
+    local max_concurrent_searches=$DEFAULT_MAX_CONCURRENT_SEARCHES
+    local max_concurrent_updates=$DEFAULT_MAX_CONCURRENT_UPDATES
+    local memory_high_mb=$DEFAULT_SYSTEMD_MEMORY_HIGH_MB
+    local memory_max_mb=$DEFAULT_SYSTEMD_MEMORY_MAX_MB
+    local memory_swap_max_mb=$DEFAULT_SYSTEMD_MEMORY_SWAP_MAX_MB
+    local tasks_max=$DEFAULT_SYSTEMD_TASKS_MAX
+    local nofile_limit=$DEFAULT_SYSTEMD_NOFILE_LIMIT
+    local cpu_quota_percent=$DEFAULT_SYSTEMD_CPU_QUOTA_PERCENT
+    while (($# > 0)); do
+        case "$1" in
+            --source)
+                (($# >= 2)) || die "--source requires a directory."
+                source_request=$2
+                shift 2
+                ;;
+            --mini-app-port)
+                (($# >= 2)) || die "--mini-app-port requires a port."
+                requested_mini_app_port=$2
+                shift 2
+                ;;
+            --mini-app-listen)
+                (($# >= 2)) || die "--mini-app-listen requires an IP address."
+                requested_mini_app_listen=$2
+                shift 2
+                ;;
+            --trusted-proxy-cidrs)
+                (($# >= 2)) || die "--trusted-proxy-cidrs requires a CIDR list."
+                requested_trusted_proxy_cidrs=$2
+                shift 2
+                ;;
+            --webhook-port)
+                (($# >= 2)) || die "--webhook-port requires a port."
+                requested_webhook_port=$2
+                shift 2
+                ;;
+            --webhook-listen)
+                (($# >= 2)) || die "--webhook-listen requires an IP address."
+                requested_webhook_listen=$2
+                shift 2
+                ;;
+            --health-port)
+                (($# >= 2)) || die "--health-port requires a port."
+                requested_health_port=$2
+                shift 2
+                ;;
+            --reverse-proxy)
+                (($# >= 2)) || die "--reverse-proxy requires caddy or external."
+                requested_reverse_proxy_mode=${2,,}
+                shift 2
+                ;;
+            --max-concurrent-lookups)
+                (($# >= 2)) || die "$1 requires an integer."
+                max_concurrent_lookups=$2
+                shift 2
+                ;;
+            --max-concurrent-searches)
+                (($# >= 2)) || die "$1 requires an integer."
+                max_concurrent_searches=$2
+                shift 2
+                ;;
+            --max-concurrent-updates)
+                (($# >= 2)) || die "$1 requires an integer."
+                max_concurrent_updates=$2
+                shift 2
+                ;;
+            --memory-high-mb)
+                (($# >= 2)) || die "$1 requires an integer."
+                memory_high_mb=$2
+                shift 2
+                ;;
+            --memory-max-mb)
+                (($# >= 2)) || die "$1 requires an integer."
+                memory_max_mb=$2
+                shift 2
+                ;;
+            --memory-swap-max-mb)
+                (($# >= 2)) || die "$1 requires an integer."
+                memory_swap_max_mb=$2
+                shift 2
+                ;;
+            --tasks-max)
+                (($# >= 2)) || die "$1 requires an integer."
+                tasks_max=$2
+                shift 2
+                ;;
+            --nofile-limit)
+                (($# >= 2)) || die "$1 requires an integer."
+                nofile_limit=$2
+                shift 2
+                ;;
+            --cpu-quota-percent)
+                (($# >= 2)) || die "$1 requires an integer."
+                cpu_quota_percent=$2
+                shift 2
+                ;;
+            --allow-undersized-host)
+                allow_undersized_host="true"
+                shift
+                ;;
+            *) die "Unknown install option: $1" ;;
+        esac
+    done
+
+    [[ -z "$requested_reverse_proxy_mode" ]] ||
+        validate_reverse_proxy_mode "$requested_reverse_proxy_mode" ||
+        die "--reverse-proxy must be caddy or external."
+    [[ -z "$requested_mini_app_port" ]] ||
+        { validate_port "$requested_mini_app_port" &&
+            ((requested_mini_app_port >= 1024)); } ||
+        die "--mini-app-port must be 1024-65535."
+    [[ -z "$requested_webhook_port" ]] ||
+        { validate_port "$requested_webhook_port" &&
+            ((requested_webhook_port >= 1024)); } ||
+        die "--webhook-port must be 1024-65535."
+    [[ -z "$requested_health_port" ]] || validate_port "$requested_health_port" ||
+        die "--health-port must be 0-65535."
+    validate_bounded_integer "$max_concurrent_lookups" 1 32 ||
+        die "--max-concurrent-lookups must be 1-32."
+    validate_bounded_integer "$max_concurrent_searches" 1 64 ||
+        die "--max-concurrent-searches must be 1-64."
+    validate_bounded_integer "$max_concurrent_updates" 1 64 ||
+        die "--max-concurrent-updates must be 1-64."
+    validate_resource_profile \
+        "$memory_high_mb" "$memory_max_mb" "$memory_swap_max_mb" \
+        "$tasks_max" "$nofile_limit" "$cpu_quota_percent"
 
     install_host_prerequisites
+    host_capacity_preflight "$allow_undersized_host"
     local source_dir
     local source_url
     local sha
@@ -1776,11 +2116,12 @@ cmd_install() {
 
     local webhook_public_url=""
     local webhook_ip_address=""
+    local webhook_listen="127.0.0.1"
     local webhook_port="9001"
     local webhook_secret=""
     if [[ "$delivery_mode" == "webhook" ]]; then
         printf '\nWebhook mode requires a public HTTPS URL. Telegram connects to that URL;\n'
-        printf 'your reverse proxy forwards the URL path to this instance on loopback.\n'
+        printf 'your reverse proxy forwards the URL path to this instance backend.\n'
         while true; do
             webhook_public_url=$(
                 prompt "Public HTTPS webhook URL" \
@@ -1789,8 +2130,19 @@ cmd_install() {
             validate_webhook_url "$webhook_public_url" && break
             warn "Use a complete HTTPS URL with a private path and no query or fragment."
         done
-        webhook_port=$(next_webhook_port)
-        webhook_port=$(prompt "Loopback webhook listener port" "$webhook_port")
+        webhook_listen=${requested_webhook_listen:-127.0.0.1}
+        if [[ -z "$requested_webhook_listen" ]]; then
+            webhook_listen=$(
+                prompt "Webhook backend bind IP (127.0.0.1 for same-host proxy)" \
+                    "$webhook_listen"
+            )
+        fi
+        validate_specific_listener "$python_bin" "$webhook_listen" ||
+            die "Webhook listener must be a specific non-link-local IP address; wildcard listeners are forbidden."
+        webhook_port=${requested_webhook_port:-$(next_webhook_port)}
+        if [[ -z "$requested_webhook_port" ]]; then
+            webhook_port=$(prompt "Private webhook backend port" "$webhook_port")
+        fi
         validate_port "$webhook_port" && [[ "$webhook_port" != "0" ]] ||
             die "Webhook port must be an integer between 1 and 65535."
         if ss -ltnH 2>/dev/null | awk '{print $4}' |
@@ -1799,15 +2151,29 @@ cmd_install() {
         fi
         webhook_ip_address=$(prompt "Optional fixed public IP for Telegram" "")
         webhook_secret=$(generate_webhook_secret "$python_bin")
+    elif [[ -n "$requested_webhook_port" || -n "$requested_webhook_listen" ]]; then
+        die "Webhook listener options require selecting webhook delivery."
     fi
 
     local mini_app_enabled="false"
     local mini_app_public_url=""
     local mini_app_port="9201"
+    local mini_app_listen="127.0.0.1"
+    local mini_app_trusted_proxy_cidrs="127.0.0.1/32,::1/128"
+    local reverse_proxy_mode="caddy"
     if confirm "Enable the authenticated Telegram Mini App?" yes; then
         mini_app_enabled="true"
         printf '\nThe Mini App needs a public HTTPS URL whose DNS already points to this host.\n'
-        printf 'The manager configures Caddy automatic HTTPS and keeps the app on loopback.\n'
+        if [[ -n "$requested_reverse_proxy_mode" ]]; then
+            reverse_proxy_mode=$requested_reverse_proxy_mode
+        elif confirm "Use an external reverse proxy such as HAProxy?" no; then
+            reverse_proxy_mode="external"
+        fi
+        if [[ "$reverse_proxy_mode" == "caddy" ]]; then
+            printf 'The manager configures Caddy automatic HTTPS and keeps the app on loopback.\n'
+        else
+            printf 'HAProxy terminates public HTTPS and forwards this bot URL to one private backend port.\n'
+        fi
         while true; do
             mini_app_public_url=$(
                 prompt "Public HTTPS Mini App URL" \
@@ -1817,8 +2183,11 @@ cmd_install() {
             warn "Use a complete HTTPS URL without credentials, query, or fragment."
         done
         preflight_mini_app_dns "$python_bin" "$mini_app_public_url"
-        mini_app_port=$(next_mini_app_port)
-        mini_app_port=$(prompt "Loopback Mini App listener port" "$mini_app_port")
+        mini_app_port=${requested_mini_app_port:-$(next_mini_app_port)}
+        if [[ "$reverse_proxy_mode" == "external" &&
+            -z "$requested_mini_app_port" ]]; then
+            mini_app_port=$(prompt "Private Mini App backend port" "$mini_app_port")
+        fi
         validate_port "$mini_app_port" && ((mini_app_port >= 1024)) ||
             die "Mini App port must be an integer between 1024 and 65535."
         if ss -ltnH 2>/dev/null | awk '{print $4}' |
@@ -1827,24 +2196,65 @@ cmd_install() {
         fi
         [[ "$mini_app_port" != "$webhook_port" || "$delivery_mode" != "webhook" ]] ||
             die "The Mini App and webhook listeners require different ports."
+        if [[ "$reverse_proxy_mode" == "external" ]]; then
+            mini_app_listen=${requested_mini_app_listen:-127.0.0.1}
+            if [[ -z "$requested_mini_app_listen" ]]; then
+                mini_app_listen=$(
+                    prompt "Bot-host bind IP reachable by HAProxy (127.0.0.1 if local)" \
+                        "$mini_app_listen"
+                )
+            fi
+            mini_app_trusted_proxy_cidrs=$requested_trusted_proxy_cidrs
+            if [[ -z "$mini_app_trusted_proxy_cidrs" ]]; then
+                mini_app_trusted_proxy_cidrs=$(
+                    prompt "Trusted HAProxy source CIDR (for example 10.0.0.5/32)" ""
+                )
+            fi
+            validate_external_proxy_network \
+                "$python_bin" "$mini_app_listen" "$mini_app_trusted_proxy_cidrs" ||
+                die "Use a specific non-link-local bind IP and one or more narrow trusted proxy CIDRs; all-address networks are forbidden."
+        elif [[ -n "$requested_mini_app_listen" ||
+            -n "$requested_trusted_proxy_cidrs" ]]; then
+            die "--mini-app-listen and --trusted-proxy-cidrs require --reverse-proxy external."
+        fi
+    elif [[ -n "$requested_mini_app_port" ||
+        -n "$requested_mini_app_listen" ||
+        -n "$requested_trusted_proxy_cidrs" ||
+        -n "$requested_reverse_proxy_mode" ]]; then
+        die "Mini App proxy options require enabling the Mini App."
     fi
 
     local suggested_port
     local health_port
     suggested_port=$(next_health_port)
     while true; do
-        health_port=$(prompt "Loopback health/metrics port (0 disables)" "$suggested_port")
+        if [[ -n "$requested_health_port" ]]; then
+            health_port=$requested_health_port
+        else
+            health_port=$(prompt "Loopback health/metrics port (0 disables)" "$suggested_port")
+        fi
         validate_port "$health_port" || {
             warn "Port must be an integer between 0 and 65535."
             continue
         }
         if [[ "$health_port" != "0" ]] &&
             ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$health_port$"; then
+            [[ -z "$requested_health_port" ]] ||
+                die "Health port ${health_port} is already listening."
             warn "Port ${health_port} is already listening."
             continue
         fi
         if [[ "$mini_app_enabled" == "true" && "$health_port" == "$mini_app_port" ]]; then
+            [[ -z "$requested_health_port" ]] ||
+                die "The health and Mini App listeners require different ports."
             warn "The health and Mini App listeners require different ports."
+            continue
+        fi
+        if [[ "$delivery_mode" == "webhook" && "$health_port" != "0" &&
+            "$health_port" == "$webhook_port" ]]; then
+            [[ -z "$requested_health_port" ]] ||
+                die "The health and webhook listeners require different ports."
+            warn "The health and webhook listeners require different ports."
             continue
         fi
         break
@@ -1868,6 +2278,15 @@ cmd_install() {
             start_now="no"
         fi
     fi
+    if [[ "$mini_app_enabled" == "true" && "$reverse_proxy_mode" == "external" ]]; then
+        printf 'Configure HAProxy to forward %s to http://%s:%s before starting.\n' \
+            "$mini_app_public_url" "$mini_app_listen" "$mini_app_port"
+        warn "Restrict the bot-host firewall so only the declared HAProxy source can reach this backend port."
+        if ! confirm "Is the external Mini App HTTPS route ready?" no; then
+            warn "The instance will be installed but not started. Configure HAProxy, then run '${PROGRAM} start ${instance}'."
+            start_now="no"
+        fi
+    fi
     if [[ "$start_now" == "yes" ]]; then
         confirm "Enable and start this instance after validation?" yes || start_now="no"
     fi
@@ -1884,18 +2303,28 @@ cmd_install() {
     printf '  Delivery:       %s\n' "$delivery_mode"
     if [[ "$delivery_mode" == "webhook" ]]; then
         printf '  Public webhook: %s\n' "$webhook_public_url"
-        printf '  Proxy target:   http://127.0.0.1:%s%s\n' \
-            "$webhook_port" "$(printf '%s' "$webhook_public_url" | sed -E 's#^https://[^/]+##')"
+        printf '  Proxy target:   http://%s:%s%s\n' \
+            "$webhook_listen" "$webhook_port" \
+            "$(printf '%s' "$webhook_public_url" | sed -E 's#^https://[^/]+##')"
     fi
     printf '  Mini App:       %s\n' "$mini_app_enabled"
     if [[ "$mini_app_enabled" == "true" ]]; then
         printf '  Mini App URL:   %s\n' "$mini_app_public_url"
-        printf '  Mini App local: http://127.0.0.1:%s\n' "$mini_app_port"
+        printf '  Proxy mode:     %s\n' "$reverse_proxy_mode"
+        printf '  Proxy backend:  http://%s:%s\n' \
+            "$mini_app_listen" "$mini_app_port"
+        printf '  Trusted proxy:  %s\n' "$mini_app_trusted_proxy_cidrs"
     fi
+    printf '  Worker profile: lookups=%s searches=%s updates=%s\n' \
+        "$max_concurrent_lookups" "$max_concurrent_searches" \
+        "$max_concurrent_updates"
+    printf '  Service limits: high=%sMiB max=%sMiB swap=%sMiB tasks=%s nofile=%s CPU=%s%%\n' \
+        "$memory_high_mb" "$memory_max_mb" "$memory_swap_max_mb" \
+        "$tasks_max" "$nofile_limit" "$cpu_quota_percent"
     printf '  Health:         127.0.0.1:%s\n\n' "$health_port"
     confirm "Create this instance?" yes || die "Installation cancelled."
 
-    if [[ "$mini_app_enabled" == "true" ]]; then
+    if [[ "$mini_app_enabled" == "true" && "$reverse_proxy_mode" == "caddy" ]]; then
         ensure_caddy_available
     fi
     install_shared_manager "$source_dir"
@@ -1943,6 +2372,7 @@ cmd_install() {
     replace_env_value "$python_bin" "$env_file" "TELEGRAM_API_TOKEN" "$token"
     replace_env_value "$python_bin" "$env_file" "TELEGRAM_DELIVERY_MODE" "$delivery_mode"
     replace_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_PUBLIC_URL" "$webhook_public_url"
+    replace_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_LISTEN" "$webhook_listen"
     replace_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_PORT" "$webhook_port"
     replace_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_SECRET_TOKEN" "$webhook_secret"
     replace_env_value "$python_bin" "$env_file" "TELEGRAM_WEBHOOK_IP_ADDRESS" "$webhook_ip_address"
@@ -1950,9 +2380,29 @@ cmd_install() {
     replace_env_value "$python_bin" "$env_file" "BOT_DESCRIPTION" "$bot_description"
     replace_env_value "$python_bin" "$env_file" "BOT_SHORT_DESCRIPTION" "$bot_short_description"
     replace_env_value "$python_bin" "$env_file" "MINI_APP_ENABLED" "$mini_app_enabled"
+    replace_env_value "$python_bin" "$env_file" "REVERSE_PROXY_MODE" "$reverse_proxy_mode"
     replace_env_value "$python_bin" "$env_file" "MINI_APP_PUBLIC_URL" "$mini_app_public_url"
-    replace_env_value "$python_bin" "$env_file" "MINI_APP_LISTEN" "127.0.0.1"
+    replace_env_value "$python_bin" "$env_file" "MINI_APP_LISTEN" "$mini_app_listen"
     replace_env_value "$python_bin" "$env_file" "MINI_APP_PORT" "$mini_app_port"
+    replace_env_value "$python_bin" "$env_file" \
+        "MINI_APP_TRUSTED_PROXY_CIDRS" "$mini_app_trusted_proxy_cidrs"
+    replace_env_value "$python_bin" "$env_file" \
+        "MAX_CONCURRENT_LOOKUPS" "$max_concurrent_lookups"
+    replace_env_value "$python_bin" "$env_file" \
+        "MAX_CONCURRENT_SEARCHES" "$max_concurrent_searches"
+    replace_env_value "$python_bin" "$env_file" \
+        "MAX_CONCURRENT_UPDATES" "$max_concurrent_updates"
+    replace_env_value "$python_bin" "$env_file" \
+        "SYSTEMD_MEMORY_HIGH_MB" "$memory_high_mb"
+    replace_env_value "$python_bin" "$env_file" \
+        "SYSTEMD_MEMORY_MAX_MB" "$memory_max_mb"
+    replace_env_value "$python_bin" "$env_file" \
+        "SYSTEMD_MEMORY_SWAP_MAX_MB" "$memory_swap_max_mb"
+    replace_env_value "$python_bin" "$env_file" "SYSTEMD_TASKS_MAX" "$tasks_max"
+    replace_env_value "$python_bin" "$env_file" \
+        "SYSTEMD_NOFILE_LIMIT" "$nofile_limit"
+    replace_env_value "$python_bin" "$env_file" \
+        "SYSTEMD_CPU_QUOTA_PERCENT" "$cpu_quota_percent"
     replace_env_value "$python_bin" "$env_file" "TRANSLATION" "$translation"
     replace_env_value "$python_bin" "$env_file" \
         "USER_PREFERENCES_FILE" "${state_dir}/preferences.sqlite3"
@@ -1970,6 +2420,10 @@ cmd_install() {
         "$service_user" "$env_file"
     verify_content_access "$service_user" "$instance"
     write_metadata "$instance" "$service_user" "$health_port" "$sha" "$source_url" "$created_at"
+    write_resource_dropin \
+        "$instance" "$memory_high_mb" "$memory_max_mb" \
+        "$memory_swap_max_mb" "$tasks_max" "$nofile_limit" \
+        "$cpu_quota_percent"
 
     if confirm "Verify this token with Telegram now?" yes; then
         validate_telegram_token_live "$app_dir/venv/bin/python" "$token"
@@ -1983,7 +2437,7 @@ cmd_install() {
     if [[ "$start_now" == "yes" ]]; then
         local service
         service=$(service_name_for "$instance")
-        if [[ "$mini_app_enabled" == "true" ]]; then
+        if [[ "$mini_app_enabled" == "true" && "$reverse_proxy_mode" == "caddy" ]]; then
             begin_caddy_transaction ||
                 die "The managed Caddy route could not be applied."
         fi
@@ -2047,6 +2501,7 @@ cmd_start() {
     local app_dir
     local env_file
     local mini_app_enabled
+    local reverse_proxy_mode
     local public_url
     local was_active
     local was_enabled
@@ -2054,13 +2509,17 @@ cmd_start() {
     app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
     env_file=$(environment_file_for "$ACTIVE_INSTANCE")
     mini_app_enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
+    reverse_proxy_mode=$(dotenv_value "$app_dir" "$env_file" "REVERSE_PROXY_MODE")
+    reverse_proxy_mode=${reverse_proxy_mode:-caddy}
     was_active=$(systemctl is-active "$service" 2>/dev/null || true)
     was_enabled=$(systemctl is-enabled "$service" 2>/dev/null || true)
     if [[ "$mini_app_enabled" == "true" ]]; then
         public_url=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")
         preflight_mini_app_dns "$app_dir/venv/bin/python" "$public_url"
-        begin_caddy_transaction ||
-            die "The managed Caddy route could not be applied."
+        if [[ "$reverse_proxy_mode" == "caddy" ]]; then
+            begin_caddy_transaction ||
+                die "The managed Caddy route could not be applied."
+        fi
     fi
     if ! systemctl enable --now "$service" ||
         ! wait_for_readiness "$ACTIVE_PORT" ||
@@ -2118,10 +2577,13 @@ cmd_status() {
     local env_file
     local delivery_mode
     local webhook_public_url
+    local webhook_listen
     local webhook_port
     local mini_app_public_url
     local mini_app_listen
     local mini_app_port
+    local reverse_proxy_mode
+    local trusted_proxy_cidrs
     local active
     local enabled
     service=$(service_name_for "$ACTIVE_INSTANCE")
@@ -2150,12 +2612,17 @@ cmd_status() {
             webhook_port=$(
                 dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT"
             )
+            webhook_listen=$(
+                dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_LISTEN"
+            )
             printf 'Webhook URL:   %s\n' "$webhook_public_url"
-            printf 'Webhook local: 127.0.0.1:%s\n' "$webhook_port"
+            printf 'Webhook local: %s:%s\n' "$webhook_listen" "$webhook_port"
         fi
         mini_app_enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
         printf 'Mini App:      %s\n' "${mini_app_enabled:-false}"
         if [[ "$mini_app_enabled" == "true" ]]; then
+            reverse_proxy_mode=$(dotenv_value "$app_dir" "$env_file" "REVERSE_PROXY_MODE")
+            reverse_proxy_mode=${reverse_proxy_mode:-caddy}
             mini_app_public_url=$(
                 dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL"
             )
@@ -2165,8 +2632,13 @@ cmd_status() {
             mini_app_port=$(
                 dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT"
             )
+            trusted_proxy_cidrs=$(
+                dotenv_value "$app_dir" "$env_file" "MINI_APP_TRUSTED_PROXY_CIDRS"
+            )
             printf 'Mini App URL:  %s\n' "$mini_app_public_url"
-            printf 'Mini App local: %s:%s\n' "$mini_app_listen" "$mini_app_port"
+            printf 'Proxy mode:    %s\n' "$reverse_proxy_mode"
+            printf 'Proxy backend: %s:%s\n' "$mini_app_listen" "$mini_app_port"
+            printf 'Trusted proxy: %s\n' "$trusted_proxy_cidrs"
         fi
     fi
     printf 'JSON log:      %s\n' "$log_file"
@@ -2244,6 +2716,7 @@ cmd_doctor() {
     local mini_app_enabled
     local mini_app_listen
     local mini_app_port
+    local reverse_proxy_mode
     service=$(service_name_for "$ACTIVE_INSTANCE")
     app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
     env_file=$(environment_file_for "$ACTIVE_INSTANCE")
@@ -2320,18 +2793,23 @@ cmd_doctor() {
         if [[ "$mini_app_enabled" == "true" ]]; then
             mini_app_listen=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_LISTEN")
             mini_app_port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
-            if [[ "$mini_app_listen" != "127.0.0.1" ]]; then
-                warn "The Mini App listener is not restricted to IPv4 loopback."
-                ((failures += 1))
-            elif ! ss -ltnH 2>/dev/null | awk '{print $4}' |
-                grep -Eq "^127\\.0\\.0\\.1:${mini_app_port}$"; then
-                warn "The configured loopback Mini App listener is not active."
+            reverse_proxy_mode=$(dotenv_value "$app_dir" "$env_file" "REVERSE_PROXY_MODE")
+            reverse_proxy_mode=${reverse_proxy_mode:-caddy}
+            if ! ss -ltnH 2>/dev/null | awk '{print $4}' |
+                grep -Fq "${mini_app_listen}:${mini_app_port}"; then
+                warn "The configured Mini App backend listener is not active."
                 ((failures += 1))
             fi
-            verify_managed_caddy_routes || {
-                warn "The setup-managed Caddy configuration is missing, stale, invalid, inactive, or disabled."
-                ((failures += 1))
-            }
+            if [[ "$reverse_proxy_mode" == "caddy" ]]; then
+                [[ "$mini_app_listen" == "127.0.0.1" ]] || {
+                    warn "Managed Caddy mode requires the Mini App on IPv4 loopback."
+                    ((failures += 1))
+                }
+                verify_managed_caddy_routes || {
+                    warn "The setup-managed Caddy configuration is missing, stale, invalid, inactive, or disabled."
+                    ((failures += 1))
+                }
+            fi
             verify_mini_app_local "$app_dir" "$env_file" 1 || {
                 warn "The local Mini App shell did not pass its content check."
                 ((failures += 1))
@@ -2393,6 +2871,7 @@ cmd_delivery() {
     local current_mode
     local requested_mode
     local webhook_public_url
+    local webhook_listen
     local webhook_port
     local webhook_ip_address
     local webhook_secret
@@ -2427,13 +2906,24 @@ cmd_delivery() {
             rm -f "$backup"
             die "Use a complete HTTPS URL with a private path and no query or fragment."
         }
+        webhook_listen=$(
+            dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_LISTEN"
+        )
+        webhook_listen=$(
+            prompt "Webhook backend bind IP (127.0.0.1 for same-host proxy)" \
+                "${webhook_listen:-127.0.0.1}"
+        )
+        validate_specific_listener "$app_dir/venv/bin/python" "$webhook_listen" || {
+            rm -f "$backup"
+            die "Webhook listener must be a specific non-link-local IP address; wildcard listeners are forbidden."
+        }
         webhook_port=$(
             dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT"
         )
         if [[ -z "$webhook_port" || "$webhook_port" == "0" ]]; then
             webhook_port=$(next_webhook_port)
         fi
-        webhook_port=$(prompt "Loopback webhook listener port" "$webhook_port")
+        webhook_port=$(prompt "Private webhook backend port" "$webhook_port")
         validate_port "$webhook_port" && [[ "$webhook_port" != "0" ]] || {
             rm -f "$backup"
             die "Webhook port must be an integer between 1 and 65535."
@@ -2459,14 +2949,16 @@ cmd_delivery() {
         replace_env_value "$app_dir/venv/bin/python" "$env_file" \
             "TELEGRAM_WEBHOOK_PUBLIC_URL" "$webhook_public_url"
         replace_env_value "$app_dir/venv/bin/python" "$env_file" \
+            "TELEGRAM_WEBHOOK_LISTEN" "$webhook_listen"
+        replace_env_value "$app_dir/venv/bin/python" "$env_file" \
             "TELEGRAM_WEBHOOK_PORT" "$webhook_port"
         replace_env_value "$app_dir/venv/bin/python" "$env_file" \
             "TELEGRAM_WEBHOOK_IP_ADDRESS" "$webhook_ip_address"
         replace_env_value "$app_dir/venv/bin/python" "$env_file" \
             "TELEGRAM_WEBHOOK_SECRET_TOKEN" "$webhook_secret"
         printf 'Configure the public HTTPS route before restarting:\n'
-        printf '  %s -> http://127.0.0.1:%s%s\n' \
-            "$webhook_public_url" "$webhook_port" \
+        printf '  %s -> http://%s:%s%s\n' \
+            "$webhook_public_url" "$webhook_listen" "$webhook_port" \
             "$(printf '%s' "$webhook_public_url" | sed -E 's#^https://[^/]+##')"
         if ! confirm "Is that HTTPS reverse-proxy route ready?" no; then
             cp -a "$backup" "$env_file"
@@ -2513,6 +3005,7 @@ cmd_miniapp() {
     local current_enabled
     local current_url
     local current_port
+    local current_proxy_mode
     local requested_enabled="false"
     local public_url
     local port
@@ -2527,6 +3020,8 @@ cmd_miniapp() {
     current_enabled=${current_enabled:-false}
     current_url=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")
     current_port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
+    current_proxy_mode=$(dotenv_value "$app_dir" "$env_file" "REVERSE_PROXY_MODE")
+    current_proxy_mode=${current_proxy_mode:-caddy}
     [[ "$current_enabled" == "true" ]] && default_choice="yes"
 
     if confirm "Enable the authenticated Telegram Mini App?" "$default_choice"; then
@@ -2540,7 +3035,8 @@ cmd_miniapp() {
         return
     fi
 
-    if [[ "$requested_enabled" == "false" && "$current_enabled" == "true" ]]; then
+    if [[ "$requested_enabled" == "false" && "$current_enabled" == "true" &&
+        "$current_proxy_mode" == "caddy" ]]; then
         ensure_caddy_available
     fi
     if [[ "$requested_enabled" == "true" ]]; then
@@ -2554,11 +3050,17 @@ cmd_miniapp() {
         done
         preflight_mini_app_dns "$app_dir/venv/bin/python" "$public_url" ||
             die "Mini App DNS preflight failed; no configuration was changed."
-        ensure_caddy_available
+        if [[ "$current_proxy_mode" == "caddy" ]]; then
+            ensure_caddy_available
+        fi
         if [[ -z "$current_url" || -z "$current_port" || "$current_port" == "0" ]]; then
             current_port=$(next_mini_app_port)
         fi
-        port=$(prompt "Loopback Mini App listener port" "$current_port")
+        if [[ "$current_proxy_mode" == "external" ]]; then
+            port=$(prompt "Private Mini App backend port" "$current_port")
+        else
+            port=$(prompt "Loopback Mini App listener port" "$current_port")
+        fi
         validate_port "$port" && ((port >= 1024)) || {
             die "Mini App port must be an integer between 1024 and 65535."
         }
@@ -2584,8 +3086,10 @@ cmd_miniapp() {
     if [[ "$requested_enabled" == "true" ]]; then
         replace_env_value "$app_dir/venv/bin/python" "$env_file" \
             "MINI_APP_PUBLIC_URL" "$public_url"
-        replace_env_value "$app_dir/venv/bin/python" "$env_file" \
-            "MINI_APP_LISTEN" "127.0.0.1"
+        if [[ "$current_proxy_mode" == "caddy" ]]; then
+            replace_env_value "$app_dir/venv/bin/python" "$env_file" \
+                "MINI_APP_LISTEN" "127.0.0.1"
+        fi
         replace_env_value "$app_dir/venv/bin/python" "$env_file" \
             "MINI_APP_PORT" "$port"
     fi
@@ -2602,10 +3106,12 @@ cmd_miniapp() {
 
     was_active=$(systemctl is-active "$service" 2>/dev/null || true)
     was_enabled=$(systemctl is-enabled "$service" 2>/dev/null || true)
-    if ! begin_caddy_transaction; then
-        cp -a "$backup" "$env_file"
-        rm -f "$backup"
-        die "Managed Caddy configuration failed; the previous environment was restored."
+    if [[ "$current_proxy_mode" == "caddy" ]]; then
+        if ! begin_caddy_transaction; then
+            cp -a "$backup" "$env_file"
+            rm -f "$backup"
+            die "Managed Caddy configuration failed; the previous environment was restored."
+        fi
     fi
 
     local changed_ok="true"
@@ -2737,6 +3243,8 @@ cmd_config() {
     local edited_mini_app_public_url
     local edited_mini_app_listen
     local edited_mini_app_port
+    local edited_reverse_proxy_mode
+    local edited_trusted_proxy_cidrs
     local edited_webhook_port
     local edited_delivery_mode
     edited_instance=$(dotenv_value "$app_dir" "$env_file" "INSTANCE_NAME")
@@ -2751,6 +3259,10 @@ cmd_config() {
     )
     edited_mini_app_listen=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_LISTEN")
     edited_mini_app_port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
+    edited_reverse_proxy_mode=$(dotenv_value "$app_dir" "$env_file" "REVERSE_PROXY_MODE")
+    edited_trusted_proxy_cidrs=$(
+        dotenv_value "$app_dir" "$env_file" "MINI_APP_TRUSTED_PROXY_CIDRS"
+    )
     edited_webhook_port=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_WEBHOOK_PORT")
     edited_delivery_mode=$(dotenv_value "$app_dir" "$env_file" "TELEGRAM_DELIVERY_MODE")
     if [[ "$edited_instance" != "$ACTIVE_INSTANCE" ||
@@ -2760,7 +3272,9 @@ cmd_config() {
         "$edited_help_file" != "$(help_file_for "$ACTIVE_INSTANCE")" ||
         "$edited_mini_app_enabled" != "$(dotenv_value "$app_dir" "$backup" "MINI_APP_ENABLED")" ||
         "$edited_mini_app_public_url" != "$(dotenv_value "$app_dir" "$backup" "MINI_APP_PUBLIC_URL")" ||
-        "$edited_mini_app_listen" != "127.0.0.1" ||
+        "$edited_mini_app_listen" != "$(dotenv_value "$app_dir" "$backup" "MINI_APP_LISTEN")" ||
+        "$edited_reverse_proxy_mode" != "$(dotenv_value "$app_dir" "$backup" "REVERSE_PROXY_MODE")" ||
+        "$edited_trusted_proxy_cidrs" != "$(dotenv_value "$app_dir" "$backup" "MINI_APP_TRUSTED_PROXY_CIDRS")" ||
         "$edited_mini_app_port" != "$(dotenv_value "$app_dir" "$backup" "MINI_APP_PORT")" ]]; then
         cp -a "$backup" "$env_file"
         rm -f "$backup"
@@ -2778,6 +3292,13 @@ cmd_config() {
         rm -f "$backup"
         die "That token belongs to another local instance; the previous file was restored."
     fi
+    if ! (sync_resource_dropin_from_env \
+        "$app_dir" "$env_file" "$ACTIVE_INSTANCE"); then
+        cp -a "$backup" "$env_file"
+        rm -f "$backup"
+        die "Native service limits were invalid; the previous file was restored."
+    fi
+    systemctl daemon-reload
     rm -f "$backup"
     record_operation config "$ACTIVE_INSTANCE" validated
     if confirm "Restart ${ACTIVE_INSTANCE} now?" yes; then
@@ -2838,6 +3359,7 @@ cmd_upgrade() {
 
     migrate_instance_configuration \
         "$source_dir" "$python_bin" "$env_file" "$ACTIVE_USER" "$ACTIVE_INSTANCE"
+    sync_resource_dropin_from_env "$app_dir" "$env_file" "$ACTIVE_INSTANCE"
     [[ ! -e "$next_dir" ]] || safe_remove_tree "$next_dir"
     UPGRADE_NEXT=$next_dir
     prepare_application \
@@ -2939,12 +3461,15 @@ cmd_uninstall() {
     local log_file
     local app_dir
     local mini_app_enabled
+    local reverse_proxy_mode
     local preserve_log="yes"
     service=$(service_name_for "$ACTIVE_INSTANCE")
     env_file=$(environment_file_for "$ACTIVE_INSTANCE")
     log_file=$(log_file_for "$ACTIVE_INSTANCE")
     app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
     mini_app_enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
+    reverse_proxy_mode=$(dotenv_value "$app_dir" "$env_file" "REVERSE_PROXY_MODE")
+    reverse_proxy_mode=${reverse_proxy_mode:-caddy}
     warn "This removes only instance '${ACTIVE_INSTANCE}': its service, managed Mini App route, code, environment, content, cache, state, and service account."
     read -r -p "Type the exact instance name to continue: " confirmation
     [[ "$confirmation" == "$ACTIVE_INSTANCE" ]] || die "Confirmation did not match."
@@ -2954,12 +3479,13 @@ cmd_uninstall() {
     confirm "Permanently uninstall ${ACTIVE_INSTANCE}?" no ||
         die "Uninstall cancelled."
 
-    if command -v caddy >/dev/null 2>&1 &&
+    if [[ "$reverse_proxy_mode" == "caddy" ]] &&
+        command -v caddy >/dev/null 2>&1 &&
         [[ -f "$CADDYFILE" && -f "$CADDY_ROUTES" ]]; then
         begin_caddy_transaction "$ACTIVE_INSTANCE" ||
             die "The Mini App route could not be removed; the instance was not uninstalled."
         commit_caddy_transaction
-    elif [[ "$mini_app_enabled" == "true" ]]; then
+    elif [[ "$mini_app_enabled" == "true" && "$reverse_proxy_mode" == "caddy" ]]; then
         die "Managed Caddy state is missing; restore it before uninstalling this enabled Mini App."
     fi
     if [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]]; then
@@ -2975,6 +3501,7 @@ cmd_uninstall() {
         "$(metadata_file_for "$ACTIVE_INSTANCE")" \
         "$(welcome_file_for "$ACTIVE_INSTANCE")" \
         "$(help_file_for "$ACTIVE_INSTANCE")"
+    rm -rf --one-file-system -- "$(resource_dropin_dir_for "$ACTIVE_INSTANCE")"
     if id "$ACTIVE_USER" >/dev/null 2>&1; then
         userdel "$ACTIVE_USER"
     fi

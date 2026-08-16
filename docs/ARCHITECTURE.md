@@ -225,7 +225,7 @@ Synchronous Librarian work runs in fixed executors. Timeouts do not release capa
 
 HTML, modules, server code, and documentation must deploy from one validated commit. `index.html` is served with `no-store`; static assets revalidate through ETags. This prevents a Telegram WebView from combining incompatible generations.
 
-Host deployment uses separate loopback listeners for health, webhook delivery, and Mini App HTTPS proxying. Docker deployments expose the Mini App only to private ingress. Polling and the Mini App are independent and may run together.
+Host deployment uses separate private listeners for health, webhook delivery, and Mini App HTTPS proxying. Health stays on loopback; a webhook or Mini App behind a remote proxy binds a specific bot-host IP and is firewall-restricted to that proxy. Docker deployments expose application listeners only to private ingress. Polling and the Mini App are independent and may run together.
 
 ## Observability and privacy
 
@@ -237,7 +237,7 @@ The browser persistent cache contains public Scripture only. User translation an
 
 A release is production-ready only when permanent CI and CodeQL pass on the exact PR head and prove:
 
-- Python 3.10, 3.11, and 3.12;
+- Python 3.10, 3.11, 3.12, 3.13, and 3.14;
 - production container build and smoke test;
 - lint, strict typing, branch coverage, dependency audit, secret scan, and systemd verification;
 - public Main API and Query API routing with no Robot content proxy;

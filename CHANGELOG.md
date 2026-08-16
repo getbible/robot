@@ -4,6 +4,38 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Python 3.14 and Ubuntu 26.04
+
+- Extended the supported runtime and deterministic CI matrix from Python
+  3.10–3.12 to Python 3.10–3.14. Python 3.14 host lifecycle and quality checks
+  run on Ubuntu 26.04 while Ruff and mypy continue enforcing Python 3.10 source
+  compatibility.
+- Moved the production container default to Python 3.14 on slim Debian Trixie,
+  with the interpreter version available as a build argument.
+- Made Python 3.14 the canonical lock-generation interpreter and retained the
+  explicit compatibility dependencies needed for exact hashed installs on
+  every supported interpreter.
+
+### Scalable native and proxy deployment
+
+- Raised the production profile for an 8 GiB, four-logical-CPU-or-better host:
+  eight lookup workers, four CPU-bound search workers, sixteen concurrent
+  updates, a 2 GiB per-instance memory ceiling, and matching task, file, swap,
+  CPU, Docker, multi-container, and Kubernetes limits. Every limit remains an
+  explicit validated environment or setup override.
+- Added real per-instance systemd resource drop-ins and synchronized them
+  transactionally through install, configuration, upgrade, rollback, and
+  uninstall instead of documenting environment variables that systemd could
+  not consume.
+- Added external HAProxy mode for native Mini Apps. Setup records a specific
+  bot-host bind IP, unique per-bot backend port, and narrow trusted proxy CIDR,
+  skips Caddy, rejects wildcard listeners and all-address trust networks, and
+  preserves the mode through status, diagnostics, upgrades, and removal.
+- Made webhook backends independently configurable. Polling opens no webhook
+  listener; webhook mode records a separate specific bind IP and per-instance
+  port so a same-host or remote proxy can forward HTTPS without sharing the
+  Mini App port.
+
 ### Waiting for Scripture instead of reporting a timeout for it
 
 - Stopped charging a search the reference-delivery budget. `LOOKUP_TIMEOUT` is

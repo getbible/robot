@@ -29,7 +29,8 @@ This command is the local equivalent of the permanent CI quality job. It must pa
 
 ### Robot runtime
 
-- deterministic Python tests on Python 3.10, 3.11, and 3.12;
+- deterministic Python tests on Python 3.10, 3.11, 3.12, 3.13, and 3.14,
+  including Python 3.14 host-native lifecycle checks on Ubuntu 26.04;
 - strict mypy and Ruff;
 - enforced branch coverage;
 - setup-manager and lifecycle checks;

@@ -1,5 +1,8 @@
+import os
 import stat
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,6 +16,17 @@ DOCKER_MANAGER = ROOT / "tests" / "docker_manager.sh"
 
 
 class SetupScriptTestCase(unittest.TestCase):
+    @staticmethod
+    def _fake_python(path: Path, major: int, minor: int) -> None:
+        path.write_text(
+            f"#!{sys.executable}\n"
+            "import sys\n"
+            f"sys.version_info = ({major}, {minor})\n"
+            "exec(compile(sys.stdin.read(), '<stdin>', 'exec'))\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+
     def test_setup_entrypoint_is_committed_executable(self) -> None:
         self.assertTrue(SETUP.stat().st_mode & stat.S_IXUSR)
 
@@ -163,19 +177,203 @@ class SetupScriptTestCase(unittest.TestCase):
             "CapabilityBoundingSet=",
             "Type=notify",
             "WatchdogSec=45s",
-            "MemoryHigh=180M",
-            "MemoryMax=256M",
-            "MemorySwapMax=16M",
+            "MemoryHigh=1536M",
+            "MemoryMax=2048M",
+            "MemorySwapMax=512M",
+            "TasksMax=256",
+            "LimitNOFILE=4096",
+            "CPUQuota=200%",
         }
         for directive in required:
             with self.subTest(directive=directive):
                 self.assertIn(directive, unit)
+
+    def test_setup_accepts_python_310_through_314_and_prefers_newest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binaries = Path(directory)
+            for minor in range(9, 16):
+                self._fake_python(binaries / f"python3.{minor}", 3, minor)
+
+            for minor in range(9, 16):
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; python_supported "$2"',
+                        "setup-python-test",
+                        str(SETUP),
+                        str(binaries / f"python3.{minor}"),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                with self.subTest(version=f"3.{minor}"):
+                    self.assertEqual(
+                        result.returncode,
+                        0 if 10 <= minor <= 14 else 1,
+                        msg=result.stderr,
+                    )
+
+            environment = dict(os.environ)
+            environment.pop("PYTHON_BIN", None)
+            environment["PATH"] = f"{binaries}:{environment['PATH']}"
+            selected = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; select_python',
+                    "setup-python-order-test",
+                    str(SETUP),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(
+                Path(selected.stdout.strip()).resolve(),
+                (binaries / "python3.14").resolve(),
+            )
+
+    def test_resource_and_port_options_are_wired_to_instance_configuration(self) -> None:
+        script = SETUP.read_text(encoding="utf-8")
+        for option in (
+            "--mini-app-port",
+            "--mini-app-listen",
+            "--trusted-proxy-cidrs",
+            "--webhook-port",
+            "--health-port",
+            "--reverse-proxy",
+            "--max-concurrent-lookups",
+            "--max-concurrent-searches",
+            "--max-concurrent-updates",
+            "--memory-high-mb",
+            "--memory-max-mb",
+            "--memory-swap-max-mb",
+            "--tasks-max",
+            "--nofile-limit",
+            "--cpu-quota-percent",
+            "--allow-undersized-host",
+        ):
+            with self.subTest(option=option):
+                self.assertIn(option, script)
+
+        for helper in (
+            "resource_dropin_dir_for()",
+            "resource_dropin_for()",
+            "validate_resource_profile()",
+            "write_resource_dropin()",
+            "sync_resource_dropin_from_env()",
+        ):
+            with self.subTest(helper=helper):
+                self.assertIn(helper, script)
+
+        for key in (
+            "SYSTEMD_MEMORY_HIGH_MB",
+            "SYSTEMD_MEMORY_MAX_MB",
+            "SYSTEMD_MEMORY_SWAP_MAX_MB",
+            "SYSTEMD_TASKS_MAX",
+            "SYSTEMD_NOFILE_LIMIT",
+            "SYSTEMD_CPU_QUOTA_PERCENT",
+        ):
+            with self.subTest(key=key):
+                self.assertIn(f'"{key}"', script)
+
+        self.assertIn(
+            '"$instance" "$memory_high_mb" "$memory_max_mb"',
+            script,
+        )
+        self.assertIn(
+            'sync_resource_dropin_from_env "$app_dir" "$env_file" "$ACTIVE_INSTANCE"',
+            script,
+        )
+        self.assertIn('"MAX_CONCURRENT_LOOKUPS" "$max_concurrent_lookups"', script)
+        self.assertIn('"MAX_CONCURRENT_SEARCHES" "$max_concurrent_searches"', script)
+        self.assertIn('"MAX_CONCURRENT_UPDATES" "$max_concurrent_updates"', script)
+        self.assertIn(
+            'mini_app_port=${requested_mini_app_port:-$(next_mini_app_port)}',
+            script,
+        )
+        self.assertIn(
+            'webhook_port=${requested_webhook_port:-$(next_webhook_port)}',
+            script,
+        )
+        self.assertIn('webhook_listen=${requested_webhook_listen:-127.0.0.1}', script)
+        self.assertIn('"TELEGRAM_WEBHOOK_LISTEN" "$webhook_listen"', script)
+        self.assertIn('health_port=$requested_health_port', script)
+
+    def test_resource_dropin_is_rendered_from_environment_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    r'''
+source "$1"
+dropin_root=$2
+resource_dropin_dir_for() { printf '%s\n' "$dropin_root"; }
+resource_dropin_for() { printf '%s/%s.conf\n' "$dropin_root" "$1"; }
+install() { mkdir -p "${@: -1}"; }
+chown() { :; }
+chmod() { :; }
+dotenv_value() {
+    case "$3" in
+        SYSTEMD_MEMORY_HIGH_MB) printf '1700\n' ;;
+        SYSTEMD_MEMORY_MAX_MB) printf '2300\n' ;;
+        SYSTEMD_MEMORY_SWAP_MAX_MB) printf '600\n' ;;
+        SYSTEMD_TASKS_MAX) printf '300\n' ;;
+        SYSTEMD_NOFILE_LIMIT) printf '5000\n' ;;
+        SYSTEMD_CPU_QUOTA_PERCENT) printf '250\n' ;;
+        *) return 1 ;;
+    esac
+}
+sync_resource_dropin_from_env /unused/app /unused/env alpha
+cat "$dropin_root/alpha.conf"
+''',
+                    "setup-resource-test",
+                    str(SETUP),
+                    directory,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "[Service]",
+                "MemoryHigh=1700M",
+                "MemoryMax=2300M",
+                "MemorySwapMax=600M",
+                "TasksMax=300",
+                "LimitNOFILE=5000",
+                "CPUQuota=250%",
+            ],
+        )
 
     def test_manager_never_accepts_token_as_argument(self) -> None:
         script = SETUP.read_text(encoding="utf-8")
         self.assertNotIn("--token ", script)
         self.assertIn('read -r -s -p "Telegram Bot API token: "', script)
         self.assertIn("ensure_unique_token", script)
+
+    def test_install_exposes_ports_capacity_and_external_proxy_controls(self) -> None:
+        script = SETUP.read_text(encoding="utf-8")
+        for option in (
+            "--mini-app-port",
+            "--mini-app-listen",
+            "--trusted-proxy-cidrs",
+            "--health-port",
+            "--webhook-port",
+            "--memory-max-mb",
+            "--cpu-quota-percent",
+            "--allow-undersized-host",
+        ):
+            self.assertIn(option, script)
+        self.assertIn("write_resource_dropin", script)
+        self.assertIn('REVERSE_PROXY_MODE" "$reverse_proxy_mode"', script)
 
     def test_root_manager_does_not_write_the_operator_git_index(self) -> None:
         script = SETUP.read_text(encoding="utf-8")

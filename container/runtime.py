@@ -48,7 +48,9 @@ RESTART_LIMIT = 5
 RESTART_WINDOW_SECONDS = 5 * 60
 DEFAULT_START_GRACE_SECONDS = 120.0
 DEFAULT_HEALTH_INTERVAL_SECONDS = 15.0
-DEFAULT_MEMORY_LIMIT_MB = 220
+# Leave 256 MiB between the per-bot child guard and the recommended 2 GiB
+# aggregate container ceiling for the PID-1 supervisor and transient overhead.
+DEFAULT_MEMORY_LIMIT_MB = 1792
 CONTAINER_BIND_ADDRESS = str(IPv4Address(0))
 
 
@@ -156,9 +158,9 @@ class InstanceSpec:
             raise ContainerConfigurationError(
                 f"{name}: CONTAINER_INSTANCE_MEMORY_LIMIT_MB must be an integer."
             ) from error
-        if not 96 <= memory_limit_mb <= 8192:
+        if not 96 <= memory_limit_mb <= 262_144:
             raise ContainerConfigurationError(
-                f"{name}: CONTAINER_INSTANCE_MEMORY_LIMIT_MB must be 96-8192."
+                f"{name}: CONTAINER_INSTANCE_MEMORY_LIMIT_MB must be 96-262144."
             )
         raw_memory_warning = environment.get(
             "CONTAINER_INSTANCE_MEMORY_WARNING_PERCENT",
