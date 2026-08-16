@@ -107,7 +107,7 @@ Arabic stem reaches the word behind its attached particle. See
 
 Supported runtime:
 
-- Python 3.10, 3.11, or 3.12;
+- Python 3.10, 3.11, 3.12, 3.13, or 3.14;
 - Linux Docker/OCI for portable deployment;
 - Linux with `systemd` for host-native deployment;
 - a Telegram bot token;
@@ -196,7 +196,7 @@ venv/bin/python -m unittest discover -s tests -v
 
 The permanent release gate requires:
 
-- Python 3.10, 3.11, and 3.12;
+- Python 3.10, 3.11, 3.12, 3.13, and 3.14;
 - production container build and smoke test;
 - Ruff, strict mypy, and branch coverage;
 - browser unit and real Chromium tests;

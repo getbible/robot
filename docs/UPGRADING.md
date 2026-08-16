@@ -5,7 +5,7 @@ Upgrade one instance from a clean checkout of the exact reviewed target commit. 
 ## Preconditions
 
 - Target commit has green CI/security and CodeQL gates.
-- Host Python remains in the supported 3.10–3.12 range.
+- Host Python remains in the supported 3.10–3.14 range.
 - Configuration and release notes were reviewed.
 - A dedicated test instance passed the live Telegram smoke matrix.
 - Current `status` and `runtime` output were recorded.
@@ -118,7 +118,7 @@ manager-owned. Mini App and webhook ports must be unique and must not match.
 
 ## Dependency updates
 
-Maintainers edit `requirements.in` or `requirements-dev.in`, regenerate both locks with `scripts/refresh-locks.sh`, review the complete generated diff, and run the full Python 3.10–3.12 matrix. Production installs only the exact reviewed `requirements.txt` with hashes.
+Maintainers edit `requirements.in` or `requirements-dev.in`, regenerate both locks with `scripts/refresh-locks.sh`, review the complete generated diff, and run the full Python 3.10–3.14 matrix. Production installs only the exact reviewed `requirements.txt` with hashes.
 
 The Librarian policy is:
 

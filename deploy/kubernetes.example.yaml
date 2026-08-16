@@ -56,21 +56,35 @@ spec:
               value: polling
             - name: MINI_APP_ENABLED
               value: "true"
+            - name: REVERSE_PROXY_MODE
+              value: external
             - name: MINI_APP_PUBLIC_URL
               value: https://bot.example.com/getbible/production
             - name: MINI_APP_LISTEN
               value: 0.0.0.0
             - name: MINI_APP_PORT
               value: "9201"
+            # Switch delivery mode to webhook and provide its public URL and
+            # secret before routing Telegram traffic to this port.
+            - name: TELEGRAM_WEBHOOK_PORT
+              value: "9001"
             - name: HEALTH_HOST
               value: 0.0.0.0
             - name: HEALTH_PORT
               value: "8081"
             - name: CONTAINER_INSTANCE_MEMORY_LIMIT_MB
-              value: "220"
+              value: "1792"
+            - name: MAX_CONCURRENT_LOOKUPS
+              value: "8"
+            - name: MAX_CONCURRENT_SEARCHES
+              value: "4"
+            - name: MAX_CONCURRENT_UPDATES
+              value: "16"
           ports:
             - name: mini-app
               containerPort: 9201
+            - name: webhook
+              containerPort: 9001
             - name: health
               containerPort: 8081
           startupProbe:
@@ -95,12 +109,12 @@ spec:
             failureThreshold: 2
           resources:
             requests:
-              cpu: 100m
-              memory: 160Mi
+              cpu: "1"
+              memory: 1536Mi
               ephemeral-storage: 64Mi
             limits:
-              cpu: "1"
-              memory: 256Mi
+              cpu: "2"
+              memory: 2Gi
               ephemeral-storage: 256Mi
           securityContext:
             allowPrivilegeEscalation: false
@@ -139,3 +153,6 @@ spec:
     - name: mini-app
       port: 9201
       targetPort: mini-app
+    - name: webhook
+      port: 9001
+      targetPort: webhook

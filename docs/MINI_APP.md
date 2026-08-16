@@ -103,7 +103,7 @@ Do not trust `Referer`, `User-Agent`, an obscure URL, or client IP as authentica
 | Listener | Default | Exposure |
 | --- | ---: | --- |
 | Health/readiness/metrics | `127.0.0.1:8081` | private only |
-| Telegram webhook | `127.0.0.1:9001` | exact private webhook path |
+| Telegram webhook | private IP, port `9001` by default | exact private webhook path; remote-proxy access is firewall-restricted to the proxy source |
 | Mini App | `127.0.0.1:9201` | HTTPS reverse proxy only |
 
 Polling and the Mini App can run together. The Mini App listener is unrelated to Telegram update delivery.
@@ -167,4 +167,4 @@ After deployment, verify:
 
 ## Verification gate
 
-A release is not ready unless permanent CI proves Python 3.10–3.12, the production container, lint, strict typing, branch coverage, dependency and secret scans, CodeQL, public API routing, CSP parity, hash verification, bounded caches, bounded selections, real Chromium navigation, graphical select/unselect, cross-source identity, no pre-Post Robot mutation, and authoritative idempotent posting.
+A release is not ready unless permanent CI proves Python 3.10–3.14, the production container, lint, strict typing, branch coverage, dependency and secret scans, CodeQL, public API routing, CSP parity, hash verification, bounded caches, bounded selections, real Chromium navigation, graphical select/unselect, cross-source identity, no pre-Post Robot mutation, and authoritative idempotent posting.

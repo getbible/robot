@@ -24,7 +24,7 @@ Store the token outside Git with restrictive permissions. Revoke and replace it 
 |---|---:|---|---|
 | `TELEGRAM_DELIVERY_MODE` | `polling` | `polling` or `webhook` | Selects exactly one Bot API update transport |
 | `TELEGRAM_WEBHOOK_PUBLIC_URL` | empty | Required in webhook mode; HTTPS URL with a non-root private path and no credentials/query/fragment; explicit public port is 80, 88, 443, or 8443 | URL registered with Telegram |
-| `TELEGRAM_WEBHOOK_LISTEN` | `127.0.0.1` | Loopback; wildcard only when `CONTAINERIZED=true` | Private application listener behind the reverse proxy |
+| `TELEGRAM_WEBHOOK_LISTEN` | `127.0.0.1` | Specific non-link-local IP; wildcard only when `CONTAINERIZED=true` | Private application listener reachable by the selected reverse proxy |
 | `TELEGRAM_WEBHOOK_PORT` | `9001` | `1024`–`65535` | Per-instance local listener port |
 | `TELEGRAM_WEBHOOK_SECRET_TOKEN` | empty | Required in webhook mode; 32–256 safe token characters | Authenticates Telegram's webhook header |
 | `TELEGRAM_WEBHOOK_SECRET_TOKEN_FILE` | empty | Absolute readable file; mutually exclusive with direct value | Secret-mounted webhook header token |
@@ -36,7 +36,9 @@ Store the token outside Git with restrictive permissions. Revoke and replace it 
 | `BOT_SHORT_DESCRIPTION` | built-in text | 1–120 characters | Bot API short description synchronized at startup |
 
 The public reverse proxy terminates TLS and forwards the exact private URL path
-to the loopback listener. Do not expose `TELEGRAM_WEBHOOK_PORT` directly. See
+to the configured backend. Keep loopback for a same-host proxy; for a remote
+HAProxy, choose the bot host's private IP and firewall the port so only HAProxy
+can reach it. Do not expose `TELEGRAM_WEBHOOK_PORT` generally. See
 [Telegram delivery](WEBHOOKS.md).
 
 ## Telegram Mini App
@@ -44,8 +46,9 @@ to the loopback listener. Do not expose `TELEGRAM_WEBHOOK_PORT` directly. See
 | Variable | Default | Validation | Purpose |
 |---|---:|---|---|
 | `MINI_APP_ENABLED` | `false` | `true` or `false`; URL required when true | Enables the same-instance Telegram Mini App |
+| `REVERSE_PROXY_MODE` | `caddy` | `caddy` or `external` | Selects setup-managed Caddy or an operator-managed proxy such as HAProxy |
 | `MINI_APP_PUBLIC_URL` | empty | Absolute HTTPS URL; optional fixed path; no credentials, query, or fragment | URL opened by Telegram and routed by the public proxy |
-| `MINI_APP_LISTEN` | `127.0.0.1` | Loopback; wildcard only when `CONTAINERIZED=true` | Private Mini App HTTP listener |
+| `MINI_APP_LISTEN` | `127.0.0.1` | Loopback, a specific IP in external mode, or wildcard only in a container | Private Mini App HTTP listener |
 | `MINI_APP_PORT` | `9201` | `1024`–`65535`; manager-reserved and different from health/webhook ports | Per-instance Mini App listener port |
 | `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | `300` | `30`–`900` | Maximum accepted age of signed Telegram `initData` |
 | `MINI_APP_LAUNCH_TTL_SECONDS` | `300` | `30`–`900` | Lifetime of the user-bound bot launch token |
@@ -83,6 +86,12 @@ requests do. Forwarded addresses are trusted only when the direct connection
 comes from `MINI_APP_TRUSTED_PROXY_CIDRS`; untrusted forwarding headers are
 ignored. Configure the exact proxy address or network rather than a public or
 unnecessarily broad range.
+
+With `REVERSE_PROXY_MODE=external`, HAProxy forwards the public URL path to the
+bot host's exact `MINI_APP_LISTEN:MINI_APP_PORT`. Use a different port per bot,
+bind a specific private address rather than a wildcard, and firewall the port
+so only `MINI_APP_TRUSTED_PROXY_CIDRS` can reach it. An all-addresses trusted
+network such as `0.0.0.0/0` is rejected.
 
 ## Instance identity and audit logging
 
@@ -185,9 +194,9 @@ A lookup timeout does not pretend that its worker thread stopped. The capacity p
 | `SEARCH_INDEX_BUILD_SECONDS` | `120` | `1`–`600` | Bound on building one translation's search index, and the budget startup prewarming spends |
 | `SEARCH_TIMEOUT` | `150` seconds | `1`–`900` | Overall wait for one search, including the index build its first query provokes |
 | `SEARCH_MAX_RESPONSE_BYTES` | `4194304` (4 MiB) | `65536`–`16777216` | Maximum constructed Librarian search result, separate from corpus downloads |
-| `MAX_CONCURRENT_LOOKUPS` | `2` | `1`–`32` | Direct-reference/catalog worker threads and permits |
+| `MAX_CONCURRENT_LOOKUPS` | `8` | `1`–`32` | Direct-reference/catalog worker threads and permits |
 | `MAX_CONCURRENT_SEARCHES` | `4` | `1`–`64` | Concurrent searches over the shared corpus. Past the core count this adds latency, not throughput — scale out with instances |
-| `MAX_CONCURRENT_UPDATES` | `4` | `1`–`64` | Telegram updates processed concurrently |
+| `MAX_CONCURRENT_UPDATES` | `16` | `1`–`64` | Telegram updates processed concurrently |
 
 `MAX_TOTAL_VERSES` may not be lower than `MAX_VERSES_PER_REFERENCE`. Telegram text is measured in UTF-16 code units, not Python characters, before chunks are sent.
 
@@ -210,7 +219,7 @@ translations, including larger non-66-book corpora, with bounded headroom.
 It does not permit a 40 MiB search result: `SEARCH_MAX_RESPONSE_BYTES`,
 `SEARCH_RESULT_LIMIT`, and Telegram message limits remain independent. Search
 also has its own worker pool, semaphore, timeout and circuit — four workers by
-default against two for direct references — so corpus parsing and indexing
+default against eight for direct references — so corpus parsing and indexing
 cannot occupy a reference reader's permit, and a search that waits out an index
 build cannot delay one.
 
@@ -284,6 +293,14 @@ Validation errors and request-limit rejections do not count as upstream failures
 | `PREWARM_DEFAULT_TRANSLATION` | `true` | `true` or `false` | Load and index the default search corpus before readiness; safe failure does not prevent direct references |
 | `HEALTH_HOST` | `127.0.0.1` | Loopback; wildcard only when `CONTAINERIZED=true` | Health listener address |
 | `HEALTH_PORT` | `8081` | `0`–`65535`; `0` disables | Health/readiness/metrics port |
+| `CONTAINER_INSTANCE_MEMORY_LIMIT_MB` | `1792` | `96`–`262144` | Container supervisor's per-bot RSS restart guard |
+| `CONTAINER_INSTANCE_MEMORY_WARNING_PERCENT` | `80` | `50`–`95` | Percentage of the per-bot guard that emits pressure warnings |
+| `SYSTEMD_MEMORY_HIGH_MB` | `1536` | `128`–`262144` | Native systemd memory-pressure threshold |
+| `SYSTEMD_MEMORY_MAX_MB` | `2048` | `256`–`262144`; not below high | Native systemd hard memory ceiling |
+| `SYSTEMD_MEMORY_SWAP_MAX_MB` | `512` | `0`–`262144` | Native systemd swap ceiling |
+| `SYSTEMD_TASKS_MAX` | `256` | `32`–`65536` | Native systemd task ceiling |
+| `SYSTEMD_NOFILE_LIMIT` | `4096` | `256`–`1048576` | Native open-file ceiling |
+| `SYSTEMD_CPU_QUOTA_PERCENT` | `200` | `10`–`6400` | Native CPU quota; 200 equals two CPUs |
 | `LOG_LEVEL` | `INFO` | Standard Python logging level name | Structured JSON log threshold |
 
 The host-native health listener is deliberately loopback-only. Docker may bind
@@ -312,6 +329,7 @@ messages because the conversation is already private.
 TELEGRAM_API_TOKEN="123456789:replace-with-real-secret"
 TELEGRAM_DELIVERY_MODE="polling"
 MINI_APP_ENABLED="true"
+REVERSE_PROXY_MODE="external"
 MINI_APP_PUBLIC_URL="https://bot.example.com/getbible/production"
 MINI_APP_LISTEN="127.0.0.1"
 MINI_APP_PORT="9201"
@@ -341,10 +359,18 @@ GETBIBLE_API_BASE_URL="https://api.getbible.net"
 GETBIBLE_WEB_BASE_URL="https://getbible.life"
 GETBIBLE_MAX_RESPONSE_BYTES="41943040"
 SEARCH_MAX_RESPONSE_BYTES="4194304"
+MAX_CONCURRENT_LOOKUPS="8"
 MAX_CONCURRENT_SEARCHES="4"
+MAX_CONCURRENT_UPDATES="16"
 PREWARM_DEFAULT_TRANSLATION="true"
 HEALTH_HOST="127.0.0.1"
 HEALTH_PORT="8081"
+SYSTEMD_MEMORY_HIGH_MB="1536"
+SYSTEMD_MEMORY_MAX_MB="2048"
+SYSTEMD_MEMORY_SWAP_MAX_MB="512"
+SYSTEMD_TASKS_MAX="256"
+SYSTEMD_NOFILE_LIMIT="4096"
+SYSTEMD_CPU_QUOTA_PERCENT="200"
 LOG_LEVEL="INFO"
 ```
 
@@ -376,15 +402,27 @@ application's own `Settings` object:
 |---|---|---|
 | `ROBOT_IMAGE` | `ghcr.io/getbible/robot:2.1.0` | Exact published runtime image |
 | `ROBOT_CONTAINER_NAME` | `getbible-robot-production` | Stable container identity |
-| `ROBOT_MEMORY_LIMIT` | `256m` | Aggregate container memory ceiling |
-| `ROBOT_MEMORY_RESERVATION` | `160m` | Compose memory reservation |
-| `ROBOT_CPU_LIMIT` | `1` | Container CPU quota |
-| `ROBOT_PIDS_LIMIT` | `48` | Container process/thread ceiling |
+| `ROBOT_MEMORY_LIMIT` | `2g` | Aggregate container memory ceiling |
+| `ROBOT_MEMORY_RESERVATION` | `1536m` | Compose memory reservation |
+| `ROBOT_CPU_LIMIT` | `2` | Container CPU quota |
+| `ROBOT_PIDS_LIMIT` | `256` | Container process/thread ceiling |
 | `ROBOT_TMPFS_SIZE` | `16m` | Bounded writable `/tmp` |
 | `ROBOT_LOG_MAX_SIZE` | `10m` | Per-file Docker log bound |
 | `ROBOT_LOG_MAX_FILES` | `3` | Docker log retention count |
+| `CONTAINER_INSTANCE_MEMORY_LIMIT_MB` | `1792` | Per-bot RSS restart guard, leaving supervisor headroom below the container ceiling |
+| `CONTAINER_INSTANCE_MEMORY_WARNING_PERCENT` | `80` | Percentage of the per-bot guard that emits memory-pressure warnings |
+| `MINI_APP_HOST_PORT` | `9201` | Host port forwarded to the container Mini App listener |
+| `MINI_APP_BIND_ADDRESS` | `127.0.0.1` | Host address accepting Mini App proxy traffic |
+| `TELEGRAM_WEBHOOK_HOST_PORT` | `9001` | Host port forwarded to the optional Telegram webhook listener |
+| `TELEGRAM_WEBHOOK_BIND_ADDRESS` | `127.0.0.1` | Host address accepting webhook proxy traffic |
 
 `docker-init` generates the complete editable example. `docker-validate`
 pulls and validates `ROBOT_IMAGE`; `docker-update` then recreates the workload
 from that image. `ROBOT_BUILD_IMAGE` applies only when the operator explicitly
 adds `--build` to use `compose.build.yaml`.
+
+The recommended production host has at least 8 GiB RAM and four logical CPUs
+(an operational proxy for i3-class or stronger hardware). Treat the one-bot
+values above as a starting profile and keep operating-system and proxy
+headroom. For multiple bots, apply the limits per container or size a
+multi-bot container for the sum of its per-instance guards.

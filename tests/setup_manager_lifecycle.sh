@@ -101,6 +101,10 @@ install_host_prerequisites() {
     :
 }
 
+host_capacity_preflight() {
+    :
+}
+
 preflight_mini_app_dns() {
     printf '%s\n' "$2" >>"$DNS_LOG"
     [[ ${FAIL_DNS_PREFLIGHT:-0} != "1" ]]
@@ -447,6 +451,9 @@ assert_file "$(log_file_for alpha)"
 assert_file "$(log_file_for beta)"
 assert_file "$MANAGER_PATH"
 assert_file "$UNIT_PATH"
+assert_file "$(resource_dropin_for alpha)"
+assert_contains "$(resource_dropin_for alpha)" "MemoryMax=2048M"
+assert_contains "$(resource_dropin_for alpha)" "CPUQuota=200%"
 assert_file "$LOGROTATE_PATH"
 assert_dir "$(application_dir_for alpha)"
 assert_dir "$(application_dir_for beta)"
@@ -715,6 +722,7 @@ assert_contains "$(help_file_for alpha)" "Fixture operator help."
 cmd_delivery alpha <<EOF
 webhook
 https://bot.example.com/telegram/alpha
+127.0.0.1
 9101
 
 y
@@ -723,6 +731,8 @@ assert_contains "$(environment_file_for alpha)" \
     'TELEGRAM_DELIVERY_MODE="webhook"'
 assert_contains "$(environment_file_for alpha)" \
     'TELEGRAM_WEBHOOK_PUBLIC_URL="https://bot.example.com/telegram/alpha"'
+assert_contains "$(environment_file_for alpha)" \
+    'TELEGRAM_WEBHOOK_LISTEN="127.0.0.1"'
 assert_contains "$(environment_file_for alpha)" \
     'TELEGRAM_WEBHOOK_PORT="9101"'
 

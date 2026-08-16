@@ -50,6 +50,8 @@ class ContainerRuntimeTestCase(unittest.TestCase):
                     "/production/state/preferences.sqlite3"
                 )
             )
+            self.assertEqual(spec.memory_limit_bytes, 1792 * 1024 * 1024)
+            self.assertEqual(spec.memory_warning_percent, 80)
 
     def test_single_instance_strips_every_forbidden_process_variable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -169,6 +171,19 @@ class ContainerRuntimeTestCase(unittest.TestCase):
         self.assertIn("cap_drop:", compose)
         self.assertIn('ROBOT_MODE: "single"', compose)
         self.assertIn('TELEGRAM_API_TOKEN: "${TELEGRAM_API_TOKEN:-}"', compose)
+        for single in (compose, single_compose):
+            with self.subTest(asset="single-resource-profile"):
+                self.assertIn('mem_limit: "${ROBOT_MEMORY_LIMIT:-2g}"', single)
+                self.assertIn(
+                    'mem_reservation: "${ROBOT_MEMORY_RESERVATION:-1536m}"',
+                    single,
+                )
+                self.assertIn('cpus: "${ROBOT_CPU_LIMIT:-2}"', single)
+                self.assertIn('pids_limit: "${ROBOT_PIDS_LIMIT:-256}"', single)
+                self.assertIn("TELEGRAM_WEBHOOK_HOST_PORT:-9001", single)
+                self.assertIn("MAX_CONCURRENT_LOOKUPS:-8", single)
+                self.assertIn("MAX_CONCURRENT_SEARCHES:-4", single)
+                self.assertIn("MAX_CONCURRENT_UPDATES:-16", single)
         self.assertIn("./docker/instances:/config/instances:ro", multi_compose)
         self.assertNotIn("build:", multi_compose)
         self.assertIn('ROBOT_MODE: "single"', single_compose)

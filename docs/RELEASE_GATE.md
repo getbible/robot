@@ -81,7 +81,7 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 
 ## Runtime and concurrency
 
-- Python 3.10, 3.11, and 3.12 deterministic suites pass.
+- Python 3.10, 3.11, 3.12, 3.13, and 3.14 deterministic suites pass.
 - Ruff, strict mypy, and branch coverage pass.
 - Fixed executors and semaphores prevent unbounded queued work.
 - Timeout cancellation does not prematurely release real worker capacity.

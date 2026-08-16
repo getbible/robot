@@ -17,13 +17,23 @@ concurrency:
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    name: Python ${{ matrix.python-version }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        include:
+          - python-version: "3.10"
+            os: ubuntu-24.04
+          - python-version: "3.11"
+            os: ubuntu-24.04
+          - python-version: "3.12"
+            os: ubuntu-24.04
+          - python-version: "3.13"
+            os: ubuntu-24.04
+          - python-version: "3.14"
+            os: ubuntu-26.04
 
     steps:
       - name: Checkout
@@ -88,7 +98,7 @@ jobs:
 
   quality:
     name: Quality and security
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
 
     steps:
@@ -98,7 +108,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
@@ -299,13 +309,16 @@ jobs:
           docker build --pull --tag getbible-robot:ci . \
             2>&1 | tee "${RUNNER_TEMP}/docker-build.log"
 
-      - name: Smoke test image contract
+      - name: Smoke test Python 3.14 image contract
         shell: bash
         run: |
           set -o pipefail
           docker run --rm --entrypoint python getbible-robot:ci \
-            -c 'from config import Settings; from container.runtime import ContainerSupervisor' \
+            -c 'import sys; print(sys.version); assert sys.version_info[:2] == (3, 14)' \
             2>&1 | tee "${RUNNER_TEMP}/docker-smoke.log"
+          docker run --rm --entrypoint python getbible-robot:ci \
+            -c 'from config import Settings; from container.runtime import ContainerSupervisor' \
+            2>&1 | tee -a "${RUNNER_TEMP}/docker-smoke.log"
           docker run --rm getbible-robot:ci --help \
             2>&1 | tee -a "${RUNNER_TEMP}/docker-smoke.log"
           docker run --rm --entrypoint /app/setup.sh \

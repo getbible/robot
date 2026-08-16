@@ -21,6 +21,7 @@ services:
     # remain internal unless an operator has a specific diagnostic need.
     ports:
       - "${MINI_APP_BIND_ADDRESS:-127.0.0.1}:${MINI_APP_HOST_PORT:-9201}:9201"
+      - "${TELEGRAM_WEBHOOK_BIND_ADDRESS:-127.0.0.1}:${TELEGRAM_WEBHOOK_HOST_PORT:-9001}:9001"
     read_only: true
     tmpfs:
       - "/tmp:size=${ROBOT_TMPFS_SIZE:-16m},mode=1777"
@@ -28,10 +29,10 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    pids_limit: "${ROBOT_PIDS_LIMIT:-64}"
-    mem_limit: "${ROBOT_MEMORY_LIMIT:-320m}"
-    mem_reservation: "${ROBOT_MEMORY_RESERVATION:-192m}"
-    cpus: "${ROBOT_CPU_LIMIT:-1.5}"
+    pids_limit: "${ROBOT_PIDS_LIMIT:-256}"
+    mem_limit: "${ROBOT_MEMORY_LIMIT:-2g}"
+    mem_reservation: "${ROBOT_MEMORY_RESERVATION:-1536m}"
+    cpus: "${ROBOT_CPU_LIMIT:-2}"
     stop_grace_period: "${ROBOT_STOP_GRACE_PERIOD:-45s}"
     logging:
       driver: local

@@ -5,7 +5,8 @@ GetBible Robot supports exactly one Telegram delivery mode per instance:
 - **polling**: the robot asks Telegram for updates. It needs outbound HTTPS only
   and is the simplest mode for testing or a private server;
 - **webhook**: Telegram sends each update as an HTTPS `POST` to a public URL.
-  The robot listens only on loopback behind a reverse proxy.
+  The robot listens on a specific private backend address behind a reverse
+  proxy; wildcard native listeners are rejected.
 
 Telegram does not provide a WebSocket stream for Bot API updates. Long polling
 and webhooks are mutually exclusive for one bot token. Starting polling removes
@@ -53,7 +54,7 @@ Prepare:
 - a valid public TLS certificate;
 - inbound TCP on public port 443 (Telegram also supports 80, 88, and 8443);
 - a reverse proxy that forwards only the private webhook path to the selected
-  loopback port.
+  bot-host IP and per-instance webhook port.
 
 During `sudo ./setup.sh install`, choose `webhook` and provide a URL such as:
 
@@ -65,14 +66,15 @@ The manager generates a high-entropy webhook secret. Telegram includes it in
 the `X-Telegram-Bot-Api-Secret-Token` request header, and the application
 rejects requests that do not match.
 
-The loopback listener remains private:
+For HAProxy on another host, use a private bot-host address:
 
 ```text
 Public: https://bot.example.com/telegram/production
-Local:  http://127.0.0.1:9001/telegram/production
+Backend: http://10.0.0.20:9001/telegram/production
 ```
 
-Do not open port 9001 in the host or cloud firewall.
+Allow port 9001 only from the HAProxy source address in the host and cloud
+firewalls. Use `127.0.0.1` instead when the proxy runs on the bot host.
 
 ## Optional webhook proxy
 
@@ -83,13 +85,13 @@ the values printed by setup:
 
 ```caddyfile
 telegram-bot.example.com {
-    reverse_proxy /telegram/production 127.0.0.1:9001
+    reverse_proxy /telegram/production 10.0.0.20:9001
 }
 ```
 
 The setup-managed Mini App Caddy routes are independent. Do not edit their
-generated file, forward a webhook to the Mini App port, or weaken either
-listener's loopback binding.
+generated file, forward a webhook to the Mini App port, use a wildcard native
+listener, or expose either backend to untrusted networks.
 
 ## Change delivery after installation
 
@@ -99,7 +101,7 @@ The manager performs a validated, rollback-capable switch:
 sudo getbible-robot delivery production
 ```
 
-For webhook mode, it asks for the public HTTPS URL, local loopback port,
+For webhook mode, it asks for the public HTTPS URL, backend bind IP and port,
 optional fixed public IP, and proxy readiness. For polling mode, the Telegram
 library removes the webhook before polling starts. If the selected active mode
 does not become ready, the manager restores the previous environment and

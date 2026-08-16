@@ -37,15 +37,18 @@ Running `sudo getbible-robot` without a command opens the operations menu.
 ## Supported host
 
 - Linux with `systemd`.
-- Python 3.10, 3.11, or 3.12.
+- Python 3.10, 3.11, 3.12, 3.13, or 3.14.
 - Outbound HTTPS to Telegram, PyPI during installation, GitHub when cloning, and `https://api.getbible.net` at runtime.
 - `git`, `curl`, `tar`, `logrotate`, `iproute2`, and the matching Python `venv` package.
 - A dedicated Telegram Bot API token from `@BotFather` for each running instance.
-- Public DNS plus inbound TCP `80`/`443` when the Telegram Mini App is enabled.
-  Setup manages Caddy automatic HTTPS on the host.
-- Do not expose the assigned Mini App port (`9201` by default), webhook port, or
-  health port in the host or cloud firewall. They are private loopback
-  listeners; only Caddy receives public Mini App traffic on `80`/`443`.
+- Production sizing of at least 8 GiB RAM and four logical CPUs (the measurable
+  proxy for an i3-class or stronger host). Smaller hosts require the explicit
+  `--allow-undersized-host` override and deliberately lower limits.
+- Public DNS plus HTTPS when the Mini App is enabled. Setup can manage Caddy or
+  preserve an external HAProxy deployment.
+- In Caddy mode, keep the Mini App, webhook, and health ports on loopback. In
+  external mode, expose each Mini App backend port only to the HAProxy source
+  CIDR; never expose health or webhook listeners as general public services.
 - Administrator access for the bot in every group where private Bible/search
   workflows and clean-chat deletion are required. Bot API 10.2 permits an
   administrator to deliver per-user ephemeral panels even when a catalog or
@@ -63,10 +66,11 @@ On Debian, Ubuntu, Fedora, or another `dnf` host, the manager offers to install 
 4. the Telegram display name, short description, and description;
 5. the default GetBible translation, with KJV selected by default;
 6. polling or HTTPS webhook delivery;
-7. for webhook mode, the public URL, local loopback port, optional fixed public
-   IP, and confirmation that the reverse proxy is ready;
-8. whether to enable the Telegram Mini App and, when enabled, its already
-   resolving public HTTPS URL plus unique loopback port;
+7. for webhook mode, the public URL, private backend bind IP and port, optional
+   fixed public IP, and confirmation that the reverse proxy is ready;
+8. whether to enable the Telegram Mini App and use managed Caddy or external
+   HAProxy; external mode asks for one unique backend port, bot-host bind IP,
+   and the exact trusted HAProxy source CIDR;
 9. a unique loopback health/metrics port;
 10. metadata-only or content audit logging;
 11. whether handled Telegram command messages should be deleted;

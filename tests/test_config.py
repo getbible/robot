@@ -39,8 +39,8 @@ class SettingsTestCase(unittest.TestCase):
             settings.search_shared_corpus_limit,
             settings.search_corpus_limit,
         )
-        self.assertEqual(settings.max_concurrent_lookups, 2)
-        self.assertEqual(settings.max_concurrent_updates, 4)
+        self.assertEqual(settings.max_concurrent_lookups, 8)
+        self.assertEqual(settings.max_concurrent_updates, 16)
         self.assertTrue(settings.prewarm_default_translation)
         self.assertEqual(settings.telegram_delivery_mode, "polling")
         self.assertFalse(settings.mini_app_enabled)
@@ -85,6 +85,148 @@ class SettingsTestCase(unittest.TestCase):
         )
         self.assertTrue(settings.mini_app_access_log)
 
+    def test_external_proxy_uses_specific_backend_and_trusted_source(self) -> None:
+        with patch.dict(
+            os.environ,
+            self.environment(
+                MINI_APP_ENABLED="true",
+                MINI_APP_PUBLIC_URL="https://bot.example.com/getbible/app",
+                REVERSE_PROXY_MODE="external",
+                MINI_APP_LISTEN="10.0.0.20",
+                MINI_APP_PORT="9250",
+                MINI_APP_TRUSTED_PROXY_CIDRS="10.0.0.5/32",
+            ),
+            clear=True,
+        ):
+            settings = Settings.from_env(load_environment_file=False)
+        self.assertEqual(settings.reverse_proxy_mode, "external")
+        self.assertEqual(settings.mini_app_listen, "10.0.0.20")
+        self.assertEqual(settings.mini_app_trusted_proxy_cidrs, ("10.0.0.5/32",))
+
+    def test_external_proxy_requires_an_explicit_safe_network_boundary(self) -> None:
+        with patch.dict(
+            os.environ,
+            self.environment(
+                REVERSE_PROXY_MODE="external",
+                MINI_APP_ENABLED="true",
+                MINI_APP_PUBLIC_URL="https://bot.example.com/getbible/app",
+                MINI_APP_LISTEN="10.20.30.40",
+                MINI_APP_TRUSTED_PROXY_CIDRS="10.20.30.5/32,2001:db8::5/128",
+            ),
+            clear=True,
+        ):
+            settings = Settings.from_env(load_environment_file=False)
+
+        self.assertEqual(settings.reverse_proxy_mode, "external")
+        self.assertEqual(settings.mini_app_listen, "10.20.30.40")
+        self.assertEqual(
+            settings.mini_app_trusted_proxy_cidrs,
+            ("10.20.30.5/32", "2001:db8::5/128"),
+        )
+
+        invalid = (
+            {"REVERSE_PROXY_MODE": "nginx"},
+            {
+                "REVERSE_PROXY_MODE": "external",
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://bot.example.com/getbible/app",
+                "MINI_APP_LISTEN": "0.0.0.0",
+                "MINI_APP_TRUSTED_PROXY_CIDRS": "10.20.30.5/32",
+            },
+            {
+                "REVERSE_PROXY_MODE": "external",
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://bot.example.com/getbible/app",
+                "MINI_APP_LISTEN": "10.20.30.40",
+                "MINI_APP_TRUSTED_PROXY_CIDRS": "0.0.0.0/0",
+            },
+            {
+                "REVERSE_PROXY_MODE": "external",
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://bot.example.com/getbible/app",
+                "MINI_APP_LISTEN": "2001:db8::40",
+                "MINI_APP_TRUSTED_PROXY_CIDRS": "::/0",
+            },
+        )
+        for overrides in invalid:
+            with (
+                self.subTest(overrides=overrides),
+                patch.dict(
+                    os.environ,
+                    self.environment(**overrides),
+                    clear=True,
+                ),
+                self.assertRaises(ConfigurationError),
+            ):
+                Settings.from_env(load_environment_file=False)
+
+    def test_enabled_listener_ports_must_be_pairwise_distinct(self) -> None:
+        common = {
+            "TELEGRAM_DELIVERY_MODE": "webhook",
+            "TELEGRAM_WEBHOOK_PUBLIC_URL": "https://bot.example.com/telegram/live",
+            "TELEGRAM_WEBHOOK_SECRET_TOKEN": "A" * 32,
+            "MINI_APP_ENABLED": "true",
+            "MINI_APP_PUBLIC_URL": "https://bot.example.com/getbible/app",
+        }
+        with patch.dict(
+            os.environ,
+            self.environment(
+                **common,
+                TELEGRAM_WEBHOOK_PORT="9101",
+                MINI_APP_PORT="9201",
+                HEALTH_PORT="8081",
+            ),
+            clear=True,
+        ):
+            settings = Settings.from_env(load_environment_file=False)
+
+        self.assertEqual(settings.webhook_port, 9101)
+        self.assertEqual(settings.mini_app_port, 9201)
+        self.assertEqual(settings.health_port, 8081)
+
+        for collision in (
+            {
+                "TELEGRAM_WEBHOOK_PORT": "9101",
+                "MINI_APP_PORT": "9101",
+                "HEALTH_PORT": "8081",
+            },
+            {
+                "TELEGRAM_WEBHOOK_PORT": "9101",
+                "MINI_APP_PORT": "8081",
+                "HEALTH_PORT": "8081",
+            },
+            {
+                "TELEGRAM_WEBHOOK_PORT": "8081",
+                "MINI_APP_PORT": "9201",
+                "HEALTH_PORT": "8081",
+            },
+        ):
+            with (
+                self.subTest(collision=collision),
+                patch.dict(
+                    os.environ,
+                    self.environment(**common, **collision),
+                    clear=True,
+                ),
+                self.assertRaises(ConfigurationError),
+            ):
+                Settings.from_env(load_environment_file=False)
+
+    def test_webhook_listener_supports_a_specific_remote_proxy_backend(self) -> None:
+        with patch.dict(
+            os.environ,
+            self.environment(
+                TELEGRAM_DELIVERY_MODE="webhook",
+                TELEGRAM_WEBHOOK_PUBLIC_URL="https://bot.example.com/telegram/live",
+                TELEGRAM_WEBHOOK_SECRET_TOKEN="A" * 32,
+                TELEGRAM_WEBHOOK_LISTEN="10.0.0.20",
+            ),
+            clear=True,
+        ):
+            settings = Settings.from_env(load_environment_file=False)
+
+        self.assertEqual(settings.webhook_listen, "10.0.0.20")
+
     def test_mini_app_configuration_fails_closed(self) -> None:
         invalid = (
             {"MINI_APP_ENABLED": "true"},
@@ -127,6 +269,13 @@ class SettingsTestCase(unittest.TestCase):
                 "MINI_APP_ENABLED": "true",
                 "MINI_APP_PUBLIC_URL": "https://bot.example.com/app",
                 "MINI_APP_TRUSTED_PROXY_CIDRS": "not-a-network",
+            },
+            {
+                "MINI_APP_ENABLED": "true",
+                "MINI_APP_PUBLIC_URL": "https://bot.example.com/app",
+                "REVERSE_PROXY_MODE": "external",
+                "MINI_APP_LISTEN": "10.0.0.20",
+                "MINI_APP_TRUSTED_PROXY_CIDRS": "0.0.0.0/0",
             },
             {
                 "MINI_APP_ENABLED": "true",
