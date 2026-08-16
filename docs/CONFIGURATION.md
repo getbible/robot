@@ -48,8 +48,8 @@ and routing policy. Do not expose `TELEGRAM_WEBHOOK_PORT` generally. See
 | `MINI_APP_ENABLED` | `false` | `true` or `false`; URL required when true | Enables the same-instance Telegram Mini App |
 | `REVERSE_PROXY_MODE` | `caddy` | `caddy` or `external` | Selects setup-managed Caddy or an existing operator-managed reverse proxy |
 | `MINI_APP_PUBLIC_URL` | empty | Absolute HTTPS URL; optional fixed path; no credentials, query, or fragment | URL opened by Telegram and routed by the public proxy |
-| `MINI_APP_LISTEN` | `127.0.0.1` | Loopback, a specific IP, or wildcard in external mode | Mini App HTTP listener used by the reverse proxy |
-| `MINI_APP_PORT` | `9201` | `1024`–`65535`; manager-reserved and different from health/webhook ports | Per-instance Mini App listener port |
+| `MINI_APP_LISTEN` | `127.0.0.1` globally; setup uses `0.0.0.0` in external mode | Loopback, a specific IP, or wildcard in external mode | Bot-host address where the Mini App listens |
+| `MINI_APP_PORT` | `9201` | `1024`–`65535`; manager-reserved and different from health/webhook ports | Public Mini App port opened on the bot host in external mode |
 | `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | `300` | `30`–`900` | Maximum accepted age of signed Telegram `initData` |
 | `MINI_APP_LAUNCH_TTL_SECONDS` | `300` | `30`–`900` | Lifetime of the user-bound bot launch token |
 | `MINI_APP_SESSION_TTL_SECONDS` | `900` | `60`–`3600` | Absolute lifetime of authenticated server-side Mini App state |
@@ -88,10 +88,12 @@ accepts the reverse proxy's forwarded client address. The optional
 `MINI_APP_TRUSTED_PROXY_CIDRS` setting can narrow that behavior when desired.
 
 With `REVERSE_PROXY_MODE=external`, the existing reverse proxy forwards the
-public URL path to `MINI_APP_LISTEN:MINI_APP_PORT`. Keep `127.0.0.1` when the
-proxy runs on the bot host; use a private address or wildcard listener when it
-runs elsewhere. Use a different port per bot. The application does not impose
-firewall policy on this operator-managed network path.
+public URL path to the bot host's selected `MINI_APP_PORT`. Setup binds
+`0.0.0.0` in this mode so network traffic can reach that port and prints the
+exact reverse-proxy target. Use a different port per bot. Caddy is not involved
+in external mode. `--mini-app-listen` and `MINI_APP_LISTEN` remain advanced
+overrides; the application does not impose firewall policy on this
+operator-managed network path.
 
 ## Instance identity and audit logging
 
