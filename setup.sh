@@ -48,8 +48,6 @@ CADDY_TRANSACTION_DIR=""
 CADDY_WAS_ACTIVE=""
 CADDY_WAS_ENABLED=""
 
-RECOMMENDED_HOST_MEMORY_KIB=$((8 * 1024 * 1024))
-RECOMMENDED_HOST_LOGICAL_CPUS=4
 DEFAULT_SYSTEMD_MEMORY_HIGH_MB=1536
 DEFAULT_SYSTEMD_MEMORY_MAX_MB=2048
 DEFAULT_SYSTEMD_MEMORY_SWAP_MAX_MB=512
@@ -183,7 +181,6 @@ Install options:
   --tasks-max N                 systemd task ceiling (default 256)
   --nofile-limit N              Open-file ceiling (default 4096)
   --cpu-quota-percent N         systemd CPU quota; 200 means two CPUs
-  --allow-undersized-host       Explicitly allow less than 8 GiB RAM or 4 CPUs
 EOF
 }
 
@@ -232,28 +229,6 @@ resource_dropin_dir_for() {
 
 resource_dropin_for() {
     printf '%s/resources.conf\n' "$(resource_dropin_dir_for "$1")"
-}
-
-host_capacity_preflight() {
-    local allow_undersized=${1:-false}
-    local memory_kib=0
-    local logical_cpus=0
-    if [[ -r /proc/meminfo ]]; then
-        memory_kib=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo)
-    fi
-    if command -v nproc >/dev/null 2>&1; then
-        logical_cpus=$(nproc)
-    else
-        logical_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '0\n')
-    fi
-    if ((memory_kib >= RECOMMENDED_HOST_MEMORY_KIB &&
-        logical_cpus >= RECOMMENDED_HOST_LOGICAL_CPUS)); then
-        return
-    fi
-    warn "The recommended production host has at least 8 GiB RAM and 4 logical CPUs (an operational proxy for an i3-class or stronger server)."
-    warn "Detected: $((memory_kib / 1024)) MiB RAM and ${logical_cpus} logical CPU(s)."
-    [[ "$allow_undersized" == "true" ]] ||
-        die "Use --allow-undersized-host only after choosing lower per-instance limits intentionally."
 }
 
 validate_external_proxy_network() {
@@ -1889,7 +1864,6 @@ cmd_install() {
     local requested_webhook_port=""
     local requested_health_port=""
     local requested_reverse_proxy_mode=""
-    local allow_undersized_host="false"
     local max_concurrent_lookups=$DEFAULT_MAX_CONCURRENT_LOOKUPS
     local max_concurrent_searches=$DEFAULT_MAX_CONCURRENT_SEARCHES
     local max_concurrent_updates=$DEFAULT_MAX_CONCURRENT_UPDATES
@@ -1986,10 +1960,6 @@ cmd_install() {
                 cpu_quota_percent=$2
                 shift 2
                 ;;
-            --allow-undersized-host)
-                allow_undersized_host="true"
-                shift
-                ;;
             *) die "Unknown install option: $1" ;;
         esac
     done
@@ -2018,7 +1988,6 @@ cmd_install() {
         "$tasks_max" "$nofile_limit" "$cpu_quota_percent"
 
     install_host_prerequisites
-    host_capacity_preflight "$allow_undersized_host"
     local source_dir
     local source_url
     local sha

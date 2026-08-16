@@ -18,7 +18,8 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Scalable native and proxy deployment
 
-- Raised the production profile for an 8 GiB, four-logical-CPU-or-better host:
+- Raised the default production profile for an 8 GiB, i3-class host without
+  imposing a RAM or CPU eligibility gate during setup:
   eight lookup workers, four CPU-bound search workers, sixteen concurrent
   updates, a 2 GiB per-instance memory ceiling, and matching task, file, swap,
   CPU, Docker, multi-container, and Kubernetes limits. Every limit remains an
