@@ -29,9 +29,12 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   uninstall instead of documenting environment variables that systemd could
   not consume.
 - Added generic external reverse-proxy mode for native Mini Apps. Setup asks
-  only for the backend port and listen address, keeps loopback as the default,
-  skips Caddy, and leaves the proxy/firewall boundary under operator control.
-  The mode works with HAProxy, Traefik, Nginx, or another HTTP reverse proxy.
+  for one public Mini App port on the bot host, binds all host interfaces by
+  default so a remote proxy can reach it, skips Caddy, and leaves the
+  proxy/firewall boundary under operator control. The mode works with HAProxy,
+  Traefik, Nginx, or another HTTP reverse proxy. The listen-address override is
+  still available for advanced deployments. Managed Caddy continues to own
+  public HTTPS port 443 and forward to loopback.
 - Made webhook backends independently configurable. Polling opens no webhook
   listener; webhook mode records a separate specific bind IP and per-instance
   port so a same-host or remote proxy can forward HTTPS without sharing the

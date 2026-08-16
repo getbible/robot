@@ -248,6 +248,7 @@ ss() {
     local instance
     local app_dir
     local env_file
+    local listen
     local port
     while IFS= read -r instance; do
         app_dir=$(application_dir_for "$instance")
@@ -257,8 +258,9 @@ ss() {
             continue
         [[ "$(<"$(service_state_file "$(service_name_for "$instance")")")" == "active" ]] ||
             continue
+        listen=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_LISTEN")
         port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
-        printf 'LISTEN 0 128 127.0.0.1:%s\n' "$port"
+        printf 'LISTEN 0 128 %s:%s\n' "${listen:-127.0.0.1}" "$port"
     done < <(instance_names)
 }
 
@@ -647,6 +649,74 @@ assert_contains "$CADDY_ROUTES" "reverse_proxy 127.0.0.1:9201"
 assert_equal "$(grep -Fc "$CADDY_IMPORT_BEGIN" "$CADDYFILE")" "1"
 assert_file "$(service_enabled_file caddy.service)"
 cmd_doctor alpha
+
+# A manually selected Mini App port remains reserved even when the owning bot
+# is stopped. Initial install must reject it without relying on a live socket.
+cmd_stop alpha
+if (
+    cmd_install \
+        --source "$SOURCE_DIR" \
+        --reverse-proxy external \
+        --mini-app-port 9201 <<EOF
+
+delta
+246813579:ABCDEFGHIJKLMNOPQRSTUVWXYZabcde1234
+246813579:ABCDEFGHIJKLMNOPQRSTUVWXYZabcde1234
+
+
+
+
+
+y
+https://bot.example.com/getbible/delta
+EOF
+)
+then
+    fail "an already assigned Mini App port was accepted during install"
+fi
+assert_absent "$(metadata_file_for delta)"
+assert_absent "$(environment_file_for delta)"
+cmd_start alpha
+
+CADDY_ROUTES_HASH=$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')
+cmd_install \
+    --source "$SOURCE_DIR" \
+    --reverse-proxy external \
+    --mini-app-port 9250 <<EOF
+
+delta
+246813579:ABCDEFGHIJKLMNOPQRSTUVWXYZabcde1234
+246813579:ABCDEFGHIJKLMNOPQRSTUVWXYZabcde1234
+
+
+
+
+
+y
+https://bot.example.com/getbible/delta
+0
+
+
+n
+y
+n
+EOF
+assert_contains "$(environment_file_for delta)" 'MINI_APP_ENABLED="true"'
+assert_contains "$(environment_file_for delta)" 'REVERSE_PROXY_MODE="external"'
+assert_contains "$(environment_file_for delta)" 'MINI_APP_LISTEN="0.0.0.0"'
+assert_contains "$(environment_file_for delta)" 'MINI_APP_PORT="9250"'
+assert_equal "$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')" \
+    "$CADDY_ROUTES_HASH"
+cmd_start delta
+cmd_doctor delta
+cmd_uninstall delta <<EOF
+delta
+y
+y
+EOF
+assert_absent "$(metadata_file_for delta)"
+assert_equal "$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')" \
+    "$CADDY_ROUTES_HASH"
 
 cmd_miniapp alpha <<EOF
 n

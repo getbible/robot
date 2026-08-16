@@ -70,8 +70,8 @@ On Debian, Ubuntu, Fedora, or another `dnf` host, the manager offers to install 
 7. for webhook mode, the public URL, private backend bind IP and port, optional
    fixed public IP, and confirmation that the reverse proxy is ready;
 8. whether to enable the Telegram Mini App and use managed Caddy or an existing
-   external reverse proxy; external mode asks only for the backend port and
-   listen address (loopback remains the default);
+   external reverse proxy; external mode asks for the public Mini App port on
+   the bot host and listens on all host interfaces by default;
 9. a unique loopback health/metrics port;
 10. metadata-only or content audit logging;
 11. whether handled Telegram command messages should be deleted;
@@ -95,6 +95,14 @@ path-preserving route, validates and reloads Caddy, and verifies the final
 certificate and response. The Mini App application itself remains on a
 separate loopback listener. See
 [Mini App deployment](MINI_APP.md).
+
+Managed Caddy always accepts the public Mini App URL on HTTPS port 443 and
+forwards it to a loopback application listener. When an existing proxy runs on
+another host, choose external mode instead: Caddy is not part of that path.
+The external proxy accepts public HTTPS and targets the printed bot-host IP and
+selected `MINI_APP_PORT`. External mode binds `0.0.0.0` so that port is
+network-accessible. An advanced deployment can override the address with
+`--mini-app-listen` or `MINI_APP_LISTEN`; setup does not change firewall rules.
 
 ## Instance and account names
 

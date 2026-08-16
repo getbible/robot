@@ -168,8 +168,8 @@ numbered selector. Non-interactive commands must provide the instance name.
 
 Install options:
   --source DIR                  Reviewed source checkout
-  --mini-app-listen IP          Mini App listen address (default 127.0.0.1)
-  --mini-app-port PORT          Reverse-proxy backend port for the Mini App
+  --mini-app-listen IP          Advanced Mini App listen-address override
+  --mini-app-port PORT          Port where this bot's Mini App is available
   --webhook-listen IP           Bot-host IP reachable by the webhook proxy
   --webhook-port PORT           Reverse-proxy backend port for webhook traffic
   --health-port PORT            Private health/metrics listener (0 disables)
@@ -1476,6 +1476,10 @@ values = dotenv_values(sys.argv[1])
 public = urlsplit(values["MINI_APP_PUBLIC_URL"])
 port = int(values["MINI_APP_PORT"])
 listen = values.get("MINI_APP_LISTEN", "127.0.0.1")
+if listen == "0.0.0.0":
+    listen = "127.0.0.1"
+elif listen == "::":
+    listen = "::1"
 if ":" in listen and not listen.startswith("["):
     listen = f"[{listen}]"
 path = public.path.rstrip("/")
@@ -2121,9 +2125,10 @@ cmd_install() {
             reverse_proxy_mode="external"
         fi
         if [[ "$reverse_proxy_mode" == "caddy" ]]; then
-            printf 'The manager configures Caddy automatic HTTPS and keeps the app on loopback.\n'
+            printf 'The manager configures Caddy on public HTTPS port 443 and keeps the Mini App listener on loopback.\n'
         else
-            printf 'Your reverse proxy terminates public HTTPS and forwards this URL to one Mini App port.\n'
+            printf 'Your reverse proxy keeps the public HTTPS port (normally 443).\n'
+            printf 'This bot host opens one HTTP listen port for that proxy to target. Caddy is not used here.\n'
         fi
         while true; do
             mini_app_public_url=$(
@@ -2137,10 +2142,15 @@ cmd_install() {
         mini_app_port=${requested_mini_app_port:-$(next_mini_app_port)}
         if [[ "$reverse_proxy_mode" == "external" &&
             -z "$requested_mini_app_port" ]]; then
-            mini_app_port=$(prompt "Private Mini App backend port" "$mini_app_port")
+            mini_app_port=$(prompt \
+                "Port where this bot's Mini App should be publicly available" \
+                "$mini_app_port")
         fi
         validate_port "$mini_app_port" && ((mini_app_port >= 1024)) ||
             die "Mini App port must be an integer between 1024 and 65535."
+        if mini_app_port_conflicts "$instance" "$mini_app_port"; then
+            die "Mini App port ${mini_app_port} is already assigned to another managed bot."
+        fi
         if ss -ltnH 2>/dev/null | awk '{print $4}' |
             grep -Eq "(^|:)$mini_app_port$"; then
             die "Mini App port ${mini_app_port} is already listening."
@@ -2148,15 +2158,11 @@ cmd_install() {
         [[ "$mini_app_port" != "$webhook_port" || "$delivery_mode" != "webhook" ]] ||
             die "The Mini App and webhook listeners require different ports."
         if [[ "$reverse_proxy_mode" == "external" ]]; then
-            mini_app_listen=${requested_mini_app_listen:-127.0.0.1}
-            if [[ -z "$requested_mini_app_listen" ]]; then
-                mini_app_listen=$(
-                    prompt "Mini App listen address (127.0.0.1 for a same-host proxy)" \
-                        "$mini_app_listen"
-                )
-            fi
+            mini_app_listen=${requested_mini_app_listen:-0.0.0.0}
             validate_proxy_listener "$python_bin" "$mini_app_listen" ||
                 die "Mini App listen address must be a valid non-link-local IP address."
+            printf 'The Mini App will accept network traffic on port %s.\n' \
+                "$mini_app_port"
         elif [[ -n "$requested_mini_app_listen" ]]; then
             die "--mini-app-listen requires --reverse-proxy external."
         fi
@@ -2221,8 +2227,8 @@ cmd_install() {
         fi
     fi
     if [[ "$mini_app_enabled" == "true" && "$reverse_proxy_mode" == "external" ]]; then
-        printf 'Configure the external reverse proxy to forward %s to http://%s:%s before starting.\n' \
-            "$mini_app_public_url" "$mini_app_listen" "$mini_app_port"
+        printf 'Configure the external reverse proxy to forward %s to http://<this-bot-host-IP>:%s before starting.\n' \
+            "$mini_app_public_url" "$mini_app_port"
         if ! confirm "Is the external Mini App HTTPS route ready?" no; then
             warn "The instance will be installed but not started. Configure the reverse proxy, then run '${PROGRAM} start ${instance}'."
             start_now="no"
@@ -2252,8 +2258,16 @@ cmd_install() {
     if [[ "$mini_app_enabled" == "true" ]]; then
         printf '  Mini App URL:   %s\n' "$mini_app_public_url"
         printf '  Proxy mode:     %s\n' "$reverse_proxy_mode"
-        printf '  Proxy backend:  http://%s:%s\n' \
-            "$mini_app_listen" "$mini_app_port"
+        if [[ "$reverse_proxy_mode" == "external" ]]; then
+            printf '  Port for this bot: %s (listen %s)\n' \
+                "$mini_app_port" "$mini_app_listen"
+            printf '  Reverse-proxy target: http://<this-bot-host-IP>:%s\n' \
+                "$mini_app_port"
+        else
+            printf '  Public HTTPS port: 443 (managed by Caddy)\n'
+            printf '  Local Mini App port: %s (listen %s)\n' \
+                "$mini_app_port" "$mini_app_listen"
+        fi
     fi
     printf '  Worker profile: lookups=%s searches=%s updates=%s\n' \
         "$max_concurrent_lookups" "$max_concurrent_searches" \
@@ -2572,7 +2586,14 @@ cmd_status() {
             )
             printf 'Mini App URL:  %s\n' "$mini_app_public_url"
             printf 'Proxy mode:    %s\n' "$reverse_proxy_mode"
-            printf 'Proxy backend: %s:%s\n' "$mini_app_listen" "$mini_app_port"
+            if [[ "$reverse_proxy_mode" == "external" ]]; then
+                printf 'Port for bot:  %s (listen %s)\n' \
+                    "$mini_app_port" "$mini_app_listen"
+            else
+                printf 'Public HTTPS:  443 (managed by Caddy)\n'
+                printf 'Mini App local: %s:%s\n' \
+                    "$mini_app_listen" "$mini_app_port"
+            fi
         fi
     fi
     printf 'JSON log:      %s\n' "$log_file"
@@ -2991,7 +3012,9 @@ cmd_miniapp() {
             current_port=$(next_mini_app_port)
         fi
         if [[ "$current_proxy_mode" == "external" ]]; then
-            port=$(prompt "Private Mini App backend port" "$current_port")
+            port=$(prompt \
+                "Port where this bot's Mini App should be publicly available" \
+                "$current_port")
         else
             port=$(prompt "Loopback Mini App listener port" "$current_port")
         fi

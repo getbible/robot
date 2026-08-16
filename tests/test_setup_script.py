@@ -372,6 +372,65 @@ cat "$dropin_root/alpha.conf"
         self.assertIn('REVERSE_PROXY_MODE" "$reverse_proxy_mode"', script)
         self.assertNotIn("Trusted HAProxy source CIDR", script)
         self.assertNotIn("--trusted-proxy-cidrs", script)
+        self.assertIn('mini_app_listen=${requested_mini_app_listen:-0.0.0.0}', script)
+        self.assertIn(
+            "Port where this bot's Mini App should be publicly available",
+            script,
+        )
+        self.assertIn(
+            'mini_app_port_conflicts "$instance" "$mini_app_port"',
+            script,
+        )
+        self.assertIn(
+            "already assigned to another managed bot",
+            script,
+        )
+        self.assertNotIn("Private Mini App backend port", script)
+        self.assertIn("Caddy is not used here", script)
+        self.assertNotIn("Mini App listen address (use 127.0.0.1", script)
+
+    def test_wildcard_mini_app_listener_uses_loopback_for_local_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app_dir = root / "app"
+            bin_dir = app_dir / "venv" / "bin"
+            bin_dir.mkdir(parents=True)
+            (bin_dir / "python").symlink_to(sys.executable)
+            env_file = root / "instance.env"
+            env_file.write_text(
+                'MINI_APP_PUBLIC_URL="https://bot.example.com/getbible/alpha"\n'
+                'MINI_APP_LISTEN="0.0.0.0"\n'
+                'MINI_APP_PORT="9250"\n',
+                encoding="utf-8",
+            )
+            (root / "dotenv.py").write_text(
+                "def dotenv_values(path):\n"
+                "    values = {}\n"
+                "    for line in open(path, encoding='utf-8'):\n"
+                "        key, value = line.rstrip().split('=', 1)\n"
+                "        values[key] = value.strip('\\\"')\n"
+                "    return values\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; mini_app_local_url "$2" "$3"',
+                    "test",
+                    str(SETUP),
+                    str(app_dir),
+                    str(env_file),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PYTHONPATH": str(root)},
+            )
+        self.assertEqual(
+            result.stdout.strip(),
+            "http://127.0.0.1:9250/getbible/alpha/",
+        )
 
     def test_root_manager_does_not_write_the_operator_git_index(self) -> None:
         script = SETUP.read_text(encoding="utf-8")

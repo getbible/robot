@@ -135,6 +135,11 @@ sudo getbible-robot doctor production
 
 The browser cache is identity-free. User preferences remain server-side and contain only the selected translation and reader coordinates.
 
+In managed Caddy mode the public listener is HTTPS port 443; the Mini App's
+own port remains an internal loopback listener. In external mode, Caddy is not
+used. The external proxy keeps its public HTTPS port and forwards to the bot
+host address and `MINI_APP_PORT` printed by setup.
+
 The generated Caddy route is deny-by-default. It forwards only packaged
 shell/assets and documented API paths; every other request receives an empty
 `404` without contacting Tornado. Tornado independently recognizes routes and
