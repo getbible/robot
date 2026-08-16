@@ -101,10 +101,6 @@ install_host_prerequisites() {
     :
 }
 
-host_capacity_preflight() {
-    :
-}
-
 preflight_mini_app_dns() {
     printf '%s\n' "$2" >>"$DNS_LOG"
     [[ ${FAIL_DNS_PREFLIGHT:-0} != "1" ]]

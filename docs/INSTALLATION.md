@@ -41,9 +41,10 @@ Running `sudo getbible-robot` without a command opens the operations menu.
 - Outbound HTTPS to Telegram, PyPI during installation, GitHub when cloning, and `https://api.getbible.net` at runtime.
 - `git`, `curl`, `tar`, `logrotate`, `iproute2`, and the matching Python `venv` package.
 - A dedicated Telegram Bot API token from `@BotFather` for each running instance.
-- Production sizing of at least 8 GiB RAM and four logical CPUs (the measurable
-  proxy for an i3-class or stronger host). Smaller hosts require the explicit
-  `--allow-undersized-host` override and deliberately lower limits.
+- The default production resource profile targets an 8 GiB, i3-class or
+  stronger host. Setup does not impose a hardware eligibility gate; tune the
+  documented environment variables and per-instance limits for the actual
+  host and workload.
 - Public DNS plus HTTPS when the Mini App is enabled. Setup can manage Caddy or
   preserve an external HAProxy deployment.
 - In Caddy mode, keep the Mini App, webhook, and health ports on loopback. In

@@ -254,7 +254,6 @@ class SetupScriptTestCase(unittest.TestCase):
             "--tasks-max",
             "--nofile-limit",
             "--cpu-quota-percent",
-            "--allow-undersized-host",
         ):
             with self.subTest(option=option):
                 self.assertIn(option, script)
@@ -369,7 +368,6 @@ cat "$dropin_root/alpha.conf"
             "--webhook-port",
             "--memory-max-mb",
             "--cpu-quota-percent",
-            "--allow-undersized-host",
         ):
             self.assertIn(option, script)
         self.assertIn("write_resource_dropin", script)

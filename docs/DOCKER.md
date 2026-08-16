@@ -340,10 +340,10 @@ Current KJV measurements are approximately:
 | All four KJV search modes exercised | 148 MiB |
 
 The default one-bot profile has a 2 GiB hard memory ceiling, a 1536 MiB
-reservation, two CPUs, and a 256-task ceiling. The recommended host has at
-least 8 GiB RAM and four logical CPUs—an operational baseline for an i3-class
-or stronger server. This leaves capacity for the kernel, SSH, Docker, an
-external reverse proxy, and controlled additional workloads. The child
+reservation, two CPUs, and a 256-task ceiling. It targets an 8 GiB, i3-class
+or stronger host but does not enforce host eligibility. This leaves capacity
+for the kernel, SSH, Docker, an external reverse proxy, and controlled
+additional workloads. The child
 supervisor restarts the bot before it can cross 1792 MiB RSS, while Docker
 remains the final aggregate limit. These values are environment-driven
 ceilings, not a promise that every workload will consume them.

@@ -421,8 +421,8 @@ pulls and validates `ROBOT_IMAGE`; `docker-update` then recreates the workload
 from that image. `ROBOT_BUILD_IMAGE` applies only when the operator explicitly
 adds `--build` to use `compose.build.yaml`.
 
-The recommended production host has at least 8 GiB RAM and four logical CPUs
-(an operational proxy for i3-class or stronger hardware). Treat the one-bot
-values above as a starting profile and keep operating-system and proxy
-headroom. For multiple bots, apply the limits per container or size a
-multi-bot container for the sum of its per-instance guards.
+The default production profile targets an 8 GiB, i3-class or stronger host.
+Setup does not reject hosts based on detected RAM or CPU counts: the values
+above are a tunable starting profile, not a hardware eligibility policy. Keep
+operating-system and proxy headroom. For multiple bots, apply the limits per
+container or size a multi-bot container for the sum of its per-instance guards.
