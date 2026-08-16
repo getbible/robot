@@ -75,11 +75,12 @@ def _listener(
     *,
     containerized: bool,
     allow_specific_address: bool = False,
+    allow_wildcard: bool = False,
 ) -> str:
     value = _env(name, default) or ""
     if value in _LOCAL_HOSTS:
         return value
-    if containerized and value in _WILDCARD_LISTENERS:
+    if (containerized or allow_wildcard) and value in _WILDCARD_LISTENERS:
         return value
     if allow_specific_address:
         try:
@@ -89,7 +90,7 @@ def _listener(
         else:
             if not (address.is_unspecified or address.is_multicast or address.is_link_local):
                 return str(address)
-    suffix = " or a wildcard container address" if containerized else ""
+    suffix = " or a wildcard address" if containerized or allow_wildcard else ""
     if allow_specific_address:
         suffix += " or a specific non-link-local IP address in external proxy mode"
     raise ConfigurationError(
@@ -150,8 +151,15 @@ def _message(name: str, default: str) -> str:
     return value
 
 
-def _network_list(name: str, default: str) -> tuple[str, ...]:
+def _network_list(
+    name: str,
+    default: str,
+    *,
+    blank_uses_default: bool = False,
+) -> tuple[str, ...]:
     raw = _env(name, default) or ""
+    if not raw and blank_uses_default:
+        raw = default
     if not raw:
         return ()
     values: list[str] = []
@@ -173,15 +181,25 @@ def _network_list(name: str, default: str) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _trusted_proxy_networks() -> tuple[str, ...]:
+def _trusted_proxy_networks(reverse_proxy_mode: str) -> tuple[str, ...]:
+    default = (
+        "0.0.0.0/0,::/0"
+        if reverse_proxy_mode == "external"
+        else "127.0.0.1/32,::1/128"
+    )
     values = _network_list(
         "MINI_APP_TRUSTED_PROXY_CIDRS",
-        "127.0.0.1/32,::1/128",
+        default,
+        blank_uses_default=True,
     )
     for value in values:
-        if ip_network(value, strict=False).prefixlen == 0:
+        if (
+            reverse_proxy_mode != "external"
+            and ip_network(value, strict=False).prefixlen == 0
+        ):
             raise ConfigurationError(
-                "MINI_APP_TRUSTED_PROXY_CIDRS cannot trust an all-addresses network."
+                "MINI_APP_TRUSTED_PROXY_CIDRS cannot trust an all-addresses "
+                "network in managed Caddy mode."
             )
     return values
 
@@ -552,21 +570,12 @@ class Settings:
             "127.0.0.1",
             containerized=containerized,
             allow_specific_address=(reverse_proxy_mode == "external"),
+            allow_wildcard=(reverse_proxy_mode == "external"),
         )
         webhook_port = _integer("TELEGRAM_WEBHOOK_PORT", 9001, 1024, 65_535)
         health_port = _integer("HEALTH_PORT", 8081, 0, 65_535)
         mini_app_port = _integer("MINI_APP_PORT", 9201, 1024, 65_535)
-        mini_app_trusted_proxy_cidrs = _trusted_proxy_networks()
-        if reverse_proxy_mode == "external" and mini_app_listen not in _WILDCARD_LISTENERS:
-            listen_address = ip_address(mini_app_listen)
-            if not listen_address.is_loopback and not any(
-                not ip_network(network, strict=False).is_loopback
-                for network in mini_app_trusted_proxy_cidrs
-            ):
-                raise ConfigurationError(
-                    "A non-loopback MINI_APP_LISTEN requires a non-loopback "
-                    "MINI_APP_TRUSTED_PROXY_CIDRS entry."
-                )
+        mini_app_trusted_proxy_cidrs = _trusted_proxy_networks(reverse_proxy_mode)
         if delivery_mode == "webhook" and health_port != 0 and webhook_port == health_port:
             raise ConfigurationError(
                 "TELEGRAM_WEBHOOK_PORT must differ from the enabled health port."

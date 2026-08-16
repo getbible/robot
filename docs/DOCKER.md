@@ -295,12 +295,10 @@ The supplied Docker operator example selects `raw`. Treat those logs as
 personal data and set access and retention accordingly. The bot never logs
 tokens, names, usernames, verse bodies, or browser authorization data.
 
-Never trust arbitrary `X-Forwarded-For` input. Set
-`MINI_APP_TRUSTED_PROXY_CIDRS` to the exact address or network used by Caddy,
-Traefik, Nginx, the container ingress, or the cloud load balancer. Forwarded
-addresses are considered only when the direct peer belongs to one of those
-networks; otherwise the application logs and limits the direct peer. Multiple
-networks are comma separated:
+External proxy mode assumes the operator controls access to the backend and
+accepts the standard forwarded client address from Caddy, Traefik, Nginx, the
+container ingress, or a cloud load balancer. To add an application-level
+restriction as well, set the optional `MINI_APP_TRUSTED_PROXY_CIDRS` list:
 
 ```dotenv
 AUDIT_IDENTITY_MODE=raw

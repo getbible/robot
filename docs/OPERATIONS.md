@@ -257,9 +257,10 @@ status, and duration. Depending on `AUDIT_IDENTITY_MODE`, identity fields are
 absent, pseudonymous, or raw Telegram IDs/resolved client IPs.
 
 Telegram command updates never contain the user's IP. For Mini App traffic,
-configure `MINI_APP_TRUSTED_PROXY_CIDRS` to the exact reverse-proxy peers;
-otherwise forwarded addresses are intentionally ignored. Raw identity mode is
-appropriate only where access and retention policy allow personal-data logs.
+managed Caddy trusts loopback and external proxy mode delegates the backend
+network boundary to the operator. `MINI_APP_TRUSTED_PROXY_CIDRS` is an optional
+advanced restriction. Raw identity mode is appropriate only where access and
+retention policy allow personal-data logs.
 
 ## Incident response
 

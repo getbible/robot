@@ -122,7 +122,7 @@ sudo getbible-robot doctor production
 | --- | --- |
 | `MINI_APP_ENABLED` | Managed deployment toggle |
 | `MINI_APP_PUBLIC_URL` | Absolute HTTPS URL without credentials, query, or fragment |
-| `MINI_APP_LISTEN` | Loopback on host deployments |
+| `MINI_APP_LISTEN` | Loopback by default; operator-selected backend address in external proxy mode |
 | `MINI_APP_PORT` | Unique per instance |
 | `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | Short Telegram authentication window |
 | `MINI_APP_LAUNCH_TTL_SECONDS` | Short owner-bound launch lifetime |
@@ -131,7 +131,7 @@ sudo getbible-robot doctor production
 | `MINI_APP_SESSIONS_PER_USER` | Bounded sessions per user |
 | `MINI_APP_MAX_SEARCHES_PER_SESSION` | Bounded Librarian result snapshots |
 | `MINI_APP_MAX_SELECTIONS` | Browser and final-post selection limit |
-| `MINI_APP_TRUSTED_PROXY_CIDRS` | Exact ingress peers allowed to supply forwarded IPs |
+| `MINI_APP_TRUSTED_PROXY_CIDRS` | Optional advanced restriction for forwarded client addresses |
 
 The browser cache is identity-free. User preferences remain server-side and contain only the selected translation and reader coordinates.
 

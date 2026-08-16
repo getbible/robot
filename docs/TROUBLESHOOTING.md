@@ -205,12 +205,12 @@ container rather than using a plain Docker restart:
 Telegram command updates do not contain end-user IP addresses. Client IP
 logging applies only to Mini App HTTP requests.
 
-The application ignores `X-Forwarded-For` unless the direct connection came
-from `MINI_APP_TRUSTED_PROXY_CIDRS`. Set that variable to the exact Caddy,
-Traefik, Nginx, ingress, or load-balancer peer network. If all requests show
-the proxy address, the proxy network is not trusted or it is not forwarding
-the header. Do not solve this with a public catch-all network: that lets a
-client spoof both attribution and its client rate bucket.
+Managed Caddy mode trusts forwarded addresses from loopback. External mode
+assumes the operator controls backend access and trusts the standard forwarded
+client address supplied by HAProxy, Traefik, Nginx, or another reverse proxy.
+If all requests show the proxy address, confirm that the proxy sends
+`X-Forwarded-For`. `MINI_APP_TRUSTED_PROXY_CIDRS` remains available as an
+optional advanced restriction.
 
 ## Rate limits or abuse controls affect normal navigation
 
