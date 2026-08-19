@@ -375,8 +375,21 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   if (!await bottomNavigation.evaluate((nav) => nav.classList.contains("is-collapsed"))) {
     await page.locator("#bottom-nav-handle").click();
   }
-  assert.equal(await page.locator("#bible-history").isHidden(), true);
+  await page.waitForFunction(() => (
+    document.querySelector("#bottom-nav")?.classList.contains("is-collapsed") &&
+    document.querySelector("#bottom-nav-handle")?.getAttribute("aria-expanded") ===
+      "false" &&
+    getComputedStyle(document.querySelector(".bottom-nav__items")).pointerEvents ===
+      "none"
+  ));
   await page.locator("#bottom-nav-handle").click();
+  await page.waitForFunction(() => (
+    !document.querySelector("#bottom-nav")?.classList.contains("is-collapsed") &&
+    document.querySelector("#bottom-nav-handle")?.getAttribute("aria-expanded") ===
+      "true" &&
+    getComputedStyle(document.querySelector("#bible-history")).visibility ===
+      "visible"
+  ));
   assert.equal(await page.locator("#bible-history").isVisible(), true);
 
   const robotRequestsBeforeHistoryUi = robotRequests.length;
@@ -517,7 +530,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     "reader preference did not restore the stored AOV location",
   );
 
-  if (!await page.locator("#bible-history").isVisible()) {
+  if (await bottomNavigation.evaluate((nav) => nav.classList.contains("is-collapsed"))) {
     await page.locator("#bottom-nav-handle").click();
   }
   await page.locator("#bible-history").click();
