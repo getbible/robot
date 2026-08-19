@@ -54,6 +54,10 @@ The Mini App has Home, Bible, Search, and Selected surfaces.
 - Selected verse number/body styling, ARIA state, range boundaries, counters, and copy output derive from `BrowserSelectionStore`.
 - Failed Post preserves the complete ordered browser selection.
 - Successful Post clears it.
+- A bounded, coordinate-only reading history remembers opened chapters and
+  selected verses for the active browser session. Each entry keeps its
+  translation and can be reopened or removed individually; the complete
+  history can also be cleared.
 
 Browser display text and UI identifiers are not final posting authority.
 
@@ -65,7 +69,7 @@ Robot protects actions with:
 
 - fresh Telegram-signed `initData`;
 - owner-bound, one-time launch tokens;
-- short-lived opaque sessions;
+- bounded opaque sessions with a three-hour default absolute lifetime;
 - user/chat/topic binding;
 - bounded request bodies and output;
 - per-user, per-chat, and trusted-client rate limits;
@@ -203,6 +207,7 @@ The permanent release gate requires:
 - public API routing and CSP parity;
 - cache hash/invalidation/bounds tests;
 - browser selection add/remove/reorder/clear and visual highlight tests;
+- browser reading-history record/reopen/remove/clear and persistence tests;
 - no pre-Post Robot selection mutation;
 - authoritative idempotent Post tests;
 - Bandit, dependency audit, secret scan, systemd verification, and CodeQL.
@@ -223,7 +228,9 @@ After deploying one exact green commit, verify:
 8. Copy does not Post or clear selection;
 9. failed Post preserves selection;
 10. successful Post delivers authoritative Scripture and clears selection;
-11. private command and launcher cleanup still works.
+11. reading history reopens the exact verse and translation;
+12. individual and complete history clearing work;
+13. private command and launcher cleanup still works.
 
 Record the deployed commit SHA and permanent CI/CodeQL run links with release evidence.
 

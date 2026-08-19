@@ -5,7 +5,7 @@
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "test:browser": "node --test tests/browser/*.test.mjs",
-    "check": "node --check app.js && node --check lib/api.js && node --check lib/clipboard.js && node --check lib/getbible-api.js && node --check lib/getbible-model.js && node --check lib/getbible-transport.js && node --check lib/i18n.js && node --check lib/locales.js && node --check lib/messages.en.js && node --check lib/model.js && node --check lib/public-cache.js && node --check lib/request-coordinator.js && node --check lib/selection-store.js && node --check lib/session.js && node --check lib/telegram.js && node --test tests/*.test.mjs"
+    "check": "node --check app.js && node --check lib/api.js && node --check lib/clipboard.js && node --check lib/getbible-api.js && node --check lib/getbible-model.js && node --check lib/getbible-transport.js && node --check lib/i18n.js && node --check lib/locales.js && node --check lib/messages.en.js && node --check lib/model.js && node --check lib/public-cache.js && node --check lib/reading-history-store.js && node --check lib/request-coordinator.js && node --check lib/selection-store.js && node --check lib/session.js && node --check lib/telegram.js && node --test tests/*.test.mjs"
   },
   "devDependencies": {
     "playwright": "1.62.0"

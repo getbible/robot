@@ -4,6 +4,22 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Long reading sessions and browser history
+
+- Raised the authenticated Mini App session default from fifteen minutes to
+  three hours, with a two-to-twenty-four-hour current range. Former valid
+  values normalize to three hours without rewriting installed environments, so
+  upgrades fix active readers while old-code rollback remains possible.
+- Added a full-screen Bible reading-history flow backed by bounded, versioned
+  browser `sessionStorage`. Successful chapter opens and verse selections keep
+  their exact reference and translation; readers can reopen them, remove one
+  entry, or clear the complete history. Displaying, recording, removing, and
+  clearing history remain local; restored reader positions use only the
+  existing preference path.
+- Added deterministic store, configuration, lifecycle, static-contract, and
+  real-Chromium coverage for persistence, bounds, navigation, accessibility,
+  and clearing behavior.
+
 ### Python 3.14 and Ubuntu 26.04
 
 - Extended the supported runtime and deterministic CI matrix from Python

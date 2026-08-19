@@ -5,7 +5,7 @@ import { MiniAppApi } from "../lib/api.js";
 
 const SESSION = {
   session_token: "abcdefghijklmnop",
-  expires_in: 900,
+  expires_in: 10_800,
   user: { id: 42 },
   preferences: { translation: "kjv", search_defaults: {}, reader_location: null },
   entrypoint: { route: "bible", query: "" },

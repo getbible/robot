@@ -27,6 +27,7 @@ import {
   uniqueVerses,
 } from "./lib/model.js";
 import { LatestRequestCoordinator } from "./lib/request-coordinator.js";
+import { ReadingHistoryStore } from "./lib/reading-history-store.js";
 import { TelegramBridge } from "./lib/telegram.js";
 import {
   clearBoundSession,
@@ -35,6 +36,7 @@ import {
 
 const bridge = new TelegramBridge();
 const i18n = new I18n();
+const readingHistory = new ReadingHistoryStore();
 let api = null;
 let filterDraft = null;
 let accessAction = () => window.location.reload();
@@ -49,6 +51,7 @@ let searchRequestId = 0;
 let filterBooksRequestId = 0;
 let sessionGeneration = 0;
 let suppressDialogFocusRestoration = false;
+let suppressHistoryFocusRestoration = false;
 const searchPageRequests = new LatestRequestCoordinator();
 const MAX_BOOK_CACHE_ENTRIES = 8;
 const MAX_CHAPTER_CACHE_ENTRIES = 24;
@@ -172,6 +175,8 @@ const elements = mapElements({
   bibleTranslationLabel: "bible-translation-label",
   bibleReference: "bible-reference",
   bibleVerseCount: "bible-verse-count",
+  bibleHistory: "bible-history",
+  bibleHistoryCount: "bible-history-count",
   bibleSearchReturn: "bible-search-return",
   bibleState: "bible-state",
   bibleVerses: "bible-verses",
@@ -184,6 +189,12 @@ const elements = mapElements({
   biblePickerState: "bible-picker-state",
   bibleBookGrid: "bible-book-grid",
   bibleChapterGrid: "bible-chapter-grid",
+  readingHistoryDialog: "reading-history-dialog",
+  readingHistorySummary: "reading-history-summary",
+  readingHistoryEmpty: "reading-history-empty",
+  readingHistoryList: "reading-history-list",
+  clearReadingHistory: "clear-reading-history",
+  closeReadingHistory: "close-reading-history",
   selectionSummary: "selection-summary",
   clearSelection: "clear-selection",
   selectionEmpty: "selection-empty",
@@ -423,6 +434,7 @@ function attachListeners() {
   elements.bibleContinue.addEventListener("click", () => {
     void openChapterLocation(state.bible.navigation.next);
   });
+  elements.bibleHistory.addEventListener("click", showReadingHistory);
   elements.biblePassage.addEventListener("click", showBiblePicker);
   elements.biblePickerBack.addEventListener("click", showBibleBookGrid);
   elements.closeBibleNavigation.addEventListener("click", closeBiblePicker);
@@ -468,6 +480,39 @@ function attachListeners() {
       closeBiblePicker();
     }
   });
+  elements.readingHistoryDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeReadingHistory();
+  });
+  elements.readingHistoryDialog.addEventListener("close", () => {
+    elements.bibleHistory.setAttribute("aria-expanded", "false");
+    elements.readingHistoryList.replaceChildren();
+    syncBackAction();
+    if (
+      !suppressDialogFocusRestoration &&
+      !suppressHistoryFocusRestoration &&
+      !elements.app.hidden &&
+      state.route === "bible"
+    ) {
+      elements.bibleHistory.focus({ preventScroll: true });
+    }
+    suppressHistoryFocusRestoration = false;
+  });
+  elements.readingHistoryDialog.addEventListener("click", (event) => {
+    if (event.target === elements.readingHistoryDialog) {
+      closeReadingHistory();
+    }
+  });
+  elements.closeReadingHistory.addEventListener("click", () => {
+    closeReadingHistory();
+  });
+  elements.clearReadingHistory.addEventListener("click", () => {
+    void clearReadingHistory();
+  });
+  elements.readingHistoryList.addEventListener(
+    "click",
+    onReadingHistoryAction,
+  );
   elements.bibleSearchReturn.addEventListener("click", () => {
     state.bible.returnToSearch = false;
     setRoute("search");
@@ -741,7 +786,9 @@ function readerLocationKey(location) {
 }
 
 function syncBackAction() {
-  if (elements.bibleNavigationDialog.open) {
+  if (elements.readingHistoryDialog.open) {
+    bridge.setBackAction(closeReadingHistory);
+  } else if (elements.bibleNavigationDialog.open) {
     bridge.setBackAction(
       state.bible.pickerStage === "chapters"
         ? showBibleBookGrid
@@ -756,6 +803,193 @@ function syncBackAction() {
   } else {
     bridge.setBackAction(null);
   }
+}
+
+function showReadingHistory() {
+  if (state.route !== "bible" || elements.readingHistoryDialog.open) {
+    return;
+  }
+  renderReadingHistory({ renderItems: true });
+  elements.bibleHistory.setAttribute("aria-expanded", "true");
+  elements.readingHistoryDialog.showModal();
+  syncBackAction();
+  window.requestAnimationFrame(() => {
+    elements.closeReadingHistory.focus({ preventScroll: true });
+  });
+}
+
+function closeReadingHistory({ restoreFocus = true } = {}) {
+  if (!elements.readingHistoryDialog.open) {
+    return;
+  }
+  suppressHistoryFocusRestoration = !restoreFocus;
+  elements.readingHistoryDialog.close();
+}
+
+function renderReadingHistory({
+  renderItems = elements.readingHistoryDialog.open,
+} = {}) {
+  const count = readingHistory.size;
+  elements.bibleHistoryCount.hidden = count === 0;
+  elements.bibleHistoryCount.textContent = count > 99 ? "99+" : String(count);
+  elements.bibleHistory.setAttribute(
+    "aria-label",
+    count === 0
+      ? i18n.t("history.open")
+      : `${i18n.t("history.open")}: ${i18n.plural("history.count", count)}`,
+  );
+  elements.readingHistorySummary.textContent = i18n.plural(
+    "history.count",
+    count,
+  );
+  elements.clearReadingHistory.disabled = count === 0;
+  elements.readingHistoryEmpty.hidden = count > 0;
+  elements.readingHistoryList.hidden = count === 0;
+  if (!renderItems) {
+    return;
+  }
+  elements.readingHistoryList.replaceChildren();
+  readingHistory.snapshot().forEach((entry) => {
+    elements.readingHistoryList.append(createReadingHistoryItem(entry));
+  });
+}
+
+function createReadingHistoryItem(entry) {
+  const item = document.createElement("li");
+  item.className = "history-item";
+
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "history-item__open";
+  open.dataset.historyOpen = entry.id;
+  open.setAttribute(
+    "aria-label",
+    i18n.t("history.open_aria", {
+      reference: entry.reference,
+      translation: translationName(entry.translation),
+    }),
+  );
+
+  const reference = document.createElement("strong");
+  reference.dir = "auto";
+  reference.textContent = entry.reference;
+  const translation = document.createElement("span");
+  translation.dir = "auto";
+  translation.textContent = translationName(entry.translation);
+  const kind = document.createElement("small");
+  kind.textContent = i18n.t(
+    entry.kind === "selection" ? "history.selection" : "history.chapter",
+  );
+  open.append(reference, translation, kind);
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "history-item__remove";
+  remove.dataset.historyRemove = entry.id;
+  remove.setAttribute(
+    "aria-label",
+    `${i18n.t("history.remove_aria", {
+      reference: entry.reference,
+    })} · ${translationName(entry.translation)}`,
+  );
+  remove.textContent = "×";
+  item.append(open, remove);
+  return item;
+}
+
+function onReadingHistoryAction(event) {
+  const remove = event.target.closest("[data-history-remove]");
+  if (remove) {
+    const items = readingHistory.snapshot();
+    const index = items.findIndex(
+      (item) => item.id === remove.dataset.historyRemove,
+    );
+    const entry = items[index];
+    if (entry && readingHistory.remove(entry.id)) {
+      renderReadingHistory();
+      announce(i18n.t("history.removed", { reference: entry.reference }));
+      const remaining = [
+        ...elements.readingHistoryList.querySelectorAll("[data-history-open]"),
+      ];
+      const adjacent = remaining[Math.min(index, remaining.length - 1)];
+      (adjacent ?? elements.closeReadingHistory).focus({ preventScroll: true });
+    }
+    return;
+  }
+  const open = event.target.closest("[data-history-open]");
+  if (!open) {
+    return;
+  }
+  const entry = readingHistory
+    .snapshot()
+    .find((item) => item.id === open.dataset.historyOpen);
+  if (!entry) {
+    return;
+  }
+  closeReadingHistory({ restoreFocus: false });
+  void openReadingHistoryEntry(entry);
+}
+
+async function openReadingHistoryEntry(entry) {
+  await openBibleAtVerse({
+    translation: entry.translation,
+    reference: entry.reference,
+    book_number: entry.book,
+    book_name: entry.book_name,
+    chapter: entry.chapter,
+    verse: entry.verse,
+    highlights: [],
+  });
+  if (
+    state.route !== "bible" ||
+    state.bible.status !== "ready" ||
+    state.translation !== entry.translation ||
+    state.bible.selectedBook?.number !== entry.book ||
+    state.bible.selectedChapter?.number !== entry.chapter
+  ) {
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    const target = elements.bibleVerses.querySelector(
+      `[data-reader-verse="${entry.verse}"]`,
+    ) ?? elements.biblePassage;
+    target.focus({ preventScroll: true });
+    announce(entry.reference);
+  });
+}
+
+async function clearReadingHistory() {
+  if (readingHistory.size === 0) {
+    return;
+  }
+  const confirmed = await bridge.confirm(i18n.t("history.clear_confirm"));
+  if (!confirmed || !elements.readingHistoryDialog.open) {
+    return;
+  }
+  readingHistory.clear();
+  renderReadingHistory();
+  announce(i18n.t("history.cleared"));
+  elements.closeReadingHistory.focus({ preventScroll: true });
+}
+
+function recordReadingHistory(kind, verse) {
+  if (!verse) {
+    return;
+  }
+  try {
+    readingHistory.record({
+      kind,
+      translation: verse.translation,
+      reference: verse.reference,
+      book: verse.book_number,
+      book_name: verse.book_name,
+      chapter: verse.chapter,
+      verse: verse.verse,
+    });
+  } catch {
+    return;
+  }
+  renderReadingHistory();
 }
 
 function populateTranslations() {
@@ -955,6 +1189,7 @@ function enqueuePreferenceWrite(payload) {
 function renderLocalizedState() {
   renderSearch();
   renderBible();
+  renderReadingHistory();
   renderBasketStatus();
   renderSelection();
 }
@@ -1591,6 +1826,10 @@ async function selectBibleChapter(
   const restoreFocus = restoreReaderFocusAfterLoad;
   restoreReaderFocusAfterLoad = false;
   if (state.bible.status === "ready") {
+    const visitedVerse = state.bible.verses.find(
+      (verse) => verse.verse === state.bible.targetVerse,
+    ) ?? state.bible.verses[0];
+    recordReadingHistory("chapter", visitedVerse);
     void saveReaderPosition();
     scrollReaderToVerse(state.bible.targetVerse);
     announce(state.bible.reference);
@@ -2322,6 +2561,12 @@ async function toggleBasketItem(selectionId) {
         return;
       }
       state.basket = normalizeBasket(payload?.basket ?? payload).items;
+      if (!removing) {
+        const addedVerse = state.basket.find(
+          (verse) => verse.selection_id === selectionId,
+        );
+        recordReadingHistory("selection", addedVerse);
+      }
       bridge.notifySelection();
       announce(
         removing

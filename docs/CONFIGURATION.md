@@ -52,7 +52,7 @@ and routing policy. Do not expose `TELEGRAM_WEBHOOK_PORT` generally. See
 | `MINI_APP_PORT` | `9201` | `1024`–`65535`; manager-reserved and different from health/webhook ports | Public Mini App port opened on the bot host in external mode |
 | `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | `300` | `30`–`900` | Maximum accepted age of signed Telegram `initData` |
 | `MINI_APP_LAUNCH_TTL_SECONDS` | `300` | `30`–`900` | Lifetime of the user-bound bot launch token |
-| `MINI_APP_SESSION_TTL_SECONDS` | `900` | `60`–`3600` | Absolute lifetime of authenticated server-side Mini App state |
+| `MINI_APP_SESSION_TTL_SECONDS` | `10800` | `7200`–`86400` for new values | Absolute lifetime of authenticated server-side Mini App state; three hours by default |
 | `MINI_APP_SESSION_LIMIT` | `200` | `10`–`20000` | Maximum active Mini App sessions |
 | `MINI_APP_SESSIONS_PER_USER` | `2` | `1`–`10` | Maximum active sessions retained for one Telegram user |
 | `MINI_APP_MAX_SEARCHES_PER_SESSION` | `2` | `1`–`8` | Retained authoritative search pages per session |
@@ -68,6 +68,17 @@ and routing policy. Do not expose `TELEGRAM_WEBHOOK_PORT` generally. See
 | `MINI_APP_SESSION_EXCHANGE_RATE_REFILL_PER_SECOND` | `0.2` | `0.01`–`10000` | Per-client sustained session-exchange refill |
 | `MINI_APP_NAVIGATION_RATE_COST` | `0.25` | `0.05`–`1` | Fractional request cost for lightweight authenticated navigation |
 | `MINI_APP_ACCESS_LOG` | `true` | `true` or `false` | Log every Mini App request; errors are always logged |
+
+The authenticated Mini App session lifetime is absolute rather than sliding:
+activity does not extend it indefinitely. The three-hour default supports long
+Bible-reading sessions, while operators may select two to twenty-four hours.
+For rollback-safe upgrades, environment files created by older releases are
+not rewritten. A missing legacy key is supplied as the old-safe raw default of
+`900` by the host manager and Compose compatibility layers. The new runtime
+normalizes that fallback, and any formerly valid explicit value from `60`
+through `3600`, to an effective `10800` seconds. Fresh explicit configuration
+templates use `10800`. Values from `3601` through `7199` are rejected; use a
+current value of at least `7200`.
 
 The HTML shell may be publicly retrievable because Telegram Mini Apps run in a
 browser engine on each user's device. It remains inert without fresh

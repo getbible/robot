@@ -35,6 +35,8 @@ services:
       MINI_APP_PORT: "${MINI_APP_PORT:-9201}"
       MINI_APP_INIT_DATA_MAX_AGE_SECONDS: "${MINI_APP_INIT_DATA_MAX_AGE_SECONDS:-300}"
       MINI_APP_LAUNCH_TTL_SECONDS: "${MINI_APP_LAUNCH_TTL_SECONDS:-300}"
+      # The raw fallback remains old-image compatible for one-step rollback.
+      # Current images normalize 900 to an effective three-hour session.
       MINI_APP_SESSION_TTL_SECONDS: "${MINI_APP_SESSION_TTL_SECONDS:-900}"
       MINI_APP_SESSION_LIMIT: "${MINI_APP_SESSION_LIMIT:-200}"
       MINI_APP_SESSIONS_PER_USER: "${MINI_APP_SESSIONS_PER_USER:-2}"

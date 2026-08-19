@@ -90,6 +90,22 @@ Tests must prove:
 - no Robot request during select, unselect, reorder, clear, copy, or rendering;
 - selected state surviving reader navigation within the active WebView session.
 
+### Browser reading history
+
+`ReadingHistoryStore` tests must cover:
+
+- successful chapter and selection visits in newest-first order, including
+  repeated coordinates and different translations;
+- exact translation/book/chapter/verse restoration;
+- the 1,000-entry bound and defensive snapshots;
+- versioned `sessionStorage` restoration with memory fallback;
+- malformed persistence rejection;
+- individual removal and complete reset, including removal of the storage key;
+- absence of verse bodies, Telegram identity, launch data, and Robot tokens;
+- no Robot request while opening the history dialog, recording, removing, or
+  clearing history; choosing an entry may use only the existing reader
+  preference path.
+
 ### Real Chromium acceptance
 
 The pinned Chromium test must exercise the production HTML, CSP, JavaScript modules, and browser APIs. It must verify:
@@ -104,6 +120,9 @@ The pinned Chromium test must exercise the production HTML, CSP, JavaScript modu
 8. no Robot basket or Scripture request occurs before Post;
 9. failed Post preserves selection;
 10. successful Post clears selection.
+11. history shows opened chapters and selected verses with their translations;
+12. history navigation, individual removal, full reset, Escape, and focus
+    restoration work.
 
 ### Post authority
 
@@ -128,6 +147,7 @@ Inject and verify independent failures for:
 - cache hash changes during download;
 - Librarian search timeout;
 - Robot session expiry;
+- unavailable or corrupt browser-session history storage;
 - final Telegram send failure.
 
 Each failure must remain inside its ownership boundary. Public API errors must not invalidate authentication; search errors must not disable reading; Post errors must not erase local selections.
@@ -144,6 +164,8 @@ After all deterministic gates pass, deploy one validated commit and verify in Te
 - Copy preserves selection;
 - Post delivers authoritative Scripture to the originating chat/topic;
 - successful Post clears the browser selection;
+- history reopens the exact verse/translation and can be cleared per-entry or
+  completely;
 - private command and launcher cleanup still behaves as documented.
 
 Record the deployed commit SHA and CI/CodeQL run links with the release evidence.

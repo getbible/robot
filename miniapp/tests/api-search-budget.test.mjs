@@ -15,7 +15,7 @@ const PUBLIC_API = {
 function session(limits) {
   return {
     session_token: "abcdefghijklmnop",
-    expires_in: 900,
+    expires_in: 10_800,
     user: { id: 42 },
     preferences: {
       translation: "kjv",

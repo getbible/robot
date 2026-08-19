@@ -20,7 +20,7 @@
   "paths": {
     "/session": {
       "post": {
-        "summary": "Create or safely recover a short-lived Mini App session",
+        "summary": "Create or safely recover a bounded Mini App session",
         "security": [],
         "requestBody": {
           "required": true,

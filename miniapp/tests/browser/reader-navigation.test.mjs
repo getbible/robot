@@ -51,9 +51,10 @@ function fulfillPublicText(route, body, contentType = "text/plain") {
   });
 }
 
-function chapterPayload(chapter) {
+function chapterPayload(translation, chapter) {
+  const label = translation.toUpperCase();
   return {
-    abbreviation: "kjv",
+    abbreviation: translation,
     book_nr: 43,
     book_name: "John",
     chapter,
@@ -61,9 +62,19 @@ function chapterPayload(chapter) {
     testament: "new",
     verses: Array.from({ length: 40 }, (_, index) => ({
       verse: index + 1,
-      text: `KJV John ${chapter} text ${index + 1}`,
+      text: `${label} John ${chapter} text ${index + 1}`,
     })),
   };
+}
+
+async function waitForCondition(predicate, message, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      assert.fail(message);
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
 }
 
 function installTelegramMock() {
@@ -134,6 +145,25 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.addInitScript(installTelegramMock);
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem(
+      "getbible.miniapp.reading-history",
+      JSON.stringify({
+        version: 1,
+        items: [{
+          id: "visit_seeded_aov",
+          kind: "chapter",
+          translation: "aov",
+          reference: "John 4:16",
+          book: 43,
+          book_name: "John",
+          chapter: 4,
+          verse: 16,
+          visited_at: 1,
+        }],
+      }),
+    );
+  });
 
   const consoleMessages = [];
   const pageErrors = [];
@@ -151,9 +181,14 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   const publicRequests = [];
   const robotRequests = [];
   const chapterBodies = new Map();
-  for (const chapter of [3, 4]) {
-    const body = jsonBody(chapterPayload(chapter));
-    chapterBodies.set(chapter, { body, sha: sha1(body) });
+  for (const translation of ["kjv", "aov"]) {
+    for (const chapter of [3, 4]) {
+      const body = jsonBody(chapterPayload(translation, chapter));
+      chapterBodies.set(
+        `${translation}:${chapter}`,
+        { body, sha: sha1(body) },
+      );
+    }
   }
 
   await page.route("https://telegram.org/**", (route) => route.fulfill({
@@ -171,30 +206,37 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
         { abbreviation: "aov", name: "Afrikaanse Ou Vertaling", language: "Afrikaans", lang: "af", direction: "ltr" },
       ], 200, true);
     }
-    if (path === "kjv.sha") return fulfillPublicText(route, "1".repeat(40));
-    if (path === "kjv/books.json") {
+    if (/^(?:kjv|aov)\.sha$/.test(path)) {
+      return fulfillPublicText(route, "1".repeat(40));
+    }
+    if (/^(?:kjv|aov)\/books\.json$/.test(path)) {
       return fulfillJson(route, bookNames.map((name, index) => ({
         nr: index + 1,
         name,
         testament: index < 39 ? "old" : "new",
       })), 200, true);
     }
-    if (path === "kjv/43.sha") return fulfillPublicText(route, "2".repeat(40));
-    if (path === "kjv/43/chapters.json") {
+    if (/^(?:kjv|aov)\/43\.sha$/.test(path)) {
+      return fulfillPublicText(route, "2".repeat(40));
+    }
+    if (/^(?:kjv|aov)\/43\/chapters\.json$/.test(path)) {
       return fulfillJson(route, Array.from({ length: 21 }, (_, index) => ({
         chapter: index + 1,
         verses: Array.from({ length: 40 }, (_, verse) => verse + 1),
       })), 200, true);
     }
-    const shaMatch = /^kjv\/43\/(3|4)\.sha$/.exec(path);
+    const shaMatch = /^(kjv|aov)\/43\/(3|4)\.sha$/.exec(path);
     if (shaMatch) {
-      return fulfillPublicText(route, chapterBodies.get(Number(shaMatch[1])).sha);
+      return fulfillPublicText(
+        route,
+        chapterBodies.get(`${shaMatch[1]}:${shaMatch[2]}`).sha,
+      );
     }
-    const jsonMatch = /^kjv\/43\/(3|4)\.json$/.exec(path);
+    const jsonMatch = /^(kjv|aov)\/43\/(3|4)\.json$/.exec(path);
     if (jsonMatch) {
       return fulfillPublicText(
         route,
-        chapterBodies.get(Number(jsonMatch[1])).body,
+        chapterBodies.get(`${jsonMatch[1]}:${jsonMatch[2]}`).body,
         "application/json",
       );
     }
@@ -232,7 +274,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     if (apiPath === "session") {
       return fulfillJson(route, {
         session_token: "BrowserTestSessionToken123",
-        expires_in: 900,
+        expires_in: 10_800,
         preferences,
         entrypoint: { route: "bible", query: "" },
         basket: { items: [], count: 0, maximum: 100 },
@@ -277,6 +319,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   assert.equal(await page.locator("#bible-reference").innerText(), "John 3");
   assert.equal(await page.locator("#bible-verses [data-reader-verse]").count(), 40);
   assert.equal(await page.evaluate(() => window.__telegramState.readyCalls), 1);
+  assert.equal(await page.locator("#bible-history-count").innerText(), "2");
 
   await page.locator("#bible-next").click();
   await page.waitForFunction(() => (
@@ -286,6 +329,118 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     await page.locator('[data-reader-verse="1"]').innerText(),
     /KJV John 4 text 1/,
   );
+  await page.waitForFunction(() => (
+    document.querySelector("#bible-history-count")?.textContent === "3"
+  ));
+  await waitForCondition(
+    () => preferences.reader_location.chapter === 4,
+    "reader preference did not reach John 4",
+  );
+
+  // Dispatch both actions in one browser task. The chapter navigation clears
+  // the visible verse list before the queued selection finishes, so history
+  // must use the canonical item returned by the selection store.
+  await page.evaluate(() => {
+    document.querySelector('[data-reader-verse="16"]')?.click();
+    document.querySelector("#bible-previous")?.click();
+  });
+  await page.waitForFunction(() => (
+    document.querySelector("#bible-reference")?.textContent === "John 3" &&
+    document.querySelector("#bible-history-count")?.textContent === "5"
+  ));
+  await waitForCondition(
+    () => preferences.reader_location.chapter === 3,
+    "reader preference did not return to John 3",
+  );
+
+  const robotRequestsBeforeHistoryUi = robotRequests.length;
+  await page.locator("#bible-history").click();
+  assert.equal(
+    await page.locator("#reading-history-dialog").getAttribute("open"),
+    "",
+  );
+  assert.equal(
+    await page.locator("#bible-history").getAttribute("aria-expanded"),
+    "true",
+  );
+  assert.equal(await page.locator(".history-item").count(), 5);
+  const selectedHistory = page.locator(".history-item")
+    .filter({ has: page.getByText("John 4:16", { exact: true }) })
+    .filter({
+      has: page.getByText("King James Version (1769) (KJV)", {
+        exact: true,
+      }),
+    });
+  assert.equal(await selectedHistory.count(), 1);
+  assert.match(await selectedHistory.innerText(), /King James Version \(1769\).*KJV/);
+  assert.match(await selectedHistory.innerText(), /Verse selected/);
+
+  await selectedHistory.locator("[data-history-remove]").click();
+  assert.equal(await page.locator(".history-item").count(), 4);
+  assert.equal(await page.locator("#bible-history-count").innerText(), "4");
+  assert.equal(robotRequests.length, robotRequestsBeforeHistoryUi);
+
+  const storedTranslationHistory = page.locator(".history-item")
+    .filter({ has: page.getByText("John 4:16", { exact: true }) })
+    .filter({
+      has: page.getByText("Afrikaanse Ou Vertaling (AOV)", { exact: true }),
+    });
+  assert.equal(await storedTranslationHistory.count(), 1);
+  await storedTranslationHistory
+    .locator("[data-history-open]")
+    .click();
+  await page.waitForFunction(() => (
+    document.querySelector("#bible-reference")?.textContent === "John 4" &&
+    document.querySelector("#bible-translation-label")?.textContent
+      ?.includes("AOV") &&
+    document.activeElement?.getAttribute("data-reader-verse") === "16"
+  ));
+  assert.match(
+    await page.locator('[data-reader-verse="16"]').innerText(),
+    /AOV John 4 text 16/,
+  );
+  await page.waitForFunction(() => (
+    document.querySelector("#bible-history-count")?.textContent === "5"
+  ));
+  await waitForCondition(
+    () => (
+      preferences.translation === "aov" &&
+      preferences.reader_location.translation === "aov" &&
+      preferences.reader_location.chapter === 4 &&
+      preferences.reader_location.verse === 16
+    ),
+    "reader preference did not restore the stored AOV location",
+  );
+
+  await page.locator("#bible-history").click();
+  const robotRequestsBeforeClear = robotRequests.length;
+  await page.locator("#clear-reading-history").click();
+  await page.waitForFunction(() => (
+    document.querySelectorAll(".history-item").length === 0 &&
+    !document.querySelector("#reading-history-empty")?.hidden
+  ));
+  assert.equal(
+    await page.evaluate(() => (
+      window.sessionStorage.getItem("getbible.miniapp.reading-history")
+    )),
+    null,
+  );
+  assert.equal(robotRequests.length, robotRequestsBeforeClear);
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => (
+    !document.querySelector("#reading-history-dialog")?.open
+  ));
+  assert.equal(
+    await page.locator("#bible-history").getAttribute("aria-expanded"),
+    "false",
+  );
+  assert.equal(
+    await page.evaluate(() => document.activeElement?.id),
+    "bible-history",
+  );
+
+  await page.locator('[data-route="home"]').click();
+  assert.equal(await page.locator("#bible-history").isHidden(), true);
 
   for (const expected of [
     "translations.json",
@@ -293,6 +448,9 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     "kjv/43/chapters.json",
     "kjv/43/3.json",
     "kjv/43/4.json",
+    "aov/books.json",
+    "aov/43/chapters.json",
+    "aov/43/4.json",
   ]) {
     assert.ok(publicRequests.includes(expected), `missing public request: ${expected}`);
   }
@@ -302,4 +460,8 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     ),
     [],
   );
+  assert.equal(robotRequests.some((path) => path.includes("history")), false);
+  assert.deepEqual(consoleMessages, []);
+  assert.deepEqual(pageErrors, []);
+  assert.deepEqual(failedRequests, []);
 });
