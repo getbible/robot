@@ -73,11 +73,13 @@ Both CSP enforcement layers must contain the same allowlist:
 
 ## Reading history
 
-The Bible toolbar exposes a history control only on the Bible surface. It opens
-a full-screen, keyboard-accessible history dialog showing the reference and
-translation for each successfully opened chapter or selected verse. Choosing an
-entry reopens that exact translation and coordinate. An entry can be removed
-individually, and Clear all removes the complete browser-session record.
+The expanded bottom navigation exposes a history control only on the Bible
+surface. It opens a full-screen, keyboard-accessible history dialog showing the
+reference and translation for each successfully opened chapter or selected
+verse. Its fixed, centered controls remain clear of Telegram's fullscreen
+controls while the entry list scrolls independently. Choosing an entry reopens
+that exact translation and coordinate. An entry can be removed individually,
+and Clear all removes the complete browser-session record.
 
 `ReadingHistoryStore` is versioned, newest-first, and bounded to 1,000
 coordinate-only entries in `sessionStorage`, with an in-memory fallback. It

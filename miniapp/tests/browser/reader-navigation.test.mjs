@@ -150,17 +150,30 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       "getbible.miniapp.reading-history",
       JSON.stringify({
         version: 1,
-        items: [{
-          id: "visit_seeded_aov",
-          kind: "chapter",
-          translation: "aov",
-          reference: "John 4:16",
-          book: 43,
-          book_name: "John",
-          chapter: 4,
-          verse: 16,
-          visited_at: 1,
-        }],
+        items: [
+          {
+            id: "visit_seeded_aov",
+            kind: "chapter",
+            translation: "aov",
+            reference: "John 4:16",
+            book: 43,
+            book_name: "John",
+            chapter: 4,
+            verse: 16,
+            visited_at: 1,
+          },
+          ...Array.from({ length: 7 }, (_, index) => ({
+            id: `visit_seeded_kjv_${index + 1}`,
+            kind: "selection",
+            translation: "kjv",
+            reference: `John 3:${index + 2}`,
+            book: 43,
+            book_name: "John",
+            chapter: 3,
+            verse: index + 2,
+            visited_at: index + 2,
+          })),
+        ],
       }),
     );
   });
@@ -319,7 +332,12 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   assert.equal(await page.locator("#bible-reference").innerText(), "John 3");
   assert.equal(await page.locator("#bible-verses [data-reader-verse]").count(), 40);
   assert.equal(await page.evaluate(() => window.__telegramState.readyCalls), 1);
-  assert.equal(await page.locator("#bible-history-count").innerText(), "2");
+  assert.equal(await page.locator("#bible-history-count").innerText(), "9");
+  assert.equal(await page.locator("#bible-heading #bible-history").count(), 0);
+  assert.equal(
+    await page.locator("#bottom-nav #bible-history").isVisible(),
+    true,
+  );
 
   await page.locator("#bible-next").click();
   await page.waitForFunction(() => (
@@ -330,7 +348,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     /KJV John 4 text 1/,
   );
   await page.waitForFunction(() => (
-    document.querySelector("#bible-history-count")?.textContent === "3"
+    document.querySelector("#bible-history-count")?.textContent === "10"
   ));
   await waitForCondition(
     () => preferences.reader_location.chapter === 4,
@@ -346,12 +364,20 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   });
   await page.waitForFunction(() => (
     document.querySelector("#bible-reference")?.textContent === "John 3" &&
-    document.querySelector("#bible-history-count")?.textContent === "5"
+    document.querySelector("#bible-history-count")?.textContent === "12"
   ));
   await waitForCondition(
     () => preferences.reader_location.chapter === 3,
     "reader preference did not return to John 3",
   );
+
+  const bottomNavigation = page.locator("#bottom-nav");
+  if (!await bottomNavigation.evaluate((nav) => nav.classList.contains("is-collapsed"))) {
+    await page.locator("#bottom-nav-handle").click();
+  }
+  assert.equal(await page.locator("#bible-history").isHidden(), true);
+  await page.locator("#bottom-nav-handle").click();
+  assert.equal(await page.locator("#bible-history").isVisible(), true);
 
   const robotRequestsBeforeHistoryUi = robotRequests.length;
   await page.locator("#bible-history").click();
@@ -363,7 +389,86 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     await page.locator("#bible-history").getAttribute("aria-expanded"),
     "true",
   );
-  assert.equal(await page.locator(".history-item").count(), 5);
+  await page.waitForFunction(() => (
+    document.activeElement?.id === "close-reading-history"
+  ));
+  assert.equal(
+    await page.evaluate(() => document.activeElement?.id),
+    "close-reading-history",
+  );
+  assert.equal(await page.locator(".history-item").count(), 12);
+  const historyLayout = await page.evaluate(() => {
+    const surface = document.querySelector(".sheet__surface--history")
+      .getBoundingClientRect();
+    const header = document.querySelector(".history-header")
+      .getBoundingClientRect();
+    const copy = document.querySelector(".history-header__copy")
+      .getBoundingClientRect();
+    const title = document.querySelector("#reading-history-title");
+    const titleRange = document.createRange();
+    titleRange.selectNodeContents(title);
+    const titleText = titleRange.getBoundingClientRect();
+    const actions = document.querySelector(".history-header__actions")
+      .getBoundingClientRect();
+    const content = document.querySelector(".history-content");
+    const list = document.querySelector("#reading-history-list");
+    const headerStyle = getComputedStyle(header);
+    return {
+      surfaceCenter: surface.left + surface.width / 2,
+      copyCenter: copy.left + copy.width / 2,
+      titleCenter: titleText.left + titleText.width / 2,
+      actionsCenter: actions.left + actions.width / 2,
+      copyLeft: copy.left,
+      copyRight: copy.right,
+      actionsLeft: actions.left,
+      actionsRight: actions.right,
+      copyTop: copy.top,
+      titleLeft: titleText.left,
+      titleRight: titleText.right,
+      safeBoundary: Math.max(
+        window.Telegram.WebApp.contentSafeAreaInset.top + 10,
+        window.Telegram.WebApp.safeAreaInset.top + 4,
+      ),
+      protectedLeft: surface.left + Number.parseFloat(headerStyle.paddingLeft),
+      protectedRight: surface.right - Number.parseFloat(headerStyle.paddingRight),
+      headerTop: header.top,
+      contentOverflow: getComputedStyle(content).overflowY,
+      listOverflow: getComputedStyle(list).overflowY,
+      listClientHeight: list.clientHeight,
+      listScrollHeight: list.scrollHeight,
+    };
+  });
+  assert.ok(Math.abs(historyLayout.copyCenter - historyLayout.surfaceCenter) < 1);
+  assert.ok(Math.abs(historyLayout.titleCenter - historyLayout.surfaceCenter) < 1);
+  assert.ok(Math.abs(historyLayout.actionsCenter - historyLayout.surfaceCenter) < 1);
+  assert.ok(historyLayout.copyTop >= historyLayout.safeBoundary);
+  assert.ok(historyLayout.copyLeft >= historyLayout.protectedLeft - 1);
+  assert.ok(historyLayout.copyRight <= historyLayout.protectedRight + 1);
+  assert.ok(historyLayout.titleLeft >= historyLayout.protectedLeft - 1);
+  assert.ok(historyLayout.titleRight <= historyLayout.protectedRight + 1);
+  assert.ok(historyLayout.actionsLeft >= historyLayout.protectedLeft - 1);
+  assert.ok(historyLayout.actionsRight <= historyLayout.protectedRight + 1);
+  assert.equal(historyLayout.contentOverflow, "hidden");
+  assert.equal(historyLayout.listOverflow, "auto");
+  assert.ok(historyLayout.listScrollHeight > historyLayout.listClientHeight);
+  const scrolledHistoryLayout = await page.locator("#reading-history-list")
+    .evaluate((list) => {
+      const header = document.querySelector(".history-header");
+      const headerTop = header.getBoundingClientRect().top;
+      list.scrollTop = list.scrollHeight;
+      return {
+        headerTop,
+        maximumScrollTop: list.scrollHeight - list.clientHeight,
+        scrollTop: list.scrollTop,
+      };
+    });
+  assert.ok(scrolledHistoryLayout.scrollTop > 0);
+  assert.ok(
+    Math.abs(
+      scrolledHistoryLayout.scrollTop - scrolledHistoryLayout.maximumScrollTop,
+    ) < 1,
+  );
+  assert.equal(scrolledHistoryLayout.headerTop, historyLayout.headerTop);
   const selectedHistory = page.locator(".history-item")
     .filter({ has: page.getByText("John 4:16", { exact: true }) })
     .filter({
@@ -376,8 +481,8 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   assert.match(await selectedHistory.innerText(), /Verse selected/);
 
   await selectedHistory.locator("[data-history-remove]").click();
-  assert.equal(await page.locator(".history-item").count(), 4);
-  assert.equal(await page.locator("#bible-history-count").innerText(), "4");
+  assert.equal(await page.locator(".history-item").count(), 11);
+  assert.equal(await page.locator("#bible-history-count").innerText(), "11");
   assert.equal(robotRequests.length, robotRequestsBeforeHistoryUi);
 
   const storedTranslationHistory = page.locator(".history-item")
@@ -400,7 +505,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     /AOV John 4 text 16/,
   );
   await page.waitForFunction(() => (
-    document.querySelector("#bible-history-count")?.textContent === "5"
+    document.querySelector("#bible-history-count")?.textContent === "12"
   ));
   await waitForCondition(
     () => (
@@ -412,6 +517,9 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     "reader preference did not restore the stored AOV location",
   );
 
+  if (!await page.locator("#bible-history").isVisible()) {
+    await page.locator("#bottom-nav-handle").click();
+  }
   await page.locator("#bible-history").click();
   const robotRequestsBeforeClear = robotRequests.length;
   await page.locator("#clear-reading-history").click();

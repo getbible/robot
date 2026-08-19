@@ -574,6 +574,7 @@ function setRoute(requestedRoute) {
   }
   state.route = route;
   elements.app.dataset.activeRoute = route;
+  elements.bibleHistory.hidden = route !== "bible";
   setHeaderCondensed(false);
   const savedScrollTop = state.scrollPositions.get(route) ?? 0;
   state.lastScrollTop = savedScrollTop;

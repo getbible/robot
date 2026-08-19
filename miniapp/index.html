@@ -259,23 +259,6 @@
               </span>
             </button>
             <button
-              id="bible-history"
-              class="reader-toolbar__history"
-              type="button"
-              aria-controls="reading-history-dialog"
-              aria-haspopup="dialog"
-              aria-expanded="false"
-              aria-label="Reading history"
-              data-i18n-aria-label="history.open"
-            >
-              <span aria-hidden="true">↶</span>
-              <span
-                id="bible-history-count"
-                class="reader-toolbar__history-count"
-                hidden
-              >0</span>
-            </button>
-            <button
               id="bible-next"
               class="reader-toolbar__arrow"
               type="button"
@@ -390,6 +373,35 @@
           <button class="bottom-nav__item" type="button" data-route="bible">
             <span class="bottom-nav__icon bottom-nav__book" aria-hidden="true">▤</span>
             <span data-i18n="nav.bible">Bible</span>
+          </button>
+          <button
+            id="bible-history"
+            class="bottom-nav__item bottom-nav__item--history"
+            type="button"
+            aria-controls="reading-history-dialog"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-label="Reading history"
+            data-i18n-aria-label="history.open"
+            hidden
+          >
+            <svg
+              class="bottom-nav__icon bottom-nav__history-icon"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path d="M3 4v5h5"></path>
+              <path d="M4.7 8a8.5 8.5 0 1 1-.9 6"></path>
+              <path d="M12 7v5l3 2"></path>
+            </svg>
+            <span data-i18n="history.title">History</span>
+            <span
+              id="bible-history-count"
+              class="bottom-nav__badge"
+              aria-hidden="true"
+              hidden
+            >0</span>
           </button>
           <button class="bottom-nav__item" type="button" data-route="selection">
             <span class="bottom-nav__icon" aria-hidden="true">✓</span>

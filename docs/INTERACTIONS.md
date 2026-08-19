@@ -28,11 +28,12 @@ GetBible keeps immediate Telegram commands native and moves browsing, reading, s
 The browser does not call Robot for catalogs, books, chapters, chapter text, selecting, unselecting, reordering, clearing, or copying.
 
 Every successful chapter open and successful verse selection is also appended
-to bounded browser-session reading history. The history control appears only in
-the Bible view and opens a full-screen list. Each row shows its reference and
+to bounded browser-session reading history. The history control appears in the
+expanded bottom navigation only in the Bible view and opens a full-screen list.
+The centered header remains fixed inside Telegram's protected fullscreen lane
+while entries scroll independently. Each row shows its reference and
 translation, reopens the exact coordinate when chosen, and can be removed
-individually. **Clear all** resets the complete history without contacting
-Robot.
+individually. **Clear all** resets the complete history without contacting Robot.
 
 ## Visual selection contract
 

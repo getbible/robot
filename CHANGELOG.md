@@ -19,6 +19,10 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 - Added deterministic store, configuration, lifecycle, static-contract, and
   real-Chromium coverage for persistence, bounds, navigation, accessibility,
   and clearing behavior.
+- Moved the Bible-only History action into the expandable bottom navigation,
+  added a dedicated counter-clockwise clock icon, and centered the fixed
+  history header inside Telegram's protected fullscreen lane while entries
+  scroll independently below it.
 
 ### Python 3.14 and Ubuntu 26.04
 
