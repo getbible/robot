@@ -62,6 +62,11 @@ test("keeps Bible as the compact reader and selector without adding a fifth rout
   assert.match(html, /id="bible-passage"/);
   assert.match(html, /id="bible-previous"/);
   assert.match(html, /id="bible-next"/);
+  assert.match(html, /id="bible-history"/);
+  assert.match(html, /aria-controls="reading-history-dialog"/);
+  assert.match(html, /aria-haspopup="dialog"/);
+  assert.match(html, /id="reading-history-dialog"/);
+  assert.match(html, /aria-labelledby="reading-history-title"/);
   assert.match(html, /id="bible-navigation-dialog"/);
   assert.match(html, /id="bible-book-grid"/);
   assert.match(html, /id="bible-chapter-grid"/);
@@ -91,11 +96,16 @@ test("keeps Bible as the compact reader and selector without adding a fifth rout
     /translateY\(calc\(100% - var\(--nav-handle-height\)/,
   );
   assert.match(css, /\.sheet__surface--passage/);
+  assert.match(css, /\.sheet__surface--history/);
   assert.match(css, /grid-template-columns: repeat\(6, minmax\(0, 1fr\)\)/);
   assert.match(css, /@media \(max-width: 367px\)/);
   assert.match(app, /rememberVisibleReaderPosition/);
   assert.match(app, /persistVisibleReaderPosition/);
   assert.match(app, /openBibleAtVerse/);
+  assert.match(app, /recordReadingHistory\("chapter", visitedVerse\)/);
+  assert.match(app, /recordReadingHistory\("selection", addedVerse\)/);
+  assert.match(app, /readingHistory\.remove/);
+  assert.match(app, /readingHistory\.clear/);
   assert.match(app, /async function chooseBiblePickerBook/);
   assert.match(app, /async function chooseBiblePickerChapter/);
   assert.match(app, /requestId !== state\.bible\.pickerRequestId/);
@@ -117,13 +127,31 @@ test("does not persist Telegram launch data or bearer tokens beyond sessionStora
   const app = await readFile(new URL("app.js", root), "utf8");
   const api = await readFile(new URL("lib/api.js", root), "utf8");
   const session = await readFile(new URL("lib/session.js", root), "utf8");
-  const source = `${app}\n${api}\n${session}`;
+  const history = await readFile(
+    new URL("lib/reading-history-store.js", root),
+    "utf8",
+  );
+  const source = `${app}\n${api}\n${session}\n${history}`;
 
   assert.doesNotMatch(source, /\blocalStorage\b/);
   assert.doesNotMatch(source, /\bDeviceStorage\b/);
   assert.match(session, /sessionStorage/);
+  assert.match(history, /sessionStorage/);
   assert.doesNotMatch(source, /setItem\([^,]+,\s*(?:bridge\.)?initData/);
   assert.match(session, /subtle\.digest\("SHA-256"/);
+});
+
+test("stores bounded coordinate-only reading history in the browser session", async () => {
+  const history = await readFile(
+    new URL("lib/reading-history-store.js", root),
+    "utf8",
+  );
+
+  assert.match(history, /DEFAULT_MAXIMUM = 1_000/);
+  assert.match(history, /getbible\.miniapp\.reading-history/);
+  assert.doesNotMatch(history, /\blocalStorage\b/);
+  assert.doesNotMatch(history, /session_token|init_data|user_id|verse_text/);
+  assert.match(history, /this\.#storage\.removeItem\(STORAGE_KEY\)/);
 });
 
 test("references the optimized hero and consistent getBible.Life brand", async () => {

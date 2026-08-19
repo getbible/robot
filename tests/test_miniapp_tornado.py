@@ -155,7 +155,7 @@ class MiniAppServerLifecycleTestCase(unittest.IsolatedAsyncioTestCase):
             "mini_app_trusted_proxy_cidrs": ("127.0.0.1/32", "::1/128"),
             "mini_app_launch_ttl_seconds": 300,
             "mini_app_session_limit": 20,
-            "mini_app_session_ttl_seconds": 900,
+            "mini_app_session_ttl_seconds": 10_800,
             "mini_app_sessions_per_user": 2,
             "mini_app_max_searches_per_session": 2,
             "mini_app_max_available_selections": 256,

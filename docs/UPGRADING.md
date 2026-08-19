@@ -103,6 +103,15 @@ Rollback does not silently replace the environment file. If a future release
 requires a configuration change, follow that release's documented upgrade
 instructions before retrying.
 
+The three-hour Mini App session change is deliberately rollback-safe. Fresh
+explicit configurations write `MINI_APP_SESSION_TTL_SECONDS=10800`; older
+physical values in the former `60`–`3600` range are left unchanged and
+normalized to three hours only by the new runtime. When an older host or Docker
+environment omits the key, the manager and versioned Compose files pass the
+old-safe raw default `900`, which the new runtime also normalizes. The
+immediately previous application or container image can therefore still read
+the same configuration after rollback.
+
 ## Configuration migrations
 
 1. Compare `.env.template` with `/etc/getbible-robot/<instance>.env` without printing secret values.

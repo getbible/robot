@@ -864,6 +864,30 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
         clock.value = 61
         self.assertIsNone(store.get(second.token))
 
+    def test_three_hour_reader_session_uses_an_absolute_boundary(self) -> None:
+        clock = _Clock()
+        launches = MiniAppLaunchStore(
+            max_launches=2,
+            ttl_seconds=60,
+            clock=clock,
+        )
+        store = MiniAppSessionStore(
+            max_sessions=2,
+            ttl_seconds=10_800,
+            clock=clock,
+        )
+        session = store.create(
+            _principal(7),
+            translation="kjv",
+            launch=launches.create_launch(user_id=7, target_chat_id=7),
+            init_data_digest=b"x" * 32,
+        )
+
+        clock.value = 10_799
+        self.assertIs(store.get(session.token), session)
+        clock.value = 10_800
+        self.assertIsNone(store.get(session.token))
+
     def test_post_attempts_are_basket_bound_and_failed_retries_remain_closed(
         self,
     ) -> None:

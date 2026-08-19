@@ -48,6 +48,22 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - A failed Post preserves the complete ordered selection.
 - A successful Post clears it.
 
+## Browser reading history
+
+- Successful chapter opens and successful selection additions append history.
+- Entries contain bounded coordinates and display metadata, never verse bodies,
+  Telegram identity, launch data, or Robot credentials.
+- History is versioned, newest-first, limited to 1,000 entries, and scoped to
+  browser `sessionStorage` with memory fallback.
+- The history control exists only in the Bible view and opens an accessible
+  full-screen dialog.
+- Choosing an entry restores both translation and exact coordinate.
+- Individual removal and full reset are local, and full reset removes the
+  storage key.
+- Displaying, recording, removing, and clearing history issue no Robot request.
+  Choosing an entry may persist the existing reader preference, but uses no
+  history or Scripture-content route.
+
 ## Search isolation
 
 - Search and pagination alone use Librarian.
@@ -73,7 +89,8 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 ## Authentication and privacy
 
 - Telegram `initData` signature, age, user, chat, chat instance, and launch ownership are validated.
-- Launches and sessions are short-lived, bounded, and owner-bound.
+- Launches and sessions are bounded and owner-bound; authenticated Mini App
+  sessions have a three-hour default absolute lifetime.
 - The bot token never enters HTML, JavaScript, URLs, logs, browser storage, or public API traffic.
 - Public cache contains no identity, session, preference, search, selection, or posting data.
 - Structured logs contain no tokens, init data, verse bodies, or repository payloads.

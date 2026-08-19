@@ -184,6 +184,7 @@ class ContainerRuntimeTestCase(unittest.TestCase):
                 self.assertIn("MAX_CONCURRENT_LOOKUPS:-8", single)
                 self.assertIn("MAX_CONCURRENT_SEARCHES:-4", single)
                 self.assertIn("MAX_CONCURRENT_UPDATES:-16", single)
+                self.assertIn("MINI_APP_SESSION_TTL_SECONDS:-900", single)
         self.assertIn("./docker/instances:/config/instances:ro", multi_compose)
         self.assertNotIn("build:", multi_compose)
         self.assertIn('ROBOT_MODE: "single"', single_compose)

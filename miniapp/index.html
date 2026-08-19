@@ -259,6 +259,23 @@
               </span>
             </button>
             <button
+              id="bible-history"
+              class="reader-toolbar__history"
+              type="button"
+              aria-controls="reading-history-dialog"
+              aria-haspopup="dialog"
+              aria-expanded="false"
+              aria-label="Reading history"
+              data-i18n-aria-label="history.open"
+            >
+              <span aria-hidden="true">↶</span>
+              <span
+                id="bible-history-count"
+                class="reader-toolbar__history-count"
+                hidden
+              >0</span>
+            </button>
+            <button
               id="bible-next"
               class="reader-toolbar__arrow"
               type="button"
@@ -471,6 +488,59 @@
             data-i18n-aria-label="bible.chapter"
             hidden
           ></div>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog
+      id="reading-history-dialog"
+      class="sheet sheet--history"
+      aria-labelledby="reading-history-title"
+    >
+      <div class="sheet__surface sheet__surface--history">
+        <header class="sheet__header history-header">
+          <div class="history-header__copy">
+            <p class="eyebrow" data-i18n="history.eyebrow">Your reading</p>
+            <h2 id="reading-history-title" data-i18n="history.title">History</h2>
+            <p id="reading-history-summary"></p>
+          </div>
+          <div class="history-header__actions">
+            <button
+              id="clear-reading-history"
+              class="text-button text-button--danger"
+              type="button"
+              data-i18n="history.clear"
+              disabled
+            >
+              Clear all
+            </button>
+            <button
+              id="close-reading-history"
+              class="icon-button"
+              type="button"
+              aria-label="Close reading history"
+              data-i18n-aria-label="history.close"
+            >
+              ×
+            </button>
+          </div>
+        </header>
+
+        <div class="history-content">
+          <div id="reading-history-empty" class="history-empty">
+            <div class="history-empty__icon" aria-hidden="true">↶</div>
+            <h3 data-i18n="history.empty_title">No reading history yet</h3>
+            <p data-i18n="history.empty_body">
+              Opened chapters and selected verses will appear here.
+            </p>
+          </div>
+          <ol
+            id="reading-history-list"
+            class="history-list"
+            aria-label="Previously opened Scripture"
+            data-i18n-aria-label="history.list_label"
+            hidden
+          ></ol>
         </div>
       </div>
     </dialog>

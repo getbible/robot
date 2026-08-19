@@ -43,6 +43,7 @@ No reader navigation, catalog load, chapter load, select, unselect, reorder, cle
 | `miniapp/lib/getbible-model.js` | GetBible response normalization and deterministic coordinate identities |
 | `miniapp/lib/public-cache.js` | IndexedDB/memory cache, LRU bounds, atomic replacement, and invalidation |
 | `miniapp/lib/selection-store.js` | Browser-owned ordered selection domain |
+| `miniapp/lib/reading-history-store.js` | Bounded, coordinate-only reading history for the active browser session |
 | `miniapp/lib/api.js` | Robot session/search/preferences/Post transport facade and public API composition |
 | `miniapp/app.js` | UI orchestration and rendering only |
 
@@ -147,7 +148,7 @@ Robot owns:
 
 - Telegram-signed `initData` verification;
 - owner-bound launch exchange;
-- short-lived opaque sessions;
+- bounded opaque sessions with a three-hour default absolute lifetime;
 - reader preferences;
 - full-text search and pagination through Librarian;
 - final Post authorization, idempotency, authoritative resolution, rendering, and Telegram delivery;
@@ -166,6 +167,20 @@ A public API error never invalidates a Telegram session. A Librarian failure aff
 7. Failure preserves the browser snapshot; success clears it.
 
 The active WebView selection is intentionally ephemeral and identity-free outside that session. Reader content remains durable through the public cache, not through Robot session memory.
+
+## Reading history lifecycle
+
+Successful chapter opens and successful verse selections append a normalized
+coordinate to `ReadingHistoryStore`. Entries retain only a local identifier,
+event kind, translation, reference, book name/number, chapter, verse, and visit
+time. They never retain verse bodies, Telegram identity, launch data, or Robot
+credentials.
+
+History is newest-first, bounded to 1,000 entries, and stored under a versioned
+`sessionStorage` key. Reopening an entry restores both its translation and exact
+coordinate. Individual removal and full reset are local browser operations and
+issue no Robot request. Storage rejection falls back to memory for the active
+page.
 
 ## Search
 
@@ -203,7 +218,10 @@ Known partial sends are rolled back best-effort. Ambiguous outcomes remain locke
 
 ## Session and concurrency model
 
-Launch tokens and sessions are owner-bound, short-lived, capacity-bounded, and independent. Telegram session lifetime is absolute and is not extended indefinitely by activity.
+Launch tokens and sessions are owner-bound, capacity-bounded, and independent.
+The authenticated Mini App session has a three-hour default absolute lifetime
+and is not extended indefinitely by activity. This is long enough for sustained
+reading while preserving a definite authentication boundary.
 
 Browser selection mutations are synchronous and single-threaded. Search pagination uses latest-request coordination so stale responses cannot overwrite current state. Preference writes are serialized per user. Final posting is serialized and idempotent.
 
@@ -231,7 +249,10 @@ Host deployment uses separate private listeners for health, webhook delivery, an
 
 Structured events contain route, status, duration, configured instance, and policy-controlled pseudonymous identity. They never contain tokens, Telegram init data, verse bodies, repository payloads, or browser cache content.
 
-The browser persistent cache contains public Scripture only. User translation and reader coordinates remain in the restricted preference store. Temporary selections remain in browser memory and expire with the WebView.
+The browser persistent cache contains public Scripture only. User translation
+and reader coordinates remain in the restricted preference store. Temporary
+selections remain in browser memory. Coordinate-only reading history remains in
+browser `sessionStorage`; both expire with the WebView session.
 
 ## Release gate
 

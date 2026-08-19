@@ -67,7 +67,7 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.mini_app_port, 9250)
         self.assertEqual(settings.mini_app_init_data_max_age_seconds, 300)
         self.assertEqual(settings.mini_app_launch_ttl_seconds, 300)
-        self.assertEqual(settings.mini_app_session_ttl_seconds, 900)
+        self.assertEqual(settings.mini_app_session_ttl_seconds, 10_800)
         self.assertEqual(settings.mini_app_session_limit, 200)
         self.assertEqual(settings.mini_app_sessions_per_user, 2)
         self.assertEqual(settings.mini_app_max_available_selections, 256)
@@ -84,6 +84,46 @@ class SettingsTestCase(unittest.TestCase):
             0.2,
         )
         self.assertTrue(settings.mini_app_access_log)
+
+    def test_mini_app_session_lifetime_is_multi_hour_and_rollback_safe(self) -> None:
+        expected = {
+            60: 10_800,
+            900: 10_800,
+            3_600: 10_800,
+            7_200: 7_200,
+            10_800: 10_800,
+            86_400: 86_400,
+        }
+        for configured, effective in expected.items():
+            with (
+                self.subTest(configured=configured),
+                patch.dict(
+                    os.environ,
+                    self.environment(
+                        MINI_APP_SESSION_TTL_SECONDS=str(configured),
+                    ),
+                    clear=True,
+                ),
+            ):
+                settings = Settings.from_env(load_environment_file=False)
+                self.assertEqual(
+                    settings.mini_app_session_ttl_seconds,
+                    effective,
+                )
+
+        for configured in (59, 3_601, 7_199, 86_401):
+            with (
+                self.subTest(invalid=configured),
+                patch.dict(
+                    os.environ,
+                    self.environment(
+                        MINI_APP_SESSION_TTL_SECONDS=str(configured),
+                    ),
+                    clear=True,
+                ),
+                self.assertRaises(ConfigurationError),
+            ):
+                Settings.from_env(load_environment_file=False)
 
     def test_external_proxy_uses_specific_backend_and_trusted_source(self) -> None:
         with patch.dict(

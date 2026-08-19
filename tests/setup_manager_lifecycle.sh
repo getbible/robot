@@ -473,6 +473,36 @@ assert_contains "$(environment_file_for alpha)" \
 assert_contains "$(environment_file_for alpha)" \
     'SEARCH_MAX_RESPONSE_BYTES="4194304"'
 assert_contains "$(help_file_for alpha)" "/search"
+assert_contains "$(environment_file_for alpha)" \
+    'MINI_APP_SESSION_TTL_SECONDS="10800"'
+
+# A legacy file may validly omit the setting and rely on the old code default.
+# Fill that case with the old-safe raw value so either application tree boots.
+MISSING_TTL_ENV="${TEST_ROOT}/missing-session-ttl.env"
+cp -- "$(environment_file_for alpha)" "$MISSING_TTL_ENV"
+sed -i '/^MINI_APP_SESSION_TTL_SECONDS=/d' "$MISSING_TTL_ENV"
+migrate_instance_configuration \
+    "$SOURCE_DIR" "$SYSTEM_PYTHON" "$MISSING_TTL_ENV" \
+    "gb-alpha" "alpha"
+assert_contains "$MISSING_TTL_ENV" 'MINI_APP_SESSION_TTL_SECONDS="900"'
+
+# Released managers persisted the former session range in the instance file.
+# Migration must leave those bytes rollback-compatible; the new runtime maps
+# them to its multi-hour effective lifetime when it loads the environment.
+replace_env_value "$SYSTEM_PYTHON" "$(environment_file_for alpha)" \
+    "MINI_APP_SESSION_TTL_SECONDS" "900"
+replace_env_value "$SYSTEM_PYTHON" "$(environment_file_for beta)" \
+    "MINI_APP_SESSION_TTL_SECONDS" "1800"
+migrate_instance_configuration \
+    "$SOURCE_DIR" "$SYSTEM_PYTHON" "$(environment_file_for alpha)" \
+    "gb-alpha" "alpha"
+migrate_instance_configuration \
+    "$SOURCE_DIR" "$SYSTEM_PYTHON" "$(environment_file_for beta)" \
+    "gb-beta" "beta"
+assert_contains "$(environment_file_for alpha)" \
+    'MINI_APP_SESSION_TTL_SECONDS="900"'
+assert_contains "$(environment_file_for beta)" \
+    'MINI_APP_SESSION_TTL_SECONDS="1800"'
 
 cmd_install --source "$SOURCE_DIR" <<EOF
 

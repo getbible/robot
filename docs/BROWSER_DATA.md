@@ -12,6 +12,7 @@ Everything else in the reading experience is browser-owned and backed by GetBibl
 - `query.getbible.net/v2` supplies explicit and grouped reference resolution;
 - IndexedDB stores validated public content;
 - browser memory owns the current ordered selection;
+- browser `sessionStorage` owns bounded, coordinate-only reading history;
 - Robot authenticates Telegram, stores preferences, accepts the final ordered post request, validates it, and sends the authoritative Scripture to Telegram.
 
 ## Ownership boundaries
@@ -27,6 +28,7 @@ Everything else in the reading experience is browser-owned and backed by GetBibl
 | Search pagination | No | Authenticated transport | Yes |
 | Selection highlighting | Yes | No | No |
 | Select/unselect/reorder/clear | Yes | No | No |
+| Reading history record/remove/clear | Yes | No | No |
 | Telegram authentication | No | Yes | No |
 | User preferences | No | Yes | No |
 | Final Telegram posting | Coordinates submitted once | Yes | No |
@@ -49,6 +51,20 @@ flowchart LR
 ```
 
 No select, unselect, reorder, clear, reader navigation, catalog, chapter, or explicit-reference operation may call Robot.
+
+## Reading history
+
+Every successfully opened chapter records its target verse, and every
+successfully added selection records that verse. Each entry contains only its
+translation, display reference, book name/number, chapter, verse, event kind,
+local identifier, and visit time. The store never persists a verse body,
+Telegram identity, launch data, session token, search result, or preference.
+
+The versioned browser-session record is newest-first and bounded to 1,000
+entries. The reader can reopen the exact translation and coordinate, remove one
+entry, or clear the entire record. Clearing removes the storage key. If
+`sessionStorage` is unavailable, history remains available in memory until the
+page closes.
 
 ## Shared verse contract
 
@@ -102,7 +118,12 @@ Reads that fail for a reason that may not repeat — a stalled transfer, a dropp
 
 Public GetBible content is stored in IndexedDB under the versioned `public:v2:` namespace. An in-memory implementation is used only when IndexedDB is unavailable.
 
-The cache is bounded by record count, total estimated payload size, per-record size, least-recently-used eviction, and in-flight request coalescing. Only identity-free public payloads may enter this cache. Telegram init data, session tokens, user IDs, preferences, search results, selections, and posting state are excluded.
+The cache is bounded by record count, total estimated payload size, per-record
+size, least-recently-used eviction, and in-flight request coalescing. Only
+identity-free public payloads may enter this cache. Telegram init data, session
+tokens, user IDs, preferences, search results, selections, reading history, and
+posting state are excluded. Reading history uses its own bounded
+browser-session store and never enters the public cache.
 
 ### Revalidation and invalidation
 
@@ -137,4 +158,9 @@ The release gate must prove:
 - final Post submits one ordered selection payload and preserves state on failure;
 - Robot re-resolves authoritative Scripture before Telegram output;
 - cache hashes, bounds, invalidation, and CSP origin parity remain enforced;
-- cold and warm real-browser flows pass.
+- cold and warm real-browser flows pass;
+- successful chapter opens and selections append browser-session history;
+- history restores translation and coordinates, supports individual removal,
+  and fully resets; opening the history surface, recording, removal, and reset
+  issue no Robot request. Restoring an entry may persist the normal reader
+  preference, but uses no history or Scripture-content route.

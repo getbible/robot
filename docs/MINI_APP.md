@@ -15,6 +15,7 @@ Only full-text search and search pagination use Robot/Librarian.
 | Explicit or grouped references | Browser → `query.getbible.net/v2` |
 | Persistent public cache | Browser IndexedDB |
 | Selected verse order and highlighting | Browser memory |
+| Opened chapter and selected verse history | Browser `sessionStorage` |
 | Full-text search and pagination | Robot → Librarian |
 | Telegram authentication and launch binding | Robot |
 | User preferences and reader position | Robot |
@@ -69,6 +70,19 @@ Both CSP enforcement layers must contain the same allowlist:
 
 - the `Content-Security-Policy` meta element in `miniapp/index.html`;
 - the response header emitted by `MiniAppStaticHandler`.
+
+## Reading history
+
+The Bible toolbar exposes a history control only on the Bible surface. It opens
+a full-screen, keyboard-accessible history dialog showing the reference and
+translation for each successfully opened chapter or selected verse. Choosing an
+entry reopens that exact translation and coordinate. An entry can be removed
+individually, and Clear all removes the complete browser-session record.
+
+`ReadingHistoryStore` is versioned, newest-first, and bounded to 1,000
+coordinate-only entries in `sessionStorage`, with an in-memory fallback. It
+never stores verse bodies, Telegram data, Robot credentials, or user identity,
+and none of its mutations call Robot.
 
 ## Cache integrity
 
@@ -126,7 +140,7 @@ sudo getbible-robot doctor production
 | `MINI_APP_PORT` | Unique per instance |
 | `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | Short Telegram authentication window |
 | `MINI_APP_LAUNCH_TTL_SECONDS` | Short owner-bound launch lifetime |
-| `MINI_APP_SESSION_TTL_SECONDS` | Absolute session lifetime |
+| `MINI_APP_SESSION_TTL_SECONDS` | Three-hour default absolute authenticated-session lifetime |
 | `MINI_APP_SESSION_LIMIT` | Bounded active sessions |
 | `MINI_APP_SESSIONS_PER_USER` | Bounded sessions per user |
 | `MINI_APP_MAX_SEARCHES_PER_SESSION` | Bounded Librarian result snapshots |
@@ -168,7 +182,9 @@ After deployment, verify:
 7. a second click unselects it;
 8. navigation preserves selected styling;
 9. no Robot basket or Scripture request occurs before Post;
-10. Post failure preserves selection and successful Post clears it.
+10. reading history reopens the exact translation and verse;
+11. individual and complete history clearing work locally;
+12. Post failure preserves selection and successful Post clears it.
 
 ## Verification gate
 
