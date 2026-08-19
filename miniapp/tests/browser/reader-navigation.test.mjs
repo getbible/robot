@@ -413,8 +413,8 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   const historyLayout = await page.evaluate(() => {
     const surface = document.querySelector(".sheet__surface--history")
       .getBoundingClientRect();
-    const header = document.querySelector(".history-header")
-      .getBoundingClientRect();
+    const headerElement = document.querySelector(".history-header");
+    const header = headerElement.getBoundingClientRect();
     const copy = document.querySelector(".history-header__copy")
       .getBoundingClientRect();
     const title = document.querySelector("#reading-history-title");
@@ -425,7 +425,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       .getBoundingClientRect();
     const content = document.querySelector(".history-content");
     const list = document.querySelector("#reading-history-list");
-    const headerStyle = getComputedStyle(header);
+    const headerStyle = getComputedStyle(headerElement);
     return {
       surfaceCenter: surface.left + surface.width / 2,
       copyCenter: copy.left + copy.width / 2,
