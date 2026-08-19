@@ -428,7 +428,10 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   assert.equal(robotRequests.length, robotRequestsBeforeClear);
   await page.keyboard.press("Escape");
   await page.waitForFunction(() => (
-    !document.querySelector("#reading-history-dialog")?.open
+    !document.querySelector("#reading-history-dialog")?.open &&
+    document.querySelector("#bible-history")?.getAttribute("aria-expanded") ===
+      "false" &&
+    document.activeElement?.id === "bible-history"
   ));
   assert.equal(
     await page.locator("#bible-history").getAttribute("aria-expanded"),
