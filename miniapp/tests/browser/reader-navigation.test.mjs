@@ -280,7 +280,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
         basket: { items: [], count: 0, maximum: 100 },
       }, 201);
     }
-    if (apiPath === "cleanup") return route.fulfill({ status: 204, body: "" });
+    if (apiPath === "cleanup") return route.fulfill({ status: 204 });
     if (apiPath === "preferences") {
       const update = request.postDataJSON();
       preferences = {
