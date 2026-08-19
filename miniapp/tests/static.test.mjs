@@ -122,8 +122,7 @@ test("keeps Bible as the compact reader and selector without adding a fifth rout
   assert.match(css, /\.sheet__surface--passage/);
   assert.match(css, /\.sheet__surface--history/);
   assert.match(css, /\.sheet__header\.history-header/);
-  assert.match(css, /\.history-content[\s\S]*?overflow: hidden/);
-  assert.match(css, /\.history-list[\s\S]*?overflow-y: auto/);
+  assert.match(css, /\.history-content[\s\S]*?overflow-y: auto/);
   assert.match(css, /grid-template-columns: repeat\(6, minmax\(0, 1fr\)\)/);
   assert.match(css, /@media \(max-width: 367px\)/);
   assert.match(app, /rememberVisibleReaderPosition/);

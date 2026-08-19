@@ -1834,7 +1834,6 @@ select:focus-visible {
 }
 
 .history-content {
-  display: grid;
   min-height: 0;
   padding:
     14px
@@ -1842,25 +1841,21 @@ select:focus-visible {
     calc(var(--safe-bottom) + 18px)
     calc(var(--safe-left) + 14px);
   background: var(--page);
-  grid-template-rows: minmax(0, 1fr);
-  overflow: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
 }
 
 .history-list {
   display: grid;
   width: 100%;
-  min-height: 0;
-  max-height: 100%;
   max-width: 720px;
   margin: 0 auto;
   padding: 2px;
   align-content: start;
   gap: 9px;
   list-style: none;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
-  -webkit-overflow-scrolling: touch;
 }
 
 .history-item {
