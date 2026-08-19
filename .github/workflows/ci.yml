@@ -156,7 +156,10 @@ jobs:
             2>&1 | tee "${RUNNER_TEMP}/miniapp-install.log"
           npm audit --audit-level=high \
             2>&1 | tee -a "${RUNNER_TEMP}/miniapp-install.log"
-          npx playwright install --with-deps chromium \
+          # Hosted runners already contain Chromium's system libraries. Keep
+          # optional font packages off the overloaded Azure APT mirror and
+          # download only Playwright's exact pinned browser from its source CDN.
+          ./node_modules/.bin/playwright install chromium \
             2>&1 | tee "${RUNNER_TEMP}/miniapp-browser-install.log"
 
       - name: Validate Mini App
