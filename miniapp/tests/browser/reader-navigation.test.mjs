@@ -424,7 +424,6 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     const actions = document.querySelector(".history-header__actions")
       .getBoundingClientRect();
     const content = document.querySelector(".history-content");
-    const list = document.querySelector("#reading-history-list");
     const headerStyle = getComputedStyle(headerElement);
     return {
       surfaceCenter: surface.left + surface.width / 2,
@@ -446,9 +445,8 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       protectedRight: surface.right - Number.parseFloat(headerStyle.paddingRight),
       headerTop: header.top,
       contentOverflow: getComputedStyle(content).overflowY,
-      listOverflow: getComputedStyle(list).overflowY,
-      listClientHeight: list.clientHeight,
-      listScrollHeight: list.scrollHeight,
+      contentClientHeight: content.clientHeight,
+      contentScrollHeight: content.scrollHeight,
     };
   });
   assert.ok(Math.abs(historyLayout.copyCenter - historyLayout.surfaceCenter) < 1);
@@ -461,18 +459,19 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   assert.ok(historyLayout.titleRight <= historyLayout.protectedRight + 1);
   assert.ok(historyLayout.actionsLeft >= historyLayout.protectedLeft - 1);
   assert.ok(historyLayout.actionsRight <= historyLayout.protectedRight + 1);
-  assert.equal(historyLayout.contentOverflow, "hidden");
-  assert.equal(historyLayout.listOverflow, "auto");
-  assert.ok(historyLayout.listScrollHeight > historyLayout.listClientHeight);
-  const scrolledHistoryLayout = await page.locator("#reading-history-list")
-    .evaluate((list) => {
+  assert.equal(historyLayout.contentOverflow, "auto");
+  assert.ok(
+    historyLayout.contentScrollHeight > historyLayout.contentClientHeight,
+  );
+  const scrolledHistoryLayout = await page.locator(".history-content")
+    .evaluate((content) => {
       const header = document.querySelector(".history-header");
       const headerTop = header.getBoundingClientRect().top;
-      list.scrollTop = list.scrollHeight;
+      content.scrollTop = content.scrollHeight;
       return {
         headerTop,
-        maximumScrollTop: list.scrollHeight - list.clientHeight,
-        scrollTop: list.scrollTop,
+        maximumScrollTop: content.scrollHeight - content.clientHeight,
+        scrollTop: content.scrollTop,
       };
     });
   assert.ok(scrolledHistoryLayout.scrollTop > 0);
