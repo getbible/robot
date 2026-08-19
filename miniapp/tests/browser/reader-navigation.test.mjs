@@ -439,7 +439,11 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     "bible-history",
   );
 
-  await page.locator('[data-route="home"]').click();
+  const homeRoute = page.locator('[data-route="home"]');
+  if (!(await homeRoute.isVisible())) {
+    await page.locator("#bottom-nav-handle").click();
+  }
+  await homeRoute.click();
   assert.equal(await page.locator("#bible-history").isHidden(), true);
 
   for (const expected of [
