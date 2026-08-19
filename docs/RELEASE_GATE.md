@@ -55,8 +55,9 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
   Telegram identity, launch data, or Robot credentials.
 - History is versioned, newest-first, limited to 1,000 entries, and scoped to
   browser `sessionStorage` with memory fallback.
-- The history control exists only in the Bible view and opens an accessible
-  full-screen dialog.
+- The history control exists only in the Bible view's expanded bottom
+  navigation and opens an accessible full-screen dialog whose centered header
+  clears Telegram controls while the entry list scrolls independently.
 - Choosing an entry restores both translation and exact coordinate.
 - Individual removal and full reset are local, and full reset removes the
   storage key.
