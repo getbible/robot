@@ -650,6 +650,10 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   });
   await page.locator("#close-bookmark-popover").click();
 
+  const historyCountBeforeNextChapter = Number(
+    await page.locator("#bible-history-count").innerText(),
+  );
+  assert.equal(Number.isSafeInteger(historyCountBeforeNextChapter), true);
   await page.locator("#bible-next").click();
   await page.waitForFunction(() => (
     document.querySelector("#bible-reference")?.textContent === "John 4"
@@ -658,9 +662,11 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     await page.locator('[data-reader-verse="1"]').innerText(),
     /KJV John 4 text 1/,
   );
-  await page.waitForFunction(() => (
-    document.querySelector("#bible-history-count")?.textContent === "10"
-  ));
+  const historyCountAfterNextChapter = historyCountBeforeNextChapter + 1;
+  await page.waitForFunction((expectedCount) => (
+    document.querySelector("#bible-history-count")?.textContent ===
+      String(expectedCount)
+  ), historyCountAfterNextChapter);
   await waitForCondition(
     () => preferences.reader_location.chapter === 4,
     "reader preference did not reach John 4",
@@ -669,14 +675,20 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   // Dispatch both actions in one browser task. The chapter navigation clears
   // the visible verse list before the queued selection finishes, so history
   // must use the canonical item returned by the selection store.
+  const historyCountBeforeConcurrentActions = Number(
+    await page.locator("#bible-history-count").innerText(),
+  );
   await page.evaluate(() => {
     document.querySelector('[data-reader-verse="16"]')?.click();
     document.querySelector("#bible-previous")?.click();
   });
-  await page.waitForFunction(() => (
+  const historyCountAfterConcurrentActions =
+    historyCountBeforeConcurrentActions + 1;
+  await page.waitForFunction((expectedCount) => (
     document.querySelector("#bible-reference")?.textContent === "John 3" &&
-    document.querySelector("#bible-history-count")?.textContent === "11"
-  ));
+    document.querySelector("#bible-history-count")?.textContent ===
+      String(expectedCount)
+  ), historyCountAfterConcurrentActions);
   await waitForCondition(
     () => preferences.reader_location.chapter === 3,
     "reader preference did not return to John 3",
@@ -718,7 +730,10 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   );
   assert.equal(await page.locator("#reading-history-dialog").count(), 0);
   assert.equal(await page.locator("#close-reading-history").count(), 0);
-  assert.equal(await page.locator(".history-item").count(), 11);
+  assert.equal(
+    await page.locator(".history-item").count(),
+    historyCountAfterConcurrentActions,
+  );
   const historyLayout = await page.evaluate(() => {
     const view = document.querySelector("#history-view");
     const heading = document.querySelector(".history-heading");
@@ -826,8 +841,15 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   assert.match(await selectedHistory.innerText(), /Verse selected/);
 
   await selectedHistory.locator("[data-history-remove]").click();
-  assert.equal(await page.locator(".history-item").count(), 10);
-  assert.equal(await page.locator("#bible-history-count").innerText(), "10");
+  const historyCountAfterRemoval = historyCountAfterConcurrentActions - 1;
+  assert.equal(
+    await page.locator(".history-item").count(),
+    historyCountAfterRemoval,
+  );
+  assert.equal(
+    await page.locator("#bible-history-count").innerText(),
+    String(historyCountAfterRemoval),
+  );
   assert.equal(robotRequests.length, robotRequestsBeforeHistoryUi);
 
   const storedTranslationHistory = page.locator(".history-item")
@@ -849,9 +871,10 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     await page.locator('[data-reader-verse="16"]').innerText(),
     /AOV John 4 text 16/,
   );
-  await page.waitForFunction(() => (
-    document.querySelector("#bible-history-count")?.textContent === "10"
-  ));
+  await page.waitForFunction((expectedCount) => (
+    document.querySelector("#bible-history-count")?.textContent ===
+      String(expectedCount)
+  ), historyCountAfterRemoval);
   const promotedHistory = await page.evaluate((storageKey) => {
     const record = JSON.parse(
       window.localStorage.getItem(storageKey),
@@ -867,7 +890,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       )).length,
     };
   }, readingHistoryStorageKey);
-  assert.equal(promotedHistory.count, 10);
+  assert.equal(promotedHistory.count, historyCountAfterRemoval);
   assert.equal(promotedHistory.matching, 1);
   assert.equal(promotedHistory.first.translation, "aov");
   assert.equal(promotedHistory.first.chapter, 4);
