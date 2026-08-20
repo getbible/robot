@@ -10,19 +10,19 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   three hours, with a two-to-twenty-four-hour current range. Former valid
   values normalize to three hours without rewriting installed environments, so
   upgrades fix active readers while old-code rollback remains possible.
-- Added a full-screen Bible reading-history flow backed by bounded, versioned
+- Added a dedicated Bible reading-history page backed by bounded, versioned
   browser `sessionStorage`. Successful chapter opens and verse selections keep
-  their exact reference and translation; readers can reopen them, remove one
-  entry, or clear the complete history. Displaying, recording, removing, and
-  clearing history remain local; restored reader positions use only the
-  existing preference path.
+  their exact reference and translation; revisiting the same chapter or verse
+  moves its existing entry to the top. Readers can reopen an entry, remove one,
+  or clear the complete history. Displaying, recording, removing, and clearing
+  history remain local; restored reader positions use only the existing preference
+  path.
 - Added deterministic store, configuration, lifecycle, static-contract, and
   real-Chromium coverage for persistence, bounds, navigation, accessibility,
   and clearing behavior.
-- Moved the Bible-only History action into the expandable bottom navigation,
-  added a dedicated counter-clockwise clock icon, and centered the fixed
-  history header inside Telegram's protected fullscreen lane while entries
-  scroll independently below it.
+- Made History a permanent fifth action in the expandable bottom navigation,
+  retained the footer on the History page, aligned its heading and empty state
+  with Selected, and reduced its top bar to the centered getBible icon.
 
 ### Python 3.14 and Ubuntu 26.04
 

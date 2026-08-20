@@ -94,15 +94,18 @@ Tests must prove:
 
 `ReadingHistoryStore` tests must cover:
 
-- successful chapter and selection visits in newest-first order, including
-  repeated coordinates and different translations;
+- successful chapter and selection visits in newest-first order;
+- stable-id move-to-front deduplication for repeat chapters and exact verses,
+  including across event kinds, plus verse and translation separation and a
+  full-capacity revisit;
 - exact translation/book/chapter/verse restoration;
 - the 1,000-entry bound and defensive snapshots;
-- versioned `sessionStorage` restoration with memory fallback;
+- versioned `sessionStorage` restoration, including legacy duplicate
+  compaction, with memory fallback;
 - malformed persistence rejection;
 - individual removal and complete reset, including removal of the storage key;
 - absence of verse bodies, Telegram identity, launch data, and Robot tokens;
-- no Robot request while opening the history dialog, recording, removing, or
+- no Robot request while opening the History page, recording, removing, or
   clearing history; choosing an entry may use only the existing reader
   preference path.
 
@@ -120,9 +123,12 @@ The pinned Chromium test must exercise the production HTML, CSP, JavaScript modu
 8. no Robot basket or Scripture request occurs before Post;
 9. failed Post preserves selection;
 10. successful Post clears selection.
-11. history shows opened chapters and selected verses with their translations;
-12. history navigation, individual removal, full reset, Escape, and focus
-    restoration work.
+11. History is reachable from every footer route and keeps the footer visible;
+12. History matches Selected's heading and empty-state layout, with a centered
+    getBible icon and no translation or Close control;
+13. revisiting an entry moves it to the top without increasing the count;
+14. exact-coordinate navigation, individual removal, full reset, and empty
+    **Open the Bible** focus/navigation work.
 
 ### Post authority
 

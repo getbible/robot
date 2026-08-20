@@ -16,7 +16,8 @@ export const DEFAULT_FILTERS = Object.freeze({
 const TRANSLATION_PATTERN = /^[a-z0-9][a-z0-9_-]{0,29}$/;
 const SEARCH_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const SELECTION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
-const ROUTES = new Set(["home", "search", "bible", "selection"]);
+const ROUTES = new Set(["home", "search", "bible", "history", "selection"]);
+const ENTRYPOINT_ROUTES = new Set(["home", "search", "bible", "selection"]);
 const GRAPHEME_SEGMENTER = typeof Intl.Segmenter === "function"
   ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
   : null;
@@ -653,7 +654,7 @@ function normalizeEntrypoint(value) {
     return { route: "home", query: "", reference: "" };
   }
   return {
-    route: routeName(value.route),
+    route: ENTRYPOINT_ROUTES.has(value.route) ? value.route : "home",
     query: boundedText(value.query, 240),
     reference: boundedText(value.reference, 180),
   };

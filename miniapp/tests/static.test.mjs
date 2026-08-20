@@ -53,12 +53,12 @@ test("revokes the live session when a successful post closes the Mini App", asyn
   );
 });
 
-test("keeps Bible as the compact reader and selector without adding a fifth route", async () => {
+test("keeps History as a first-class page in the permanent bottom navigation", async () => {
   const html = await readFile(new URL("index.html", root), "utf8");
   const css = await readFile(new URL("styles.css", root), "utf8");
   const app = await readFile(new URL("app.js", root), "utf8");
 
-  assert.equal([...html.matchAll(/data-route="/g)].length, 4);
+  assert.equal([...html.matchAll(/data-route="/g)].length, 5);
   const readerToolbar = html.match(/<div id="bible-heading"[\s\S]*?<\/div>/)?.[0] ?? "";
   const bottomNavigation = html.match(/<nav[\s\S]*?id="bottom-nav"[\s\S]*?<\/nav>/)?.[0] ?? "";
   const historyOffset = bottomNavigation.indexOf('id="bible-history"');
@@ -73,11 +73,18 @@ test("keeps Bible as the compact reader and selector without adding a fifth rout
   assert.match(bottomNavigation, /id="bible-history"/);
   assert.match(bottomNavigation, /class="bottom-nav__icon bottom-nav__history-icon"/);
   assert.match(bottomNavigation, /aria-hidden="true"\s+focusable="false"/);
-  assert.doesNotMatch(historyTrigger, /data-route=/);
-  assert.match(html, /aria-controls="reading-history-dialog"/);
-  assert.match(html, /aria-haspopup="dialog"/);
-  assert.match(html, /id="reading-history-dialog"/);
-  assert.match(html, /aria-labelledby="reading-history-title"/);
+  assert.match(historyTrigger, /data-route="history"/);
+  assert.doesNotMatch(historyTrigger, /hidden|aria-haspopup|aria-expanded/);
+  assert.match(
+    html,
+    /id="history-view"[\s\S]*?data-view="history"[\s\S]*?aria-labelledby="reading-history-title"/,
+  );
+  assert.match(html, /class="selection-heading history-heading"/);
+  assert.match(html, /id="reading-history-empty" class="empty-selection"/);
+  assert.match(html, /id="empty-history-browse"/);
+  assert.match(html, /class="brand" role="img" aria-label="getBible\.Life"/);
+  assert.doesNotMatch(html, /id="reading-history-dialog"/);
+  assert.doesNotMatch(html, /id="close-reading-history"/);
   assert.match(html, /id="bible-navigation-dialog"/);
   assert.match(html, /id="bible-book-grid"/);
   assert.match(html, /id="bible-chapter-grid"/);
@@ -109,7 +116,28 @@ test("keeps Bible as the compact reader and selector without adding a fifth rout
   assert.match(css, /\.bottom-nav\.is-collapsed \.bottom-nav__items/);
   assert.match(
     css,
-    /\.app-shell\[data-active-route="bible"\] \.bottom-nav__items\s*{\s*grid-template-columns: repeat\(5, minmax\(0, 1fr\)\)/,
+    /\.bottom-nav__items\s*{[\s\S]*?grid-template-columns: repeat\(5, minmax\(0, 1fr\)\)/,
+  );
+  assert.match(
+    css,
+    /\.app-shell\[data-active-route="history"\] \.translation-chip\s*{\s*display: none/,
+  );
+  assert.match(
+    css,
+    /app-shell\[data-active-route="history"\][\s\S]*?--topbar-row-height: max\([\s\S]*?var\(--device-safe-top\)[\s\S]*?var\(--safe-top\)/,
+  );
+  assert.match(css, /\.bottom-nav__badge\s*{[\s\S]*?inset-inline-start:/);
+  assert.match(
+    css,
+    /\.history-item__open:focus-visible,[\s\S]*?\.history-item__remove:focus-visible\s*{\s*outline-offset: -3px/,
+  );
+  assert.match(
+    css,
+    /\.history-item__open:focus-visible\s*{\s*outline-color: var\(--brand-strong\)/,
+  );
+  assert.match(
+    css,
+    /\.history-item__remove:focus-visible\s*{\s*outline-color: var\(--destructive\)/,
   );
   assert.match(
     css,
@@ -120,9 +148,8 @@ test("keeps Bible as the compact reader and selector without adding a fifth rout
     /translateY\(calc\(100% - var\(--nav-handle-height\)/,
   );
   assert.match(css, /\.sheet__surface--passage/);
-  assert.match(css, /\.sheet__surface--history/);
-  assert.match(css, /\.sheet__header\.history-header/);
-  assert.match(css, /\.history-content[\s\S]*?overflow-y: auto/);
+  assert.doesNotMatch(css, /\.sheet__surface--history/);
+  assert.doesNotMatch(css, /\.sheet__header\.history-header/);
   assert.match(css, /grid-template-columns: repeat\(6, minmax\(0, 1fr\)\)/);
   assert.match(css, /@media \(max-width: 367px\)/);
   assert.match(app, /rememberVisibleReaderPosition/);
@@ -132,7 +159,10 @@ test("keeps Bible as the compact reader and selector without adding a fifth rout
   assert.match(app, /recordReadingHistory\("selection", addedVerse\)/);
   assert.match(app, /readingHistory\.remove/);
   assert.match(app, /readingHistory\.clear/);
-  assert.match(app, /elements\.bibleHistory\.hidden = route !== "bible"/);
+  assert.match(app, /route === "history"[\s\S]*?renderReadingHistory/);
+  assert.match(app, /moveFocusToRoute[\s\S]*?activeRouteButton\.focus/);
+  assert.doesNotMatch(app, /elements\.bibleHistory\.hidden/);
+  assert.doesNotMatch(app, /readingHistoryDialog|showReadingHistory/);
   assert.match(app, /async function chooseBiblePickerBook/);
   assert.match(app, /async function chooseBiblePickerChapter/);
   assert.match(app, /requestId !== state\.bible\.pickerRequestId/);

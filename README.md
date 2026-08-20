@@ -1,6 +1,6 @@
 # GetBible Robot
 
-GetBible Robot is a hardened Telegram interface for Scripture reading, search, selection, copying, and posting. The Mini App uses GetBible API V2 directly for public Scripture data and keeps temporary selection state in the browser. Robot remains the authenticated Telegram control plane and the sole adapter for Librarian full-text search.
+GetBible Robot is a hardened Telegram interface for Scripture reading, search, history, selection, copying, and posting. The Mini App uses GetBible API V2 directly for public Scripture data and keeps temporary selection and reading-history state in the browser. Robot remains the authenticated Telegram control plane and the sole adapter for Librarian full-text search.
 
 ## Architecture at a glance
 
@@ -9,6 +9,7 @@ Telegram Mini App
   ├─ translations / books / chapters / hashes → https://api.getbible.net/v2
   ├─ explicit and grouped references          → https://query.getbible.net/v2
   ├─ temporary ordered selection              → browser memory
+  ├─ coordinate-only reading history          → browser sessionStorage
   └─ auth / preferences / search / final Post → Robot
                                                 └─ search only → Librarian
 ```
@@ -42,7 +43,7 @@ See [Architecture](docs/ARCHITECTURE.md), [Browser data](docs/BROWSER_DATA.md), 
 
 ## Mini App behavior
 
-The Mini App has Home, Bible, Search, and Selected surfaces.
+The Mini App has Home, Search, Bible, History, and Selected surfaces in one permanent bottom navigation.
 
 - Translation metadata, localized books, chapter maps, chapter text, and hashes come directly from Main API.
 - Explicit references use Query API.
@@ -55,9 +56,10 @@ The Mini App has Home, Bible, Search, and Selected surfaces.
 - Failed Post preserves the complete ordered browser selection.
 - Successful Post clears it.
 - A bounded, coordinate-only reading history remembers opened chapters and
-  selected verses for the active browser session. Each entry keeps its
-  translation and can be reopened or removed individually; the complete
-  history can also be cleared.
+  selected verses for the active browser session. Revisiting the same chapter
+  or exact verse moves its existing entry to the top. History remains available
+  from every surface, and each entry keeps its translation and can be reopened
+  or removed individually; the complete history can also be cleared.
 
 Browser display text and UI identifiers are not final posting authority.
 
@@ -207,7 +209,7 @@ The permanent release gate requires:
 - public API routing and CSP parity;
 - cache hash/invalidation/bounds tests;
 - browser selection add/remove/reorder/clear and visual highlight tests;
-- browser reading-history record/reopen/remove/clear and persistence tests;
+- browser reading-history move-to-front/reopen/remove/clear and persistence tests;
 - no pre-Post Robot selection mutation;
 - authoritative idempotent Post tests;
 - Bandit, dependency audit, secret scan, systemd verification, and CodeQL.
@@ -229,8 +231,10 @@ After deploying one exact green commit, verify:
 9. failed Post preserves selection;
 10. successful Post delivers authoritative Scripture and clears selection;
 11. reading history reopens the exact verse and translation;
-12. individual and complete history clearing work;
-13. private command and launcher cleanup still works.
+12. History remains available in the footer on every Mini App surface;
+13. revisiting a history location moves it to the top without duplication;
+14. individual and complete history clearing work;
+15. private command and launcher cleanup still works.
 
 Record the deployed commit SHA and permanent CI/CodeQL run links with release evidence.
 

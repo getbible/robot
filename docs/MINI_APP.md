@@ -30,7 +30,8 @@ Telegram WebView
   ├─ signed initData / preferences / search / final post → Robot
   ├─ catalogs / chapters / hashes                    → api.getbible.net/v2
   ├─ explicit or grouped references                  → query.getbible.net/v2
-  └─ temporary ordered selection                     → BrowserSelectionStore
+  ├─ temporary ordered selection                     → BrowserSelectionStore
+  └─ unique coordinate history                       → ReadingHistoryStore
 ```
 
 Reader and search results are normalized into one verse descriptor. Coordinate identity is:
@@ -73,18 +74,22 @@ Both CSP enforcement layers must contain the same allowlist:
 
 ## Reading history
 
-The expanded bottom navigation exposes a history control only on the Bible
-surface. It opens a full-screen, keyboard-accessible history dialog showing the
-reference and translation for each successfully opened chapter or selected
-verse. Its fixed, centered controls remain clear of Telegram's fullscreen
-controls while the entry list scrolls independently. Choosing an entry reopens
-that exact translation and coordinate. An entry can be removed individually,
-and Clear all removes the complete browser-session record.
+The bottom navigation exposes History permanently on Home, Search, Bible,
+History, and Selected. History is a normal, keyboard-accessible page, so the
+same footer remains visible and usable. Its heading and empty state follow the
+Selected page, including the centered **Open the Bible** action, while the top
+bar keeps only the centered getBible icon. Choosing an entry reopens that exact
+translation and coordinate. An entry can be removed individually, and Clear
+all removes the complete browser-session record.
 
-`ReadingHistoryStore` is versioned, newest-first, and bounded to 1,000
-coordinate-only entries in `sessionStorage`, with an in-memory fallback. It
-never stores verse bodies, Telegram data, Robot credentials, or user identity,
-and none of its mutations call Robot.
+`ReadingHistoryStore` is versioned, unique and newest-first, and bounded to
+1,000 coordinate-only entries in `sessionStorage`, with an in-memory fallback.
+Chapter visits share translation/book/chapter identity, while verse selections
+use their full coordinate; an exact coordinate also coalesces across event
+kinds. Revisiting one moves its stable entry to the top. Restoration
+compacts older duplicate records. The store never keeps verse bodies, Telegram
+data, Robot credentials, or user identity, and none of its mutations call
+Robot.
 
 ## Cache integrity
 
@@ -185,8 +190,10 @@ After deployment, verify:
 8. navigation preserves selected styling;
 9. no Robot basket or Scripture request occurs before Post;
 10. reading history reopens the exact translation and verse;
-11. individual and complete history clearing work locally;
-12. Post failure preserves selection and successful Post clears it.
+11. History remains available from every footer route and revisits move to the
+    top without duplication;
+12. individual and complete history clearing work locally;
+13. Post failure preserves selection and successful Post clears it.
 
 ## Verification gate
 

@@ -53,6 +53,15 @@ export class ReadingHistoryStore {
       id,
       visited_at: Math.floor(visitedAt),
     });
+    const existing = this.#items.find((item) =>
+      sameHistoryLocation(item, entry)
+    );
+    if (existing) {
+      entry.id = existing.id;
+    }
+    this.#items = this.#items.filter(
+      (item) => !sameHistoryLocation(item, entry),
+    );
     this.#items.unshift(entry);
     if (this.#items.length > this.#maximum) {
       this.#items.length = this.#maximum;
@@ -111,9 +120,19 @@ export class ReadingHistoryStore {
       ) {
         throw new TypeError("Reading history record is invalid.");
       }
-      return record.items
-        .map(normalizeEntry)
+      const items = uniqueEntries(record.items.map(normalizeEntry))
         .slice(0, this.#maximum);
+      if (items.length !== record.items.length) {
+        try {
+          this.#storage.setItem(
+            STORAGE_KEY,
+            JSON.stringify({ version: RECORD_VERSION, items }),
+          );
+        } catch {
+          this.#storage = null;
+        }
+      }
+      return items;
     } catch {
       try {
         this.#storage.removeItem(STORAGE_KEY);
@@ -205,6 +224,30 @@ function boundedInteger(value, minimum, maximum) {
 
 function cloneEntry(entry) {
   return { ...entry };
+}
+
+function sameHistoryLocation(left, right) {
+  const sameChapter =
+    left.translation === right.translation &&
+    left.book === right.book &&
+    left.chapter === right.chapter;
+  return (
+    sameChapter &&
+    (
+      left.verse === right.verse ||
+      (left.kind === "chapter" && right.kind === "chapter")
+    )
+  );
+}
+
+function uniqueEntries(entries) {
+  const unique = [];
+  for (const entry of entries) {
+    if (!unique.some((item) => sameHistoryLocation(item, entry))) {
+      unique.push(entry);
+    }
+  }
+  return unique;
 }
 
 function defaultIdentifier(visitedAt, sequence) {

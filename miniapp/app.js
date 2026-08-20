@@ -51,7 +51,6 @@ let searchRequestId = 0;
 let filterBooksRequestId = 0;
 let sessionGeneration = 0;
 let suppressDialogFocusRestoration = false;
-let suppressHistoryFocusRestoration = false;
 const searchPageRequests = new LatestRequestCoordinator();
 const MAX_BOOK_CACHE_ENTRIES = 8;
 const MAX_CHAPTER_CACHE_ENTRIES = 24;
@@ -189,12 +188,12 @@ const elements = mapElements({
   biblePickerState: "bible-picker-state",
   bibleBookGrid: "bible-book-grid",
   bibleChapterGrid: "bible-chapter-grid",
-  readingHistoryDialog: "reading-history-dialog",
+  historyView: "history-view",
   readingHistorySummary: "reading-history-summary",
   readingHistoryEmpty: "reading-history-empty",
   readingHistoryList: "reading-history-list",
   clearReadingHistory: "clear-reading-history",
-  closeReadingHistory: "close-reading-history",
+  emptyHistoryBrowse: "empty-history-browse",
   selectionSummary: "selection-summary",
   clearSelection: "clear-selection",
   selectionEmpty: "selection-empty",
@@ -434,7 +433,6 @@ function attachListeners() {
   elements.bibleContinue.addEventListener("click", () => {
     void openChapterLocation(state.bible.navigation.next);
   });
-  elements.bibleHistory.addEventListener("click", showReadingHistory);
   elements.biblePassage.addEventListener("click", showBiblePicker);
   elements.biblePickerBack.addEventListener("click", showBibleBookGrid);
   elements.closeBibleNavigation.addEventListener("click", closeBiblePicker);
@@ -480,32 +478,6 @@ function attachListeners() {
       closeBiblePicker();
     }
   });
-  elements.readingHistoryDialog.addEventListener("cancel", (event) => {
-    event.preventDefault();
-    closeReadingHistory();
-  });
-  elements.readingHistoryDialog.addEventListener("close", () => {
-    elements.bibleHistory.setAttribute("aria-expanded", "false");
-    elements.readingHistoryList.replaceChildren();
-    syncBackAction();
-    if (
-      !suppressDialogFocusRestoration &&
-      !suppressHistoryFocusRestoration &&
-      !elements.app.hidden &&
-      state.route === "bible"
-    ) {
-      elements.bibleHistory.focus({ preventScroll: true });
-    }
-    suppressHistoryFocusRestoration = false;
-  });
-  elements.readingHistoryDialog.addEventListener("click", (event) => {
-    if (event.target === elements.readingHistoryDialog) {
-      closeReadingHistory();
-    }
-  });
-  elements.closeReadingHistory.addEventListener("click", () => {
-    closeReadingHistory();
-  });
   elements.clearReadingHistory.addEventListener("click", () => {
     void clearReadingHistory();
   });
@@ -525,6 +497,7 @@ function attachListeners() {
   elements.copySelection.addEventListener("click", () => void clipboard.copy());
   elements.postSelection.addEventListener("click", () => void postBasket());
   elements.emptyBrowse.addEventListener("click", () => setRoute("bible"));
+  elements.emptyHistoryBrowse.addEventListener("click", () => setRoute("bible"));
 }
 
 function loadHeroAsset() {
@@ -566,6 +539,8 @@ function showExpiredAccess() {
 function setRoute(requestedRoute) {
   const route = routeName(requestedRoute);
   const currentView = document.querySelector(`[data-view="${state.route}"]`);
+  const moveFocusToRoute =
+    route !== state.route && currentView?.contains(document.activeElement);
   if (currentView) {
     state.scrollPositions.set(state.route, currentView.scrollTop);
   }
@@ -574,7 +549,6 @@ function setRoute(requestedRoute) {
   }
   state.route = route;
   elements.app.dataset.activeRoute = route;
-  elements.bibleHistory.hidden = route !== "bible";
   setHeaderCondensed(false);
   const savedScrollTop = state.scrollPositions.get(route) ?? 0;
   state.lastScrollTop = savedScrollTop;
@@ -586,11 +560,13 @@ function setRoute(requestedRoute) {
       });
     }
   });
+  let activeRouteButton = null;
   document.querySelectorAll("[data-route]").forEach((button) => {
     const active = button.dataset.route === route;
     button.classList.toggle("is-active", active);
     if (active) {
       button.setAttribute("aria-current", "page");
+      activeRouteButton = button;
     } else {
       button.removeAttribute("aria-current");
     }
@@ -612,6 +588,14 @@ function setRoute(requestedRoute) {
   if (route === "selection") {
     renderSelection();
   }
+  if (route === "history") {
+    renderReadingHistory({ renderItems: true });
+  }
+  if (moveFocusToRoute && activeRouteButton) {
+    window.requestAnimationFrame(() => {
+      activeRouteButton.focus({ preventScroll: true });
+    });
+  }
 }
 
 function onViewScroll(view) {
@@ -621,12 +605,16 @@ function onViewScroll(view) {
   const scrollTop = Math.max(0, view.scrollTop);
   const delta = scrollTop - state.lastScrollTop;
   state.scrollPositions.set(state.route, scrollTop);
-  if (delta > 6 && scrollTop > 58) {
+  if (state.route === "history") {
+    setHeaderCondensed(false);
+  } else if (delta > 6 && scrollTop > 58) {
     setHeaderCondensed(true);
   } else if (delta < -4 || scrollTop < 24) {
     setHeaderCondensed(false);
   }
-  if (view === elements.bibleView) {
+  if (state.route === "history") {
+    showNavigation();
+  } else if (view === elements.bibleView) {
     if (state.navigationRevealScrollTop !== null && delta < -4) {
       state.navigationRevealScrollTop = scrollTop;
     }
@@ -787,9 +775,7 @@ function readerLocationKey(location) {
 }
 
 function syncBackAction() {
-  if (elements.readingHistoryDialog.open) {
-    bridge.setBackAction(closeReadingHistory);
-  } else if (elements.bibleNavigationDialog.open) {
+  if (elements.bibleNavigationDialog.open) {
     bridge.setBackAction(
       state.bible.pickerStage === "chapters"
         ? showBibleBookGrid
@@ -806,29 +792,8 @@ function syncBackAction() {
   }
 }
 
-function showReadingHistory() {
-  if (state.route !== "bible" || elements.readingHistoryDialog.open) {
-    return;
-  }
-  renderReadingHistory({ renderItems: true });
-  elements.bibleHistory.setAttribute("aria-expanded", "true");
-  elements.readingHistoryDialog.showModal();
-  syncBackAction();
-  window.requestAnimationFrame(() => {
-    elements.closeReadingHistory.focus({ preventScroll: true });
-  });
-}
-
-function closeReadingHistory({ restoreFocus = true } = {}) {
-  if (!elements.readingHistoryDialog.open) {
-    return;
-  }
-  suppressHistoryFocusRestoration = !restoreFocus;
-  elements.readingHistoryDialog.close();
-}
-
 function renderReadingHistory({
-  renderItems = elements.readingHistoryDialog.open,
+  renderItems = state.route === "history",
 } = {}) {
   const count = readingHistory.size;
   elements.bibleHistoryCount.hidden = count === 0;
@@ -843,7 +808,7 @@ function renderReadingHistory({
     "history.count",
     count,
   );
-  elements.clearReadingHistory.disabled = count === 0;
+  elements.clearReadingHistory.hidden = count === 0;
   elements.readingHistoryEmpty.hidden = count > 0;
   elements.readingHistoryList.hidden = count === 0;
   if (!renderItems) {
@@ -913,7 +878,7 @@ function onReadingHistoryAction(event) {
         ...elements.readingHistoryList.querySelectorAll("[data-history-open]"),
       ];
       const adjacent = remaining[Math.min(index, remaining.length - 1)];
-      (adjacent ?? elements.closeReadingHistory).focus({ preventScroll: true });
+      (adjacent ?? elements.emptyHistoryBrowse).focus({ preventScroll: true });
     }
     return;
   }
@@ -927,7 +892,6 @@ function onReadingHistoryAction(event) {
   if (!entry) {
     return;
   }
-  closeReadingHistory({ restoreFocus: false });
   void openReadingHistoryEntry(entry);
 }
 
@@ -964,13 +928,15 @@ async function clearReadingHistory() {
     return;
   }
   const confirmed = await bridge.confirm(i18n.t("history.clear_confirm"));
-  if (!confirmed || !elements.readingHistoryDialog.open) {
+  if (!confirmed || state.route !== "history") {
     return;
   }
   readingHistory.clear();
+  state.scrollPositions.set("history", 0);
+  elements.historyView.scrollTop = 0;
   renderReadingHistory();
   announce(i18n.t("history.cleared"));
-  elements.closeReadingHistory.focus({ preventScroll: true });
+  elements.emptyHistoryBrowse.focus({ preventScroll: true });
 }
 
 function recordReadingHistory(kind, verse) {
@@ -990,6 +956,8 @@ function recordReadingHistory(kind, verse) {
   } catch {
     return;
   }
+  state.scrollPositions.set("history", 0);
+  elements.historyView.scrollTop = 0;
   renderReadingHistory();
 }
 

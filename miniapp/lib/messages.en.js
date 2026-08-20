@@ -79,9 +79,9 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "history.clear": "Clear all",
   "history.close": "Close reading history",
   "history.list_label": "Previously opened Scripture",
-  "history.empty_title": "No reading history yet",
+  "history.empty_title": "Your history will appear here",
   "history.empty_body":
-    "Opened chapters and selected verses will appear here.",
+    "Open a chapter or select a verse to return to it later.",
   "history.count_one": "One place",
   "history.count_other": "{count} places",
   "history.chapter": "Chapter opened",

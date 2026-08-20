@@ -55,16 +55,20 @@ No select, unselect, reorder, clear, reader navigation, catalog, chapter, or exp
 ## Reading history
 
 Every successfully opened chapter records its target verse, and every
-successfully added selection records that verse. Each entry contains only its
-translation, display reference, book name/number, chapter, verse, event kind,
-local identifier, and visit time. The store never persists a verse body,
-Telegram identity, launch data, session token, search result, or preference.
+successfully added selection records that verse. Chapter visits de-duplicate by
+translation, book, and chapter; selections de-duplicate by their full verse
+coordinate, and an exact coordinate also coalesces across event kinds.
+Recording a repeat updates and promotes that entry instead of duplicating it.
+Each entry contains only its translation, display reference, book name/number,
+chapter, verse, event kind, local identifier, and visit time. The store never
+persists a verse body, Telegram identity, launch data, session token, search
+result, or preference.
 
-The versioned browser-session record is newest-first and bounded to 1,000
-entries. The reader can reopen the exact translation and coordinate, remove one
-entry, or clear the entire record. Clearing removes the storage key. If
-`sessionStorage` is unavailable, history remains available in memory until the
-page closes.
+The versioned browser-session record is unique, newest-first, and bounded to
+1,000 entries. Legacy duplicates are compacted when restored. The reader can
+reopen the exact translation and coordinate, remove one entry, or clear the
+entire record. Clearing removes the storage key. If `sessionStorage` is
+unavailable, history remains available in memory until the page closes.
 
 ## Shared verse contract
 
@@ -159,8 +163,10 @@ The release gate must prove:
 - Robot re-resolves authoritative Scripture before Telegram output;
 - cache hashes, bounds, invalidation, and CSP origin parity remain enforced;
 - cold and warm real-browser flows pass;
-- successful chapter opens and selections append browser-session history;
-- history restores translation and coordinates, supports individual removal,
-  and fully resets; opening the history surface, recording, removal, and reset
-  issue no Robot request. Restoring an entry may persist the normal reader
-  preference, but uses no history or Scripture-content route.
+- successful chapter opens and selections record unique browser-session
+  history, promoting revisited coordinates to the front;
+- History remains available from every bottom-navigation surface, restores
+  translation and coordinates, supports individual removal, and fully resets;
+  opening the History page, recording, removal, and reset issue no Robot
+  request. Restoring an entry may persist the normal reader preference, but
+  uses no history or Scripture-content route.

@@ -90,8 +90,8 @@ function installTelegramMock() {
       colorScheme: "dark",
       version: "8.0",
       viewportStableHeight: 844,
-      safeAreaInset: { top: 24, right: 0, bottom: 18, left: 0 },
-      contentSafeAreaInset: { top: 48, right: 0, bottom: 34, left: 0 },
+      safeAreaInset: { top: 0, right: 0, bottom: 18, left: 0 },
+      contentSafeAreaInset: { top: 56, right: 0, bottom: 34, left: 0 },
       isFullscreen: false,
       BackButton: { onClick() {}, offClick() {}, show() {}, hide() {} },
       HapticFeedback: { selectionChanged() {}, notificationOccurred() {} },
@@ -173,6 +173,17 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
             verse: index + 2,
             visited_at: index + 2,
           })),
+          {
+            id: "visit_seeded_aov_legacy_duplicate",
+            kind: "selection",
+            translation: "aov",
+            reference: "John 4:16",
+            book: 43,
+            book_name: "John",
+            chapter: 4,
+            verse: 16,
+            visited_at: 0,
+          },
         ],
       }),
     );
@@ -364,7 +375,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   });
   await page.waitForFunction(() => (
     document.querySelector("#bible-reference")?.textContent === "John 3" &&
-    document.querySelector("#bible-history-count")?.textContent === "12"
+    document.querySelector("#bible-history-count")?.textContent === "11"
   ));
   await waitForCondition(
     () => preferences.reader_location.chapter === 3,
@@ -392,86 +403,98 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   ));
   assert.equal(await page.locator("#bible-history").isVisible(), true);
 
+  await page.setViewportSize({ width: 320, height: 844 });
   const robotRequestsBeforeHistoryUi = robotRequests.length;
   await page.locator("#bible-history").click();
-  assert.equal(
-    await page.locator("#reading-history-dialog").getAttribute("open"),
-    "",
-  );
-  assert.equal(
-    await page.locator("#bible-history").getAttribute("aria-expanded"),
-    "true",
-  );
   await page.waitForFunction(() => (
-    document.activeElement?.id === "close-reading-history"
+    document.querySelector("#app")?.dataset.activeRoute === "history"
   ));
+  assert.equal(await page.locator("#history-view").isVisible(), true);
+  assert.equal(await bottomNavigation.isVisible(), true);
+  assert.equal(await page.locator("#bible-history").isVisible(), true);
   assert.equal(
-    await page.evaluate(() => document.activeElement?.id),
-    "close-reading-history",
+    await page.locator("#bible-history").getAttribute("aria-current"),
+    "page",
   );
-  assert.equal(await page.locator(".history-item").count(), 12);
+  assert.equal(await page.locator("#reading-history-dialog").count(), 0);
+  assert.equal(await page.locator("#close-reading-history").count(), 0);
+  assert.equal(await page.locator(".history-item").count(), 11);
   const historyLayout = await page.evaluate(() => {
-    const surface = document.querySelector(".sheet__surface--history")
+    const view = document.querySelector("#history-view");
+    const heading = document.querySelector(".history-heading");
+    const copy = heading.firstElementChild.getBoundingClientRect();
+    const clear = document.querySelector("#clear-reading-history")
       .getBoundingClientRect();
-    const headerElement = document.querySelector(".history-header");
-    const header = headerElement.getBoundingClientRect();
-    const copy = document.querySelector(".history-header__copy")
+    const topbar = document.querySelector(".topbar").getBoundingClientRect();
+    const brand = document.querySelector(".brand").getBoundingClientRect();
+    const navigation = document.querySelector("#bottom-nav")
       .getBoundingClientRect();
-    const title = document.querySelector("#reading-history-title");
-    const titleRange = document.createRange();
-    titleRange.selectNodeContents(title);
-    const titleText = titleRange.getBoundingClientRect();
-    const actions = document.querySelector(".history-header__actions")
-      .getBoundingClientRect();
-    const content = document.querySelector(".history-content");
-    const headerStyle = getComputedStyle(headerElement);
     return {
-      surfaceCenter: surface.left + surface.width / 2,
-      copyCenter: copy.left + copy.width / 2,
-      titleCenter: titleText.left + titleText.width / 2,
-      actionsCenter: actions.left + actions.width / 2,
+      usesSelectionHeading: heading.classList.contains("selection-heading"),
+      contentSafeTop: window.Telegram.WebApp.contentSafeAreaInset.top,
       copyLeft: copy.left,
       copyRight: copy.right,
-      actionsLeft: actions.left,
-      actionsRight: actions.right,
-      copyTop: copy.top,
-      titleLeft: titleText.left,
-      titleRight: titleText.right,
-      safeBoundary: Math.max(
-        window.Telegram.WebApp.contentSafeAreaInset.top + 10,
-        window.Telegram.WebApp.safeAreaInset.top + 4,
-      ),
-      protectedLeft: surface.left + Number.parseFloat(headerStyle.paddingLeft),
-      protectedRight: surface.right - Number.parseFloat(headerStyle.paddingRight),
-      headerTop: header.top,
-      contentOverflow: getComputedStyle(content).overflowY,
-      contentClientHeight: content.clientHeight,
-      contentScrollHeight: content.scrollHeight,
+      clearLeft: clear.left,
+      clearRight: clear.right,
+      topbarCenter: topbar.left + topbar.width / 2,
+      brandCenter: brand.left + brand.width / 2,
+      brandVisible: getComputedStyle(document.querySelector(".brand__icon")).display !==
+        "none",
+      translationDisplay: getComputedStyle(
+        document.querySelector("#translation-shortcut"),
+      ).display,
+      viewportWidth: window.innerWidth,
+      viewTop: view.getBoundingClientRect().top,
+      viewOverflow: getComputedStyle(view).overflowY,
+      viewClientHeight: view.clientHeight,
+      viewScrollHeight: view.scrollHeight,
+      navigationTop: navigation.top,
+      navigationBottom: navigation.bottom,
     };
   });
-  assert.ok(Math.abs(historyLayout.copyCenter - historyLayout.surfaceCenter) < 1);
-  assert.ok(Math.abs(historyLayout.titleCenter - historyLayout.surfaceCenter) < 1);
-  assert.ok(Math.abs(historyLayout.actionsCenter - historyLayout.surfaceCenter) < 1);
-  assert.ok(historyLayout.copyTop >= historyLayout.safeBoundary);
-  assert.ok(historyLayout.copyLeft >= historyLayout.protectedLeft - 1);
-  assert.ok(historyLayout.copyRight <= historyLayout.protectedRight + 1);
-  assert.ok(historyLayout.titleLeft >= historyLayout.protectedLeft - 1);
-  assert.ok(historyLayout.titleRight <= historyLayout.protectedRight + 1);
-  assert.ok(historyLayout.actionsLeft >= historyLayout.protectedLeft - 1);
-  assert.ok(historyLayout.actionsRight <= historyLayout.protectedRight + 1);
-  assert.equal(historyLayout.contentOverflow, "auto");
-  assert.ok(
-    historyLayout.contentScrollHeight > historyLayout.contentClientHeight,
-  );
-  const scrolledHistoryLayout = await page.locator(".history-content")
-    .evaluate((content) => {
-      const header = document.querySelector(".history-header");
-      const headerTop = header.getBoundingClientRect().top;
-      content.scrollTop = content.scrollHeight;
+  assert.equal(historyLayout.usesSelectionHeading, true);
+  assert.ok(historyLayout.copyLeft < historyLayout.clearLeft);
+  assert.ok(historyLayout.copyRight <= historyLayout.clearLeft);
+  assert.ok(historyLayout.clearRight <= historyLayout.viewportWidth);
+  assert.ok(historyLayout.viewTop >= historyLayout.contentSafeTop);
+  assert.ok(Math.abs(historyLayout.brandCenter - historyLayout.topbarCenter) < 1);
+  assert.equal(historyLayout.brandVisible, true);
+  assert.equal(historyLayout.translationDisplay, "none");
+  assert.equal(historyLayout.viewOverflow, "auto");
+  assert.ok(historyLayout.viewScrollHeight > historyLayout.viewClientHeight);
+  assert.ok(historyLayout.navigationTop < historyLayout.navigationBottom);
+  await page.locator("#bottom-nav-handle").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#bottom-nav")?.classList.contains("is-collapsed")
+  ));
+  await page.locator("#history-view").evaluate((view) => new Promise((resolve) => {
+    view.addEventListener("scroll", () => {
+      window.requestAnimationFrame(resolve);
+    }, { once: true });
+    view.scrollTop = view.scrollHeight;
+  }));
+  await page.waitForFunction(() => {
+    const navigation = document.querySelector("#bottom-nav");
+    return !navigation?.classList.contains("is-collapsed");
+  });
+  await page.waitForFunction(() => {
+    const navigation = document.querySelector("#bottom-nav");
+    const view = document.querySelector("#history-view");
+    return view?.scrollTop > 0 &&
+      !navigation?.classList.contains("is-collapsed") &&
+      getComputedStyle(document.querySelector(".bottom-nav__items")).visibility ===
+        "visible" &&
+      getComputedStyle(document.querySelector("#bible-history")).visibility ===
+        "visible";
+  });
+  const scrolledHistoryLayout = await page.locator("#history-view")
+    .evaluate((view) => {
+      const navigation = document.querySelector("#bottom-nav")
+        .getBoundingClientRect();
       return {
-        headerTop,
-        maximumScrollTop: content.scrollHeight - content.clientHeight,
-        scrollTop: content.scrollTop,
+        maximumScrollTop: view.scrollHeight - view.clientHeight,
+        navigationTop: navigation.top,
+        scrollTop: view.scrollTop,
       };
     });
   assert.ok(scrolledHistoryLayout.scrollTop > 0);
@@ -480,7 +503,17 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       scrolledHistoryLayout.scrollTop - scrolledHistoryLayout.maximumScrollTop,
     ) < 1,
   );
-  assert.equal(scrolledHistoryLayout.headerTop, historyLayout.headerTop);
+  assert.equal(scrolledHistoryLayout.navigationTop, historyLayout.navigationTop);
+  assert.equal(await page.locator(".brand__icon").isVisible(), true);
+  const storedLocations = await page.evaluate(() => {
+    const record = JSON.parse(
+      window.sessionStorage.getItem("getbible.miniapp.reading-history"),
+    );
+    return record.items.map((item) => (
+      `${item.translation}:${item.book}:${item.chapter}:${item.verse}`
+    ));
+  });
+  assert.equal(new Set(storedLocations).size, storedLocations.length);
   const selectedHistory = page.locator(".history-item")
     .filter({ has: page.getByText("John 4:16", { exact: true }) })
     .filter({
@@ -493,8 +526,8 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   assert.match(await selectedHistory.innerText(), /Verse selected/);
 
   await selectedHistory.locator("[data-history-remove]").click();
-  assert.equal(await page.locator(".history-item").count(), 11);
-  assert.equal(await page.locator("#bible-history-count").innerText(), "11");
+  assert.equal(await page.locator(".history-item").count(), 10);
+  assert.equal(await page.locator("#bible-history-count").innerText(), "10");
   assert.equal(robotRequests.length, robotRequestsBeforeHistoryUi);
 
   const storedTranslationHistory = page.locator(".history-item")
@@ -517,8 +550,28 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     /AOV John 4 text 16/,
   );
   await page.waitForFunction(() => (
-    document.querySelector("#bible-history-count")?.textContent === "12"
+    document.querySelector("#bible-history-count")?.textContent === "10"
   ));
+  const promotedHistory = await page.evaluate(() => {
+    const record = JSON.parse(
+      window.sessionStorage.getItem("getbible.miniapp.reading-history"),
+    );
+    return {
+      count: record.items.length,
+      first: record.items[0],
+      matching: record.items.filter((item) => (
+        item.translation === "aov" &&
+        item.book === 43 &&
+        item.chapter === 4 &&
+        item.verse === 16
+      )).length,
+    };
+  });
+  assert.equal(promotedHistory.count, 10);
+  assert.equal(promotedHistory.matching, 1);
+  assert.equal(promotedHistory.first.translation, "aov");
+  assert.equal(promotedHistory.first.chapter, 4);
+  assert.equal(promotedHistory.first.verse, 16);
   await waitForCondition(
     () => (
       preferences.translation === "aov" &&
@@ -533,6 +586,14 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     await page.locator("#bottom-nav-handle").click();
   }
   await page.locator("#bible-history").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#app")?.dataset.activeRoute === "history" &&
+    document.querySelector("#history-view")?.scrollTop === 0
+  ));
+  const firstPromotedHistory = page.locator(".history-item").first();
+  assert.equal(await firstPromotedHistory.isVisible(), true);
+  assert.match(await firstPromotedHistory.innerText(), /John 4:16/);
+  assert.match(await firstPromotedHistory.innerText(), /AOV/);
   const robotRequestsBeforeClear = robotRequests.length;
   await page.locator("#clear-reading-history").click();
   await page.waitForFunction(() => (
@@ -546,28 +607,23 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     null,
   );
   assert.equal(robotRequests.length, robotRequestsBeforeClear);
-  await page.keyboard.press("Escape");
-  await page.waitForFunction(() => (
-    !document.querySelector("#reading-history-dialog")?.open &&
-    document.querySelector("#bible-history")?.getAttribute("aria-expanded") ===
-      "false" &&
-    document.activeElement?.id === "bible-history"
-  ));
-  assert.equal(
-    await page.locator("#bible-history").getAttribute("aria-expanded"),
-    "false",
-  );
   assert.equal(
     await page.evaluate(() => document.activeElement?.id),
-    "bible-history",
+    "empty-history-browse",
   );
+  assert.equal(await page.locator("#clear-reading-history").isHidden(), true);
+  assert.equal(await page.locator("#reading-history-empty").isVisible(), true);
+  await page.locator("#empty-history-browse").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#app")?.dataset.activeRoute === "bible" &&
+    document.activeElement?.dataset.route === "bible"
+  ));
 
-  const homeRoute = page.locator('[data-route="home"]');
-  if (!(await homeRoute.isVisible())) {
-    await page.locator("#bottom-nav-handle").click();
+  for (const route of ["home", "search", "selection"]) {
+    await page.locator(`[data-route="${route}"]`).click();
+    assert.equal(await page.locator("#bottom-nav").isVisible(), true);
+    assert.equal(await page.locator("#bible-history").isVisible(), true);
   }
-  await homeRoute.click();
-  assert.equal(await page.locator("#bible-history").isHidden(), true);
 
   for (const expected of [
     "translations.json",

@@ -50,14 +50,16 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 
 ## Browser reading history
 
-- Successful chapter opens and successful selection additions append history.
+- Successful chapter opens and successful selection additions record history;
+  an existing chapter or exact verse moves to the front without increasing the
+  entry count, including an exact-coordinate revisit across event kinds.
 - Entries contain bounded coordinates and display metadata, never verse bodies,
   Telegram identity, launch data, or Robot credentials.
-- History is versioned, newest-first, limited to 1,000 entries, and scoped to
-  browser `sessionStorage` with memory fallback.
-- The history control exists only in the Bible view's expanded bottom
-  navigation and opens an accessible full-screen dialog whose centered header
-  clears Telegram controls while the entry list scrolls independently.
+- History is versioned, unique and newest-first, limited to 1,000 entries, and
+  scoped to browser `sessionStorage` with memory fallback.
+- History is a permanent fifth bottom-navigation route. Its normal page keeps
+  the footer visible, follows Selected's heading and empty-state layout, and
+  shows only the centered getBible icon in the top bar.
 - Choosing an entry restores both translation and exact coordinate.
 - Individual removal and full reset are local, and full reset removes the
   storage key.

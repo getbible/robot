@@ -449,10 +449,16 @@ test("reorders immutable basket arrays and deduplicates appended pages", () => {
 
 test("falls back unknown routes to the protected home screen", () => {
   assert.equal(routeName("bible"), "bible");
+  assert.equal(routeName("history"), "history");
   assert.equal(routeName("https://example.com"), "home");
 });
 
 test("keeps Bible fragments separate from executable search entrypoints", () => {
+  assert.deepEqual(entrypointIntent({ route: "history", query: "ignored" }), {
+    route: "home",
+    search_query: "",
+    bible_reference: "",
+  });
   assert.deepEqual(entrypointIntent({ route: "bible", query: "John 3" }), {
     route: "bible",
     search_query: "",
