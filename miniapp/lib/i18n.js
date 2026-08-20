@@ -3,7 +3,12 @@ import { ENGLISH_MESSAGES } from "./messages.en.js";
 
 export const UI_CATALOGS = Object.freeze({
   en: ENGLISH_MESSAGES,
-  ...TRANSLATED_MESSAGES,
+  ...Object.fromEntries(
+    Object.entries(TRANSLATED_MESSAGES).map(([locale, catalog]) => [
+      locale,
+      Object.freeze({ ...ENGLISH_MESSAGES, ...catalog }),
+    ]),
+  ),
 });
 
 export class I18n {

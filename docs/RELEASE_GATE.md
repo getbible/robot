@@ -12,7 +12,9 @@ A commit is deployable only when every applicable item below is satisfied on the
 
 ## Active Mini App doctrine
 
-- Only full-text search and search pagination use Robot/Librarian.
+- Only full-text search and search pagination use Librarian; Robot's other
+  protected paths are authentication, preference compatibility, final Post,
+  and explicit bookmark chat backup/restore.
 - Translation metadata, books, chapters, chapter text, and hashes use `api.getbible.net/v2` directly from the browser.
 - Explicit and grouped references use `query.getbible.net/v2` directly from the browser.
 - Public API requests contain no Telegram or Robot credentials.
@@ -20,6 +22,9 @@ A commit is deployable only when every applicable item below is satisfied on the
 - Reader and search verses share coordinate identity.
 - No Robot basket or Scripture mutation occurs before final Post.
 - Browser text and references are never final posting authority.
+- Bookmarks and last-read are compact user state, not public Scripture cache
+  entries; only an explicit backup/restore action sends bookmark JSON through
+  Robot.
 
 Any code, test, OpenAPI path, or documentation that presents the former Robot-proxied reader or per-click server basket as the active design blocks release.
 
@@ -56,7 +61,9 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - Entries contain bounded coordinates and display metadata, never verse bodies,
   Telegram identity, launch data, or Robot credentials.
 - History is versioned, unique and newest-first, limited to 1,000 entries, and
-  scoped to browser `sessionStorage` with memory fallback.
+  stored in authenticated user-scoped browser `localStorage` with memory
+  fallback. It survives WebView sessions on that browser but never synchronizes
+  through Telegram or Robot.
 - History is a permanent fifth bottom-navigation route. Its normal page keeps
   the footer visible, follows Selected's heading and empty-state layout, and
   shows only the centered getBible icon in the top bar.
@@ -66,6 +73,49 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - Displaying, recording, removing, and clearing history issue no Robot request.
   Choosing an entry may persist the existing reader preference, but uses no
   history or Scripture-content route.
+
+## Bookmark and last-read persistence
+
+- A selected Bible verse exposes an anchored, accessible topic menu without
+  changing the five-item footer.
+- Home exposes Search, Bible, and History primary actions plus Selected,
+  History, and Bookmarks summaries. Only Search and Bible show the translation
+  control; Home, History, Selected, and Bookmarks use the centered icon-only
+  top bar.
+- Topic and bookmark counts, identifiers, names, colors, text excerpts, and
+  serialized values are bounded.
+- Whole-verse bookmark identity is canonical book/chapter/verse across
+  translations; reassignment updates the existing bookmark rather than
+  duplicating it.
+- Topic search/detail/add/rename/recolor/removal and bookmark
+  assign/move/reopen/remove/clear behavior derive from `BookmarkStore`.
+- The newest valid timestamped bookmark aggregate reconciles deterministically
+  across scoped browser `localStorage`, Telegram `DeviceStorage`, and Telegram
+  `CloudStorage`; writes are coalesced and partial API failure preserves an
+  available valid copy.
+- The compact last-read record contains only translation, book, chapter, verse,
+  version, and timestamp, or a timestamped cleared marker, and uses the same
+  local/device/cloud strategy without stale-position resurrection.
+- History, selections, translation catalogs, chapters, and public cache entries
+  never enter Telegram user storage.
+
+## Bookmark portability and chat recovery
+
+- Browser JSON download/import is versioned, merge-safe, and bounded.
+- Chat backup is an explicit authenticated, idempotent action that validates
+  and canonicalizes the document before sending it to the user's private bot
+  chat.
+- The durable Telegram document carries an owner-bound Restore callback; the
+  callback is accepted only from the owner's private chat and validates its
+  file metadata.
+- Every Restore callback creates a fresh, short-lived, one-time Bookmarks
+  launch. Restore revalidates the downloaded document, requires user
+  confirmation, persists the merge, and only then acknowledges that launch's
+  restore reference.
+- A transport or acknowledgement failure leaves existing bookmarks and the
+  original chat document recoverable.
+- Robot database/session state and structured logs never contain a bookmark
+  backup body; a pending restore retains bounded Telegram file metadata only.
 
 ## Search isolation
 
@@ -96,7 +146,9 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
   sessions have a three-hour default absolute lifetime.
 - The bot token never enters HTML, JavaScript, URLs, logs, browser storage, or public API traffic.
 - Public cache contains no identity, session, preference, search, selection, or posting data.
-- Structured logs contain no tokens, init data, verse bodies, or repository payloads.
+- Public cache contains no history, bookmark, last-read, or backup data.
+- Structured logs contain no tokens, init data, verse bodies, repository
+  payloads, or bookmark backup bodies.
 - Forwarded client addresses are accepted only from configured trusted proxies.
 
 ## Runtime and concurrency

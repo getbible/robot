@@ -21,21 +21,37 @@ GetBible keeps immediate Telegram commands native and moves browsing, reading, s
 3. Choose a book and chapter.
 4. Read the complete chapter loaded directly from `api.getbible.net/v2`.
 5. Tap a verse to select it in browser memory.
-6. Tap it again to unselect it.
-7. Continue navigating; selected verses remain visibly selected during the active WebView session.
-8. Open **Selected** to reorder, remove, copy, or Post.
+6. Use the anchored menu above that verse to assign its complete verse to a
+   colored bookmark topic, or dismiss it without bookmarking.
+7. Tap the verse again to unselect it; an existing bookmark remains independent.
+8. Continue navigating; selected verses remain visibly selected during the active WebView session.
+9. Open **Selected** to reorder, remove, copy, or Post.
 
 The browser does not call Robot for catalogs, books, chapters, chapter text, selecting, unselecting, reordering, clearing, or copying.
 
 Every successful chapter open and successful verse selection is also recorded
-in bounded browser-session reading history. A repeated chapter or exact verse
-moves to the top instead of creating another row. **History** is a permanent
+in bounded, user-scoped browser-local reading history. A repeated chapter or
+exact verse moves to the top instead of creating another row. **History** is a permanent
 fifth bottom-navigation action and opens a normal page, so the
 footer remains available for navigation. The page uses the same left-aligned
 heading, right-aligned clear action, and bordered empty state as **Selected**;
 its top bar keeps only the centered getBible icon. Each row shows its reference
 and translation, reopens the exact coordinate when chosen, and can be removed
-individually. **Clear all** resets the complete history without contacting Robot.
+individually. **Clear all** resets the complete history without contacting Robot
+or Telegram storage. The record survives later WebView sessions on that browser
+but intentionally does not synchronize between devices.
+
+## Home and top-bar workflow
+
+Home presents **Search Scripture**, **Read the Bible**, and **See history** as
+its three primary actions. Beneath them, current Selected and History summaries
+appear when populated, and Bookmarks is always available to manage topics and
+recovery. The permanent footer remains Home, Search, Bible, History, and
+Selected; Bookmarks is not added as a sixth footer action.
+
+Search and Bible show the translation control. Home, History, Selected, and
+Bookmarks keep only the centered getBible icon, so those page headings and
+actions have the same visual rhythm.
 
 ## Visual selection contract
 
@@ -88,6 +104,44 @@ Available actions:
 
 Reorder, remove, clear, and copy are local. They issue no Robot request.
 
+## Bookmark workflow
+
+Bookmarks are complete canonical verses. Their identity is book, chapter, and
+verse across translations, so assigning an already bookmarked coordinate from
+another translation updates the one existing bookmark and moves it to the
+chosen topic.
+
+1. Select a Bible verse to open the anchored topic menu above it.
+2. Choose one colored topic to add or move the bookmark, or remove its existing
+   bookmark.
+3. From Home, choose **Manage** in the Bookmarks summary.
+4. Search topic names, open a topic to review its verses, or add, rename,
+   recolor, and remove topics.
+5. Open a bookmarked verse in Bible or remove it from the topic detail view.
+
+The browser writes each change to its scoped local copy immediately. On a
+supported Telegram client it asynchronously reconciles the newest timestamped
+bookmark/topic aggregate through `DeviceStorage` and `CloudStorage`. Compact
+last-read coordinates use the same hybrid strategy. History, selections,
+translation catalogs, and chapters remain browser-only.
+
+### Backup and restore
+
+The Bookmarks page supports two portable recovery paths:
+
+- **Download JSON** and **Import bookmarks** operate on a bounded, versioned
+  file in the browser;
+- **Back up to chat** sends that validated JSON document to the user's private
+  bot chat with an owner-bound **Restore bookmarks** button.
+
+The chat document remains the durable artifact. Pressing Restore on any
+Telegram client must occur in that owner's private bot chat and creates a fresh,
+short-lived, one-time Mini App launch. The page retrieves the document, shows
+its counts and asks before merging. It persists the merged state before
+acknowledging the restore reference, so a failed acknowledgement can be safely
+retried from the chat message. Robot never stores the backup body in database
+or session state and never writes it to structured logs.
+
 ## Post workflow
 
 Post is the only selection synchronization boundary.
@@ -114,7 +168,8 @@ Selections from different translations may coexist. Coordinate identity includes
 
 ## Navigation and accessibility
 
-- The shared translation selector remains reachable in fullscreen and non-fullscreen layouts.
+- The translation selector remains reachable on Search and Bible in fullscreen
+  and non-fullscreen layouts; icon-only routes do not expose it.
 - The passage picker supports keyboard, Escape, backdrop, Close, and Telegram Back behavior.
 - Selected state is communicated visually and through ARIA.
 - Focus returns to a useful reader or error target after navigation and retry.
@@ -129,6 +184,9 @@ Selections from different translations may coexist. Coordinate identity includes
 | Query API unavailable | explicit reference resolution fails retryably |
 | Librarian unavailable | Search alone fails |
 | Robot unavailable | protected Search/preferences/Post fail; local selection remains usable |
+| Telegram Mini App storage unavailable | local bookmarks and last-read remain usable; cross-device sync is marked degraded |
+| Chat restore fails before merge | current bookmarks remain; local JSON export/import remains available |
+| Restore persistence or acknowledgement fails after merge | imported merge remains; chat document remains recoverable for retry |
 | Post fails | ordered selection remains intact |
 | Session expires | protected actions fail closed; identity-free cached Scripture remains public data |
 
@@ -143,4 +201,8 @@ A release must demonstrate in real Chromium and Telegram that:
 - Search and Reader are interchangeable by coordinate identity;
 - no pre-Post Robot basket or Scripture mutation occurs;
 - failed Post preserves selection;
-- successful Post delivers authoritative Scripture and clears selection.
+- successful Post delivers authoritative Scripture and clears selection;
+- history survives a new local WebView session but does not move to another device;
+- bookmark topics and last-read reconcile between supported Telegram clients;
+- private-chat backup/restore enforces ownership, confirmation,
+  persistence-before-acknowledgement, and bounded JSON validation.

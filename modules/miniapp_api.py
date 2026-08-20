@@ -22,6 +22,15 @@ from getbible import RequestLimitError, TranslationNotFoundError
 from config import Settings
 
 from .audit import audit_event, audit_identity
+from .bookmark_backup import (
+    MAX_BOOKMARK_BACKUP_REQUEST_BYTES,
+    BookmarkBackupDocument,
+    BookmarkBackupError,
+    BookmarkBackupUnavailable,
+    BookmarkRestoreFile,
+    bookmark_backup_document,
+    parse_bookmark_backup_bytes,
+)
 from .catalog import BookOption, ChapterOption, TranslationOption
 from .errors import (
     CircuitOpen,
@@ -40,6 +49,7 @@ from .miniapp_auth import (
 )
 from .miniapp_sessions import (
     MAX_MINIAPP_SELECTION_TEXT_BYTES,
+    MiniAppBookmarkBackupAttempt,
     MiniAppLaunch,
     MiniAppLaunchStore,
     MiniAppPostAttempt,
@@ -168,6 +178,13 @@ class MiniAppApi:
             [MiniAppLaunch, tuple[ScriptureQuery, ...]],
             Awaitable[Sequence[int] | None],
         ],
+        send_bookmark_backup: Callable[
+            [int, BookmarkBackupDocument],
+            Awaitable[int],
+        ]
+        | None = None,
+        load_bookmark_backup: Callable[[BookmarkRestoreFile], Awaitable[bytes]]
+        | None = None,
         cleanup_launch: Callable[[MiniAppLaunch], Awaitable[None]] | None = None,
         ingress_limiter: MiniAppIngressLimiter | None = None,
         replay_guard: TelegramInitDataReplayGuard | None = None,
@@ -201,6 +218,8 @@ class MiniAppApi:
         self._launches = launches
         self._validator = validator
         self._post_scripture = post_scripture
+        self._send_bookmark_backup = send_bookmark_backup
+        self._load_bookmark_backup = load_bookmark_backup
         self._cleanup_launch = cleanup_launch
         self._replay_guard = replay_guard or TelegramInitDataReplayGuard(
             ttl_seconds=300,
@@ -274,7 +293,12 @@ class MiniAppApi:
                     "Access-Control-Max-Age": "600",
                 },
             )
-        if len(request.body) > self._max_body:
+        request_body_limit = (
+            MAX_BOOKMARK_BACKUP_REQUEST_BYTES
+            if parts.path == f"{self._api_prefix}/bookmarks/backup"
+            else self._max_body
+        )
+        if len(request.body) > request_body_limit:
             return self._error_response(
                 413,
                 "request_too_large",
@@ -349,6 +373,16 @@ class MiniAppApi:
                 if method != "PUT":
                     return self._method_not_allowed("PUT, OPTIONS")
                 return await self._update_preferences(session, request)
+            if parts.path == f"{self._api_prefix}/bookmarks/backup":
+                if method != "POST":
+                    return self._method_not_allowed("POST, OPTIONS")
+                return await self._backup_bookmarks(session, request)
+            if parts.path == f"{self._api_prefix}/bookmarks/restore":
+                if method == "GET":
+                    return await self._restore_bookmarks(session)
+                if method == "DELETE":
+                    return await self._acknowledge_bookmark_restore(session)
+                return self._method_not_allowed("GET, DELETE, OPTIONS")
             if parts.path == f"{self._api_prefix}/post":
                 if method != "POST":
                     return self._method_not_allowed("POST, OPTIONS")
@@ -383,6 +417,15 @@ class MiniAppApi:
             return self._error_response(400, "invalid_request", str(error))
         except MiniAppSessionInputError as error:
             return self._error_response(400, "invalid_request", str(error))
+        except BookmarkBackupError as error:
+            return self._error_response(400, "invalid_bookmark_backup", str(error))
+        except BookmarkBackupUnavailable:
+            return self._error_response(
+                503,
+                "bookmark_backup_unavailable",
+                "Telegram bookmark backup is temporarily unavailable.",
+                details={"retryable": True},
+            )
         except TranslationNotFoundError:
             return self._error_response(
                 400,
@@ -442,6 +485,8 @@ class MiniAppApi:
             f"{self._api_prefix}/basket/items": ("POST",),
             f"{self._api_prefix}/basket/order": ("PATCH",),
             f"{self._api_prefix}/preferences": ("PUT",),
+            f"{self._api_prefix}/bookmarks/backup": ("POST",),
+            f"{self._api_prefix}/bookmarks/restore": ("GET", "DELETE"),
             f"{self._api_prefix}/post": ("POST",),
         }
         allowed = exact.get(path)
@@ -620,6 +665,11 @@ class MiniAppApi:
                 "entrypoint": {
                     "route": session.launch.initial_route,
                     "query": session.launch.initial_query,
+                    **(
+                        {"bookmark_restore_available": True}
+                        if session.launch.bookmark_restore is not None
+                        else {}
+                    ),
                 },
                 "translations": [_translation_payload(option) for option in options],
                 "basket": self._basket_payload(session),
@@ -784,8 +834,10 @@ class MiniAppApi:
             f"{self._api_prefix}/scripture",
             f"{self._api_prefix}/search",
             f"{self._api_prefix}/post",
+            f"{self._api_prefix}/bookmarks/backup",
+            f"{self._api_prefix}/bookmarks/restore",
         }
-        if request.method.upper() == "POST" and path in expensive:
+        if request.method.upper() != "DELETE" and path in expensive:
             return 1.0
         return self._navigation_rate_cost
 
@@ -810,6 +862,8 @@ class MiniAppApi:
             "basket/items",
             "basket/order",
             "preferences",
+            "bookmarks/backup",
+            "bookmarks/restore",
             "post",
         }
         return relative if relative in known else "not_found"
@@ -1206,6 +1260,129 @@ class MiniAppApi:
             self._preference_locks[user_id] = lock
         return lock
 
+    async def _backup_bookmarks(
+        self,
+        session: MiniAppSession,
+        request: MiniAppHttpRequest,
+    ) -> MiniAppHttpResponse:
+        if self._send_bookmark_backup is None:
+            raise BookmarkBackupUnavailable("Bookmark delivery is unavailable.")
+        payload = self._json_body(request)
+        if set(payload) != {"idempotency_key", "backup"}:
+            raise MiniAppApiInputError("Bookmark backup request is invalid.")
+        idempotency_key = _required_text(payload, "idempotency_key", 128)
+        if re.fullmatch(r"[A-Fa-f0-9-]{16,64}", idempotency_key) is None:
+            raise MiniAppApiInputError("idempotency_key is invalid.")
+        document = bookmark_backup_document(payload.get("backup"))
+        document_digest = hashlib.sha256(document.payload).digest()
+
+        async with session.bookmark_io_lock:
+            attempt, created = self._sessions.begin_bookmark_backup(
+                session,
+                idempotency_key,
+                document_digest,
+            )
+            if not created:
+                return self._bookmark_backup_attempt_response(attempt)
+            try:
+                message_id = await self._send_bookmark_backup(
+                    session.user_id,
+                    document,
+                )
+                if (
+                    isinstance(message_id, bool)
+                    or not isinstance(message_id, int)
+                    or message_id <= 0
+                ):
+                    raise BookmarkBackupUnavailable(
+                        "Telegram returned an invalid bookmark backup response."
+                    )
+            except BaseException:
+                self._sessions.fail_bookmark_backup(
+                    session,
+                    idempotency_key,
+                    document_digest,
+                )
+                raise
+            self._sessions.complete_bookmark_backup(
+                session,
+                idempotency_key,
+                document_digest,
+                message_id,
+            )
+            return self._response(
+                200,
+                {
+                    "status": "backed_up",
+                    "message_id": message_id,
+                    "idempotent_replay": False,
+                },
+            )
+
+    def _bookmark_backup_attempt_response(
+        self,
+        attempt: MiniAppBookmarkBackupAttempt,
+    ) -> MiniAppHttpResponse:
+        if attempt.state == "completed" and attempt.message_id is not None:
+            return self._response(
+                200,
+                {
+                    "status": "backed_up",
+                    "message_id": attempt.message_id,
+                    "idempotent_replay": True,
+                },
+            )
+        return self._error_response(
+            409,
+            "bookmark_backup_outcome_locked",
+            (
+                "This bookmark backup already has an incomplete Telegram "
+                "delivery attempt. Check the bot chat before trying again."
+            ),
+        )
+
+    async def _restore_bookmarks(
+        self,
+        session: MiniAppSession,
+    ) -> MiniAppHttpResponse:
+        if self._load_bookmark_backup is None:
+            raise BookmarkBackupUnavailable("Bookmark restore is unavailable.")
+        async with session.bookmark_io_lock:
+            restore = self._sessions.bookmark_restore(session)
+            if restore is None:
+                return self._error_response(
+                    404,
+                    "bookmark_restore_not_found",
+                    "No bookmark backup is waiting for this Mini App launch.",
+                )
+            raw_document = await self._load_bookmark_backup(restore)
+            document = parse_bookmark_backup_bytes(raw_document)
+            return self._response(
+                200,
+                {
+                    "backup": document.value,
+                    "source": {
+                        "file_name": restore.file_name,
+                        "file_size": restore.file_size,
+                        "topic_count": document.topic_count,
+                        "bookmark_count": document.bookmark_count,
+                    },
+                },
+            )
+
+    async def _acknowledge_bookmark_restore(
+        self,
+        session: MiniAppSession,
+    ) -> MiniAppHttpResponse:
+        async with session.bookmark_io_lock:
+            if not self._sessions.acknowledge_bookmark_restore(session):
+                return self._error_response(
+                    404,
+                    "bookmark_restore_not_found",
+                    "No bookmark backup is waiting for this Mini App launch.",
+                )
+            return self._response(204, None)
+
     async def _validate_reader_location(self, location: ReaderLocation) -> None:
         books = await self._service.books(location.translation)
         book = next((item for item in books if item.number == location.book), None)
@@ -1382,8 +1559,8 @@ class MiniAppApi:
         self,
         session: MiniAppSession,
     ) -> MiniAppHttpResponse:
-        """Serialize explicit revocation behind every basket/post transaction."""
-        async with session.post_lock:
+        """Serialize revocation behind every Telegram side-effect transaction."""
+        async with session.post_lock, session.bookmark_io_lock:
             self._sessions.revoke(session.token)
             return self._response(204, None)
 

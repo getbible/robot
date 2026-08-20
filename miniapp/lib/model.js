@@ -16,8 +16,21 @@ export const DEFAULT_FILTERS = Object.freeze({
 const TRANSLATION_PATTERN = /^[a-z0-9][a-z0-9_-]{0,29}$/;
 const SEARCH_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const SELECTION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
-const ROUTES = new Set(["home", "search", "bible", "history", "selection"]);
-const ENTRYPOINT_ROUTES = new Set(["home", "search", "bible", "selection"]);
+const ROUTES = new Set([
+  "home",
+  "search",
+  "bible",
+  "history",
+  "selection",
+  "bookmarks",
+]);
+const ENTRYPOINT_ROUTES = new Set([
+  "home",
+  "search",
+  "bible",
+  "selection",
+  "bookmarks",
+]);
 const GRAPHEME_SEGMENTER = typeof Intl.Segmenter === "function"
   ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
   : null;
@@ -586,11 +599,18 @@ export function routeName(value, fallback = "home") {
 
 export function entrypointIntent(value) {
   const entrypoint = normalizeEntrypoint(value);
-  return {
+  const intent = {
     route: entrypoint.route,
     search_query: entrypoint.route === "search" ? entrypoint.query : "",
     bible_reference: entrypoint.route === "bible" ? entrypoint.query : "",
   };
+  if (
+    entrypoint.route === "bookmarks" &&
+    entrypoint.bookmark_restore_available
+  ) {
+    intent.bookmark_restore_available = true;
+  }
+  return intent;
 }
 
 export function resolveBibleEntrypoint(value, books, translationCodes = []) {
@@ -651,12 +671,20 @@ export function resolveBibleEntrypoint(value, books, translationCodes = []) {
 
 function normalizeEntrypoint(value) {
   if (!isRecord(value)) {
-    return { route: "home", query: "", reference: "" };
+    return {
+      route: "home",
+      query: "",
+      reference: "",
+      bookmark_restore_available: false,
+    };
   }
+  const route = ENTRYPOINT_ROUTES.has(value.route) ? value.route : "home";
   return {
-    route: ENTRYPOINT_ROUTES.has(value.route) ? value.route : "home",
+    route,
     query: boundedText(value.query, 240),
     reference: boundedText(value.reference, 180),
+    bookmark_restore_available:
+      route === "bookmarks" && value.bookmark_restore_available === true,
   };
 }
 

@@ -564,6 +564,95 @@
         }
       }
     },
+    "/bookmarks/backup": {
+      "post": {
+        "summary": "Send a bounded bookmark backup to the authenticated user's private bot chat",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["idempotency_key", "backup"],
+                "properties": {
+                  "idempotency_key": {
+                    "type": "string",
+                    "minLength": 16,
+                    "maxLength": 64,
+                    "pattern": "^[A-Fa-f0-9-]+$"
+                  },
+                  "backup": {
+                    "$ref": "#/components/schemas/BookmarkBackup"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The portable JSON document was delivered exactly once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookmarkBackupReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "409": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/InvalidRequest"
+          }
+        }
+      }
+    },
+    "/bookmarks/restore": {
+      "get": {
+        "summary": "Load and validate the Telegram file attached to this one-time restore launch",
+        "responses": {
+          "200": {
+            "description": "Validated bookmark document ready for an explicit browser merge",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookmarkRestore"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/InvalidRequest"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Acknowledge a successful browser merge and consume this restore launch reference",
+        "responses": {
+          "204": {
+            "description": "Restore reference acknowledged"
+          },
+          "404": {
+            "$ref": "#/components/responses/InvalidRequest"
+          }
+        }
+      }
+    },
     "/post": {
       "post": {
         "summary": "Atomically validate and post the browser selection through the bot",
@@ -1051,6 +1140,207 @@
           }
         }
       },
+      "BookmarkTopic": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "value"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "value": {
+            "type": "string",
+            "pattern": "^#[A-Fa-f0-9]{6}$"
+          }
+        }
+      },
+      "BookmarkPassage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["translation", "book", "chapter"],
+        "properties": {
+          "translation": {
+            "$ref": "#/components/schemas/TranslationCode"
+          },
+          "book": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "chapter": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          }
+        }
+      },
+      "BookmarkMarking": {
+        "type": "object",
+        "required": [
+          "id",
+          "passage",
+          "verse",
+          "quote",
+          "reference",
+          "colorId",
+          "createdAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "passage": {
+            "$ref": "#/components/schemas/BookmarkPassage"
+          },
+          "verse": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000
+          },
+          "start": {
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "maximum": 100000
+          },
+          "end": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 100000
+          },
+          "quote": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 3000
+          },
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 180
+          },
+          "colorId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "createdAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        }
+      },
+      "BookmarkBackup": {
+        "type": "object",
+        "required": ["version", "exportedAt", "colors", "markings"],
+        "properties": {
+          "format": {
+            "const": "getbible-life-markings"
+          },
+          "version": {
+            "type": "integer",
+            "enum": [1, 2]
+          },
+          "exportedAt": {
+            "type": "string",
+            "format": "date-time",
+            "maxLength": 64
+          },
+          "colors": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/BookmarkTopic"
+            }
+          },
+          "markings": {
+            "type": "array",
+            "maxItems": 800,
+            "items": {
+              "$ref": "#/components/schemas/BookmarkMarking"
+            }
+          },
+          "notes": {
+            "type": "array",
+            "maxItems": 800,
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "description": "Portable GetBible markings JSON, canonically bounded to 4 MiB. Robot treats all bookmark display text as backup data, never as authoritative Scripture."
+      },
+      "BookmarkBackupReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "message_id", "idempotent_replay"],
+        "properties": {
+          "status": {
+            "const": "backed_up"
+          },
+          "message_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "idempotent_replay": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BookmarkRestore": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["backup", "source"],
+        "properties": {
+          "backup": {
+            "$ref": "#/components/schemas/BookmarkBackup"
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "file_name",
+              "file_size",
+              "topic_count",
+              "bookmark_count"
+            ],
+            "properties": {
+              "file_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "file_size": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4194304
+              },
+              "topic_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100
+              },
+              "bookmark_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 800
+              }
+            }
+          }
+        }
+      },
       "ReaderLocation": {
         "type": ["object", "null"],
         "additionalProperties": false,
@@ -1122,11 +1412,14 @@
         "properties": {
           "route": {
             "type": "string",
-            "enum": ["home", "search", "bible", "selection"]
+            "enum": ["home", "search", "bible", "selection", "bookmarks"]
           },
           "query": {
             "type": "string",
             "maxLength": 240
+          },
+          "bookmark_restore_available": {
+            "type": "boolean"
           },
           "reference": {
             "type": "string",

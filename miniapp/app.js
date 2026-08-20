@@ -28,6 +28,14 @@ import {
 } from "./lib/model.js";
 import { LatestRequestCoordinator } from "./lib/request-coordinator.js";
 import { ReadingHistoryStore } from "./lib/reading-history-store.js";
+import {
+  BOOKMARK_BACKUP_MAX_BYTES,
+  BOOKMARK_TOPIC_COLORS,
+  BookmarkStore,
+  bookmarkStorageScope,
+} from "./lib/bookmark-store.js";
+import { restoreBookmarkBackup } from "./lib/bookmark-restore.js";
+import { TelegramBookmarkStorage } from "./lib/telegram-bookmark-storage.js";
 import { TelegramBridge } from "./lib/telegram.js";
 import {
   clearBoundSession,
@@ -36,7 +44,9 @@ import {
 
 const bridge = new TelegramBridge();
 const i18n = new I18n();
-const readingHistory = new ReadingHistoryStore();
+let readingHistory = null;
+let bookmarkStore = null;
+let bookmarkStorage = null;
 let api = null;
 let filterDraft = null;
 let accessAction = () => window.location.reload();
@@ -51,9 +61,18 @@ let searchRequestId = 0;
 let filterBooksRequestId = 0;
 let sessionGeneration = 0;
 let suppressDialogFocusRestoration = false;
+let bookmarkDownloadUrl = null;
+let bookmarkBackupTask = null;
+let lastReadRevision = 0;
 const searchPageRequests = new LatestRequestCoordinator();
 const MAX_BOOK_CACHE_ENTRIES = 8;
 const MAX_CHAPTER_CACHE_ENTRIES = 24;
+const ICON_ONLY_ROUTES = new Set([
+  "home",
+  "history",
+  "selection",
+  "bookmarks",
+]);
 
 const state = {
   route: "home",
@@ -67,6 +86,12 @@ const state = {
   filters: { ...DEFAULT_FILTERS, books: [], exclude: [] },
   basket: [],
   pendingSelections: new Set(),
+  bookmarks: {
+    popoverSelectionId: null,
+    selectedTopicId: null,
+    search: "",
+    storageStatus: null,
+  },
   bookCache: new Map(),
   bookRequests: new Map(),
   chapterCache: new Map(),
@@ -113,9 +138,13 @@ const state = {
 
 const ERROR_MESSAGE_KEYS = Object.freeze({
   authorization_replayed: "error.session_invalid",
+  bookmark_backup_outcome_locked: "bookmarks.backup_failed",
+  bookmark_backup_unavailable: "bookmarks.backup_failed",
+  bookmark_restore_not_found: "bookmarks.restore_failed",
   forbidden: "error.forbidden",
   internal_error: "common.request_failed",
   invalid_request: "common.request_failed",
+  invalid_bookmark_backup: "bookmarks.import_failed",
   invalid_response: "error.invalid_response",
   invalid_selection: "error.selection_changed",
   invalid_session_response: "error.session_invalid",
@@ -147,6 +176,12 @@ const elements = mapElements({
   homeSelection: "home-selection",
   homeSelectionTitle: "home-selection-title",
   homeSelectionMeta: "home-selection-meta",
+  homeHistory: "home-history",
+  homeHistoryTitle: "home-history-title",
+  homeHistoryMeta: "home-history-meta",
+  homeBookmarks: "home-bookmarks",
+  homeBookmarksTitle: "home-bookmarks-title",
+  homeBookmarksMeta: "home-bookmarks-meta",
   translationShortcut: "translation-shortcut",
   translationShortLabel: "translation-short-label",
   translationFullLabel: "translation-full-label",
@@ -194,6 +229,40 @@ const elements = mapElements({
   readingHistoryList: "reading-history-list",
   clearReadingHistory: "clear-reading-history",
   emptyHistoryBrowse: "empty-history-browse",
+  bookmarksView: "bookmarks-view",
+  bookmarksTitle: "bookmarks-title",
+  bookmarksSummary: "bookmarks-summary",
+  clearBookmarks: "clear-bookmarks",
+  bookmarkStorageWarning: "bookmark-storage-warning",
+  bookmarkGroupsPanel: "bookmark-groups-panel",
+  bookmarkTopicSearch: "bookmark-topic-search",
+  bookmarkGroupList: "bookmark-group-list",
+  bookmarkGroupsEmpty: "bookmark-groups-empty",
+  bookmarkTopicManager: "bookmark-topic-manager",
+  bookmarkTopicForm: "bookmark-topic-form",
+  bookmarkTopicName: "bookmark-topic-name",
+  bookmarkTopicColor: "bookmark-topic-color",
+  bookmarkTopicEditor: "bookmark-topic-editor",
+  bookmarkDetail: "bookmark-detail",
+  bookmarkAllTopics: "bookmark-all-topics",
+  bookmarkDetailDot: "bookmark-detail-dot",
+  bookmarkDetailTitle: "bookmark-detail-title",
+  bookmarkDetailCount: "bookmark-detail-count",
+  bookmarkDetailEmpty: "bookmark-detail-empty",
+  bookmarkList: "bookmark-list",
+  backupBookmarks: "backup-bookmarks",
+  downloadBookmarks: "download-bookmarks",
+  importBookmarks: "import-bookmarks",
+  bookmarkImportFile: "bookmark-import-file",
+  bookmarkBackupStatus: "bookmark-backup-status",
+  bookmarkPopover: "bookmark-popover",
+  bookmarkPopoverReference: "bookmark-popover-reference",
+  bookmarkActiveTopic: "bookmark-active-topic",
+  bookmarkActiveTopicDot: "bookmark-active-topic-dot",
+  bookmarkActiveTopicName: "bookmark-active-topic-name",
+  bookmarkTopicPicker: "bookmark-topic-picker",
+  removeVerseBookmark: "remove-verse-bookmark",
+  closeBookmarkPopover: "close-bookmark-popover",
   selectionSummary: "selection-summary",
   clearSelection: "clear-selection",
   selectionEmpty: "selection-empty",
@@ -260,6 +329,50 @@ async function boot() {
       });
     }
 
+    const storageScope = await bookmarkStorageScope(payload?.user?.id);
+    readingHistory = new ReadingHistoryStore({ scope: storageScope });
+    bookmarkStorage = await TelegramBookmarkStorage.open({
+      scope: storageScope,
+      webApp: bridge.webApp,
+      hydrateLastRead: true,
+      onStatus: (status) => {
+        state.bookmarks.storageStatus = status;
+        updateBookmarkStorageWarning();
+      },
+    });
+    bookmarkStore = new BookmarkStore({
+      scope: storageScope,
+      storage: bookmarkStorage,
+    });
+    const storedLastRead = await bookmarkStorage.readLastRead();
+    const synchronizedLastReadWasCleared = Boolean(
+      bookmarkStorage.status.lastReadCleared,
+    );
+    lastReadRevision = Math.max(
+      lastReadRevision,
+      Number(bookmarkStorage.status.lastReadRecordUpdatedAt) || 0,
+    );
+    const synchronizedLocation = normalizeReaderLocation(
+      storedLastRead,
+      storedLastRead?.translation,
+    );
+    const canRestoreLocation = synchronizedLocation &&
+      session.translations.some(
+        (translation) => translation.code === synchronizedLocation.translation,
+      );
+    if (canRestoreLocation) {
+      session.preferences.translation = synchronizedLocation.translation;
+      session.preferences.search_defaults.translation =
+        synchronizedLocation.translation;
+      session.preferences.reader_location = synchronizedLocation;
+    } else if (synchronizedLastReadWasCleared) {
+      session.preferences.reader_location = null;
+    } else if (session.preferences.reader_location) {
+      void bookmarkStorage.writeLastRead(
+        telegramLastReadRecord(session.preferences.reader_location),
+      );
+    }
+
     state.translations = session.translations;
     state.translation = session.preferences.translation;
     state.filters = normalizeFilters(
@@ -272,6 +385,11 @@ async function boot() {
     populateTranslations();
     syncTranslationControls();
     renderAll();
+    if (canRestoreLocation) {
+      void savePreferences(synchronizedLocation, { mirrorLastRead: false });
+    } else if (synchronizedLastReadWasCleared) {
+      void savePreferences(null, { mirrorLastRead: false });
+    }
 
     elements.boot.hidden = true;
     elements.app.hidden = false;
@@ -284,6 +402,9 @@ async function boot() {
     if (entrypoint.search_query) {
       elements.searchQuery.value = entrypoint.search_query;
       await runSearch(entrypoint.search_query);
+    }
+    if (entrypoint.bookmark_restore_available) {
+      await restoreBookmarksFromChat();
     }
   } catch (error) {
     if (error instanceof ApiError && [401, 409].includes(error.status)) {
@@ -498,6 +619,56 @@ function attachListeners() {
   elements.postSelection.addEventListener("click", () => void postBasket());
   elements.emptyBrowse.addEventListener("click", () => setRoute("bible"));
   elements.emptyHistoryBrowse.addEventListener("click", () => setRoute("bible"));
+
+  elements.bookmarkTopicSearch.addEventListener("input", () => {
+    state.bookmarks.search = elements.bookmarkTopicSearch.value;
+    renderBookmarkGroups();
+  });
+  elements.bookmarkGroupList.addEventListener("click", onBookmarkGroupAction);
+  elements.bookmarkTopicForm.addEventListener("submit", onBookmarkTopicCreate);
+  elements.bookmarkTopicEditor.addEventListener("click", onBookmarkTopicEdit);
+  elements.bookmarkTopicEditor.addEventListener("change", onBookmarkTopicColorChange);
+  elements.bookmarkAllTopics.addEventListener("click", showAllBookmarkTopics);
+  elements.bookmarkList.addEventListener("click", onBookmarkListAction);
+  elements.clearBookmarks.addEventListener("click", () => void clearBookmarks());
+  elements.backupBookmarks.addEventListener("click", () => {
+    void backupBookmarksToChat();
+  });
+  elements.downloadBookmarks.addEventListener("click", downloadBookmarkBackup);
+  elements.importBookmarks.addEventListener("click", () => {
+    elements.bookmarkImportFile.click();
+  });
+  elements.bookmarkImportFile.addEventListener("change", () => {
+    void importBookmarkBackup();
+  });
+  elements.bookmarkActiveTopic.addEventListener("click", () => {
+    applyPopoverBookmark(
+      elements.bookmarkActiveTopic.dataset.bookmarkTopic ?? null,
+    );
+  });
+  elements.bookmarkTopicPicker.addEventListener("change", () => {
+    const topicId = elements.bookmarkTopicPicker.value;
+    if (topicId) {
+      applyPopoverBookmark(topicId);
+    }
+  });
+  elements.removeVerseBookmark.addEventListener("click", removePopoverBookmark);
+  elements.closeBookmarkPopover.addEventListener("click", closeBookmarkPopover);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !elements.bookmarkPopover.hidden) {
+      event.preventDefault();
+      closeBookmarkPopover();
+    }
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (
+      !elements.bookmarkPopover.hidden &&
+      !elements.bookmarkPopover.contains(event.target) &&
+      !event.target.closest("[data-bookmark-trigger]")
+    ) {
+      closeBookmarkPopover({ restoreFocus: false });
+    }
+  });
 }
 
 function loadHeroAsset() {
@@ -547,6 +718,7 @@ function setRoute(requestedRoute) {
   if (state.route === "bible" && route !== "bible") {
     persistVisibleReaderPosition();
   }
+  closeBookmarkPopover({ restoreFocus: false });
   state.route = route;
   elements.app.dataset.activeRoute = route;
   setHeaderCondensed(false);
@@ -591,9 +763,16 @@ function setRoute(requestedRoute) {
   if (route === "history") {
     renderReadingHistory({ renderItems: true });
   }
-  if (moveFocusToRoute && activeRouteButton) {
+  if (route === "bookmarks") {
+    renderBookmarks();
+  }
+  if (moveFocusToRoute) {
     window.requestAnimationFrame(() => {
-      activeRouteButton.focus({ preventScroll: true });
+      const routeHeading = {
+        bookmarks: elements.bookmarksTitle,
+        history: document.getElementById("reading-history-title"),
+      }[route];
+      (activeRouteButton ?? routeHeading)?.focus({ preventScroll: true });
     });
   }
 }
@@ -605,16 +784,16 @@ function onViewScroll(view) {
   const scrollTop = Math.max(0, view.scrollTop);
   const delta = scrollTop - state.lastScrollTop;
   state.scrollPositions.set(state.route, scrollTop);
-  if (state.route === "history") {
+  if (ICON_ONLY_ROUTES.has(state.route)) {
     setHeaderCondensed(false);
   } else if (delta > 6 && scrollTop > 58) {
     setHeaderCondensed(true);
   } else if (delta < -4 || scrollTop < 24) {
     setHeaderCondensed(false);
   }
-  if (state.route === "history") {
+  if (view !== elements.bibleView) {
     showNavigation();
-  } else if (view === elements.bibleView) {
+  } else {
     if (state.navigationRevealScrollTop !== null && delta < -4) {
       state.navigationRevealScrollTop = scrollTop;
     }
@@ -622,12 +801,6 @@ function onViewScroll(view) {
       state.navigationRevealScrollTop === null ||
       scrollTop > state.navigationRevealScrollTop + 10;
     if (delta > 10 && scrollTop > 64 && movedBelowRevealPoint) {
-      setNavigationCollapsed(true);
-    }
-  } else {
-    if (scrollTop < 20 || delta < -8) {
-      showNavigation();
-    } else if (delta > 10 && scrollTop > 64) {
       setNavigationCollapsed(true);
     }
   }
@@ -754,8 +927,24 @@ async function drainReaderPositionSaves() {
       if (pendingKey === savedReaderPositionKey) {
         continue;
       }
-      await enqueuePreferenceWrite({ reader_location: pending });
-      savedReaderPositionKey = pendingKey;
+      if (bookmarkStorage) {
+        // The adapter writes the compact local copy synchronously before its
+        // Telegram callbacks, so pagehide cannot strand the newest position
+        // behind the network preference request.
+        void bookmarkStorage.writeLastRead(telegramLastReadRecord(pending));
+      }
+      const response = await enqueuePreferenceWrite({
+        reader_location: pending,
+      });
+      const saved = normalizeReaderLocation(
+        response?.preferences?.reader_location,
+        pending.translation,
+      );
+      const savedKey = readerLocationKey(saved);
+      if (!saved || savedKey !== pendingKey) {
+        throw new TypeError("Saved reader location did not match the request.");
+      }
+      savedReaderPositionKey = savedKey;
     }
   } catch (error) {
     pendingReaderPosition = null;
@@ -775,7 +964,9 @@ function readerLocationKey(location) {
 }
 
 function syncBackAction() {
-  if (elements.bibleNavigationDialog.open) {
+  if (!elements.bookmarkPopover.hidden) {
+    bridge.setBackAction(closeBookmarkPopover);
+  } else if (elements.bibleNavigationDialog.open) {
     bridge.setBackAction(
       state.bible.pickerStage === "chapters"
         ? showBibleBookGrid
@@ -785,6 +976,8 @@ function syncBackAction() {
     bridge.setBackAction(closeTranslationSelector);
   } else if (elements.filtersDialog.open) {
     bridge.setBackAction(closeFilters);
+  } else if (state.route === "bookmarks" && state.bookmarks.selectedTopicId) {
+    bridge.setBackAction(showAllBookmarkTopics);
   } else if (state.route !== "home") {
     bridge.setBackAction(() => setRoute("home"));
   } else {
@@ -808,6 +1001,11 @@ function renderReadingHistory({
     "history.count",
     count,
   );
+  elements.homeHistory.hidden = count === 0;
+  elements.homeHistoryTitle.textContent = i18n.t("home.history_preview");
+  elements.homeHistoryMeta.textContent = count === 0
+    ? i18n.t("home.history_preview_hint")
+    : i18n.plural("history.count", count);
   elements.clearReadingHistory.hidden = count === 0;
   elements.readingHistoryEmpty.hidden = count > 0;
   elements.readingHistoryList.hidden = count === 0;
@@ -1161,6 +1359,7 @@ function renderLocalizedState() {
   renderReadingHistory();
   renderBasketStatus();
   renderSelection();
+  renderBookmarks();
 }
 
 async function runSearch(rawQuery) {
@@ -1479,9 +1678,27 @@ function renderFilterBooks(books, selectedBooks = state.filters.books) {
   );
 }
 
-async function savePreferences(readerLocation = undefined) {
+async function savePreferences(
+  readerLocation = undefined,
+  { mirrorLastRead = true } = {},
+) {
   try {
     const expectedTranslation = state.translation;
+    const requestedLocation = readerLocation === undefined
+      ? undefined
+      : normalizeReaderLocation(readerLocation, expectedTranslation);
+    if (readerLocation !== undefined && readerLocation !== null && !requestedLocation) {
+      throw new TypeError("The requested reader location is invalid.");
+    }
+    if (readerLocation !== undefined && bookmarkStorage && mirrorLastRead) {
+      if (requestedLocation) {
+        void bookmarkStorage.writeLastRead(
+          telegramLastReadRecord(requestedLocation),
+        );
+      } else {
+        void bookmarkStorage.clearLastRead();
+      }
+    }
     const {
       words,
       match,
@@ -1502,7 +1719,7 @@ async function savePreferences(readerLocation = undefined) {
       },
     };
     if (readerLocation !== undefined) {
-      payload.reader_location = readerLocation;
+      payload.reader_location = requestedLocation;
     }
     const response = await enqueuePreferenceWrite(payload);
     const translation = response?.preferences?.translation;
@@ -1513,6 +1730,18 @@ async function savePreferences(readerLocation = undefined) {
       response.preferences.reader_location,
       translation,
     );
+    if (
+      readerLocation !== undefined &&
+      bookmarkStorage &&
+      mirrorLastRead &&
+      readerLocationKey(location) !== readerLocationKey(requestedLocation)
+    ) {
+      if (location) {
+        void bookmarkStorage.writeLastRead(telegramLastReadRecord(location));
+      } else {
+        void bookmarkStorage.clearLastRead();
+      }
+    }
     return {
       translation,
       reader_location:
@@ -1523,6 +1752,22 @@ async function savePreferences(readerLocation = undefined) {
     handleSessionError(error);
     return false;
   }
+}
+
+function telegramLastReadRecord(location) {
+  const normalized = normalizeReaderLocation(
+    location,
+    location?.translation,
+  );
+  if (!normalized) {
+    throw new TypeError("A valid last-read location is required.");
+  }
+  lastReadRevision = Math.max(Date.now(), lastReadRevision + 1);
+  return {
+    version: 1,
+    record_updated_at: lastReadRevision,
+    ...normalized,
+  };
 }
 
 async function getBooks(translation) {
@@ -2242,6 +2487,9 @@ function scrollReaderToVerse(number) {
 
 function renderBible() {
   const bible = state.bible;
+  if (!elements.bookmarkPopover.hidden) {
+    closeBookmarkPopover({ restoreFocus: false });
+  }
   elements.biblePassage.setAttribute(
     "aria-expanded",
     String(elements.bibleNavigationDialog.open),
@@ -2425,6 +2673,14 @@ function createVerseCard(verse, selected) {
 }
 
 function createReaderVerse(verse, selected, previous, following) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "reader-verse-row";
+  const bookmark = bookmarkStore?.bookmarkFor(verse) ?? null;
+  const bookmarkTopic = bookmarkStore?.topic(bookmark?.topic_id) ?? null;
+  if (bookmarkTopic) {
+    applyBookmarkColor(wrapper, bookmarkTopic.color);
+  }
+
   const button = document.createElement("button");
   const isSelected = selected.has(verse.selection_id);
   button.type = "button";
@@ -2469,7 +2725,29 @@ function createReaderVerse(verse, selected, previous, following) {
       : [],
   );
   button.append(number, text);
-  return button;
+  wrapper.append(button);
+
+  if (isSelected || bookmark) {
+    wrapper.classList.add("has-bookmark-trigger");
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className = "reader-bookmark-trigger";
+    trigger.dataset.bookmarkTrigger = verse.selection_id;
+    trigger.setAttribute(
+      "aria-label",
+      i18n.t("bookmarks.open_palette_aria", {
+        reference: verse.reference,
+      }),
+    );
+    trigger.setAttribute("aria-haspopup", "dialog");
+    trigger.setAttribute(
+      "aria-expanded",
+      String(state.bookmarks.popoverSelectionId === verse.selection_id),
+    );
+    trigger.textContent = bookmark ? "◆" : "◇";
+    wrapper.append(trigger);
+  }
+  return wrapper;
 }
 
 function appendHighlightedText(container, text, highlights) {
@@ -2489,6 +2767,11 @@ function appendHighlightedText(container, text, highlights) {
 }
 
 function onVerseCardClick(event) {
+  const bookmarkTrigger = event.target.closest("[data-bookmark-trigger]");
+  if (bookmarkTrigger) {
+    openBookmarkPopover(bookmarkTrigger.dataset.bookmarkTrigger);
+    return;
+  }
   const context = event.target.closest("[data-open-bible]");
   if (context) {
     const verse = findVerse(context.dataset.openBible);
@@ -2520,6 +2803,7 @@ async function toggleBasketItem(selectionId) {
   }
   state.pendingSelections.add(selectionId);
   refreshSelectionVisuals();
+  let bookmarkPrompt = null;
   await enqueueBasketMutation(async (generation) => {
     const removing = selectedIds().has(selectionId);
     try {
@@ -2535,6 +2819,9 @@ async function toggleBasketItem(selectionId) {
           (verse) => verse.selection_id === selectionId,
         );
         recordReadingHistory("selection", addedVerse);
+        if (state.route === "bible") {
+          bookmarkPrompt = addedVerse;
+        }
       }
       bridge.notifySelection();
       announce(
@@ -2556,6 +2843,11 @@ async function toggleBasketItem(selectionId) {
       }
     }
   });
+  if (bookmarkPrompt && state.route === "bible") {
+    window.requestAnimationFrame(() => {
+      openBookmarkPopover(bookmarkPrompt.selection_id);
+    });
+  }
 }
 
 function refreshSelectionVisuals() {
@@ -2573,6 +2865,691 @@ function refreshSelectionVisuals() {
   }
   renderBasketStatus();
   renderSelection();
+}
+
+function renderBookmarks() {
+  const snapshot = bookmarkStore?.snapshot() ?? {
+    active_topic_id: null,
+    topics: [],
+    bookmarks: [],
+  };
+  const count = snapshot.bookmarks.length;
+  const topicIds = new Set(snapshot.topics.map((topic) => topic.id));
+  if (
+    state.bookmarks.selectedTopicId &&
+    !topicIds.has(state.bookmarks.selectedTopicId)
+  ) {
+    state.bookmarks.selectedTopicId = null;
+  }
+
+  elements.bookmarksSummary.textContent = i18n.plural(
+    "bookmarks.count",
+    count,
+  );
+  elements.homeBookmarksTitle.textContent = i18n.t(
+    "home.bookmarks_preview",
+  );
+  elements.homeBookmarksMeta.textContent = count > 0
+    ? i18n.plural("bookmarks.count", count)
+    : i18n.t("home.bookmarks_preview_hint");
+  elements.clearBookmarks.hidden = count === 0;
+  elements.clearBookmarks.disabled = !bookmarkStore;
+  setBookmarkBackupBusy(Boolean(bookmarkBackupTask));
+  updateBookmarkStorageWarning();
+  elements.bookmarkGroupsPanel.hidden = Boolean(
+    state.bookmarks.selectedTopicId,
+  );
+  elements.bookmarkDetail.hidden = !state.bookmarks.selectedTopicId;
+
+  if (state.route !== "bookmarks") {
+    return;
+  }
+  if (state.bookmarks.selectedTopicId) {
+    renderBookmarkDetail(state.bookmarks.selectedTopicId);
+  } else {
+    renderBookmarkGroups();
+    renderBookmarkTopicEditor();
+    setBookmarkColorInput(elements.bookmarkTopicColor);
+  }
+}
+
+function updateBookmarkStorageWarning() {
+  const cloudState = state.bookmarks.storageStatus?.cloud;
+  const cloudAvailable = !cloudState || !["unavailable", "error"].includes(
+    cloudState,
+  );
+  elements.bookmarkStorageWarning.hidden = Boolean(
+    bookmarkStore?.persistent && cloudAvailable,
+  );
+}
+
+function renderBookmarkGroups() {
+  const snapshot = bookmarkStore?.snapshot();
+  if (!snapshot) {
+    elements.bookmarkGroupList.replaceChildren();
+    elements.bookmarkGroupsEmpty.hidden = true;
+    return;
+  }
+  const query = state.bookmarks.search.trim().toLocaleLowerCase();
+  const topics = snapshot.topics.filter((topic) =>
+    !query || topic.name.toLocaleLowerCase().includes(query)
+  );
+  const fragment = document.createDocumentFragment();
+  for (const topic of topics) {
+    const count = bookmarkStore.topicUsage(topic.id);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "bookmark-group-card";
+    button.dataset.bookmarkTopic = topic.id;
+    applyBookmarkColor(button, topic.color);
+    button.setAttribute(
+      "aria-label",
+      i18n.t("bookmarks.open_group_aria", {
+        name: topic.name,
+        count: i18n.plural("bookmarks.count", count),
+      }),
+    );
+    const dot = document.createElement("span");
+    dot.className = "bookmark-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const copy = document.createElement("span");
+    copy.className = "bookmark-group-card__copy";
+    const name = document.createElement("strong");
+    name.textContent = topic.name;
+    const usage = document.createElement("span");
+    usage.className = "bookmark-group-card__count";
+    usage.textContent = i18n.plural("bookmarks.count", count);
+    copy.append(name, usage);
+    const arrow = document.createElement("span");
+    arrow.setAttribute("aria-hidden", "true");
+    arrow.textContent = "›";
+    button.append(dot, copy, arrow);
+    fragment.append(button);
+  }
+  elements.bookmarkGroupList.replaceChildren(fragment);
+  elements.bookmarkGroupsEmpty.hidden = topics.length > 0;
+}
+
+function onBookmarkGroupAction(event) {
+  const button = event.target.closest("[data-bookmark-topic]");
+  if (!button || !bookmarkStore?.topic(button.dataset.bookmarkTopic)) {
+    return;
+  }
+  state.bookmarks.selectedTopicId = button.dataset.bookmarkTopic;
+  state.scrollPositions.set("bookmarks", 0);
+  elements.bookmarksView.scrollTop = 0;
+  renderBookmarks();
+  syncBackAction();
+  window.requestAnimationFrame(() => {
+    elements.bookmarkDetailTitle.focus({ preventScroll: true });
+  });
+}
+
+function showAllBookmarkTopics() {
+  const previousTopicId = state.bookmarks.selectedTopicId;
+  state.bookmarks.selectedTopicId = null;
+  renderBookmarks();
+  syncBackAction();
+  window.requestAnimationFrame(() => {
+    const target = previousTopicId
+      ? elements.bookmarkGroupList.querySelector(
+        `[data-bookmark-topic="${previousTopicId}"]`,
+      )
+      : null;
+    (target ?? elements.bookmarkTopicSearch).focus({ preventScroll: true });
+  });
+}
+
+function renderBookmarkDetail(topicId) {
+  const topic = bookmarkStore?.topic(topicId);
+  if (!topic) {
+    return;
+  }
+  const bookmarks = bookmarkStore.bookmarksForTopic(topicId);
+  applyBookmarkColor(elements.bookmarkDetail, topic.color);
+  elements.bookmarkDetailTitle.tabIndex = -1;
+  elements.bookmarkDetailTitle.textContent = topic.name;
+  elements.bookmarkDetailCount.textContent = i18n.plural(
+    "bookmarks.count",
+    bookmarks.length,
+  );
+  elements.bookmarkDetailEmpty.hidden = bookmarks.length > 0;
+  elements.bookmarkList.hidden = bookmarks.length === 0;
+  const fragment = document.createDocumentFragment();
+  for (const bookmark of bookmarks) {
+    const item = document.createElement("li");
+    item.className = "bookmark-list__item";
+    applyBookmarkColor(item, topic.color);
+
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "bookmark-list__open";
+    open.dataset.bookmarkOpen = bookmark.id;
+    open.setAttribute(
+      "aria-label",
+      i18n.t("bookmarks.open_aria", {
+        reference: bookmark.reference,
+        translation: translationName(bookmark.translation),
+      }),
+    );
+    const reference = document.createElement("strong");
+    reference.className = "bookmark-list__reference";
+    reference.textContent =
+      `${bookmark.reference} · ${bookmark.translation.toUpperCase()}`;
+    const text = document.createElement("span");
+    text.className = "bookmark-list__text";
+    text.textContent = bookmark.text;
+    open.append(reference, text);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "bookmark-list__remove";
+    remove.dataset.bookmarkRemove = bookmark.id;
+    remove.setAttribute(
+      "aria-label",
+      i18n.t("bookmarks.remove_aria", {
+        reference: bookmark.reference,
+      }),
+    );
+    remove.textContent = "×";
+    item.append(open, remove);
+    fragment.append(item);
+  }
+  elements.bookmarkList.replaceChildren(fragment);
+}
+
+async function onBookmarkListAction(event) {
+  const remove = event.target.closest("[data-bookmark-remove]");
+  const open = event.target.closest("[data-bookmark-open]");
+  const bookmarkId = remove?.dataset.bookmarkRemove ?? open?.dataset.bookmarkOpen;
+  const bookmark = bookmarkStore
+    ?.snapshot()
+    .bookmarks.find((item) => item.id === bookmarkId);
+  if (!bookmark) {
+    return;
+  }
+  if (remove) {
+    bookmarkStore.removeBookmark(bookmark.id);
+    renderBookmarks();
+    if (state.bible.status === "ready") {
+      renderBible();
+    }
+    announce(i18n.t("bookmarks.removed", { reference: bookmark.reference }));
+    return;
+  }
+  const translation = state.translations.some(
+    (item) => item.code === bookmark.translation,
+  )
+    ? bookmark.translation
+    : state.translation;
+  await openBibleAtVerse(bookmarkVerse(bookmark, translation));
+}
+
+function renderBookmarkTopicEditor() {
+  const snapshot = bookmarkStore?.snapshot();
+  if (!snapshot) {
+    elements.bookmarkTopicEditor.replaceChildren();
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const topic of snapshot.topics) {
+    const row = document.createElement("div");
+    row.className = "bookmark-topic-editor__row";
+    row.dataset.topicEditor = topic.id;
+    applyBookmarkColor(row, topic.color);
+
+    const identity = document.createElement("div");
+    identity.className = "bookmark-topic-editor__identity";
+    const dot = document.createElement("span");
+    dot.className = "bookmark-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const name = document.createElement("input");
+    name.className = "bookmark-topic-editor__name";
+    name.type = "text";
+    name.maxLength = 80;
+    name.required = true;
+    name.value = topic.name;
+    name.dataset.topicName = topic.id;
+    name.setAttribute(
+      "aria-label",
+      i18n.t("bookmarks.rename_aria", { name: topic.name }),
+    );
+    identity.append(dot, name);
+
+    const color = document.createElement("input");
+    color.className = "bookmark-topic-editor__color";
+    color.type = "color";
+    color.dataset.topicColor = topic.id;
+    color.setAttribute(
+      "aria-label",
+      i18n.t("bookmarks.color_aria", { name: topic.name }),
+    );
+    setBookmarkColorInput(color, topic.color);
+
+    const actions = document.createElement("div");
+    actions.className = "bookmark-topic-editor__actions";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.dataset.topicSave = topic.id;
+    save.textContent = i18n.t("bookmarks.save_topic");
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.dataset.topicDelete = topic.id;
+    remove.setAttribute(
+      "aria-label",
+      i18n.t("bookmarks.remove_topic_aria", { name: topic.name }),
+    );
+    remove.textContent = "×";
+    actions.append(save, remove);
+    row.append(identity, color, actions);
+    fragment.append(row);
+  }
+  elements.bookmarkTopicEditor.replaceChildren(fragment);
+}
+
+function onBookmarkTopicCreate(event) {
+  event.preventDefault();
+  if (!bookmarkStore) {
+    return;
+  }
+  try {
+    const topic = bookmarkStore.addTopic(
+      elements.bookmarkTopicName.value,
+      elements.bookmarkTopicColor.value,
+    );
+    elements.bookmarkTopicForm.reset();
+    setBookmarkColorInput(elements.bookmarkTopicColor, topic.color);
+    renderBookmarks();
+    announce(i18n.t("bookmarks.topic_added"));
+  } catch (error) {
+    toast(error instanceof Error ? error.message : i18n.t("common.request_failed"));
+  }
+}
+
+function onBookmarkTopicColorChange(event) {
+  const select = event.target.closest("[data-topic-color]");
+  if (!select) {
+    return;
+  }
+  const row = select.closest("[data-topic-editor]");
+  if (row) {
+    applyBookmarkColor(row, select.value);
+  }
+}
+
+async function onBookmarkTopicEdit(event) {
+  const save = event.target.closest("[data-topic-save]");
+  const remove = event.target.closest("[data-topic-delete]");
+  const topicId = save?.dataset.topicSave ?? remove?.dataset.topicDelete;
+  const topic = bookmarkStore?.topic(topicId);
+  if (!topic) {
+    return;
+  }
+  if (save) {
+    const row = save.closest("[data-topic-editor]");
+    const name = row?.querySelector("[data-topic-name]")?.value;
+    const color = row?.querySelector("[data-topic-color]")?.value;
+    try {
+      bookmarkStore.updateTopic(topic.id, { name, color });
+      renderBookmarks();
+      announce(i18n.t("bookmarks.topic_updated"));
+    } catch {
+      toast(i18n.t("common.request_failed"));
+    }
+    return;
+  }
+  if (bookmarkStore.topicCount === 1) {
+    toast(i18n.t("bookmarks.last_topic"));
+    return;
+  }
+  const count = bookmarkStore.topicUsage(topic.id);
+  const confirmed = await bridge.confirm(
+    i18n.plural("bookmarks.topic_delete_confirm", count, {
+      name: topic.name,
+    }),
+  );
+  if (!confirmed || !bookmarkStore.topic(topic.id)) {
+    return;
+  }
+  bookmarkStore.removeTopic(topic.id);
+  renderBookmarks();
+  if (state.bible.status === "ready") {
+    renderBible();
+  }
+  announce(i18n.t("bookmarks.topic_removed"));
+}
+
+function setBookmarkColorInput(input, selected = null) {
+  const value = selected ?? input.value ?? BOOKMARK_TOPIC_COLORS[0];
+  input.value = validBookmarkColor(value)
+    ? value.toLowerCase()
+    : BOOKMARK_TOPIC_COLORS[0];
+}
+
+async function clearBookmarks() {
+  if (!bookmarkStore || bookmarkStore.size === 0) {
+    return;
+  }
+  const confirmed = await bridge.confirm(i18n.t("bookmarks.clear_confirm"));
+  if (!confirmed) {
+    return;
+  }
+  bookmarkStore.clearBookmarks();
+  renderBookmarks();
+  if (state.bible.status === "ready") {
+    renderBible();
+  }
+  announce(i18n.t("bookmarks.clear_done"));
+}
+
+function downloadBookmarkBackup() {
+  if (!bookmarkStore) {
+    return;
+  }
+  const json = JSON.stringify(bookmarkStore.backup(), null, 2);
+  if (bookmarkDownloadUrl) {
+    URL.revokeObjectURL(bookmarkDownloadUrl);
+  }
+  bookmarkDownloadUrl = URL.createObjectURL(
+    new Blob([json], { type: "application/json" }),
+  );
+  const link = document.createElement("a");
+  link.href = bookmarkDownloadUrl;
+  link.download =
+    `getbible-bookmarks-${new Date().toISOString().slice(0, 10)}.json`;
+  link.hidden = true;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  elements.bookmarkBackupStatus.textContent = i18n.t(
+    "bookmarks.backup_ready",
+  );
+  announce(i18n.t("bookmarks.backup_ready"));
+}
+
+async function backupBookmarksToChat() {
+  if (!bookmarkStore || bookmarkBackupTask) {
+    return;
+  }
+  bookmarkBackupTask = (async () => {
+    setBookmarkBackupBusy(true);
+    elements.bookmarkBackupStatus.textContent = i18n.t(
+      "bookmarks.backup_sending",
+    );
+    try {
+      await bookmarkStorage?.flush();
+      await api.backupBookmarks(bookmarkStore.backup(), idempotencyKey());
+      const message = i18n.t("bookmarks.backup_chat_ready");
+      elements.bookmarkBackupStatus.textContent = message;
+      bridge.notifySuccess();
+      announce(message);
+    } catch (error) {
+      handleSessionError(error);
+      const message = i18n.t("bookmarks.backup_failed");
+      elements.bookmarkBackupStatus.textContent = message;
+      bridge.notifyError();
+      announce(message);
+    } finally {
+      bookmarkBackupTask = null;
+      setBookmarkBackupBusy(false);
+    }
+  })();
+  await bookmarkBackupTask;
+}
+
+function setBookmarkBackupBusy(busy) {
+  const disabled = Boolean(busy) || !bookmarkStore;
+  elements.backupBookmarks.disabled = disabled;
+  elements.downloadBookmarks.disabled = disabled;
+  elements.importBookmarks.disabled = disabled;
+}
+
+async function restoreBookmarksFromChat() {
+  if (!bookmarkStore) {
+    return;
+  }
+  elements.bookmarkBackupStatus.textContent = i18n.t(
+    "bookmarks.restore_loading",
+  );
+  try {
+    const result = await restoreBookmarkBackup({
+      fetchRestore: () => api.restoreBookmarks(),
+      confirmRestore: (payload) => {
+        const source = payload?.source ?? {};
+        return bridge.confirm(i18n.t("bookmarks.restore_confirm", {
+          bookmarks: Number.isInteger(source.bookmark_count)
+            ? source.bookmark_count
+            : 0,
+          topics: Number.isInteger(source.topic_count)
+            ? source.topic_count
+            : 0,
+          file: typeof source.file_name === "string"
+            ? source.file_name
+            : "getbible-bookmarks.json",
+        }));
+      },
+      importBackup: (backup, options) => bookmarkStore.importBackup(
+        backup,
+        options,
+      ),
+      flushPersistence: () => bookmarkStorage?.flush(),
+      acknowledgeRestore: () => api.acknowledgeBookmarkRestore(),
+    });
+    if (result.status === "declined") {
+      elements.bookmarkBackupStatus.textContent = "";
+      return;
+    }
+    state.bookmarks.selectedTopicId = null;
+    renderBookmarks();
+    if (state.bible.status === "ready") {
+      renderBible();
+    }
+    if (!result.acknowledgementError) {
+      elements.bookmarkBackupStatus.textContent = i18n.t(
+        "bookmarks.restore_done",
+      );
+    } else {
+      handleSessionError(result.acknowledgementError);
+      elements.bookmarkBackupStatus.textContent = i18n.t(
+        "bookmarks.restore_ack_failed",
+      );
+    }
+    bridge.notifySuccess();
+    announce(elements.bookmarkBackupStatus.textContent);
+  } catch (error) {
+    handleSessionError(error);
+    const message = i18n.t("bookmarks.restore_failed");
+    elements.bookmarkBackupStatus.textContent = message;
+    bridge.notifyError();
+    announce(message);
+  }
+}
+
+async function importBookmarkBackup() {
+  const file = elements.bookmarkImportFile.files?.[0];
+  elements.bookmarkImportFile.value = "";
+  if (!file || !bookmarkStore) {
+    return;
+  }
+  try {
+    if (file.size > BOOKMARK_BACKUP_MAX_BYTES) {
+      throw new TypeError("Bookmark backup is too large.");
+    }
+    const backup = JSON.parse(await file.text());
+    const result = bookmarkStore.importBackup(backup, {
+      byteLength: file.size,
+    });
+    state.bookmarks.selectedTopicId = null;
+    renderBookmarks();
+    if (state.bible.status === "ready") {
+      renderBible();
+    }
+    const skipped = result.conflicts_skipped +
+      result.range_markings_skipped + result.notes_skipped;
+    const message = i18n.t("bookmarks.imported", {
+      bookmarks: result.bookmarks_added,
+      topics: result.topics_added,
+      skipped,
+    });
+    elements.bookmarkBackupStatus.textContent = message;
+    bridge.notifySuccess();
+    announce(message);
+  } catch {
+    const message = i18n.t("bookmarks.import_failed");
+    elements.bookmarkBackupStatus.textContent = message;
+    bridge.notifyError();
+    announce(message);
+  }
+}
+
+function openBookmarkPopover(selectionId) {
+  const verse = findVerse(selectionId);
+  const trigger = elements.bibleVerses.querySelector(
+    `[data-bookmark-trigger="${selectionId}"]`,
+  );
+  const row = trigger?.closest(".reader-verse-row");
+  if (!verse || !trigger || !row || !bookmarkStore) {
+    return;
+  }
+  closeBookmarkPopover({ restoreFocus: false });
+  const bookmark = bookmarkStore.bookmarkFor(verse);
+  const activeTopic = bookmarkStore.topic(
+    bookmark?.topic_id ?? bookmarkStore.activeTopicId,
+  );
+  if (!activeTopic) {
+    return;
+  }
+  state.bookmarks.popoverSelectionId = selectionId;
+  elements.bookmarkPopoverReference.textContent = verse.reference;
+  applyBookmarkColor(elements.bookmarkPopover, activeTopic.color);
+  elements.bookmarkActiveTopic.dataset.bookmarkTopic = activeTopic.id;
+  elements.bookmarkActiveTopicName.textContent = activeTopic.name;
+  elements.removeVerseBookmark.hidden = !bookmark;
+  populateBookmarkTopicPicker(activeTopic.id);
+  row.append(elements.bookmarkPopover);
+  row.classList.add("has-bookmark-popover");
+  trigger.setAttribute("aria-expanded", "true");
+  elements.bookmarkPopover.hidden = false;
+  syncBackAction();
+  window.requestAnimationFrame(() => {
+    const rowTop = row.getBoundingClientRect().top;
+    elements.bookmarkPopover.dataset.placement = rowTop < 190 ? "below" : "above";
+    elements.bookmarkActiveTopic.focus({ preventScroll: true });
+  });
+}
+
+function populateBookmarkTopicPicker(activeTopicId) {
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.disabled = true;
+  placeholder.selected = true;
+  placeholder.textContent = i18n.t("bookmarks.more_topics");
+  const options = [placeholder];
+  for (const topic of bookmarkStore?.snapshot().topics ?? []) {
+    if (topic.id === activeTopicId) {
+      continue;
+    }
+    const option = document.createElement("option");
+    option.value = topic.id;
+    option.textContent = `● ${topic.name}`;
+    option.style.color = topic.color;
+    options.push(option);
+  }
+  elements.bookmarkTopicPicker.replaceChildren(...options);
+}
+
+function closeBookmarkPopover({ restoreFocus = true } = {}) {
+  const selectionId = state.bookmarks.popoverSelectionId;
+  const trigger = selectionId
+    ? elements.bibleVerses.querySelector(
+      `[data-bookmark-trigger="${selectionId}"]`,
+    )
+    : null;
+  elements.bookmarkPopover.closest(".reader-verse-row")
+    ?.classList.remove("has-bookmark-popover");
+  elements.bookmarkPopover.hidden = true;
+  trigger?.setAttribute("aria-expanded", "false");
+  state.bookmarks.popoverSelectionId = null;
+  if (elements.bookmarkPopover.parentElement !== elements.app) {
+    elements.bottomNav.before(elements.bookmarkPopover);
+  }
+  syncBackAction();
+  if (restoreFocus && trigger && document.contains(trigger)) {
+    trigger.focus({ preventScroll: true });
+  }
+}
+
+function applyPopoverBookmark(topicId) {
+  const selectionId = state.bookmarks.popoverSelectionId;
+  const verse = findVerse(selectionId);
+  const topic = bookmarkStore?.topic(topicId);
+  if (!verse || !topic || !bookmarkStore) {
+    return;
+  }
+  bookmarkStore.apply(verse, topic.id);
+  closeBookmarkPopover({ restoreFocus: false });
+  renderBookmarks();
+  renderBible();
+  bridge.notifySelection();
+  announce(i18n.t("bookmarks.saved", {
+    reference: verse.reference,
+    name: topic.name,
+  }));
+  focusBookmarkTrigger(selectionId);
+}
+
+function removePopoverBookmark() {
+  const selectionId = state.bookmarks.popoverSelectionId;
+  const verse = findVerse(selectionId);
+  if (!verse || !bookmarkStore?.removeVerse(verse)) {
+    return;
+  }
+  closeBookmarkPopover({ restoreFocus: false });
+  renderBookmarks();
+  renderBible();
+  announce(i18n.t("bookmarks.verse_removed", {
+    reference: verse.reference,
+  }));
+  focusBookmarkTrigger(selectionId);
+}
+
+function focusBookmarkTrigger(selectionId) {
+  window.requestAnimationFrame(() => {
+    elements.bibleVerses.querySelector(
+      `[data-bookmark-trigger="${selectionId}"]`,
+    )?.focus({ preventScroll: true });
+  });
+}
+
+function bookmarkVerse(bookmark, translation = bookmark.translation) {
+  return {
+    selection_id: "",
+    translation,
+    reference: bookmark.reference,
+    book_number: bookmark.book,
+    book_name: bookmark.book_name,
+    chapter: bookmark.chapter,
+    verse: bookmark.verse,
+    text: bookmark.text,
+    highlights: [],
+  };
+}
+
+function colorToken(color) {
+  const safeColor = validBookmarkColor(color) ? color : BOOKMARK_TOPIC_COLORS[0];
+  return safeColor.slice(1);
+}
+
+function validBookmarkColor(color) {
+  return typeof color === "string" && /^#[a-f0-9]{6}$/i.test(color);
+}
+
+function applyBookmarkColor(element, color) {
+  const safeColor = validBookmarkColor(color)
+    ? color.toLowerCase()
+    : BOOKMARK_TOPIC_COLORS[0];
+  element.dataset.bookmarkColor = colorToken(safeColor);
+  element.style.setProperty("--bookmark-topic-color", safeColor);
 }
 
 function renderAll() {
@@ -2941,6 +3918,16 @@ function invalidateClientSessionState() {
   restoreReaderFocusAfterLoad = false;
   state.pendingSelections.clear();
   state.basket = [];
+  state.bookmarks.popoverSelectionId = null;
+  state.bookmarks.selectedTopicId = null;
+  state.bookmarks.storageStatus = null;
+  bookmarkStore = null;
+  bookmarkStorage = null;
+  readingHistory = null;
+  if (bookmarkDownloadUrl) {
+    URL.revokeObjectURL(bookmarkDownloadUrl);
+    bookmarkDownloadUrl = null;
+  }
   clipboard.sync({ visible: false, disabled: true });
   state.posting = false;
   state.search.results = [];
@@ -2957,6 +3944,9 @@ function invalidateClientSessionState() {
 }
 
 function closeOpenDialogs() {
+  if (!elements.bookmarkPopover.hidden) {
+    closeBookmarkPopover({ restoreFocus: false });
+  }
   document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
 }
 

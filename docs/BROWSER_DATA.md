@@ -1,19 +1,25 @@
 # Browser data architecture
 
-The Telegram Mini App is a browser application. Public Bible content and temporary selection state therefore belong in the browser data plane rather than in the Robot process. This keeps reading responsive, avoids repeated server work, and isolates user interaction from Robot availability.
+The Telegram Mini App is a browser application. Public Bible content, temporary selection state, and device-local reading history therefore belong in the browser data plane rather than in the Robot process. Small user-critical records additionally reconcile with Telegram Mini App storage, while large public catalogs and chapters remain browser-only. This keeps reading responsive, avoids repeated server work, and preserves useful cross-device continuity without making ordinary reading depend on Robot.
 
 ## Doctrine
 
-Only full-text search and search pagination use Robot/Librarian.
+Only full-text search and search pagination use Librarian. Robot also provides
+the authenticated control paths for sessions, preferences, final Post, and an
+explicit bookmark chat backup or restore.
 
-Everything else in the reading experience is browser-owned and backed by GetBible API V2:
+The reading and persistence split is:
 
 - `api.getbible.net/v2` supplies translation catalogs, books, chapter maps, chapter text, and hashes;
 - `query.getbible.net/v2` supplies explicit and grouped reference resolution;
 - IndexedDB stores validated public content;
 - browser memory owns the current ordered selection;
-- browser `sessionStorage` owns bounded, coordinate-only reading history;
-- Robot authenticates Telegram, stores preferences, accepts the final ordered post request, validates it, and sends the authoritative Scripture to Telegram.
+- scoped browser `localStorage` owns bounded, coordinate-only reading history;
+- scoped `localStorage` plus Telegram `DeviceStorage` and `CloudStorage` reconcile
+  bookmarks, colored topics, the active topic, and compact last-read coordinates;
+- Robot authenticates Telegram, retains compatible reader preferences, accepts
+  the final ordered post request, validates it, and sends authoritative
+  Scripture or an explicitly requested bookmark backup document to Telegram.
 
 ## Ownership boundaries
 
@@ -29,8 +35,11 @@ Everything else in the reading experience is browser-owned and backed by GetBibl
 | Selection highlighting | Yes | No | No |
 | Select/unselect/reorder/clear | Yes | No | No |
 | Reading history record/remove/clear | Yes | No | No |
+| Bookmark/topic editing and local import/export | Yes | No | No |
+| Bookmark and last-read device/cloud sync | Telegram Mini App storage | No | No |
+| Private-chat bookmark backup/restore transport | Confirm/merge in browser | Yes | No |
 | Telegram authentication | No | Yes | No |
-| User preferences | No | Yes | No |
+| Reader preference compatibility | Compact Mini App storage copy | Yes | No |
 | Final Telegram posting | Coordinates submitted once | Yes | No |
 
 ## Request flow
@@ -46,8 +55,12 @@ flowchart LR
     A --> V[VerseSelection]
     L --> V
     V --> B[BrowserSelectionStore]
-    B -->|final ordered coordinates once| P[Robot post endpoint]
-    P -->|authoritative validation and Telegram send| G[Telegram]
+    T --> H[Scoped local ReadingHistoryStore]
+    T --> M[BookmarkStore]
+    M <-->|newest timestamped aggregate| TS[Telegram DeviceStorage / CloudStorage]
+    B -->|final ordered coordinates once| P[Robot protected endpoints]
+    M -->|explicit bounded JSON backup| P
+    P -->|validated Scripture or private backup document| G[Telegram]
 ```
 
 No select, unselect, reorder, clear, reader navigation, catalog, chapter, or explicit-reference operation may call Robot.
@@ -64,11 +77,52 @@ chapter, verse, event kind, local identifier, and visit time. The store never
 persists a verse body, Telegram identity, launch data, session token, search
 result, or preference.
 
-The versioned browser-session record is unique, newest-first, and bounded to
-1,000 entries. Legacy duplicates are compacted when restored. The reader can
+The versioned record is unique, newest-first, bounded to 1,000 entries, and
+stored under a key derived from the authenticated user scope in browser
+`localStorage`. Legacy duplicates are compacted when restored. The reader can
 reopen the exact translation and coordinate, remove one entry, or clear the
-entire record. Clearing removes the storage key. If `sessionStorage` is
+entire record. Clearing removes the storage key. If `localStorage` is
 unavailable, history remains available in memory until the page closes.
+
+History never reconciles through Telegram storage and never reaches Robot.
+Moving between devices therefore synchronizes bookmarks and last-read, but not
+the device's trail of previously opened locations.
+
+## Hybrid user storage
+
+The hybrid adapter is intentionally limited to compact user-critical data:
+
+- at most 100 colored bookmark topics and 800 canonical whole-verse bookmarks;
+- the active bookmark topic;
+- a last-read record containing only translation, book, chapter, verse,
+  version, and update timestamp, or a timestamped cleared marker without a
+  coordinate.
+
+The bookmark aggregate is stored immediately in the authenticated user's
+scoped `localStorage` record. At startup, valid local, Telegram
+`DeviceStorage`, and Telegram `CloudStorage` candidates are compared by update
+time; the newest candidate becomes active and is mirrored to every available
+store. Later writes update the local copy synchronously and coalesce bounded
+Telegram writes in the background. A client without either Telegram API keeps
+working from local storage and presents sync as degraded instead of blocking
+the feature.
+
+Bookmark identity is canonical book/chapter/verse, not translation. Assigning
+the same verse from another translation updates its one bookmark and topic.
+Selections remain independent and ephemeral, and the public cache remains
+identity-free.
+
+### Portable recovery
+
+The Bookmarks page can download and merge a bounded, versioned JSON file. It
+can also send the validated JSON to the authenticated user's private bot chat.
+That document has an owner-bound Restore callback that remains useful on
+another Telegram client. Pressing it in the owner's private chat creates a
+fresh short-lived, one-time Mini App launch containing only bounded Telegram
+file metadata. The browser retrieves the document, asks the user to confirm,
+merges and flushes it, then acknowledges the restore reference. The document
+message remains in chat for future recovery. Robot does not store or log the
+backup body in a database or Mini App session.
 
 ## Shared verse contract
 
@@ -125,9 +179,10 @@ Public GetBible content is stored in IndexedDB under the versioned `public:v2:` 
 The cache is bounded by record count, total estimated payload size, per-record
 size, least-recently-used eviction, and in-flight request coalescing. Only
 identity-free public payloads may enter this cache. Telegram init data, session
-tokens, user IDs, preferences, search results, selections, reading history, and
-posting state are excluded. Reading history uses its own bounded
-browser-session store and never enters the public cache.
+tokens, user IDs, preferences, search results, selections, reading history,
+bookmarks, last-read records, and posting state are excluded. History and the
+hybrid bookmark adapter use separate bounded scoped stores and never enter the
+public cache.
 
 ### Revalidation and invalidation
 
@@ -142,6 +197,13 @@ A failed validation never replaces a previously accepted record.
 - A browser selection operation cannot fail because Robot is unavailable.
 - A failed final Post preserves the complete ordered browser selection for retry.
 - A malformed or tampered final selection is rejected by Robot before Telegram output.
+- Telegram storage failure degrades bookmark/last-read sync to whichever valid
+  local or Telegram store remains available; it does not invalidate Scripture
+  content, history, or selection.
+- A chat restore transport, validation, or confirmation failure before merge
+  leaves current bookmarks unchanged. If persistence or acknowledgement fails
+  after merge, the imported merge remains available and the chat document can
+  be retried. Local JSON download/import remains independent of chat transport.
 
 ## Compatibility and removal policy
 
@@ -163,10 +225,16 @@ The release gate must prove:
 - Robot re-resolves authoritative Scripture before Telegram output;
 - cache hashes, bounds, invalidation, and CSP origin parity remain enforced;
 - cold and warm real-browser flows pass;
-- successful chapter opens and selections record unique browser-session
+- successful chapter opens and selections record unique scoped, durable local
   history, promoting revisited coordinates to the front;
 - History remains available from every bottom-navigation surface, restores
   translation and coordinates, supports individual removal, and fully resets;
   opening the History page, recording, removal, and reset issue no Robot
   request. Restoring an entry may persist the normal reader preference, but
-  uses no history or Scripture-content route.
+  uses no history or Scripture-content route;
+- bookmark topic operations, canonical cross-translation deduplication, limits,
+  import/export, and newest-record reconciliation across local, device, and
+  cloud stores remain deterministic under partial API failure;
+- private-chat backup is owner-bound and bounded, restore uses a fresh
+  one-time launch, the confirmed merge persists before acknowledgement, and no
+  backup body enters Robot database/session/log storage.

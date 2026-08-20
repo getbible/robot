@@ -63,7 +63,7 @@ Tests must prove:
 
 Tests must prove:
 
-- full-text search and pagination alone use Robot/Librarian;
+- full-text search and pagination alone use Librarian, through Robot;
 - a Librarian failure does not affect reader navigation;
 - stale search and pagination responses cannot overwrite newer state;
 - search verses normalize to the same descriptor used by reader verses;
@@ -100,8 +100,8 @@ Tests must prove:
   full-capacity revisit;
 - exact translation/book/chapter/verse restoration;
 - the 1,000-entry bound and defensive snapshots;
-- versioned `sessionStorage` restoration, including legacy duplicate
-  compaction, with memory fallback;
+- versioned authenticated-scope `localStorage` restoration, including legacy
+  duplicate compaction, with memory fallback;
 - malformed persistence rejection;
 - individual removal and complete reset, including removal of the storage key;
 - absence of verse bodies, Telegram identity, launch data, and Robot tokens;
@@ -109,26 +109,75 @@ Tests must prove:
   clearing history; choosing an entry may use only the existing reader
   preference path.
 
+### Bookmark and hybrid-storage domain
+
+`BookmarkStore` and `TelegramBookmarkStorage` tests must cover:
+
+- the shipped colored topic catalog plus bounded add, rename, recolor, and
+  removal;
+- one complete bookmark per canonical book/chapter/verse across translations,
+  topic reassignment, removal, clear, and defensive snapshots;
+- maximum topic/bookmark counts and per-value sizes that fit Telegram storage
+  limits;
+- versioned bounded JSON export/import, compatible-format merge,
+  cross-translation deduplication, malformed input rejection, and no partial
+  mutation on failure;
+- authenticated user-scoped local keys with no raw Telegram user identifier;
+- newest-timestamp startup reconciliation across `localStorage`, Telegram
+  `DeviceStorage`, and Telegram `CloudStorage`, including deterministic ties,
+  write coalescing, manifest-last cloud commits, and partial/unavailable API
+  fallback;
+- compact last-read reconciliation containing no chapter body, history,
+  selection, session token, or Telegram init data, including a failed remote
+  clear followed by tombstone reconciliation without stale resurrection;
+- history and the public Scripture cache never being written through the
+  Telegram adapter.
+
+### Bookmark chat backup and restore
+
+Backend and browser tests must prove:
+
+- authenticated backup JSON is versioned, schema-validated, canonicalized,
+  size/count bounded, and delivered idempotently to the requesting user's
+  private bot chat;
+- ambiguous or incomplete delivery attempts cannot create an uncontrolled
+  retry;
+- the document callback is owner-bound and accepted only from the owner's
+  private bot chat;
+- a callback validates Telegram file metadata and creates a fresh, short-lived,
+  one-time Bookmarks launch;
+- restore fetch validates the Telegram document again, merge requires explicit
+  confirmation, persistence flush completes before DELETE acknowledgement, and
+  acknowledgement consumes only that launch's restore reference;
+- backup bodies never enter Robot database/session state, structured logs, or
+  public browser cache.
+
 ### Real Chromium acceptance
 
-The pinned Chromium test must exercise the production HTML, CSP, JavaScript modules, and browser APIs. It must verify:
+The pinned Chromium test exercises the production HTML, CSP, JavaScript
+modules, and browser APIs. It verifies:
 
-1. the reader loads from Main API;
-2. chapter navigation works;
-3. selecting a verse immediately sets `aria-pressed=true` and selected styling;
-4. the verse number and body retain the selected visual state;
-5. navigating away and back preserves highlighting;
-6. the same verse from Search and Reader is one selection;
-7. a second click unselects it;
-8. no Robot basket or Scripture request occurs before Post;
-9. failed Post preserves selection;
-10. successful Post clears selection.
-11. History is reachable from every footer route and keeps the footer visible;
-12. History matches Selected's heading and empty-state layout, with a centered
-    getBible icon and no translation or Close control;
-13. revisiting an entry moves it to the top without increasing the count;
-14. exact-coordinate navigation, individual removal, full reset, and empty
-    **Open the Bible** focus/navigation work.
+1. the reader loads from Main API and chapter navigation works;
+2. History is reachable from every footer route and keeps the footer visible;
+3. History matches Selected's heading and empty-state layout, with a centered
+   getBible icon and no translation or Close control;
+4. revisiting a history coordinate moves it to the top without increasing the
+   count, and exact-coordinate navigation, removal, reset, and empty-state
+   navigation work;
+5. Home shows Search, Bible, and History actions plus the Bookmarks summary,
+   and Home/History/Selected/Bookmarks use the icon-only top bar;
+6. selecting a reader verse opens the anchored bookmark menu; assignment opens
+   the updated topic view, reassignment and removal update persisted state and
+   the reader color, and the five-item footer remains usable;
+7. an explicit chat-backup action sends the current bookmark document through
+   the authenticated Robot endpoint; and
+8. no legacy Robot Scripture or history request is emitted.
+
+Focused model, storage, API, and backend tests separately verify selection
+identity and unselect state transitions, Post authority and server failure
+semantics, restore/import persistence, and acknowledgement ordering. Visual
+selection state, browser selection behavior after Post, complete topic-view
+refresh, and chat-failure fallback remain live smoke requirements below.
 
 ### Post authority
 
@@ -153,7 +202,11 @@ Inject and verify independent failures for:
 - cache hash changes during download;
 - Librarian search timeout;
 - Robot session expiry;
-- unavailable or corrupt browser-session history storage;
+- unavailable or corrupt scoped browser-local history storage;
+- unavailable, partial, stale, or corrupt Telegram DeviceStorage/CloudStorage;
+- oversized, malformed, wrong-owner, missing, or changed bookmark backup
+  documents;
+- restore persistence or acknowledgement failure;
 - final Telegram send failure.
 
 Each failure must remain inside its ownership boundary. Public API errors must not invalidate authentication; search errors must not disable reading; Post errors must not erase local selections.
@@ -169,9 +222,19 @@ After all deterministic gates pass, deploy one validated commit and verify in Te
 - Search and Reader selections interoperate;
 - Copy preserves selection;
 - Post delivers authoritative Scripture to the originating chat/topic;
+- failed Post preserves the browser selection;
 - successful Post clears the browser selection;
 - history reopens the exact verse/translation and can be cleared per-entry or
   completely;
+- history remains on the same browser after reopening but is absent on a clean
+  second device;
+- bookmark assignment, topic management, and cross-translation canonical
+  deduplication work;
+- bookmarks and last-read synchronize on a second supported Telegram client;
+- JSON download/import and private-chat backup/restore work, including owner
+  validation, confirmation, and persistence before acknowledgement;
+- when private-chat backup transport fails, local JSON Download and Import stay
+  enabled and usable;
 - private command and launcher cleanup still behaves as documented.
 
 Record the deployed commit SHA and CI/CodeQL run links with the release evidence.

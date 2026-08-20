@@ -10,6 +10,7 @@ from tornado.web import Application, URLSpec
 
 from modules.miniapp_api import MiniAppHttpRequest, MiniAppHttpResponse
 from modules.miniapp_tornado import (
+    MAX_MINI_APP_REQUEST_BYTES,
     ClientAddressResolver,
     MiniAppServer,
     MiniAppStaticHandler,
@@ -130,6 +131,40 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
         self.assertEqual(self.cleanup_requests[0].method, "POST")
         self.assertEqual(self.api.requests, [])
 
+    def test_streaming_body_limit_is_large_only_for_bookmark_backup(self) -> None:
+        oversized_ordinary = self.fetch(
+            "/app/api/v1/preferences",
+            method="POST",
+            body=b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
+        )
+        oversized_lookalike = self.fetch(
+            "/app/api/v1/x/api/v1/bookmarks/backup",
+            method="POST",
+            body=b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
+        )
+        oversized_wrong_method = self.fetch(
+            "/app/api/v1/bookmarks/backup",
+            method="PUT",
+            body=b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
+        )
+        allowed_backup = self.fetch(
+            "/app/api/v1/bookmarks/backup",
+            method="POST",
+            body=b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
+        )
+
+        # Tornado rejects an over-limit Content-Length at the HTTP transport
+        # boundary with 400; a chunked overrun raised by the handler is 413.
+        self.assertIn(oversized_ordinary.code, (400, 413))
+        self.assertIn(oversized_lookalike.code, (400, 413))
+        self.assertIn(oversized_wrong_method.code, (400, 413))
+        self.assertEqual(allowed_backup.code, 202)
+        self.assertEqual(len(self.api.requests), 1)
+        self.assertEqual(
+            self.api.requests[-1].body,
+            b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
+        )
+
     def test_static_shell_and_assets_receive_distinct_hardened_cache_headers(self) -> None:
         shell = self.fetch("/static/")
         self.assertEqual(shell.code, 200)
@@ -237,8 +272,8 @@ class MiniAppServerLifecycleTestCase(unittest.IsolatedAsyncioTestCase):
             server_factory.assert_called_once_with(
                 application,
                 xheaders=False,
-                max_buffer_size=128 * 1024,
-                max_body_size=64 * 1024,
+                max_buffer_size=MAX_MINI_APP_REQUEST_BYTES,
+                max_body_size=MAX_MINI_APP_REQUEST_BYTES,
                 max_header_size=16 * 1024,
                 idle_connection_timeout=30.0,
                 body_timeout=10.0,

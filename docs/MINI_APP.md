@@ -1,10 +1,12 @@
 # Telegram Mini App
 
-The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, and temporary verse selection belong in the browser. Robot remains the authenticated Telegram control plane and the Librarian search adapter.
+The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, temporary verse selection, and device-local history belong in the browser. Compact bookmarks and last-read coordinates additionally use Telegram Mini App storage when available. Robot remains the authenticated Telegram control plane, the Librarian search adapter, and the bounded relay for an explicit private-chat bookmark backup or restore.
 
 ## Active doctrine
 
-Only full-text search and search pagination use Robot/Librarian.
+Only full-text search and search pagination use Librarian. Robot also owns the
+authenticated control paths for sessions, preference compatibility, final
+Post, and explicit bookmark chat backup/restore.
 
 | Capability | Owner |
 | --- | --- |
@@ -15,10 +17,14 @@ Only full-text search and search pagination use Robot/Librarian.
 | Explicit or grouped references | Browser → `query.getbible.net/v2` |
 | Persistent public cache | Browser IndexedDB |
 | Selected verse order and highlighting | Browser memory |
-| Opened chapter and selected verse history | Browser `sessionStorage` |
+| Opened chapter and selected verse history | Scoped browser `localStorage` |
+| Bookmark topics, bookmarks, and active topic | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage` |
+| Compact last-read coordinate | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage`, with Robot preference compatibility |
+| Bookmark JSON download/import | Browser |
+| Private-chat bookmark backup/restore | Browser confirmation + Robot/Telegram transport |
 | Full-text search and pagination | Robot → Librarian |
 | Telegram authentication and launch binding | Robot |
-| User preferences and reader position | Robot |
+| Reader preference compatibility | Robot |
 | Final Telegram delivery | Robot |
 
 A normal reader action must never call Robot for translations, books, chapters, chapter text, selecting, unselecting, reordering, clearing, or copying.
@@ -27,11 +33,12 @@ A normal reader action must never call Robot for translations, books, chapters, 
 
 ```text
 Telegram WebView
-  ├─ signed initData / preferences / search / final post → Robot
+  ├─ signed initData / preferences / search / post / chat backup → Robot
   ├─ catalogs / chapters / hashes                    → api.getbible.net/v2
   ├─ explicit or grouped references                  → query.getbible.net/v2
   ├─ temporary ordered selection                     → BrowserSelectionStore
-  └─ unique coordinate history                       → ReadingHistoryStore
+  ├─ unique coordinate history                       → scoped local ReadingHistoryStore
+  └─ bookmarks / topics / compact last-read          → local + Telegram storage adapter
 ```
 
 Reader and search results are normalized into one verse descriptor. Coordinate identity is:
@@ -80,16 +87,59 @@ same footer remains visible and usable. Its heading and empty state follow the
 Selected page, including the centered **Open the Bible** action, while the top
 bar keeps only the centered getBible icon. Choosing an entry reopens that exact
 translation and coordinate. An entry can be removed individually, and Clear
-all removes the complete browser-session record.
+all removes the complete device-local record.
 
 `ReadingHistoryStore` is versioned, unique and newest-first, and bounded to
-1,000 coordinate-only entries in `sessionStorage`, with an in-memory fallback.
+1,000 coordinate-only entries in authenticated user-scoped `localStorage`, with
+an in-memory fallback.
 Chapter visits share translation/book/chapter identity, while verse selections
 use their full coordinate; an exact coordinate also coalesces across event
 kinds. Revisiting one moves its stable entry to the top. Restoration
 compacts older duplicate records. The store never keeps verse bodies, Telegram
 data, Robot credentials, or user identity, and none of its mutations call
-Robot.
+Robot or Telegram storage. History survives later WebView sessions in that
+browser but does not synchronize between devices.
+
+## Navigation and bookmarks
+
+The permanent footer remains the five actions Home, Search, Bible, History, and
+Selected. Bookmarks is reached from the Home summary rather than adding a sixth
+footer action. Home contains the three primary actions **Search Scripture**,
+**Read the Bible**, and **See history**, followed by Selected, History, and
+Bookmarks summaries. The translation control remains in Search and Bible; Home,
+History, Selected, and Bookmarks show only the centered getBible icon.
+
+Selecting a verse in Bible reveals a keyboard-accessible bookmark trigger and
+an anchored menu above the verse. The menu assigns that complete canonical
+book/chapter/verse to one colored topic or removes its bookmark. A repeated
+coordinate from another translation updates its one bookmark rather than
+duplicating it.
+
+The Bookmarks surface lists colored topics, filters them by name, opens a topic
+to review its verses, and supports topic add, rename, recolor, and removal plus
+clear-all. Default topics and their palette follow the established GetBible
+bookmark catalog; user-created topics may use any valid six-digit hex color.
+Topic and bookmark counts are bounded.
+
+`BookmarkStore` writes its versioned aggregate immediately to scoped
+`localStorage`. `TelegramBookmarkStorage` compares timestamped candidates from
+local storage and Telegram `DeviceStorage` and `CloudStorage`, selects the
+newest valid copy, then mirrors it to available stores. The active topic and a
+compact last-read coordinate participate; a timestamped cleared marker prevents
+an older remote position from reappearing after a failed sync. Selection,
+history, catalogs, and chapters do not. Unsupported Telegram storage leaves the
+local copy usable and shows a degraded-sync notice.
+
+The Bookmarks page offers bounded JSON **Download** and **Import**, plus **Back
+up to chat**. The chat action passes a validated document through an
+authenticated, idempotent endpoint to the user's private bot chat. Telegram's
+document message carries an owner-bound Restore callback. A callback from the
+owner's private chat creates a fresh, short-lived, one-time launch that opens
+Bookmarks, retrieves and validates the Telegram file, asks before merging,
+flushes the result to persistent storage, and acknowledges that launch. The
+original document remains in chat. Robot sessions and persistence keep only
+delivery/file metadata and never a backup body; structured logs exclude the
+document.
 
 ## Cache integrity
 
@@ -154,7 +204,10 @@ sudo getbible-robot doctor production
 | `MINI_APP_MAX_SELECTIONS` | Browser and final-post selection limit |
 | `MINI_APP_TRUSTED_PROXY_CIDRS` | Optional advanced restriction for forwarded client addresses |
 
-The browser cache is identity-free. User preferences remain server-side and contain only the selected translation and reader coordinates.
+The public browser cache is identity-free. Robot retains only the compatible
+reader preference containing translation and reader coordinates. Device-local
+history and hybrid bookmark state live in separate scoped browser/Telegram
+stores and never enter the public cache.
 
 In managed Caddy mode the public listener is HTTPS port 443; the Mini App's
 own port remains an internal loopback listener. In external mode, Caddy is not
@@ -183,7 +236,7 @@ After deployment, verify:
 1. cold reader load uses the public Main API;
 2. warm reader load uses IndexedDB and hash policy correctly;
 3. explicit references use Query API;
-4. search alone uses Robot/Librarian;
+4. search is the only Scripture-discovery path through Robot/Librarian;
 5. selecting highlights the verse number and body immediately;
 6. selecting the same verse from search and reader does not duplicate it;
 7. a second click unselects it;
@@ -193,8 +246,16 @@ After deployment, verify:
 11. History remains available from every footer route and revisits move to the
     top without duplication;
 12. individual and complete history clearing work locally;
-13. Post failure preserves selection and successful Post clears it.
+13. Home exposes Search, Bible, and History actions plus Selected, History, and
+    Bookmarks summaries, with the route-specific top-bar controls;
+14. a selected Bible verse can be assigned to one colored bookmark topic and
+    the Bookmarks manager can edit topics and reopen/remove verses;
+15. bookmark and last-read state reconcile on a second supported Telegram
+    client without synchronizing history or downloaded Scripture;
+16. bounded JSON download/import and private-chat backup/restore work, and a
+    confirmed restore persists before its one-launch reference is acknowledged;
+17. Post failure preserves selection and successful Post clears it.
 
 ## Verification gate
 
-A release is not ready unless permanent CI proves Python 3.10–3.14, the production container, lint, strict typing, branch coverage, dependency and secret scans, CodeQL, public API routing, CSP parity, hash verification, bounded caches, bounded selections, real Chromium navigation, graphical select/unselect, cross-source identity, no pre-Post Robot mutation, and authoritative idempotent posting.
+A release is not ready unless permanent CI proves Python 3.10–3.14, the production container, lint, strict typing, branch coverage, dependency and secret scans, CodeQL, public API routing, CSP parity, hash verification, bounded caches, bounded selections, durable local history, bookmark-domain and hybrid-storage invariants, private-chat backup/restore ownership and bounds, real Chromium navigation, graphical select/unselect, cross-source identity, no pre-Post Robot mutation, and authoritative idempotent posting.

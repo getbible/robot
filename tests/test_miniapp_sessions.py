@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from modules import miniapp_sessions
+from modules.bookmark_backup import BookmarkRestoreFile
 from modules.interactions import SearchResult
 from modules.miniapp_auth import TelegramMiniAppPrincipal
 from modules.miniapp_sessions import (
@@ -151,6 +152,41 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
                 user_id=7,
                 target_chat_id=-100,
                 source_ephemeral_message_id=51,
+            )
+
+    def test_bookmark_restore_launch_is_private_owner_bound_and_acknowledged(self) -> None:
+        launches = MiniAppLaunchStore(max_launches=2, ttl_seconds=60)
+        restore = BookmarkRestoreFile.validated(
+            file_id="telegram-file-id",
+            file_unique_id="telegram-unique-id",
+            file_name="getbible-bookmarks.json",
+            file_size=1024,
+        )
+        launch = launches.create_launch(
+            user_id=7,
+            target_chat_id=7,
+            initial_route="bookmarks",
+            bookmark_restore=restore,
+        )
+        store = MiniAppSessionStore(max_sessions=2, ttl_seconds=60)
+        session = store.create(
+            _principal(7),
+            translation="kjv",
+            launch=launch,
+            init_data_digest=b"x" * 32,
+        )
+
+        self.assertIs(store.bookmark_restore(session), restore)
+        self.assertTrue(store.acknowledge_bookmark_restore(session))
+        self.assertIsNone(store.bookmark_restore(session))
+        self.assertFalse(store.acknowledge_bookmark_restore(session))
+
+        with self.assertRaisesRegex(ValueError, "private chat"):
+            launches.create_launch(
+                user_id=7,
+                target_chat_id=-100,
+                initial_route="bookmarks",
+                bookmark_restore=restore,
             )
 
     def test_prompt_attachment_survives_launch_exchange_race(self) -> None:
@@ -944,6 +980,34 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
             miniapp_direct_url("GetBibleBot", token),
             "https://t.me/GetBibleBot?startapp=abcdefghijklmnop&mode=compact",
         )
+
+
+class MiniAppSessionConcurrencyTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_bookmark_io_pins_an_expired_session_until_release(self) -> None:
+        clock = _Clock()
+        launches = MiniAppLaunchStore(
+            max_launches=2,
+            ttl_seconds=60,
+            clock=clock,
+        )
+        store = MiniAppSessionStore(
+            max_sessions=2,
+            ttl_seconds=60,
+            clock=clock,
+        )
+        session = store.create(
+            _principal(7),
+            translation="kjv",
+            launch=launches.create_launch(user_id=7, target_chat_id=7),
+            init_data_digest=b"x" * 32,
+        )
+
+        async with session.bookmark_io_lock:
+            clock.value = 61
+            self.assertIs(store.get(session.token, touch=False), session)
+            self.assertEqual(store.snapshot()["sessions"], 1)
+
+        self.assertIsNone(store.get(session.token, touch=False))
 
 
 if __name__ == "__main__":

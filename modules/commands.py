@@ -33,6 +33,11 @@ from telegram.ext import ContextTypes
 
 from config import Settings
 from modules.audit import audit_event, audit_identity
+from modules.bookmark_backup import (
+    BookmarkBackupError,
+    BookmarkRestoreFile,
+    valid_bookmark_restore_callback,
+)
 from modules.catalog import BookOption, ChapterOption, TranslationOption
 from modules.dependencies import ApplicationServices
 from modules.ephemeral import (
@@ -444,6 +449,112 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             context,
             enabled=settings.delete_command_messages,
         )
+
+
+async def bookmark_restore_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Turn a durable backup-document button into a fresh owner launch."""
+    callback = update.callback_query
+    identity = _identity(update)
+    if (
+        callback is None
+        or identity is None
+        or update.effective_chat is None
+    ):
+        return
+    chat_id, user_id = identity
+    settings, _, limiter, _ = _components(context)
+    if not valid_bookmark_restore_callback(
+        callback.data,
+        user_id=user_id,
+        secret=settings.telegram_api_token,
+    ):
+        await callback.answer(
+            "This bookmark backup belongs to another Telegram account.",
+            show_alert=True,
+        )
+        return
+    if (
+        getattr(update.effective_chat, "type", None) != "private"
+        or chat_id != user_id
+    ):
+        await callback.answer(
+            "Bookmark backups can only be restored in your private bot chat.",
+            show_alert=True,
+        )
+        return
+    message = callback.message
+    document = getattr(message, "document", None)
+    if document is None:
+        await callback.answer(
+            "This backup message is no longer available. Import the JSON file "
+            "from the Bookmarks page instead.",
+            show_alert=True,
+        )
+        return
+    try:
+        restore = BookmarkRestoreFile.validated(
+            file_id=getattr(document, "file_id", None),
+            file_unique_id=getattr(document, "file_unique_id", None),
+            file_name=getattr(document, "file_name", None),
+            file_size=getattr(document, "file_size", None),
+        )
+    except BookmarkBackupError as error:
+        await callback.answer(str(error), show_alert=True)
+        return
+
+    if not await _allow_command(update, context, limiter):
+        await callback.answer("Please try again shortly.", show_alert=True)
+        return
+    mini_app = _mini_app(context)
+    if mini_app is None:
+        await callback.answer(
+            "Bookmark restore is temporarily unavailable.",
+            show_alert=True,
+        )
+        return
+    try:
+        launch = mini_app.create_launch(
+            user_id=user_id,
+            target_chat_id=user_id,
+            initial_route="bookmarks",
+            initial_query="",
+            bookmark_restore=restore,
+        )
+        keyboard = InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton(
+                    "Open and review backup",
+                    web_app=WebAppInfo(url=mini_app.web_url(launch)),
+                )
+            ]]
+        )
+        prompt = await context.bot.send_message(
+            chat_id=user_id,
+            text=(
+                "Your bookmark backup is ready to review. Open it now; this "
+                "secure restore link is intentionally short-lived."
+            ),
+            reply_markup=keyboard,
+        )
+        message_id = getattr(prompt, "message_id", None)
+        if (
+            isinstance(message_id, bool)
+            or not isinstance(message_id, int)
+            or message_id <= 0
+        ):
+            raise TelegramError("Telegram returned an invalid restore prompt.")
+        mini_app.remember_prompt(launch, message_id=message_id)
+    except (TelegramError, ValueError):
+        LOGGER.warning("Unable to prepare a bookmark restore launch", exc_info=True)
+        await callback.answer(
+            "The restore link could not be prepared. Please try again.",
+            show_alert=True,
+        )
+        return
+    await callback.answer("Restore link ready.")
 
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

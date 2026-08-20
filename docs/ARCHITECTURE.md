@@ -4,8 +4,8 @@
 
 GetBible Robot has two deliberately separate data planes:
 
-1. **Browser Scripture plane** — public, read-only GetBible API V2 data and temporary UI state.
-2. **Robot control plane** — Telegram authentication, preferences, Librarian search, and final Telegram delivery.
+1. **Mini App plane** — public, read-only GetBible API V2 data, browser-owned UI state, and compact user state reconciled with Telegram Mini App storage.
+2. **Robot control plane** — Telegram authentication, preference compatibility, Librarian search, bounded bookmark backup transport, and final Telegram delivery.
 
 Only full-text search and search pagination use Librarian. Translation discovery, books, chapters, chapter text, hashes, and explicit reference resolution are browser-to-GetBible API operations.
 
@@ -17,6 +17,9 @@ flowchart LR
     R[Robot control plane]
     L[Librarian]
     S[BrowserSelectionStore]
+    H[Scoped local history]
+    B[BookmarkStore]
+    TS[Telegram DeviceStorage / CloudStorage]
     G[Telegram]
 
     T -->|catalogs, chapters, hashes| A
@@ -26,8 +29,13 @@ flowchart LR
     R -->|search/pagination| L
     A -->|normalized verses| S
     L -->|normalized verses| S
+    T -->|coordinate visits| H
+    T -->|bookmarks and last-read| B
+    B <-->|newest valid record| TS
     S -->|final ordered selection at Post| R
+    B -->|explicit bounded JSON backup| R
     R -->|authoritative bounded output| G
+    R -->|private backup document| G
 ```
 
 No reader navigation, catalog load, chapter load, select, unselect, reorder, clear, or copy operation may call Robot.
@@ -43,8 +51,10 @@ No reader navigation, catalog load, chapter load, select, unselect, reorder, cle
 | `miniapp/lib/getbible-model.js` | GetBible response normalization and deterministic coordinate identities |
 | `miniapp/lib/public-cache.js` | IndexedDB/memory cache, LRU bounds, atomic replacement, and invalidation |
 | `miniapp/lib/selection-store.js` | Browser-owned ordered selection domain |
-| `miniapp/lib/reading-history-store.js` | Bounded, coordinate-only reading history for the active browser session |
-| `miniapp/lib/api.js` | Robot session/search/preferences/Post transport facade and public API composition |
+| `miniapp/lib/reading-history-store.js` | Bounded, durable, coordinate-only history in an authenticated user-scoped local key |
+| `miniapp/lib/bookmark-store.js` | Canonical whole-verse bookmarks, colored topic management, and portable JSON import/export |
+| `miniapp/lib/telegram-bookmark-storage.js` | Timestamp reconciliation across localStorage, Telegram DeviceStorage, and Telegram CloudStorage for bookmarks and compact last-read |
+| `miniapp/lib/api.js` | Robot session/search/preferences/Post and bookmark backup/restore transport facade plus public API composition |
 | `miniapp/app.js` | UI orchestration and rendering only |
 
 `BrowserSelectionStore` is the sole owner of temporary selected state. It enforces bounded capacity, coordinate deduplication, source-independent removal, explicit ordering, defensive snapshots, and final coordinate projection.
@@ -151,6 +161,8 @@ Robot owns:
 - bounded opaque sessions with a three-hour default absolute lifetime;
 - reader preferences;
 - full-text search and pagination through Librarian;
+- validation and private-chat delivery/retrieval of explicitly requested,
+  bounded bookmark backup documents;
 - final Post authorization, idempotency, authoritative resolution, rendering, and Telegram delivery;
 - cleanup, audit, health, and operational limits.
 
@@ -181,11 +193,47 @@ translation, reference, book name/number, chapter, verse, and visit time. They
 never retain verse bodies, Telegram identity, launch data, or Robot credentials.
 
 History is unique and newest-first, bounded to 1,000 entries, and stored under
-a versioned `sessionStorage` key. Restoration compacts legacy duplicate
-coordinates newest-first. Reopening an entry restores both its translation and
-exact coordinate. Individual removal and full reset are local browser
-operations and issue no Robot request. Storage rejection falls back to memory
-for the active page.
+a versioned, authenticated user-scoped `localStorage` key. It survives WebView
+sessions on that browser until the user clears it or browser data is removed.
+Restoration compacts legacy duplicate coordinates newest-first. Reopening an
+entry restores both its translation and exact coordinate. Individual removal
+and full reset are local browser operations and issue no Robot or Telegram
+storage request. Storage rejection falls back to memory for the active page.
+
+## Bookmarks and last-read lifecycle
+
+`BookmarkStore` owns one bookmark per canonical book/chapter/verse across
+translations. Selecting a topic replaces that verse's previous topic and
+display translation instead of creating a duplicate. The domain has bounded
+topic and bookmark counts, ships a fixed colored topic catalog, permits topic
+add/rename/recolor/removal, and exports or merges a bounded, versioned JSON
+document. Bookmarks represent the complete verse; text ranges and notes from a
+compatible imported document are not made active bookmark state.
+
+The synchronous aggregate is written immediately to scoped browser
+`localStorage`. `TelegramBookmarkStorage` then reconciles the newest valid
+timestamped aggregate with Telegram `DeviceStorage` and `CloudStorage` when
+those APIs are available, and mirrors the winner back to available stores. A
+compact last-read record containing only translation, book, chapter, verse,
+version, and update time follows the same local/device/cloud pattern; clearing
+it writes a newer coordinate-free tombstone so a stale remote value cannot
+reappear. Existing Robot reader preferences remain a compatibility and
+availability fallback.
+No history entry, selection, chapter body, catalog, or public-cache record is
+sent through this adapter.
+
+The user may download or import the same bounded JSON locally. **Back up to
+chat** submits it through an authenticated, idempotent Robot endpoint; Robot
+validates and canonicalizes the document and sends it to that user's private
+bot chat with an owner-bound permanent Restore callback. Pressing the callback
+in the private owner chat validates the Telegram document metadata and creates
+a fresh, short-lived, one-time Mini App launch. The Mini App retrieves the file
+through that launch, asks before merging, flushes the merged state to an
+available persistent store, and then explicitly acknowledges the restore
+reference. The chat document remains the durable recovery artifact. Backup
+bodies are never written to Robot database/session state or logs; a restore
+launch retains only bounded Telegram file metadata until acknowledgement or
+expiry.
 
 ## Search
 
@@ -230,6 +278,12 @@ reading while preserving a definite authentication boundary.
 
 Browser selection mutations are synchronous and single-threaded. Search pagination uses latest-request coordination so stale responses cannot overwrite current state. Preference writes are serialized per user. Final posting is serialized and idempotent.
 
+Bookmark writes are synchronous locally and asynchronously coalesced for
+Telegram storage. Timestamp reconciliation makes startup deterministic when
+local, device, and cloud copies differ. Bookmark chat backup is serialized and
+idempotent per authenticated session; restore references are single-launch and
+explicitly consumed only after a confirmed merge has persisted.
+
 Synchronous Librarian work runs in fixed executors. Timeouts do not release capacity until the underlying future exits, preventing cancellation from turning into an unbounded queue.
 
 ## Failure isolation
@@ -240,6 +294,9 @@ Synchronous Librarian work runs in fixed executors. Timeouts do not release capa
 | Query API unavailable | explicit/grouped reference resolution only |
 | Librarian unavailable | search only |
 | Robot temporarily unavailable | authentication/search/preferences/Post only; local selection remains |
+| Telegram Mini App storage unavailable | local bookmark and last-read copies continue; UI reports degraded sync |
+| Browser local storage unavailable | history falls back to memory; Telegram bookmark storage can still persist when supported |
+| Bookmark chat backup unavailable | live bookmarks remain unchanged; local JSON export remains available |
 | Invalid public response | rejected without cache replacement |
 | Failed Post | ordered browser selection preserved |
 | Expired Robot session | protected operations fail closed; public cached data remains identity-free |
@@ -254,10 +311,14 @@ Host deployment uses separate private listeners for health, webhook delivery, an
 
 Structured events contain route, status, duration, configured instance, and policy-controlled pseudonymous identity. They never contain tokens, Telegram init data, verse bodies, repository payloads, or browser cache content.
 
-The browser persistent cache contains public Scripture only. User translation
-and reader coordinates remain in the restricted preference store. Temporary
-selections remain in browser memory. Coordinate-only reading history remains in
-browser `sessionStorage`; both expire with the WebView session.
+The IndexedDB public cache contains public Scripture only. Temporary selections
+remain in browser memory for the active WebView. Coordinate-only history uses a
+separate user-scoped browser `localStorage` key and never enters Telegram or
+Robot storage. Bookmark topics, whole-verse bookmarks, and compact last-read
+coordinates use separate scoped local/Telegram storage; they never enter the
+public cache. Robot retains its restricted reader preference for compatibility
+but never retains bookmark backup bodies. Structured logs exclude bookmark
+documents as well as Scripture bodies and credentials.
 
 ## Release gate
 
@@ -274,4 +335,10 @@ A release is production-ready only when permanent CI and CodeQL pass on the exac
 - graphical highlight and second-click unselect in real Chromium;
 - no Robot selection mutation before Post;
 - failed Post preserves selection and successful Post clears it;
+- durable scoped history remains local, unique, bounded, and coordinate-only;
+- bookmark domain bounds, canonical deduplication, topic operations, and
+  local/DeviceStorage/CloudStorage reconciliation;
+- bounded JSON download/import plus owner-bound private-chat backup, fresh
+  one-time restore launch, persistence-before-acknowledgement, and absence of
+  backup bodies from Robot persistence and logs;
 - authoritative idempotent Telegram delivery.

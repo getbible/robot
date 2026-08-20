@@ -160,7 +160,10 @@ test("keeps History as a first-class page in the permanent bottom navigation", a
   assert.match(app, /readingHistory\.remove/);
   assert.match(app, /readingHistory\.clear/);
   assert.match(app, /route === "history"[\s\S]*?renderReadingHistory/);
-  assert.match(app, /moveFocusToRoute[\s\S]*?activeRouteButton\.focus/);
+  assert.match(
+    app,
+    /moveFocusToRoute[\s\S]*?\(activeRouteButton \?\? routeHeading\)\?\.focus/,
+  );
   assert.doesNotMatch(app, /elements\.bibleHistory\.hidden/);
   assert.doesNotMatch(app, /readingHistoryDialog|showReadingHistory/);
   assert.match(app, /async function chooseBiblePickerBook/);
@@ -180,7 +183,7 @@ test("keeps History as a first-class page in the permanent bottom navigation", a
   assert.match(app, /button\.setAttribute\("aria-label", book\.name\)/);
 });
 
-test("does not persist Telegram launch data or bearer tokens beyond sessionStorage", async () => {
+test("persists only scoped user data and keeps Telegram credentials session-only", async () => {
   const app = await readFile(new URL("app.js", root), "utf8");
   const api = await readFile(new URL("lib/api.js", root), "utf8");
   const session = await readFile(new URL("lib/session.js", root), "utf8");
@@ -188,27 +191,65 @@ test("does not persist Telegram launch data or bearer tokens beyond sessionStora
     new URL("lib/reading-history-store.js", root),
     "utf8",
   );
+  const bookmarks = await readFile(
+    new URL("lib/bookmark-store.js", root),
+    "utf8",
+  );
+  const telegramStorage = await readFile(
+    new URL("lib/telegram-bookmark-storage.js", root),
+    "utf8",
+  );
   const source = `${app}\n${api}\n${session}\n${history}`;
+  const durableData = `${history}\n${bookmarks}\n${telegramStorage}`;
 
-  assert.doesNotMatch(source, /\blocalStorage\b/);
-  assert.doesNotMatch(source, /\bDeviceStorage\b/);
   assert.match(session, /sessionStorage/);
-  assert.match(history, /sessionStorage/);
+  assert.doesNotMatch(session, /localStorage|DeviceStorage|CloudStorage/);
+  assert.match(history, /browserLocalStorage/);
+  assert.match(telegramStorage, /CloudStorage/);
+  assert.match(telegramStorage, /DeviceStorage/);
+  assert.doesNotMatch(durableData, /session_token|init_data|bearer_token/i);
   assert.doesNotMatch(source, /setItem\([^,]+,\s*(?:bridge\.)?initData/);
   assert.match(session, /subtle\.digest\("SHA-256"/);
 });
 
-test("stores bounded coordinate-only reading history in the browser session", async () => {
+test("stores bounded coordinate-only reading history in scoped local storage", async () => {
   const history = await readFile(
     new URL("lib/reading-history-store.js", root),
     "utf8",
   );
 
   assert.match(history, /DEFAULT_MAXIMUM = 1_000/);
-  assert.match(history, /getbible\.miniapp\.reading-history/);
-  assert.doesNotMatch(history, /\blocalStorage\b/);
+  assert.match(history, /getbible\.miniapp\.reading-history\.v1/);
+  assert.match(history, /SCOPE_PATTERN/);
+  assert.match(history, /browserLocalStorage/);
   assert.doesNotMatch(history, /session_token|init_data|user_id|verse_text/);
-  assert.match(history, /this\.#storage\.removeItem\(STORAGE_KEY\)/);
+  assert.match(history, /this\.#storage\.removeItem\(this\.#key\)/);
+});
+
+test("keeps Bookmarks on Home while preserving the five-item footer", async () => {
+  const html = await readFile(new URL("index.html", root), "utf8");
+  const css = await readFile(new URL("styles.css", root), "utf8");
+  const app = await readFile(new URL("app.js", root), "utf8");
+
+  assert.match(html, /data-home-route="history"/);
+  assert.match(html, /id="home-history"/);
+  assert.match(html, /id="home-bookmarks"/);
+  assert.match(
+    html,
+    /id="bookmarks-view"[\s\S]*?data-view="bookmarks"/,
+  );
+  assert.match(html, /id="bookmark-popover"[\s\S]*?role="dialog"/);
+  const footer = html.match(/<nav[\s\S]*?id="bottom-nav"[\s\S]*?<\/nav>/)?.[0] ?? "";
+  assert.equal([...footer.matchAll(/data-route="/g)].length, 5);
+  assert.doesNotMatch(footer, /data-route="bookmarks"/);
+  assert.match(app, /const ICON_ONLY_ROUTES = new Set\(\[[\s\S]*?"home"[\s\S]*?"selection"[\s\S]*?"bookmarks"/);
+  assert.match(app, /new BookmarkStore\([\s\S]*?storage: bookmarkStorage/);
+  assert.match(app, /bookmarkStore\.apply\(verse, topic\.id\)/);
+  assert.match(app, /api\.backupBookmarks/);
+  assert.match(app, /api\.acknowledgeBookmarkRestore/);
+  assert.match(css, /\.reader-verse-row/);
+  assert.match(css, /\.bookmark-popover\[data-placement="above"\]/);
+  assert.ok([...css.matchAll(/\[data-bookmark-color="[a-f0-9]{6}"\]/g)].length >= 54);
 });
 
 test("references the optimized hero and consistent getBible.Life brand", async () => {
@@ -319,7 +360,19 @@ test("ships parseable OpenAPI JSON at the documented relative root", async () =>
   assert.ok(contract.paths["/session"].delete);
   assert.ok(contract.paths["/cleanup"].post);
   assert.ok(contract.paths["/basket/order"]);
+  assert.ok(contract.paths["/bookmarks/backup"].post);
+  assert.ok(contract.paths["/bookmarks/restore"].get);
+  assert.ok(contract.paths["/bookmarks/restore"].delete);
   assert.ok(contract.paths["/post"]);
+  assert.equal(
+    contract.components.schemas.BookmarkBackup.properties.markings.maxItems,
+    800,
+  );
+  assert.equal(
+    contract.components.schemas.BookmarkRestore.properties.source.properties
+      .file_size.maximum,
+    4 * 1024 * 1024,
+  );
   assert.equal(
     contract.paths["/basket/order"].patch.requestBody.content[
       "application/json"

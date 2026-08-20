@@ -8,6 +8,7 @@ from getbible import RepositoryError
 from telegram import Message
 from telegram.error import NetworkError, TelegramError
 
+from modules.bookmark_backup import bookmark_restore_callback_data
 from modules.catalog import BookOption, ChapterOption, TranslationOption
 from modules.commands import (
     INTERACTIONS_SLOT,
@@ -27,6 +28,7 @@ from modules.commands import (
     _search_results_text,
     _selected_search_reference,
     bible_command,
+    bookmark_restore_callback,
     help_command,
     interaction_callback,
     interaction_reply,
@@ -75,6 +77,7 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             max_references=8,
             max_total_verses=100,
             audit_log_mode="metadata",
+            telegram_api_token="123456:abcdefghijklmnopqrstuvwxyzABCDEFGHIJ",
         )
         application = SimpleNamespace(
             bot_data={
@@ -166,6 +169,106 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         message = context.bot.send_message.await_args.kwargs["text"]
         self.assertIn("2 seconds", message)
         self.assertNotIn("welcome", message)
+
+    async def test_bookmark_document_callback_creates_private_owner_launch(self) -> None:
+        limiter = _Limiter()
+        context = self.context(limiter)
+        launch = SimpleNamespace(token="abcdefghijklmnop")
+        mini_app = Mock(spec=MiniAppServer)
+        mini_app.create_launch.return_value = launch
+        mini_app.web_url.return_value = (
+            "https://robot.example/?launch=abcdefghijklmnop"
+        )
+        context.application.bot_data[MINI_APP_SLOT] = mini_app
+        callback = SimpleNamespace(
+            data=bookmark_restore_callback_data(
+                200,
+                context.application.bot_data[SETTINGS_SLOT].telegram_api_token,
+            ),
+            message=SimpleNamespace(
+                document=SimpleNamespace(
+                    file_id="telegram-file-id",
+                    file_unique_id="telegram-unique-id",
+                    file_name="getbible-bookmarks.json",
+                    file_size=1024,
+                )
+            ),
+            answer=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            callback_query=callback,
+            effective_chat=SimpleNamespace(id=200, type="private"),
+            effective_user=SimpleNamespace(id=200),
+            effective_message=callback.message,
+        )
+
+        await bookmark_restore_callback(update, context)
+
+        mini_app.create_launch.assert_called_once()
+        create = mini_app.create_launch.call_args.kwargs
+        self.assertEqual(create["user_id"], 200)
+        self.assertEqual(create["target_chat_id"], 200)
+        self.assertEqual(create["initial_route"], "bookmarks")
+        self.assertEqual(create["bookmark_restore"].file_id, "telegram-file-id")
+        sent = context.bot.send_message.await_args.kwargs
+        self.assertEqual(sent["chat_id"], 200)
+        button = sent["reply_markup"].inline_keyboard[0][0]
+        self.assertIsNotNone(button.web_app)
+        mini_app.remember_prompt.assert_called_once_with(
+            launch,
+            message_id=300,
+        )
+        callback.answer.assert_awaited_once_with("Restore link ready.")
+
+    async def test_bookmark_document_callback_rejects_wrong_owner(self) -> None:
+        context = self.context(_Limiter())
+        callback = SimpleNamespace(
+            data=bookmark_restore_callback_data(
+                201,
+                context.application.bot_data[SETTINGS_SLOT].telegram_api_token,
+            ),
+            message=SimpleNamespace(document=object()),
+            answer=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            callback_query=callback,
+            effective_chat=SimpleNamespace(id=200, type="private"),
+            effective_user=SimpleNamespace(id=200),
+            effective_message=callback.message,
+        )
+
+        await bookmark_restore_callback(update, context)
+
+        callback.answer.assert_awaited_once_with(
+            "This bookmark backup belongs to another Telegram account.",
+            show_alert=True,
+        )
+        context.bot.send_message.assert_not_awaited()
+
+    async def test_bookmark_document_callback_rejects_non_private_chat(self) -> None:
+        context = self.context(_Limiter())
+        callback = SimpleNamespace(
+            data=bookmark_restore_callback_data(
+                200,
+                context.application.bot_data[SETTINGS_SLOT].telegram_api_token,
+            ),
+            message=SimpleNamespace(document=object()),
+            answer=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            callback_query=callback,
+            effective_chat=SimpleNamespace(id=-100, type="supergroup"),
+            effective_user=SimpleNamespace(id=200),
+            effective_message=callback.message,
+        )
+
+        await bookmark_restore_callback(update, context)
+
+        callback.answer.assert_awaited_once_with(
+            "Bookmark backups can only be restored in your private bot chat.",
+            show_alert=True,
+        )
+        context.bot.send_message.assert_not_awaited()
 
     async def test_search_with_words_lists_results_without_posting_scripture(self) -> None:
         limiter = _Limiter()

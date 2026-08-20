@@ -57,6 +57,10 @@ export class TelegramBridge {
       validLaunchToken(telegramToken);
   }
 
+  get webApp() {
+    return this.#webApp;
+  }
+
   initialize() {
     if (!this.available) {
       return false;

@@ -84,7 +84,7 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             commands,
             {"start", "get", "getbible", "bible", "search", "help"},
         )
-        self.assertEqual(application.add_handler.call_count, 9)
+        self.assertEqual(application.add_handler.call_count, 10)
         application.add_error_handler.assert_called_once_with(bot.error_handler)
         services = result.bot_data[bot.APPLICATION_SERVICES_SLOT]
         self.assertIs(services.settings, result.bot_data[bot.SETTINGS_SLOT])

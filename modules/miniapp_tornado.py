@@ -13,10 +13,22 @@ from urllib.parse import urlsplit
 
 from tornado.httpserver import HTTPServer
 from tornado.web import Application as TornadoApplication
-from tornado.web import RedirectHandler, RequestHandler, StaticFileHandler, URLSpec
+from tornado.web import (
+    HTTPError,
+    RedirectHandler,
+    RequestHandler,
+    StaticFileHandler,
+    URLSpec,
+    stream_request_body,
+)
 
 from config import Settings
 
+from .bookmark_backup import (
+    MAX_BOOKMARK_BACKUP_REQUEST_BYTES,
+    BookmarkBackupDocument,
+    BookmarkRestoreFile,
+)
 from .miniapp_api import MiniAppApi, MiniAppHttpRequest, MiniAppIngressLimiter
 from .miniapp_auth import TelegramInitDataReplayGuard, TelegramInitDataValidator
 from .miniapp_cleanup import MiniAppLaunchCleanup
@@ -35,6 +47,7 @@ from .service import ScriptureQuery, ScriptureService
 
 _IpAddress: TypeAlias = IPv4Address | IPv6Address
 CleanupSessionCallback = Callable[[MiniAppHttpRequest], Awaitable[int]]
+MAX_MINI_APP_REQUEST_BYTES = 64 * 1024
 
 
 def _header_value(headers: Mapping[str, str], name: str) -> str | None:
@@ -83,6 +96,7 @@ class ClientAddressResolver:
         )
 
 
+@stream_request_body
 class MiniAppApiHandler(RequestHandler):
     """Forward a bounded Tornado request to :class:`MiniAppApi`."""
 
@@ -95,6 +109,31 @@ class MiniAppApiHandler(RequestHandler):
         self._api = api
         self._address_resolver = address_resolver
         self._cleanup_session = cleanup_session
+        self._body = bytearray()
+        self._body_limit = MAX_MINI_APP_REQUEST_BYTES
+
+    def prepare(self) -> None:
+        """Select a bounded body limit after headers identify the API route."""
+        if (
+            self.request.method == "POST"
+            and self.path_args
+            and self.path_args[0] == "bookmarks/backup"
+        ):
+            self._body_limit = MAX_BOOKMARK_BACKUP_REQUEST_BYTES
+        set_max_body_size = getattr(
+            self.request.connection,
+            "set_max_body_size",
+            None,
+        )
+        if not callable(set_max_body_size):
+            raise HTTPError(500, reason="Request body limiting is unavailable.")
+        set_max_body_size(self._body_limit)
+
+    def data_received(self, chunk: bytes) -> None:
+        """Collect only the bounded body needed by the framework-neutral API."""
+        if len(self._body) + len(chunk) > self._body_limit:
+            raise HTTPError(413, reason="Request body is too large.")
+        self._body.extend(chunk)
 
     async def get(self, path: str = "") -> None:
         await self._dispatch(path)
@@ -128,7 +167,7 @@ class MiniAppApiHandler(RequestHandler):
             method=self.request.method or "",
             target=self.request.uri or "",
             headers=dict(self.request.headers),
-            body=self.request.body,
+            body=bytes(self._body),
             client_key=client_ip,
         )
         if path == "cleanup":
@@ -243,6 +282,13 @@ class MiniAppServer:
             [MiniAppLaunch, tuple[ScriptureQuery, ...]],
             Awaitable[Sequence[int] | None],
         ],
+        send_bookmark_backup: Callable[
+            [int, BookmarkBackupDocument],
+            Awaitable[int],
+        ]
+        | None = None,
+        load_bookmark_backup: Callable[[BookmarkRestoreFile], Awaitable[bytes]]
+        | None = None,
         cleanup_launch: Callable[[MiniAppLaunch], Awaitable[None]] | None = None,
         abuse_warning: Callable[[int, int, str], Awaitable[None]] | None = None,
         static_root: Path | None = None,
@@ -295,6 +341,8 @@ class MiniAppServer:
             validator=validator,
             public_url=self._public_url,
             post_scripture=post_with_cleanup,
+            send_bookmark_backup=send_bookmark_backup,
+            load_bookmark_backup=load_bookmark_backup,
             cleanup_launch=self._cleanup.cleanup_now,
             ingress_limiter=MiniAppIngressLimiter(
                 capacity=settings.mini_app_session_exchange_rate_capacity,
@@ -355,8 +403,8 @@ class MiniAppServer:
         server = HTTPServer(
             application,
             xheaders=False,
-            max_buffer_size=128 * 1024,
-            max_body_size=64 * 1024,
+            max_buffer_size=MAX_MINI_APP_REQUEST_BYTES,
+            max_body_size=MAX_MINI_APP_REQUEST_BYTES,
             max_header_size=self._settings.mini_app_max_header_bytes,
             idle_connection_timeout=self._settings.mini_app_idle_timeout_seconds,
             body_timeout=self._settings.mini_app_body_timeout_seconds,
@@ -393,9 +441,10 @@ class MiniAppServer:
         initial_query: str = "",
         source_ephemeral_message_id: int | None = None,
         source_ephemeral_receiver_user_id: int | None = None,
+        bookmark_restore: BookmarkRestoreFile | None = None,
     ) -> MiniAppLaunch:
         """Create one short-lived command handoff without putting content in a URL."""
-        if initial_route not in {"home", "bible", "search"}:
+        if initial_route not in {"home", "bible", "search", "bookmarks"}:
             raise ValueError("initial_route is invalid.")
         return self.launches.create_launch(
             user_id=user_id,
@@ -407,6 +456,7 @@ class MiniAppServer:
             source_ephemeral_receiver_user_id=(
                 source_ephemeral_receiver_user_id
             ),
+            bookmark_restore=bookmark_restore,
         )
 
     def web_url(self, launch: MiniAppLaunch) -> str:
