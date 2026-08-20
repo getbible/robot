@@ -16,6 +16,7 @@ MAX_BOOKMARK_BACKUP_BYTES = 4 * 1024 * 1024
 MAX_BOOKMARK_BACKUP_REQUEST_BYTES = MAX_BOOKMARK_BACKUP_BYTES + 4096
 MAX_BOOKMARK_TOPICS = 100
 MAX_BOOKMARK_MARKINGS = 800
+MAX_BOOKMARK_TOPICS_PER_MARKING = 100
 BOOKMARK_RESTORE_CALLBACK_PREFIX = "gbr:"
 
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
@@ -100,7 +101,7 @@ def bookmark_backup_document(value: object) -> BookmarkBackupDocument:
     if (
         isinstance(version, bool)
         or not isinstance(version, int)
-        or version not in {1, 2}
+        or version not in {1, 2, 3, 4}
     ):
         raise BookmarkBackupError("The bookmark backup version is unsupported.")
     exported_at = _iso_timestamp(value.get("exportedAt"))
@@ -158,10 +159,73 @@ def bookmark_backup_document(value: object) -> BookmarkBackupDocument:
         _bounded_integer(passage.get("chapter"), "chapter", 1, 1000)
         _bounded_integer(marking.get("verse"), "verse", 1, 2000)
         _bounded_text(marking.get("quote"), "bookmark quote", 3000)
-        _bounded_text(marking.get("reference"), "bookmark reference", 180)
-        color_id = _bounded_text(marking.get("colorId"), "bookmark topic", 128)
-        if color_id not in topic_ids:
-            raise BookmarkBackupError("A bookmark entry uses an unknown topic.")
+        if version == 4:
+            if "reference" in marking or "bookName" not in marking:
+                raise BookmarkBackupError("A bookmark reference is invalid.")
+            _bounded_text(marking.get("bookName"), "bookmark book name", 128)
+        else:
+            if "bookName" in marking or "reference" not in marking:
+                raise BookmarkBackupError("A bookmark reference is invalid.")
+            _bounded_text(marking.get("reference"), "bookmark reference", 180)
+        if version == 4:
+            if "colorId" in marking or "colorIds" in marking:
+                raise BookmarkBackupError("A bookmark entry has invalid topics.")
+            color_indexes = marking.get("colorIndexes")
+            if (
+                not isinstance(color_indexes, list)
+                or not 1 <= len(color_indexes) <= MAX_BOOKMARK_TOPICS_PER_MARKING
+            ):
+                raise BookmarkBackupError("A bookmark entry has invalid topics.")
+            marking_topic_indexes: set[int] = set()
+            for color_index_value in color_indexes:
+                color_index = _bounded_integer(
+                    color_index_value,
+                    "bookmark topic index",
+                    0,
+                    len(colors) - 1,
+                )
+                if color_index in marking_topic_indexes:
+                    raise BookmarkBackupError(
+                        "A bookmark entry has duplicate topics."
+                    )
+                marking_topic_indexes.add(color_index)
+        elif version == 3:
+            if "colorId" in marking or "colorIndexes" in marking:
+                raise BookmarkBackupError("A bookmark entry has invalid topics.")
+            color_ids = marking.get("colorIds")
+            if (
+                not isinstance(color_ids, list)
+                or not 1 <= len(color_ids) <= MAX_BOOKMARK_TOPICS_PER_MARKING
+            ):
+                raise BookmarkBackupError("A bookmark entry has invalid topics.")
+            marking_topic_ids: set[str] = set()
+            for color_id_value in color_ids:
+                color_id = _bounded_text(
+                    color_id_value,
+                    "bookmark topic",
+                    128,
+                )
+                if color_id not in topic_ids:
+                    raise BookmarkBackupError(
+                        "A bookmark entry uses an unknown topic."
+                    )
+                if color_id in marking_topic_ids:
+                    raise BookmarkBackupError(
+                        "A bookmark entry has duplicate topics."
+                    )
+                marking_topic_ids.add(color_id)
+        else:
+            if "colorIds" in marking or "colorIndexes" in marking:
+                raise BookmarkBackupError("A bookmark entry has invalid topics.")
+            color_id = _bounded_text(
+                marking.get("colorId"),
+                "bookmark topic",
+                128,
+            )
+            if color_id not in topic_ids:
+                raise BookmarkBackupError(
+                    "A bookmark entry uses an unknown topic."
+                )
         _bounded_integer(
             marking.get("createdAt"),
             "bookmark timestamp",

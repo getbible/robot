@@ -1,6 +1,6 @@
 # Telegram Mini App
 
-The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, temporary verse selection, and device-local history belong in the browser. Compact bookmarks and last-read coordinates additionally use Telegram Mini App storage when available. Robot remains the authenticated Telegram control plane, the Librarian search adapter, and the bounded relay for an explicit private-chat bookmark backup or restore.
+The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, temporary verse selection, and device-local history belong in the browser. Compact personal bookmarks and last-read coordinates additionally use Telegram Mini App storage when available; the global bookmark overlay remains browser-local. Robot remains the authenticated Telegram control plane, the Librarian search adapter, and the bounded relay for an explicit private-chat bookmark backup or restore.
 
 ## Active doctrine
 
@@ -18,7 +18,8 @@ Post, and explicit bookmark chat backup/restore.
 | Persistent public cache | Browser IndexedDB |
 | Selected verse order and highlighting | Browser memory |
 | Opened chapter and selected verse history | Scoped browser `localStorage` |
-| Bookmark topics, bookmarks, and active topic | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage` |
+| Personal bookmark aggregate v2, topics, and active topic | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage` |
+| Global bookmark visibility and per-link exclusions | Browser `localStorage` |
 | Compact last-read coordinate | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage`, with Robot preference compatibility |
 | Bookmark JSON download/import | Browser |
 | Private-chat bookmark backup/restore | Browser confirmation + Robot/Telegram transport |
@@ -38,7 +39,8 @@ Telegram WebView
   ├─ explicit or grouped references                  → query.getbible.net/v2
   ├─ temporary ordered selection                     → BrowserSelectionStore
   ├─ unique coordinate history                       → scoped local ReadingHistoryStore
-  └─ bookmarks / topics / compact last-read          → local + Telegram storage adapter
+  ├─ personal bookmarks / topics / last-read         → local + Telegram storage adapter
+  └─ global bookmark visibility / exclusions         → browser localStorage
 ```
 
 Reader and search results are normalized into one verse descriptor. Coordinate identity is:
@@ -109,29 +111,52 @@ footer action. Home contains the three primary actions **Search Scripture**,
 Bookmarks summaries. The translation control remains in Search and Bible; Home,
 History, Selected, and Bookmarks show only the centered getBible icon.
 
-Selecting a verse in Bible reveals a keyboard-accessible bookmark trigger and
-an anchored menu above the verse. The menu assigns that complete canonical
-book/chapter/verse to one colored topic or removes its bookmark. A repeated
-coordinate from another translation updates its one bookmark rather than
-duplicating it.
+Selecting a Bible verse reveals a small keyboard-accessible ellipsis at its
+bottom-right; selection alone never opens the menu. Activating the ellipsis
+opens the anchored menu, where the complete canonical book/chapter/verse may be
+assigned to any unassigned topic or unassigned from one topic without affecting
+its others. An existing assignment is a no-op, and the same coordinate in
+another translation updates its one personal record instead of duplicating it.
+The menu links directly to each assigned topic. Topic detail offers navigation
+back to all topics and, when opened from the reader, back to the source verse.
 
-The Bookmarks surface lists colored topics, filters them by name, opens a topic
-to review its verses, and supports topic add, rename, recolor, and removal plus
-clear-all. Default topics and their palette follow the established GetBible
-bookmark catalog; user-created topics may use any valid six-digit hex color.
-Topic and bookmark counts are bounded.
+The Bookmarks surface lists personal and global verse links together in one
+topic list; global rows carry a **G** marker. One global link may be hidden, or
+all global links may be cleared for one topic. Loading that topic or the full
+catalog resets its exclusions without duplication. The built-in catalog
+contains 2,155 links across 61 topics. Its visibility and exclusions remain in
+this browser and never consume, synchronize with, or back up personal records.
+A scoped browser-only mapping keeps legacy numeric topics attached to their
+canonical global topic after a rename or reload.
 
-`BookmarkStore` writes its versioned aggregate immediately to scoped
+Personal records are bounded to 800 canonical verses, and each may belong to
+multiple topics without consuming another verse slot. Topic search, add,
+rename, recolor, removal, and clear-all remain available. Topic removal warns
+that its personal assignments will also be removed. **Restore default tags**
+adds only missing defaults and preserves recolors, renames, custom topics, and
+personal bookmarks. The global catalog/provider boundary supports a future
+authorized publishing source, but authorized-user publishing is not
+implemented.
+
+`BookmarkStore` writes personal aggregate version 2 immediately to scoped
 `localStorage`. `TelegramBookmarkStorage` compares timestamped candidates from
 local storage and Telegram `DeviceStorage` and `CloudStorage`, selects the
-newest valid copy, then mirrors it to available stores. The active topic and a
-compact last-read coordinate participate; a timestamped cleared marker prevents
-an older remote position from reappearing after a failed sync. Selection,
-history, catalogs, and chapters do not. Unsupported Telegram storage leaves the
-local copy usable and shows a degraded-sync notice.
+newest valid copy, then mirrors it to available stores. Cloud bookmark values
+use topic indexes into the synchronized topic manifest and reconstruct full
+identifiers on read. Stable item values plus a metadata fingerprint preserve
+metadata-last atomicity while avoiding full rewrites, and transient partial
+writes receive bounded automatic retries. The active topic and compact
+last-read participate; a
+timestamped cleared marker prevents an older remote position from reappearing
+after a failed sync. Selection, history, the global catalog and exclusions, and
+chapters do not. Unsupported Telegram storage leaves the local copy usable and
+shows a degraded-sync notice.
 
-The Bookmarks page offers bounded JSON **Download** and **Import**, plus **Back
-up to chat**. The chat action passes a validated document through an
+The Bookmarks page offers bounded personal JSON **Download** and **Import**,
+plus **Back up to chat**. New documents are version 4 and use bounded
+`colorIndexes` into the color array for multi-topic assignment; version 1, 2,
+and 3 documents remain importable. The chat
+action passes a validated document through an
 authenticated, idempotent endpoint to the user's private bot chat. Telegram's
 document message carries an owner-bound Restore callback. A callback from the
 owner's private chat creates a fresh, short-lived, one-time launch that opens
@@ -248,13 +273,16 @@ After deployment, verify:
 12. individual and complete history clearing work locally;
 13. Home exposes Search, Bible, and History actions plus Selected, History, and
     Bookmarks summaries, with the route-specific top-bar controls;
-14. a selected Bible verse can be assigned to one colored bookmark topic and
-    the Bookmarks manager can edit topics and reopen/remove verses;
+14. the compact verse ellipsis alone opens the bookmark menu, and a personal
+    verse can belong to multiple colored topics within the 800-record bound;
 15. bookmark and last-read state reconcile on a second supported Telegram
     client without synchronizing history or downloaded Scripture;
 16. bounded JSON download/import and private-chat backup/restore work, and a
     confirmed restore persists before its one-launch reference is acknowledged;
-17. Post failure preserves selection and successful Post clears it.
+17. the unified topic list marks global links with **G**, supports per-link hide
+    and per-topic/all-catalog reset, and excludes global links from personal
+    sync and backup;
+18. Post failure preserves selection and successful Post clears it.
 
 ## Verification gate
 

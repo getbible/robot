@@ -100,9 +100,13 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "history.removed": "{reference} removed from history.",
   "bookmarks.eyebrow": "Your study",
   "bookmarks.title": "Bookmarks",
-  "bookmarks.clear": "Clear all",
+  "bookmarks.clear": "Clear personal",
   "bookmarks.count_one": "One bookmark",
   "bookmarks.count_other": "{count} bookmarks",
+  "bookmarks.personal_verse_one": "One personal verse",
+  "bookmarks.personal_verse_other": "{count} personal verses",
+  "bookmarks.global_link_one": "One global link",
+  "bookmarks.global_link_other": "{count} global links",
   "bookmarks.groups_label": "Bookmark topics",
   "bookmarks.search_label": "Find a bookmark topic",
   "bookmarks.search_placeholder": "Search topics",
@@ -113,11 +117,45 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "bookmarks.new_topic": "New topic",
   "bookmarks.add_topic": "Add topic",
   "bookmarks.save_topic": "Save",
+  "bookmarks.restore_default_tags": "Restore default tags",
+  "bookmarks.default_tags_restored_one":
+    "One missing default tag was restored. Existing tags and bookmarks were kept.",
+  "bookmarks.default_tags_restored_other":
+    "{count} missing default tags were restored. Existing tags and bookmarks were kept.",
+  "bookmarks.default_tags_current": "All default tags are already available.",
+  "bookmarks.default_tags_limit":
+    "Remove a custom topic before restoring the missing default tags.",
+  "bookmarks.default_tags_failed": "The default tags could not be restored.",
   "bookmarks.all_topics": "All topics",
+  "bookmarks.back_to_verse": "Back to verse",
   "bookmarks.group_empty_title": "No bookmarks in this topic yet",
   "bookmarks.group_empty_body":
     "Select a verse in the Bible, then choose this topic from the bookmark menu.",
   "bookmarks.list_label": "Saved bookmark verses",
+  "bookmarks.global_title": "Global bookmark library",
+  "bookmarks.global_help":
+    "Show the built-in getBible.Life topic verses in this browser without changing your personal bookmarks, sync, or backups. Reload them at any time to restore missing topics.",
+  "bookmarks.load_global_tags": "Load Global Tags",
+  "bookmarks.global_loading": "Loading the global bookmark library…",
+  "bookmarks.global_loaded":
+    "Loaded {bookmarks} global verse links across {topics} topics.",
+  "bookmarks.global_current":
+    "{bookmarks} global verse links are active across {topics} topics.",
+  "bookmarks.global_failed":
+    "The global bookmark library could not be loaded. Please try again.",
+  "bookmarks.global_topic_limit":
+    "Remove a custom bookmark topic before loading the global topics.",
+  "bookmarks.global_marker": "Global bookmark",
+  "bookmarks.topic_global_title": "Global verses for this topic",
+  "bookmarks.load_topic_global": "Load global verses",
+  "bookmarks.reload_topic_global": "Reload global verses",
+  "bookmarks.clear_topic_global": "Clear global verses",
+  "bookmarks.topic_global_available":
+    "{bookmarks} global verse links are available for this topic.",
+  "bookmarks.topic_global_loaded":
+    "{bookmarks} global verse links are loaded for this topic.",
+  "bookmarks.topic_global_cleared":
+    "Global verse links were cleared from this topic. Personal bookmarks were kept.",
   "bookmarks.backup_title": "Backup and restore",
   "bookmarks.backup_help":
     "Bookmarks sync across your Telegram devices. You can also keep a recovery copy in this private bot chat.",
@@ -126,37 +164,57 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "bookmarks.import": "Import bookmarks",
   "bookmarks.storage_warning":
     "Telegram sync is unavailable on this client. Your local copy still works; back it up before clearing app data.",
-  "bookmarks.choose_topic": "Choose another topic",
-  "bookmarks.more_topics": "More topics…",
+  "bookmarks.assigned_topics": "Assigned bookmark topics",
+  "bookmarks.choose_topic": "Add another topic",
+  "bookmarks.more_topics": "Add to another topic…",
+  "bookmarks.all_topics_assigned": "Added to every topic",
   "bookmarks.none": "None",
   "bookmarks.close_palette": "Close bookmark menu",
   "bookmarks.palette_label": "Choose a bookmark topic for {reference}",
   "bookmarks.open_palette_aria": "Bookmark {reference}",
   "bookmarks.open_group_aria": "Open {name}, {count}",
+  "bookmarks.open_topic_aria": "Open topic {name}",
+  "bookmarks.open_global_topic_aria": "Open global topic {name}",
   "bookmarks.open_aria": "Open {reference} in {translation}",
+  "bookmarks.open_global_aria":
+    "Open {reference} in {translation}. Global bookmark.",
   "bookmarks.remove_aria": "Remove bookmark for {reference}",
+  "bookmarks.remove_global_aria":
+    "Hide global bookmark for {reference} from this browser",
+  "bookmarks.remove_topic_assignment_aria":
+    "Remove {reference} from {name}",
+  "bookmarks.remove_global_topic_assignment_aria":
+    "Hide global bookmark {reference} from {name} in this browser",
   "bookmarks.rename_aria": "Rename {name}",
   "bookmarks.color_aria": "Choose a color for {name}",
   "bookmarks.remove_topic_aria": "Remove topic {name}",
-  "bookmarks.clear_confirm": "Remove every saved bookmark? Your topics will remain.",
-  "bookmarks.clear_done": "All bookmarks were removed.",
+  "bookmarks.clear_confirm":
+    "Remove every personal bookmark? Global bookmarks and topics will remain.",
+  "bookmarks.clear_done": "All personal bookmarks were removed.",
   "bookmarks.topic_delete_confirm_one":
-    "Remove {name} and its saved bookmark? This cannot be undone.",
+    "Remove {name} and its saved verse link? Verses also saved in other topics stay there. This cannot be undone.",
   "bookmarks.topic_delete_confirm_other":
-    "Remove {name} and its {count} saved bookmarks? This cannot be undone.",
+    "Remove {name} and its {count} saved verse links? Verses also saved in other topics stay there. This cannot be undone.",
+  "bookmarks.topic_delete_global_confirm":
+    "Remove {name}? Personal verse links removed: {personal}. Global verse links hidden until Global Tags are reloaded: {global}.",
   "bookmarks.topic_added": "Topic added.",
   "bookmarks.topic_updated": "Topic updated.",
   "bookmarks.topic_removed": "Topic removed.",
   "bookmarks.last_topic": "Keep at least one bookmark topic.",
   "bookmarks.saved": "{reference} saved under {name}.",
+  "bookmarks.limit_reached":
+    "You can save up to 800 personal verses. Remove one before bookmarking another verse.",
   "bookmarks.verse_removed": "Bookmark removed from {reference}.",
   "bookmarks.removed": "{reference} removed from bookmarks.",
+  "bookmarks.removed_from_topic": "{reference} removed from {name}.",
+  "bookmarks.global_removed":
+    "{reference} was hidden from this global topic. Reload the topic to restore it.",
   "bookmarks.backup_ready": "Bookmark backup downloaded.",
   "bookmarks.backup_sending": "Sending your bookmark backup to this private bot chat…",
   "bookmarks.backup_chat_ready": "Backup saved in this private bot chat.",
   "bookmarks.backup_failed": "The bot could not save that backup. Please try again.",
   "bookmarks.restore_confirm":
-    "Merge {bookmarks} bookmarks and {topics} topics from {file}? Existing verses will keep their current topics.",
+    "Merge {bookmarks} personal verses and {topics} topics from {file}? Existing verses keep their current topics and gain any missing topics from the backup.",
   "bookmarks.restore_loading": "Loading your bookmark backup from Telegram…",
   "bookmarks.restore_done": "Bookmark backup restored from Telegram.",
   "bookmarks.restore_failed":
@@ -164,8 +222,12 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "bookmarks.restore_ack_failed":
     "Bookmarks were restored, but Telegram could not mark the restore complete. Reopening it is safe.",
   "bookmarks.imported":
-    "Imported {bookmarks} bookmarks and {topics} topics; skipped {skipped} existing verses.",
+    "Imported changes for {bookmarks} verses and added {topics} topics. Unchanged existing verses: {conflicts}; skipped ranges: {ranges}; skipped notes: {notes}.",
+  "bookmarks.import_limit":
+    "That backup would exceed the 800-personal-verse or 100-topic limit. Remove some personal data, then try again.",
   "bookmarks.import_failed": "That bookmark backup could not be imported.",
+  "bookmarks.global_verse_unavailable":
+    "This global verse is not available in the selected translation.",
   "selection.eyebrow": "Your selection",
   "selection.title": "Ready to post",
   "selection.none": "No verses selected yet.",

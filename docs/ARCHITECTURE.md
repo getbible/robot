@@ -30,7 +30,7 @@ flowchart LR
     A -->|normalized verses| S
     L -->|normalized verses| S
     T -->|coordinate visits| H
-    T -->|bookmarks and last-read| B
+    T -->|personal bookmarks and last-read| B
     B <-->|newest valid record| TS
     S -->|final ordered selection at Post| R
     B -->|explicit bounded JSON backup| R
@@ -52,8 +52,10 @@ No reader navigation, catalog load, chapter load, select, unselect, reorder, cle
 | `miniapp/lib/public-cache.js` | IndexedDB/memory cache, LRU bounds, atomic replacement, and invalidation |
 | `miniapp/lib/selection-store.js` | Browser-owned ordered selection domain |
 | `miniapp/lib/reading-history-store.js` | Bounded, durable, coordinate-only history in an authenticated user-scoped local key |
-| `miniapp/lib/bookmark-store.js` | Canonical whole-verse bookmarks, colored topic management, and portable JSON import/export |
-| `miniapp/lib/telegram-bookmark-storage.js` | Timestamp reconciliation across localStorage, Telegram DeviceStorage, and Telegram CloudStorage for bookmarks and compact last-read |
+| `miniapp/lib/bookmark-store.js` | Canonical personal verse records, multi-topic assignment, colored topic management, and portable JSON import/export |
+| `miniapp/lib/global-bookmark-catalog.js` | Built-in global topic/verse provider, default-topic definitions, and local-topic remapping |
+| `miniapp/lib/global-bookmark-preferences.js` | Browser-local global-topic visibility and per-link exclusions |
+| `miniapp/lib/telegram-bookmark-storage.js` | Aggregate-v2 timestamp reconciliation across localStorage, Telegram DeviceStorage, and Telegram CloudStorage, with compact cloud topic indexes |
 | `miniapp/lib/api.js` | Robot session/search/preferences/Post and bookmark backup/restore transport facade plus public API composition |
 | `miniapp/app.js` | UI orchestration and rendering only |
 
@@ -202,38 +204,60 @@ storage request. Storage rejection falls back to memory for the active page.
 
 ## Bookmarks and last-read lifecycle
 
-`BookmarkStore` owns one bookmark per canonical book/chapter/verse across
-translations. Selecting a topic replaces that verse's previous topic and
-display translation instead of creating a duplicate. The domain has bounded
-topic and bookmark counts, ships a fixed colored topic catalog, permits topic
-add/rename/recolor/removal, and exports or merges a bounded, versioned JSON
-document. Bookmarks represent the complete verse; text ranges and notes from a
-compatible imported document are not made active bookmark state.
+`BookmarkStore` owns at most 800 personal verse records, each unique by
+canonical book/chapter/verse across translations. A record may belong to
+multiple colored topics without consuming another verse slot. Reassigning the
+same coordinate updates that record; assigning an existing topic is a no-op.
+The domain permits topic add/rename/recolor/removal and warns before topic
+removal also removes its personal verse assignments. Restoring default tags
+adds only missing definitions, preserving existing recolors, renames, custom
+topics, and personal bookmarks. Bookmarks represent the complete verse; text
+ranges and notes from a compatible imported document are not made active
+bookmark state.
 
-The synchronous aggregate is written immediately to scoped browser
-`localStorage`. `TelegramBookmarkStorage` then reconciles the newest valid
-timestamped aggregate with Telegram `DeviceStorage` and `CloudStorage` when
-those APIs are available, and mirrors the winner back to available stores. A
-compact last-read record containing only translation, book, chapter, verse,
-version, and update time follows the same local/device/cloud pattern; clearing
-it writes a newer coordinate-free tombstone so a stale remote value cannot
-reappear. Existing Robot reader preferences remain a compatibility and
-availability fallback.
-No history entry, selection, chapter body, catalog, or public-cache record is
-sent through this adapter.
+Personal aggregate version 2 is written immediately to scoped browser
+`localStorage`. `TelegramBookmarkStorage` reconciles the newest valid
+timestamped aggregate with Telegram `DeviceStorage` and `CloudStorage` and
+mirrors the winner back to available stores. Cloud bookmark records replace
+topic identifiers with compact indexes into the synchronized topic manifest;
+the full identifiers are reconstructed during reconciliation. Stable item
+wrappers and a metadata fingerprint avoid rewriting unchanged values, preserve
+metadata-last atomicity, and allow bounded automatic retry after a partial
+write. A compact
+last-read record follows the same local/device/cloud pattern; clearing it writes
+a newer coordinate-free tombstone so a stale remote value cannot reappear.
+Existing Robot reader preferences remain a compatibility and availability
+fallback. No history entry, selection, chapter body, global catalog, global
+exclusion, or public-cache record is sent through this adapter.
 
-The user may download or import the same bounded JSON locally. **Back up to
-chat** submits it through an authenticated, idempotent Robot endpoint; Robot
-validates and canonicalizes the document and sends it to that user's private
-bot chat with an owner-bound permanent Restore callback. Pressing the callback
-in the private owner chat validates the Telegram document metadata and creates
-a fresh, short-lived, one-time Mini App launch. The Mini App retrieves the file
-through that launch, asks before merging, flushes the merged state to an
-available persistent store, and then explicitly acknowledges the restore
-reference. The chat document remains the durable recovery artifact. Backup
-bodies are never written to Robot database/session state or logs; a restore
-launch retains only bounded Telegram file metadata until acknowledgement or
-expiry.
+The browser-bundled global provider contains 2,155 verse links across 61
+topics. Personal and global rows share one topic list, with global rows marked
+**G**. Browser-local preferences alone determine which global topics and links
+are visible. A separate mapping under the hashed account scope preserves
+canonical-to-local identity when a legacy numeric topic is renamed. One link
+may be hidden, a topic may be cleared, and loading that topic or the complete
+catalog resets its exclusions without creating duplicates. These links never
+become personal records and never enter Telegram storage or backup documents.
+The catalog/provider boundary can later accept an
+authorized publishing source; user-authorized global publishing is intentionally
+not implemented.
+
+The user may download or import the same bounded personal JSON locally. New
+backup documents are version 4 and carry each record's topic assignments as
+bounded `colorIndexes` into the document's color array. They store `bookName`
+instead of a redundant formatted reference, keeping even the worst-case
+800-record, 100-topic UTF-8 document below 4 MiB when pretty-printed. Version 1,
+2, and 3 documents remain importable. **Back up to
+chat** submits the document through an authenticated, idempotent Robot endpoint;
+Robot validates and canonicalizes it and sends it to that user's private bot
+chat with an owner-bound permanent Restore callback. Pressing the callback in
+the private owner chat validates the Telegram document metadata and creates a
+fresh, short-lived, one-time Mini App launch. The Mini App retrieves the file,
+asks before merging, flushes the merged state, and explicitly acknowledges the
+restore reference. The chat document remains the durable recovery artifact.
+Backup bodies are never written to Robot database/session state or logs; a
+restore launch retains only bounded Telegram file metadata until acknowledgement
+or expiry.
 
 ## Search
 
@@ -336,9 +360,13 @@ A release is production-ready only when permanent CI and CodeQL pass on the exac
 - no Robot selection mutation before Post;
 - failed Post preserves selection and successful Post clears it;
 - durable scoped history remains local, unique, bounded, and coordinate-only;
-- bookmark domain bounds, canonical deduplication, topic operations, and
-  local/DeviceStorage/CloudStorage reconciliation;
+- the 800-record bookmark bound, canonical deduplication, multi-topic
+  assignments, default-topic restoration, aggregate-v2 reconciliation, and
+  compact CloudStorage topic indexes;
+- the unified global/personal list, **G** marker, browser-local global
+  exclusions, and per-link/per-topic/all-catalog reset without personal sync;
 - bounded JSON download/import plus owner-bound private-chat backup, fresh
-  one-time restore launch, persistence-before-acknowledgement, and absence of
-  backup bodies from Robot persistence and logs;
+  one-time restore launch, compact v4 `colorIndexes` plus v1/v2/v3 import,
+  persistence-before-acknowledgement, and absence of global links or backup
+  bodies from Robot persistence and logs;
 - authoritative idempotent Telegram delivery.
