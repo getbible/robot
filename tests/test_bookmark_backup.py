@@ -70,21 +70,22 @@ class BookmarkBackupTestCase(unittest.TestCase):
         self.assertEqual(document.value, backup)
 
     def test_restore_callback_is_durable_and_owner_bound(self) -> None:
-        callback = bookmark_restore_callback_data(200, "123:secret")
+        callback_key = ":".join(("123", "fixture-key"))
+        callback = bookmark_restore_callback_data(200, callback_key)
 
         self.assertLessEqual(len(callback.encode("utf-8")), 64)
         self.assertTrue(
             valid_bookmark_restore_callback(
                 callback,
                 user_id=200,
-                secret="123:secret",
+                secret=callback_key,
             )
         )
         self.assertFalse(
             valid_bookmark_restore_callback(
                 callback,
                 user_id=201,
-                secret="123:secret",
+                secret=callback_key,
             )
         )
 
@@ -288,18 +289,19 @@ class BookmarkBackupTestCase(unittest.TestCase):
             ), self.assertRaisesRegex(ValueError, "identity"):
                 bookmark_restore_callback_data(user_id, secret)  # type: ignore[arg-type]
 
+        callback_key = invalid_identities[0][1]
         self.assertFalse(
             valid_bookmark_restore_callback(
                 "not-a-callback",
                 user_id=200,
-                secret="secret",
+                secret=callback_key,
             )
         )
         self.assertFalse(
             valid_bookmark_restore_callback(
                 "gbr:200:abcdefghijklmnop",
                 user_id=0,
-                secret="secret",
+                secret=callback_key,
             )
         )
 
