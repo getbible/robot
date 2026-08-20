@@ -17,7 +17,7 @@ const SOURCE_CSV = new URL(
   import.meta.url,
 );
 const SOURCE_CSV_SHA256 =
-  "85ecb22f34a0d3e59a5f8a6d902d1b45100adfb4a2176722e7f3eb87fe838cf5";
+  "85ecb22f34a0d3e59a5f8a6d902d1b45100adfb4a2176722e7f3eb87fe838cf5"; // pragma: allowlist secret
 
 const LEGACY_TOPIC_NAMES = new Map([
   ["blessings-and-curses", "Blessings & Curses"],
@@ -57,7 +57,7 @@ test("ships the complete immutable global bookmark catalogue", () => {
     createHash("sha256")
       .update(JSON.stringify(GLOBAL_BOOKMARK_DATA))
       .digest("hex"),
-    "38a6dabe556e28fe4428be6f0ec5d4f8c39c53f9dbaa76210a80064119969022",
+    "38a6dabe556e28fe4428be6f0ec5d4f8c39c53f9dbaa76210a80064119969022", // pragma: allowlist secret
   );
   const verseAssignments = new Map();
   for (const coordinates of Object.values(GLOBAL_BOOKMARK_DATA.bookmarks_by_topic)) {
