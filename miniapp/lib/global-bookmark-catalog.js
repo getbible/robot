@@ -1,4 +1,8 @@
 import { GLOBAL_BOOKMARK_DATA } from "./global-bookmark-data.js";
+import {
+  CORE_BOOKMARK_TOPIC_DEFINITIONS,
+  isLegacyBookmarkTopicId,
+} from "./bookmark-topic-definitions.js";
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const COLOR_PATTERN = /^#[a-f0-9]{6}$/;
@@ -76,70 +80,6 @@ const BOOK_NAMES = Object.freeze([
   "Revelation",
 ]);
 
-const TOPIC_DEFINITIONS = Object.freeze([
-  topic("Adultery", "#f9a8b8"),
-  topic("Authority of the Bible", "#93c5fd"),
-  topic("Baptism", "#7dd3fc"),
-  topic("Biblical Love", "#a16207"),
-  topic("Blessings and Curses", "#fde68a", ["Blessings & Curses"]),
-  topic("Christian Clothing", "#d8b4fe"),
-  topic("Christian Offices", "#a5b4fc"),
-  topic("Communion", "#fca5a5"),
-  topic("Conditional Security", "#fdba74"),
-  topic("Dating", "#f0abfc"),
-  topic("Dietary Guidance", "#bef264"),
-  topic("Discipline", "#fcd34d"),
-  topic("Education", "#67e8f9"),
-  topic("Effective Prayer", "#c4b5fd"),
-  topic("Family Planning", "#fda4af"),
-  topic("Fear Not", "#fef08a"),
-  topic("First Day", "#fed7aa"),
-  topic("Flattery", "#fecdd3"),
-  topic("Free Will", "#99f6e4"),
-  topic("God's Judgment", "#fb7185", ["God's Judgement"]),
-  topic("Grace", "#bbf7d0"),
-  topic("Home Church", "#86efac"),
-  topic("Immutability", "#bfdbfe"),
-  topic("Jesus Christ's Deity", "#c7d2fe"),
-  topic("Jesus Christ's Humanity", "#fecaca"),
-  topic("Leadership", "#a7f3d0"),
-  topic("Longevity", "#d9f99d"),
-  topic("Man's Role", "#bae6fd"),
-  topic("Marriage", "#f5b7d2"),
-  topic("Music's Influence", "#e9d5ff"),
-  topic("No Fellowship", "#fdc4a8"),
-  topic("No One is Good", "#fda4a4"),
-  topic("Non-Resistance", "#a7f3e8", ["Nonresistance"]),
-  topic("Not Under the Law", "#ddd6fe"),
-  topic("Obey God's Commandments", "#fde047"),
-  topic("Obey Government Laws", "#cbd5e1"),
-  topic("Omnipotent", "#818cf8", ["Omnipotence"]),
-  topic("Omnipresent", "#60a5fa", ["Omnipresence"]),
-  topic("Omniscient", "#a78bfa", ["Omniscience"]),
-  topic("Orderly Home", "#b7e4c7"),
-  topic("Ordinances", "#67d6e8", ["Ordinance"]),
-  topic("Prince of this World", "#c4a7a7"),
-  topic("Providence", "#8dd3c7"),
-  topic("Renewing of the Mind", "#a5f3fc"),
-  topic("Repentance", "#fbbf8a"),
-  topic("Saved by Faith", "#86efac"),
-  topic("Sodomy", "#f59e9e"),
-  topic("Spirit of Prophecy", "#d8b4fe"),
-  topic("Spiritual Gifts", "#c084fc"),
-  topic("Spiritual Judgment", "#f0c36e", ["Spiritual Judgement"]),
-  topic("Spiritual Rebirth", "#6ee7b7"),
-  topic("Temptation", "#fca5a5"),
-  topic("What is Life", "#5eead4"),
-  topic("Wine", "#e8a0bf"),
-  topic("Wisdom Cause", "#fef08a"),
-  topic("Wisdom Fruit", "#bef264"),
-  topic("Wisdom Origin", "#fcd34d"),
-  topic("Wisdom Value", "#fbbf24"),
-  topic("Woman's Role", "#fbcfe8"),
-  topic("Word of God", "#7dd3fc"),
-  topic("Worldly Wisdom", "#d6d3d1"),
-]);
-
 /**
  * Immutable, translation-independent topic-to-verse associations.
  *
@@ -159,7 +99,7 @@ export class GlobalBookmarkCatalog {
 
   constructor({
     data = GLOBAL_BOOKMARK_DATA,
-    topics = TOPIC_DEFINITIONS,
+    topics = CORE_BOOKMARK_TOPIC_DEFINITIONS,
     bookNames = BOOK_NAMES,
   } = {}) {
     if (
@@ -279,7 +219,9 @@ export class GlobalBookmarkCatalog {
           [definition.name, ...definition.aliases].map(normalizedTopicName),
         );
         match = available.find((local) =>
-          !used.has(local.id) && names.has(normalizedTopicName(local.name))
+          isLegacyBookmarkTopicId(local.id) &&
+          !used.has(local.id) &&
+          names.has(normalizedTopicName(local.name))
         );
       }
       if (match) {
@@ -305,6 +247,21 @@ export class GlobalBookmarkCatalog {
   topicDefinition(canonicalTopicId) {
     const definition = this.#topicsById.get(canonicalTopicId);
     return definition ? cloneTopicDefinition(definition) : null;
+  }
+
+  topicDefinitionForLocalTopic(
+    localTopicId,
+    localTopics,
+    topicMappings = null,
+  ) {
+    const canonicalTopicId = this.canonicalTopicId(
+      localTopicId,
+      localTopics,
+      topicMappings,
+    );
+    return canonicalTopicId
+      ? this.topicDefinition(canonicalTopicId)
+      : null;
   }
 
   bookmarksForTopic(localTopicId, localTopics, topicMappings = null) {
@@ -403,32 +360,31 @@ export const DEFAULT_BOOKMARK_TOPIC_DEFINITIONS = Object.freeze(
     .map(freezeTopicDefinition),
 );
 
-function topic(name, color, aliases = [], defaultTopic = true) {
-  return Object.freeze({
-    id: topicSlug(name),
-    name,
-    color,
-    aliases: Object.freeze([...aliases]),
-    default: defaultTopic,
-  });
-}
-
 function normalizeTopicDefinition(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("A global bookmark topic is invalid.");
   }
   const id = boundedText(value.id, 128);
   const name = boundedText(value.name, 80).normalize("NFC");
+  const nameKey = boundedText(
+    value.name_key ?? `bookmark_topics.${id}`,
+    180,
+  );
   const color = boundedText(value.color, 7).toLowerCase();
   const aliases = Array.isArray(value.aliases)
     ? value.aliases.map((alias) => boundedText(alias, 80).normalize("NFC"))
     : [];
-  if (!ID_PATTERN.test(id) || !COLOR_PATTERN.test(color)) {
+  if (
+    !ID_PATTERN.test(id) ||
+    !/^bookmark_topics\.[a-z0-9]+(?:-[a-z0-9]+)*$/.test(nameKey) ||
+    !COLOR_PATTERN.test(color)
+  ) {
     throw new TypeError("A global bookmark topic is invalid.");
   }
   return {
     id,
     name,
+    name_key: nameKey,
     color,
     aliases: Object.freeze(aliases),
     default: value.default !== false,
@@ -462,14 +418,6 @@ function globalBookmarkId(assignment) {
 
 function verseKey(value) {
   return `${value.book}/${value.chapter}/${value.verse}`;
-}
-
-function topicSlug(name) {
-  return String(name)
-    .toLowerCase()
-    .replace(/['’]/gu, "")
-    .replace(/[^a-z0-9]+/gu, "-")
-    .replace(/^-|-$/gu, "");
 }
 
 function normalizedTopicName(value) {
@@ -527,6 +475,7 @@ function cloneTopicDefinition(value) {
   return {
     id: value.id,
     name: value.name,
+    name_key: value.name_key,
     color: value.color,
     aliases: [...value.aliases],
     default: value.default,

@@ -96,9 +96,12 @@ Tests must prove:
 
 - successful chapter and selection visits in newest-first order;
 - stable-id move-to-front deduplication for repeat chapters and exact verses,
-  including across event kinds, plus verse and translation separation and a
+  including across event kinds and translations, plus verse separation and a
   full-capacity revisit;
-- exact translation/book/chapter/verse restoration;
+- exact book/chapter/verse restoration in the currently selected translation;
+- bounded, viewport-aware verse-text hydration with independent row progress,
+  stale-view cancellation, unshared queued-work suppression, localized failure
+  states, and no selectable-authority registration;
 - the 1,000-entry bound and defensive snapshots;
 - versioned authenticated-scope `localStorage` restoration, including legacy
   duplicate compaction, with memory fallback;
@@ -113,9 +116,13 @@ Tests must prove:
 
 `BookmarkStore` and `TelegramBookmarkStorage` tests must cover:
 
-- the shipped default topic definitions plus bounded add, rename, recolor,
-  removal warnings, and restoration of missing defaults without overwriting
-  user changes;
+- the shipped default topic definitions and localized core-name keys, read-only
+  built-in names, bounded custom add/rename, recolor/removal warnings, and
+  restoration of missing defaults without overwriting user changes;
+- complete Home-summary, History, Bookmark, and 61-topic locale-key coverage,
+  with each governed alias/fallback reusing the established whole-application
+  language source, policy catalogs excluded from native-translation claims,
+  and integer `few` forms exercised for Czech, Polish, Russian, and Ukrainian;
 - at most 800 personal records, each unique by canonical
   book/chapter/verse across translations and assignable to multiple topics
   without consuming another verse slot;
@@ -128,7 +135,7 @@ Tests must prove:
 - the 2,155-link/61-topic global catalog, unified personal/global ordering and
   **G** marker, browser-local exclusions, and idempotent per-link,
   per-topic, and all-catalog reset without personal sync or backup, including
-  renamed numeric-topic remapping;
+  renamed numeric-topic remapping and display-only active-translation excerpts;
 - authenticated user-scoped local keys with no raw Telegram user identifier;
 - newest-timestamp startup reconciliation across `localStorage`, Telegram
   `DeviceStorage`, and Telegram `CloudStorage`, including deterministic ties,
@@ -172,7 +179,8 @@ modules, and browser APIs. It verifies:
 4. revisiting a history coordinate moves it to the top without increasing the
    count, and exact-coordinate navigation, removal, reset, and empty-state
    navigation work;
-5. Home shows Search, Bible, and History actions plus the Bookmarks summary,
+5. Home shows Search and Bible actions plus the conditional History and
+   Bookmarks summaries,
    and Home/History/Selected/Bookmarks use the icon-only top bar;
 6. selecting a reader verse reveals a compact bottom-right ellipsis without
    opening the menu; activating it opens the anchored menu, multi-topic
@@ -236,8 +244,8 @@ After all deterministic gates pass, deploy one validated commit and verify in Te
 - Post delivers authoritative Scripture to the originating chat/topic;
 - failed Post preserves the browser selection;
 - successful Post clears the browser selection;
-- history reopens the exact verse/translation and can be cleared per-entry or
-  completely;
+- history shows verse text, reopens the exact verse in the currently selected
+  translation, and can be cleared per-entry or completely;
 - history remains on the same browser after reopening but is absent on a clean
   second device;
 - multi-topic personal assignment, topic management/default restoration, the

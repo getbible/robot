@@ -35,18 +35,19 @@ exact verse moves to the top instead of creating another row. **History** is a p
 fifth bottom-navigation action and opens a normal page, so the
 footer remains available for navigation. The page uses the same left-aligned
 heading, right-aligned clear action, and bordered empty state as **Selected**;
-its top bar keeps only the centered getBible icon. Each row shows its reference
-and translation, reopens the exact coordinate when chosen, and can be removed
-individually. **Clear all** resets the complete history without contacting Robot
+its top bar keeps only the centered getBible icon. Each row shows its reference,
+current translation, and verse text, reopens the exact coordinate in that
+currently selected translation, and can be removed individually. **Clear all**
+resets the complete history without contacting Robot
 or Telegram storage. The record survives later WebView sessions on that browser
 but intentionally does not synchronize between devices.
 
 ## Home and top-bar workflow
 
-Home presents **Search Scripture**, **Read the Bible**, and **See history** as
-its three primary actions. Beneath them, current Selected and History summaries
-appear when populated, and Bookmarks is always available to manage topics and
-recovery. The permanent footer remains Home, Search, Bible, History, and
+Home presents **Search Scripture** and **Read the Bible** as its two primary
+actions. Beneath them, current Selected and History summaries appear when
+populated, and Bookmarks is always available to manage topics and recovery. The
+permanent footer remains Home, Search, Bible, History, and
 Selected; Bookmarks is not added as a sixth footer action.
 
 Search and Bible show the translation control. Home, History, Selected, and
@@ -115,8 +116,10 @@ chosen topic.
 2. Choose one colored topic to add or move the bookmark, or remove its existing
    bookmark.
 3. From Home, choose **Manage** in the Bookmarks summary.
-4. Search topic names, open a topic to review its verses, or add, rename,
-   recolor, and remove topics.
+4. Search localized built-in topic names or custom topic names, open a topic to
+   review its verses, or add, rename, recolor, and remove custom topics.
+   Built-in names are translated and read-only, while their colors can be
+   changed and the topics can be removed.
 5. Open a bookmarked verse in Bible or remove it from the topic detail view.
 
 The browser writes each change to its scoped local copy immediately. On a

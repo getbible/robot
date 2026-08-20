@@ -40,12 +40,20 @@ test("tracks the exact source CSV used to generate the catalogue", async () => {
 
 test("ships the complete immutable global bookmark catalogue", () => {
   const topicIds = GLOBAL_BOOKMARK_TOPIC_DEFINITIONS.map((topic) => topic.id);
+  const topicNameKeys = GLOBAL_BOOKMARK_TOPIC_DEFINITIONS.map(
+    (topic) => topic.name_key,
+  );
 
   assert.equal(GLOBAL_BOOKMARK_CATALOG.assignmentCount, 2_155);
   assert.equal(GLOBAL_BOOKMARK_CATALOG.uniqueVerseCount, 1_916);
   assert.equal(GLOBAL_BOOKMARK_TOPIC_DEFINITIONS.length, 61);
   assert.equal(DEFAULT_BOOKMARK_TOPIC_DEFINITIONS.length, 61);
   assert.equal(new Set(topicIds).size, 61);
+  assert.equal(new Set(topicNameKeys).size, 61);
+  assert.equal(
+    topicNameKeys.every((key) => /^bookmark_topics\.[a-z0-9-]+$/.test(key)),
+    true,
+  );
   assert.equal(Object.isFrozen(GLOBAL_BOOKMARK_TOPIC_DEFINITIONS), true);
   assert.equal(Object.isFrozen(GLOBAL_BOOKMARK_TOPIC_DEFINITIONS[0]), true);
   assert.equal(Object.isFrozen(GLOBAL_BOOKMARK_TOPIC_DEFINITIONS[0].aliases), true);
@@ -99,6 +107,7 @@ test("uses the requested global topic colors", () => {
     {
       id: "biblical-love",
       name: "Biblical Love",
+      name_key: "bookmark_topics.biblical-love",
       color: "#a16207",
       aliases: [],
       default: true,
@@ -109,6 +118,7 @@ test("uses the requested global topic colors", () => {
     {
       id: "fear-not",
       name: "Fear Not",
+      name_key: "bookmark_topics.fear-not",
       color: "#fef08a",
       aliases: [],
       default: true,
@@ -147,6 +157,29 @@ test("maps every canonical and legacy topic name onto numeric local ids", () => 
     assert.equal(bookmark.source, GLOBAL_BOOKMARK_SOURCE);
     assert.equal(bookmark.text, "");
   }
+});
+
+test("does not promote a custom topic that reuses a built-in English name", () => {
+  const topics = [{ id: "custom-grace", name: "Grace" }];
+
+  assert.equal(GLOBAL_BOOKMARK_CATALOG.resolveTopics(topics).size, 0);
+  assert.equal(
+    GLOBAL_BOOKMARK_CATALOG.canonicalTopicId("custom-grace", topics),
+    null,
+  );
+  assert.deepEqual(
+    GLOBAL_BOOKMARK_CATALOG.bookmarksForTopic("custom-grace", topics),
+    [],
+  );
+});
+
+test("presents an unmapped numeric legacy topic as its built-in definition", () => {
+  const topics = [{ id: "21", name: "Grace" }];
+
+  assert.deepEqual(
+    GLOBAL_BOOKMARK_CATALOG.topicDefinitionForLocalTopic("21", topics),
+    GLOBAL_BOOKMARK_CATALOG.topicDefinition("grace"),
+  );
 });
 
 test("uses a durable canonical mapping after numeric topics are renamed", () => {
@@ -189,8 +222,8 @@ test("uses a durable canonical mapping after numeric topics are renamed", () => 
 });
 
 test("resolves every global assignment attached to one verse", () => {
-  const localTopics = GLOBAL_BOOKMARK_TOPIC_DEFINITIONS.map((topic, index) => ({
-    id: `local-${index + 1}`,
+  const localTopics = GLOBAL_BOOKMARK_TOPIC_DEFINITIONS.map((topic) => ({
+    id: topic.id,
     name: topic.name,
   }));
   const multiTopicEntry = Object.entries(GLOBAL_BOOKMARK_DATA.bookmarks_by_topic)

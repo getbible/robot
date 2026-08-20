@@ -132,6 +132,28 @@ test("restores canonical global topics without replacing personal topic ids", ()
   assert.equal(repeated.topic_ids["fear-not"], "fear-not");
 });
 
+test("does not treat a custom topic with a core English name as the core topic", () => {
+  const storage = new MemoryStorage();
+  const bookmarks = scopedStore(storage, "a".repeat(64), {
+    idFactory: (prefix) => prefix === "topic"
+      ? "custom-grace"
+      : "bookmark_custom_grace",
+  });
+  bookmarks.removeTopic("grace");
+  const custom = bookmarks.addTopic("Grace", "#123456");
+  const [definition] = GLOBAL_BOOKMARK_TOPIC_DEFINITIONS.filter(
+    (topic) => topic.id === "grace",
+  );
+
+  const restored = bookmarks.ensureTopics([definition]);
+
+  assert.equal(restored.topics_added, 1);
+  assert.equal(restored.topic_ids.grace, "grace");
+  assert.equal(bookmarks.topic(custom.id)?.name, "Grace");
+  assert.equal(bookmarks.topic(custom.id)?.color, "#123456");
+  assert.equal(bookmarks.topic("grace")?.name, "Grace");
+});
+
 test("reuses a mapped numeric topic after the user renames it", () => {
   const storage = new MemoryStorage();
   let id = 40;

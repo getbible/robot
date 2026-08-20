@@ -1,4 +1,7 @@
-import { DEFAULT_BOOKMARK_TOPIC_DEFINITIONS } from "./global-bookmark-catalog.js";
+import {
+  CORE_BOOKMARK_TOPIC_DEFINITIONS,
+  isLegacyBookmarkTopicId,
+} from "./bookmark-topic-definitions.js";
 
 const STORAGE_PREFIX = "getbible.miniapp.bookmarks.v1";
 const STORAGE_VERSION = 2;
@@ -23,7 +26,7 @@ const FORBIDDEN_CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f
 const FORBIDDEN_CONTROL_GLOBAL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
 
 export const DEFAULT_BOOKMARK_TOPICS = Object.freeze(
-  DEFAULT_BOOKMARK_TOPIC_DEFINITIONS.map((definition) => Object.freeze({
+  CORE_BOOKMARK_TOPIC_DEFINITIONS.map((definition) => Object.freeze({
     id: definition.id,
     name: definition.name,
     color: definition.color,
@@ -282,9 +285,10 @@ export class BookmarkStore {
   /**
    * Atomically restores a canonical set of topic definitions.
    *
-   * Stable IDs are preferred, then only explicit canonical/alias name matches
-   * are accepted. A validated preferred mapping lets a previously matched
-   * legacy numeric ID survive a user rename and later reset. Existing topic
+   * Stable IDs are preferred, then explicit canonical/alias name matches are
+   * accepted only for legacy numeric topic IDs. A validated preferred mapping
+   * lets a previously matched legacy numeric ID survive a user rename and
+   * later reset. Existing topic
    * IDs, names, and colors are retained so user customizations and personal
    * bookmarks never need to be rewritten.
    * Unrelated custom topics and every personal bookmark remain untouched.
@@ -323,7 +327,9 @@ export class BookmarkStore {
           [requirement.name, ...requirement.aliases].map(normalizedTopicName),
         );
         index = nextTopics.findIndex((topic) =>
-          !usedTopicIds.has(topic.id) && names.has(normalizedTopicName(topic.name))
+          isLegacyBookmarkTopicId(topic.id) &&
+          !usedTopicIds.has(topic.id) &&
+          names.has(normalizedTopicName(topic.name))
         );
       }
       const match = index < 0 ? null : nextTopics[index];

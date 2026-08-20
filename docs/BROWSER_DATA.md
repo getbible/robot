@@ -73,8 +73,9 @@ No select, unselect, reorder, clear, reader navigation, catalog, chapter, or exp
 
 Every successfully opened chapter records its target verse, and every
 successfully added selection records that verse. Chapter visits de-duplicate by
-translation, book, and chapter; selections de-duplicate by their full verse
-coordinate, and an exact coordinate also coalesces across event kinds.
+book and chapter; selections de-duplicate by their book/chapter/verse
+coordinate across translations, and an exact coordinate also coalesces across
+event kinds.
 Recording a repeat updates and promotes that entry instead of duplicating it.
 Each entry contains only its translation, display reference, book name/number,
 chapter, verse, event kind, local identifier, and visit time. The store never
@@ -83,9 +84,14 @@ result, or preference.
 
 The versioned record is unique, newest-first, bounded to 1,000 entries, and
 stored under a key derived from the authenticated user scope in browser
-`localStorage`. Legacy duplicates are compacted when restored. The reader can
-reopen the exact translation and coordinate, remove one entry, or clear the
-entire record. Clearing removes the storage key. If `localStorage` is
+`localStorage`. Legacy cross-translation duplicates are compacted when
+restored. The History page progressively hydrates initial and near-viewport
+display-only verse excerpts from the same bounded public chapter data plane
+used by global Bookmarks. Missing coordinates render a localized unavailable
+state; transient chapter failures remain request failures and retry after the
+browser reconnects. Excerpts are not added to the history record. The reader
+reopens the exact coordinate in the currently selected translation, can remove
+one entry, or clear the entire record. Clearing removes the storage key. If `localStorage` is
 unavailable, history remains available in memory until the page closes.
 
 History never reconciles through Telegram storage and never reaches Robot.
@@ -119,14 +125,18 @@ Bookmark identity is canonical book/chapter/verse, not translation. Assigning
 the same verse from another translation updates its one record. Assigning it to
 another topic extends that record, while repeating an existing assignment is a
 no-op. Removing a topic warns before removing that topic's personal assignments.
+Built-in topic names come from localized constants and cannot be renamed;
+users may recolor or remove them. Custom topics remain user-named and editable.
 Restoring default tags recreates only missing definitions, preserving recolors,
-renames, custom topics, and personal bookmarks. Selections remain independent
+custom topics, and personal bookmarks. Selections remain independent
 and ephemeral, and the public cache remains identity-free.
 
 ### Global catalog overlay
 
 The browser bundle provides 2,155 global verse links across 61 topics. They
 appear in the same topic list as personal records and carry a **G** marker.
+Their cards hydrate verse text for the currently selected translation from the
+bounded public chapter data plane; that text is not persisted as a bookmark.
 Only browser-local topic visibility and per-link exclusions are persisted. A
 link can be hidden, a topic can be cleared, and loading that topic or the full
 catalog restores its hidden links without duplication. Global links and these

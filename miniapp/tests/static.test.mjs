@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 
+import {
+  BOOKMARK_LOCALE_EXTENSION,
+  BOOKMARK_LOCALE_FALLBACK_POLICIES,
+  BOOKMARK_LOCALE_POLICY_SOURCES,
+} from "../lib/bookmark-locales.js";
+import { SCOPED_LOCALE_OVERRIDES } from "../lib/bookmark-locales-scoped-overrides.js";
 import { UI_CATALOGS } from "../lib/i18n.js";
+import { TRANSLATED_MESSAGES } from "../lib/locales.js";
 
 const root = new URL("../", import.meta.url);
 
@@ -226,13 +233,28 @@ test("stores bounded coordinate-only reading history in scoped local storage", a
   assert.match(history, /this\.#storage\.removeItem\(this\.#key\)/);
 });
 
-test("keeps Bookmarks on Home while preserving the five-item footer", async () => {
+test("keeps conditional Home summaries and the five-item footer", async () => {
   const html = await readFile(new URL("index.html", root), "utf8");
   const css = await readFile(new URL("styles.css", root), "utf8");
   const app = await readFile(new URL("app.js", root), "utf8");
 
-  assert.match(html, /data-home-route="history"/);
+  const homeActionsStart = html.indexOf('<div class="home-actions">');
+  const homeSummariesStart = html.indexOf(
+    '<div class="home-summaries">',
+    homeActionsStart,
+  );
+  assert.ok(homeActionsStart >= 0 && homeSummariesStart > homeActionsStart);
+  const homeActions = html.slice(homeActionsStart, homeSummariesStart);
+  assert.equal([...homeActions.matchAll(/class="home-action"/g)].length, 2);
+  assert.match(homeActions, /data-home-route="search"/);
+  assert.match(homeActions, /data-home-route="bible"/);
+  assert.doesNotMatch(homeActions, /data-home-route="history"/);
+
   assert.match(html, /id="home-history"/);
+  assert.match(
+    html,
+    /id="home-history"[\s\S]*?data-home-route="history"/,
+  );
   assert.match(html, /id="home-bookmarks"/);
   assert.match(
     html,
@@ -253,6 +275,14 @@ test("keeps Bookmarks on Home while preserving the five-item footer", async () =
   assert.match(app, /api\.acknowledgeBookmarkRestore/);
   assert.match(css, /\.reader-verse-row/);
   assert.match(css, /\.bookmark-popover\[data-placement="above"\]/);
+  assert.doesNotMatch(
+    css,
+    /\.bookmark-popover__close\s*\{\s*position:\s*absolute/,
+  );
+  assert.doesNotMatch(
+    css,
+    /\.home-actions\s*\{\s*grid-template-columns:\s*repeat\(3/,
+  );
   assert.ok([...css.matchAll(/\[data-bookmark-color="[a-f0-9]{6}"\]/g)].length >= 54);
 });
 
@@ -294,6 +324,17 @@ test("keeps global and personal bookmarks in one controllable topic list", async
   assert.match(UI_CATALOGS.en["bookmarks.imported"], /skipped ranges/);
 });
 
+test("derives generated bookmark tags from the canonical topic definitions", async () => {
+  const generator = await readFile(
+    new URL("../scripts/generate_global_bookmarks.mjs", root),
+    "utf8",
+  );
+
+  assert.match(generator, /CORE_BOOKMARK_TOPIC_DEFINITIONS/);
+  assert.match(generator, /\[definition\.name, \.\.\.definition\.aliases\]/);
+  assert.doesNotMatch(generator, /const TAG_IDS = new Map\(\[/);
+});
+
 test("references the optimized hero and consistent getBible.Life brand", async () => {
   const css = await readFile(new URL("styles.css", root), "utf8");
   const html = await readFile(new URL("index.html", root), "utf8");
@@ -326,7 +367,7 @@ test("has English catalog coverage for every marked interface and accessibility 
   assert.ok(keys.length >= 60);
 });
 
-test("ships complete localized catalogs for every GetBible translation language", () => {
+test("ships complete governed catalogs for every GetBible translation language", () => {
   const englishKeys = Object.keys(UI_CATALOGS.en).sort();
   const expectedLocales = [
     "af", "ar", "br", "ch", "chr", "cop", "cs", "cu", "da", "de", "el",
@@ -337,16 +378,186 @@ test("ships complete localized catalogs for every GetBible translation language"
     "sv", "sw", "syr", "th", "tl", "tlh", "tpi", "tr", "tsg", "uk", "vi",
     "zh", "zh-hans", "zh-hant",
   ];
+  const translatedLocales = expectedLocales.filter((locale) => locale !== "en");
+  const baseKeys = Object.keys(TRANSLATED_MESSAGES.af).sort();
+  const extensionKeys = Object.keys(BOOKMARK_LOCALE_EXTENSION.af).sort();
+  const pluralExtensionKeys = [
+    "bookmarks.count_few",
+    "bookmarks.default_tags_restored_few",
+    "bookmarks.global_link_few",
+    "bookmarks.personal_verse_few",
+    "bookmarks.topic_delete_confirm_few",
+  ];
+  const fewFormLocales = new Set(["cs", "cu", "pl", "ru", "uk"]);
+  const numericOneKeys = new Set(
+    pluralExtensionKeys.map((key) => key.replace(/_few$/, "_one")),
+  );
+  const numericOneLocales = new Set(["cu", "ru", "tl", "tsg", "uk"]);
+  const topicKeys = extensionKeys.filter((key) =>
+    key.startsWith("bookmark_topics.")
+  );
+  const scopedOverrideKeys = englishKeys.filter((key) =>
+    key.startsWith("history.") ||
+    (baseKeys.includes(key) && key.startsWith("home.")) ||
+    key === "selection.browse"
+  );
+  const protectedTokens = ["getBible.Life", "Telegram", "JSON"];
 
   assert.deepEqual(Object.keys(UI_CATALOGS).sort(), expectedLocales);
+  assert.deepEqual(Object.keys(TRANSLATED_MESSAGES).sort(), translatedLocales);
+  assert.deepEqual(
+    Object.keys(BOOKMARK_LOCALE_EXTENSION).sort(),
+    translatedLocales,
+  );
+  assert.equal(baseKeys.length, 159);
+  assert.equal(extensionKeys.length, 173);
+  assert.equal(topicKeys.length, 61);
+  assert.equal(new Set([...baseKeys, ...extensionKeys]).size, englishKeys.length);
+  assert.deepEqual([...new Set([...baseKeys, ...extensionKeys])].sort(), englishKeys);
+  assert.deepEqual(
+    Object.keys(SCOPED_LOCALE_OVERRIDES).sort(),
+    ["chr", "cop", "enm", "got", "syr", "tlh"],
+  );
+  assert.equal(scopedOverrideKeys.length, 30);
+  const expectedPolicySources = {
+    chr: "en",
+    cop: "ar",
+    cu: "ru",
+    enm: "en",
+    got: "de",
+    grc: "el",
+    he: "hbo",
+    mlf: "en",
+    pon: "en",
+    pot: "en",
+    ppk: "id",
+    rmq: "es",
+    syr: "ar",
+    tlh: "en",
+    tsg: "tl",
+    "zh-hans": "zh",
+  };
+  assert.deepEqual(BOOKMARK_LOCALE_POLICY_SOURCES, expectedPolicySources);
+  assert.strictEqual(
+    BOOKMARK_LOCALE_FALLBACK_POLICIES,
+    BOOKMARK_LOCALE_POLICY_SOURCES,
+  );
+
+  const englishExtension = Object.fromEntries(
+    extensionKeys.map((key) => [key, UI_CATALOGS.en[key]]),
+  );
+  for (const locale of translatedLocales) {
+    const base = TRANSLATED_MESSAGES[locale];
+    const extension = BOOKMARK_LOCALE_EXTENSION[locale];
+    assert.equal(Object.isFrozen(base), true, `${locale}:base frozen`);
+    assert.equal(Object.isFrozen(extension), true, `${locale}:extension frozen`);
+    assert.deepEqual(Object.keys(base).sort(), baseKeys, `${locale}:base keys`);
+    assert.deepEqual(
+      Object.keys(extension).sort(),
+      fewFormLocales.has(locale)
+        ? [...extensionKeys, ...pluralExtensionKeys].sort()
+        : extensionKeys,
+      `${locale}:extension keys`,
+    );
+    for (const key of Object.keys(extension)) {
+      const usesNumericOne = numericOneLocales.has(locale) &&
+        numericOneKeys.has(key);
+      const englishKey = key.endsWith("_few") || usesNumericOne
+        ? key.replace(/_(?:few|one)$/, "_other")
+        : key;
+      assert.equal(typeof extension[key], "string", `${locale}:${key}`);
+      assert.notEqual(extension[key].trim(), "", `${locale}:${key}`);
+      assert.deepEqual(
+        [...extension[key].matchAll(/\{([a-z_]+)\}/g)]
+          .map((match) => match[1])
+          .sort(),
+        [...UI_CATALOGS.en[englishKey].matchAll(/\{([a-z_]+)\}/g)]
+          .map((match) => match[1])
+          .sort(),
+        `${locale}:${key}:placeholders`,
+      );
+      for (const token of protectedTokens) {
+        assert.equal(
+          extension[key].split(token).length,
+          UI_CATALOGS.en[englishKey].split(token).length,
+          `${locale}:${key}:${token}`,
+        );
+      }
+    }
+  }
+
+  for (const [locale, source] of Object.entries(expectedPolicySources)) {
+    if (source === "en") {
+      assert.deepEqual(
+        BOOKMARK_LOCALE_EXTENSION[locale],
+        englishExtension,
+        `${locale}:established English source`,
+      );
+      continue;
+    }
+    if (source === "id") {
+      // Indonesian is a policy language, not a separately exposed UI locale.
+      assert.equal(locale, "ppk");
+      continue;
+    }
+    assert.strictEqual(
+      BOOKMARK_LOCALE_EXTENSION[locale],
+      BOOKMARK_LOCALE_EXTENSION[source],
+      `${locale}:reuses ${source} extension`,
+    );
+    assert.deepEqual(
+      UI_CATALOGS[locale],
+      UI_CATALOGS[source],
+      `${locale}:uniform full-app ${source} policy`,
+    );
+  }
+  for (const locale of translatedLocales.filter(
+    (candidate) => !Object.hasOwn(BOOKMARK_LOCALE_POLICY_SOURCES, candidate),
+  )) {
+    const translatedCount = extensionKeys.filter(
+      (key) => BOOKMARK_LOCALE_EXTENSION[locale][key] !== UI_CATALOGS.en[key],
+    ).length;
+    assert.ok(translatedCount > 150, `${locale}:target-language coverage`);
+  }
+
+  for (const [locale, overrides] of Object.entries(SCOPED_LOCALE_OVERRIDES)) {
+    assert.equal(Object.isFrozen(overrides), true, `${locale}:overrides frozen`);
+    assert.deepEqual(
+      Object.keys(overrides).sort(),
+      scopedOverrideKeys,
+      `${locale}:override keys`,
+    );
+    for (const key of Object.keys(overrides)) {
+      const expected = Object.hasOwn(BOOKMARK_LOCALE_EXTENSION[locale], key)
+        ? BOOKMARK_LOCALE_EXTENSION[locale][key]
+        : TRANSLATED_MESSAGES[locale][key];
+      assert.equal(
+        UI_CATALOGS[locale][key],
+        Object.hasOwn(BOOKMARK_LOCALE_POLICY_SOURCES, locale)
+          ? expected
+          : overrides[key],
+        `${locale}:${key}:scoped policy`,
+      );
+    }
+  }
+
   for (const [locale, catalog] of Object.entries(UI_CATALOGS)) {
-    assert.deepEqual(Object.keys(catalog).sort(), englishKeys, locale);
-    for (const key of englishKeys) {
+    assert.equal(Object.isFrozen(catalog), true, `${locale}:catalog frozen`);
+    const localeKeys = locale !== "en" && fewFormLocales.has(locale)
+      ? [...englishKeys, ...pluralExtensionKeys].sort()
+      : englishKeys;
+    assert.deepEqual(Object.keys(catalog).sort(), localeKeys, locale);
+    for (const key of localeKeys) {
+      const usesNumericOne = numericOneLocales.has(locale) &&
+        numericOneKeys.has(key);
+      const englishKey = key.endsWith("_few") || usesNumericOne
+        ? key.replace(/_(?:few|one)$/, "_other")
+        : key;
       assert.equal(typeof catalog[key], "string", `${locale}:${key}`);
       assert.notEqual(catalog[key].trim(), "", `${locale}:${key}`);
       assert.deepEqual(
         [...catalog[key].matchAll(/\{([a-z_]+)\}/g)].map((match) => match[1]).sort(),
-        [...UI_CATALOGS.en[key].matchAll(/\{([a-z_]+)\}/g)]
+        [...UI_CATALOGS.en[englishKey].matchAll(/\{([a-z_]+)\}/g)]
           .map((match) => match[1])
           .sort(),
         `${locale}:${key}`,
@@ -390,6 +601,21 @@ test("uses one exclusive translation selector and invalidates stale content", as
   );
   assert.match(app, /searchRequestId \+= 1/);
   assert.match(app, /state\.bible\.requestId \+= 1/);
+});
+
+test("explicit verse navigation supersedes an unfinished launch reference", async () => {
+  const app = await readFile(new URL("app.js", root), "utf8");
+  const functionStart = app.indexOf("async function openBibleAtVerse(");
+  const functionEnd = app.indexOf("\nfunction currentRouteScrollTop()", functionStart);
+  assert.ok(functionStart >= 0 && functionEnd > functionStart);
+  const body = app.slice(functionStart, functionEnd);
+
+  const clearIntent = body.indexOf('state.bible.entryReference = "";');
+  const beginNavigation = body.indexOf("state.bible.requestId += 1;");
+  const loadBooks = body.indexOf("await loadBibleBooks(");
+  assert.ok(clearIntent >= 0, "explicit navigation clears launch intent");
+  assert.ok(clearIntent < beginNavigation, "launch intent clears before ownership changes");
+  assert.ok(clearIntent < loadBooks, "launch intent clears before books resolve");
 });
 
 test("ships parseable OpenAPI JSON at the documented relative root", async () => {

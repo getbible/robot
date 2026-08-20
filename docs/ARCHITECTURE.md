@@ -185,9 +185,9 @@ The active WebView selection is intentionally ephemeral and identity-free outsid
 ## Reading history lifecycle
 
 Successful chapter opens and successful verse selections record a normalized
-coordinate in `ReadingHistoryStore`. Chapter visits share translation, book,
-and chapter identity even when their target verse changes. Verse selections
-share full translation, book, chapter, and verse identity, and an exact
+coordinate in `ReadingHistoryStore`. Chapter visits share book and chapter
+identity even when their target verse or translation changes. Verse selections
+share full book, chapter, and verse identity across translations, and an exact
 coordinate also coalesces across event kinds. A revisit refreshes metadata and
 visit time, preserves its local identifier, and moves it to the front instead
 of adding a duplicate. Entries retain only that identifier, event kind,
@@ -197,10 +197,18 @@ never retain verse bodies, Telegram identity, launch data, or Robot credentials.
 History is unique and newest-first, bounded to 1,000 entries, and stored under
 a versioned, authenticated user-scoped `localStorage` key. It survives WebView
 sessions on that browser until the user clears it or browser data is removed.
-Restoration compacts legacy duplicate coordinates newest-first. Reopening an
-entry restores both its translation and exact coordinate. Individual removal
-and full reset are local browser operations and issue no Robot or Telegram
-storage request. Storage rejection falls back to memory for the active page.
+Restoration compacts legacy duplicate coordinates newest-first. The History
+view resolves initial and near-viewport verse excerpts through one
+concurrency-bounded, display-only public chapter path shared with global
+Bookmarks. Rows render independently as their chapters resolve, cancelled
+views skip unshared queued work, and a missing coordinate receives a localized
+unavailable state. Transient chapter failures render a localized request state
+and retry after the browser reconnects. The view does not persist those bodies
+or register them as selectable authority.
+Reopening an entry uses its exact coordinate with the translation that is
+currently selected. Individual removal and full reset are local browser
+operations and issue no Robot or Telegram storage request. Storage rejection
+falls back to memory for the active page.
 
 ## Bookmarks and last-read lifecycle
 
@@ -209,9 +217,12 @@ canonical book/chapter/verse across translations. A record may belong to
 multiple colored topics without consuming another verse slot. Reassigning the
 same coordinate updates that record; assigning an existing topic is a no-op.
 The domain permits topic add/rename/recolor/removal and warns before topic
-removal also removes its personal verse assignments. Restoring default tags
-adds only missing definitions, preserving existing recolors, renames, custom
-topics, and personal bookmarks. Bookmarks represent the complete verse; text
+removal also removes its personal verse assignments. Built-in topic identity
+and English migration names remain stable storage metadata, while display names
+come from localized constants and are read-only; built-in colors remain
+editable. Custom topic names remain editable. Restoring default tags adds only
+missing definitions, preserving existing recolors, custom topics, and personal
+bookmarks. Bookmarks represent the complete verse; text
 ranges and notes from a compatible imported document are not made active
 bookmark state.
 
@@ -232,7 +243,9 @@ exclusion, or public-cache record is sent through this adapter.
 
 The browser-bundled global provider contains 2,155 verse links across 61
 topics. Personal and global rows share one topic list, with global rows marked
-**G**. Browser-local preferences alone determine which global topics and links
+**G**. Global rows hydrate display-only verse text for the active translation
+through the bounded public chapter data plane. Browser-local preferences alone
+determine which global topics and links
 are visible. A separate mapping under the hashed account scope preserves
 canonical-to-local identity when a legacy numeric topic is renamed. One link
 may be hidden, a topic may be cleared, and loading that topic or the complete

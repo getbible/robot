@@ -1,4 +1,7 @@
+import { ENGLISH_BOOKMARK_TOPIC_MESSAGES } from "./bookmark-topic-definitions.js";
+
 export const ENGLISH_MESSAGES = Object.freeze({
+  ...ENGLISH_BOOKMARK_TOPIC_MESSAGES,
   "gate.opening": "Opening getBible.Life…",
   "gate.securing": "Securing your Telegram session…",
   "gate.protected": "Protected Mini App",
@@ -22,6 +25,7 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "home.title": "Read, find, and share His Word.",
   "home.body":
     "Gather all the Scripture you need, then post them together.",
+  "home.tagline": "The words of eternal life",
   "home.search": "Search Scripture",
   "home.search_hint": "Find words, phrases, and themes",
   "home.browse": "Read the Bible",
@@ -98,6 +102,8 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "history.clear_confirm": "Clear your entire reading history?",
   "history.cleared": "Reading history cleared.",
   "history.removed": "{reference} removed from history.",
+  "history.verse_unavailable":
+    "This verse is not available in the selected translation.",
   "bookmarks.eyebrow": "Your study",
   "bookmarks.title": "Bookmarks",
   "bookmarks.clear": "Clear personal",
@@ -117,6 +123,10 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "bookmarks.new_topic": "New topic",
   "bookmarks.add_topic": "Add topic",
   "bookmarks.save_topic": "Save",
+  "bookmarks.core_topic_name": "Built-in translated topic",
+  "bookmarks.invalid_topic": "Enter a valid topic name and color.",
+  "bookmarks.topic_limit":
+    "You can create up to 100 topics. Remove one before adding another.",
   "bookmarks.restore_default_tags": "Restore default tags",
   "bookmarks.default_tags_restored_one":
     "One missing default tag was restored. Existing tags and bookmarks were kept.",

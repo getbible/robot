@@ -87,16 +87,19 @@ The bottom navigation exposes History permanently on Home, Search, Bible,
 History, and Selected. History is a normal, keyboard-accessible page, so the
 same footer remains visible and usable. Its heading and empty state follow the
 Selected page, including the centered **Open the Bible** action, while the top
-bar keeps only the centered getBible icon. Choosing an entry reopens that exact
-translation and coordinate. An entry can be removed individually, and Clear
-all removes the complete device-local record.
+bar keeps only the centered getBible icon. The first and near-viewport entries
+hydrate independently through the bounded public chapter data plane; a missing
+coordinate shows a localized unavailable state, while a transient request
+failure retries after connectivity returns. Each entry reopens its exact
+coordinate in the currently selected translation. An entry can be removed
+individually, and Clear all removes the complete device-local record.
 
 `ReadingHistoryStore` is versioned, unique and newest-first, and bounded to
 1,000 coordinate-only entries in authenticated user-scoped `localStorage`, with
 an in-memory fallback.
-Chapter visits share translation/book/chapter identity, while verse selections
-use their full coordinate; an exact coordinate also coalesces across event
-kinds. Revisiting one moves its stable entry to the top. Restoration
+Chapter visits share book/chapter identity across translations, while verse
+selections use their full book/chapter/verse coordinate; an exact coordinate
+also coalesces across event kinds. Revisiting one moves its stable entry to the top. Restoration
 compacts older duplicate records. The store never keeps verse bodies, Telegram
 data, Robot credentials, or user identity, and none of its mutations call
 Robot or Telegram storage. History survives later WebView sessions in that
@@ -106,9 +109,9 @@ browser but does not synchronize between devices.
 
 The permanent footer remains the five actions Home, Search, Bible, History, and
 Selected. Bookmarks is reached from the Home summary rather than adding a sixth
-footer action. Home contains the three primary actions **Search Scripture**,
-**Read the Bible**, and **See history**, followed by Selected, History, and
-Bookmarks summaries. The translation control remains in Search and Bible; Home,
+footer action. Home contains the two primary actions **Search Scripture** and
+**Read the Bible**, followed by Selected, History, and Bookmarks summaries; the
+History summary appears only when populated. The translation control remains in Search and Bible; Home,
 History, Selected, and Bookmarks show only the centered getBible icon.
 
 Selecting a Bible verse reveals a small keyboard-accessible ellipsis at its
@@ -121,7 +124,8 @@ The menu links directly to each assigned topic. Topic detail offers navigation
 back to all topics and, when opened from the reader, back to the source verse.
 
 The Bookmarks surface lists personal and global verse links together in one
-topic list; global rows carry a **G** marker. One global link may be hidden, or
+topic list; global rows carry a **G** marker and progressively hydrate visible
+verse text for the currently selected translation without persisting that text. One global link may be hidden, or
 all global links may be cleared for one topic. Loading that topic or the full
 catalog resets its exclusions without duplication. The built-in catalog
 contains 2,155 links across 61 topics. Its visibility and exclusions remain in
@@ -130,11 +134,12 @@ A scoped browser-only mapping keeps legacy numeric topics attached to their
 canonical global topic after a rename or reload.
 
 Personal records are bounded to 800 canonical verses, and each may belong to
-multiple topics without consuming another verse slot. Topic search, add,
-rename, recolor, removal, and clear-all remain available. Topic removal warns
-that its personal assignments will also be removed. **Restore default tags**
-adds only missing defaults and preserves recolors, renames, custom topics, and
-personal bookmarks. The global catalog/provider boundary supports a future
+multiple topics without consuming another verse slot. Built-in topic names are
+localized constants and cannot be renamed, though their colors can be changed
+and they can be removed. Custom topics remain user-named and support add,
+rename, recolor, and removal. Topic removal warns that its personal assignments
+will also be removed. **Restore default tags** adds only missing defaults and
+preserves recolors, custom topics, and personal bookmarks. The global catalog/provider boundary supports a future
 authorized publishing source, but authorized-user publishing is not
 implemented.
 
@@ -267,12 +272,13 @@ After deployment, verify:
 7. a second click unselects it;
 8. navigation preserves selected styling;
 9. no Robot basket or Scripture request occurs before Post;
-10. reading history reopens the exact translation and verse;
+10. reading history shows verse text and reopens the exact verse in the
+    currently selected translation;
 11. History remains available from every footer route and revisits move to the
     top without duplication;
 12. individual and complete history clearing work locally;
-13. Home exposes Search, Bible, and History actions plus Selected, History, and
-    Bookmarks summaries, with the route-specific top-bar controls;
+13. Home exposes Search and Bible actions plus conditional Selected, History,
+    and Bookmarks summaries, with the route-specific top-bar controls;
 14. the compact verse ellipsis alone opens the bookmark menu, and a personal
     verse can belong to multiple colored topics within the 800-record bound;
 15. bookmark and last-read state reconcile on a second supported Telegram

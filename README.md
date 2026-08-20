@@ -46,7 +46,7 @@ See [Architecture](docs/ARCHITECTURE.md), [Browser data](docs/BROWSER_DATA.md), 
 
 ## Mini App behavior
 
-The Mini App has Home, Search, Bible, History, and Selected in one permanent bottom navigation. Bookmarks is a Home-managed surface rather than a sixth footer action. Home offers **Search Scripture**, **Read the Bible**, and **See history**, followed by current Selected, History, and Bookmarks summaries. Search and Bible retain the translation control; Home, History, Selected, and Bookmarks show only the centered getBible icon in the top bar.
+The Mini App has Home, Search, Bible, History, and Selected in one permanent bottom navigation. Bookmarks is a Home-managed surface rather than a sixth footer action. Home offers **Search Scripture** and **Read the Bible**, followed by current Selected, History, and Bookmarks summaries; the History summary appears only when history exists. Search and Bible retain the translation control; Home, History, Selected, and Bookmarks show only the centered getBible icon in the top bar.
 
 - Translation metadata, localized books, chapter maps, chapter text, and hashes come directly from Main API.
 - Explicit references use Query API.
@@ -60,10 +60,11 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
 - Successful Post clears it.
 - A bounded, coordinate-only reading history remembers opened chapters and
   selected verses in user-scoped browser `localStorage`. Revisiting the same
-  chapter or exact verse moves its existing entry to the top. History remains
-  available from every surface, and each entry keeps its translation and can
-  be reopened or removed individually; the complete history can also be
-  cleared.
+  chapter or exact verse across translations moves its existing entry to the
+  top. History remains available from every surface, displays verse text from
+  the bounded public chapter cache, and opens each coordinate in the currently
+  selected translation. Entries can be removed individually or cleared
+  together.
 - Selecting a reader verse reveals a compact bottom-right ellipsis. The
   anchored bookmark menu opens only when that control is activated. Each of
   the 800 personal canonical verse records may belong to multiple colored
@@ -76,11 +77,15 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   links without duplicating them. The built-in catalog contains 2,155 links
   across 61 topics and only its browser-local visibility/exclusions are stored.
   A scoped browser-only mapping keeps legacy numeric topics linked after a
-  rename; global data never enters personal synchronization or backups.
-- Topics support search, add, rename, recolor, removal, and clear-all. Removing
-  a topic warns that its personal verse assignments will also be removed.
-  **Restore default tags** recreates only missing defaults, preserving existing
-  recolors, renames, custom topics, and personal bookmarks.
+  rename; global data never enters personal synchronization or backups. Global
+  rows resolve their verse text in the currently selected translation without
+  copying that text into personal storage.
+- Built-in topic names are localized display constants: they can be recolored
+  or removed, but not renamed. Custom topics remain user-named and support add,
+  rename, recolor, and removal. Removing any topic warns that its personal
+  verse assignments will also be removed. **Restore default tags** recreates
+  only missing defaults while preserving colors, custom topics, and personal
+  bookmarks.
 - Personal bookmark aggregate version 2, topics, the active topic, and the
   compact last-read coordinate reconcile by timestamp across scoped
   `localStorage`, Telegram `DeviceStorage`, and Telegram `CloudStorage`;
@@ -271,7 +276,8 @@ After deploying one exact green commit, verify:
 8. Copy does not Post or clear selection;
 9. failed Post preserves selection;
 10. successful Post delivers authoritative Scripture and clears selection;
-11. reading history reopens the exact verse and translation;
+11. reading history shows the verse text and reopens the exact verse in the
+    currently selected translation;
 12. History remains available in the footer on every Mini App surface;
 13. revisiting a history location moves it to the top without duplication;
 14. individual and complete history clearing work;

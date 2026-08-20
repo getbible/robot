@@ -4,6 +4,28 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Localized bookmarks and translation-independent history
+
+- Removed the redundant unconditional **See history** Home action while keeping
+  the conditional History summary and permanent footer route.
+- Kept bookmark-menu close and assignment-removal controls in separate grid
+  cells at narrow widths so their 44-pixel targets cannot overlap.
+- Added viewport-aware, progressively rendered verse hydration for global
+  bookmark rows and reading-history entries through the existing bounded
+  public chapter cache/API. Missing coordinates show a localized unavailable
+  state; transient request failures stay distinct and retry when connectivity
+  returns. No hydrated verse body enters bookmark or history persistence.
+- Made reading-history identity and reopening translation-independent: repeated
+  coordinates coalesce across translations, and an entry opens in the
+  translation currently selected by the reader.
+- Completed the missing Bookmarks, History, and Home-summary catalog coverage
+  across every shipped UI catalog. The extension mirrors each existing
+  whole-application alias/fallback language source, keeps those policies
+  explicit instead of claiming native coverage, and adds the integer `few`
+  forms needed by Czech, Polish, Russian, and Ukrainian bookmark counts. The 61
+  built-in topic names now use stable localization keys and are read-only while
+  remaining recolorable/removable; custom topic names remain user-managed.
+
 ### Long reading sessions and browser history
 
 - Raised the authenticated Mini App session default from fifteen minutes to

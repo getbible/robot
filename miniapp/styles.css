@@ -2257,6 +2257,12 @@ select:focus-visible {
   min-height: 44px;
 }
 
+.bookmark-topic-editor__name--core {
+  align-items: center;
+  display: flex;
+  overflow-wrap: anywhere;
+}
+
 .bookmark-topic-form input[type="color"],
 .bookmark-topic-editor__color {
   padding: 4px;
@@ -2920,6 +2926,26 @@ select:focus-visible {
   font-size: 0.67rem;
 }
 
+.history-item__open .history-item__text {
+  display: -webkit-box;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 0.8rem;
+  font-weight: 400;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.history-item__open .history-item__text[hidden] {
+  display: none;
+}
+
 .history-item__remove {
   display: grid;
   width: 44px;
@@ -3466,10 +3492,6 @@ select:focus-visible {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .bookmark-popover__context {
-    padding-inline-end: 42px;
-  }
-
   .bookmark-detail__heading {
     grid-template-columns: 23px minmax(0, 1fr);
   }
@@ -3478,12 +3500,6 @@ select:focus-visible {
     max-width: none;
     grid-column: 2;
     justify-content: flex-start;
-  }
-
-  .bookmark-popover__close {
-    position: absolute;
-    top: 7px;
-    inset-inline-end: 7px;
   }
 
   .search-form__submit {
@@ -3510,14 +3526,6 @@ select:focus-visible {
 @media (min-width: 760px) {
   .view {
     padding-top: 30px;
-  }
-
-  .home-actions {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .home-actions > :last-child:nth-child(odd) {
-    grid-column: auto;
   }
 
   .bookmark-group-list {
