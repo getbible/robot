@@ -252,6 +252,44 @@ test("keeps Bookmarks on Home while preserving the five-item footer", async () =
   assert.ok([...css.matchAll(/\[data-bookmark-color="[a-f0-9]{6}"\]/g)].length >= 54);
 });
 
+test("keeps global and personal bookmarks in one controllable topic list", async () => {
+  const html = await readFile(new URL("index.html", root), "utf8");
+  const app = await readFile(new URL("app.js", root), "utf8");
+  const css = await readFile(new URL("styles.css", root), "utf8");
+
+  const topicManager = html.indexOf('id="bookmark-topic-manager"');
+  const loadAll = html.indexOf('id="load-global-bookmarks"');
+  const backup = html.indexOf('id="bookmark-backup-title"');
+  assert.ok(topicManager >= 0 && topicManager < loadAll && loadAll < backup);
+  assert.match(html, /id="restore-default-bookmark-topics"/);
+  assert.match(app, /bookmarkStore\.ensureTopics\([\s\S]*?defaultsOnly: true/);
+
+  const detail = html.indexOf('id="bookmark-detail"');
+  const bookmarkList = html.indexOf('id="bookmark-list"');
+  assert.ok(detail >= 0 && detail < bookmarkList);
+  assert.equal([...html.matchAll(/id="bookmark-list"/g)].length, 1);
+  assert.doesNotMatch(html, /id="bookmark-topic-global"/);
+  assert.match(html, /id="load-topic-global-bookmarks"/);
+  assert.match(html, /id="clear-topic-global-bookmarks"/);
+  assert.match(html, /id="bookmark-back-to-verse"/);
+  assert.match(html, /id="bookmark-assigned-topics"/);
+  assert.match(app, /marker\.textContent = "G"/);
+  assert.match(app, /bookmark\.source === GLOBAL_BOOKMARK_SOURCE/);
+  assert.match(app, /globalBookmarkPreferences\?\.hasTopic/);
+  assert.match(app, /globalBookmarkPreferences\.hideBookmark/);
+  assert.match(app, /bookmarkStore\.removeBookmarkTopic/);
+  assert.match(app, /trigger\.textContent = "•••"/);
+  assert.doesNotMatch(app, /bookmarkPrompt/);
+  assert.match(app, /error instanceof RangeError[\s\S]*?bookmarks\.limit_reached/);
+  assert.match(app, /setTopicMappings\([\s\S]*?result\.topic_ids/);
+  assert.match(app, /dataset\.availableHeight/);
+  assert.doesNotMatch(app, /bookmarkPopover\.style/);
+  assert.match(css, /data-bookmark-color="a16207"[\s\S]*?bookmark-topic-foreground: #ffffff/);
+  assert.match(css, /bookmark-detail__actions \.button[\s\S]*?min-height: 44px/);
+  assert.equal(UI_CATALOGS.en["bookmarks.clear"], "Clear personal");
+  assert.match(UI_CATALOGS.en["bookmarks.imported"], /skipped ranges/);
+});
+
 test("references the optimized hero and consistent getBible.Life brand", async () => {
   const css = await readFile(new URL("styles.css", root), "utf8");
   const html = await readFile(new URL("index.html", root), "utf8");
@@ -364,6 +402,26 @@ test("ships parseable OpenAPI JSON at the documented relative root", async () =>
   assert.ok(contract.paths["/bookmarks/restore"].get);
   assert.ok(contract.paths["/bookmarks/restore"].delete);
   assert.ok(contract.paths["/post"]);
+  assert.deepEqual(
+    contract.components.schemas.BookmarkBackup.properties.version.enum,
+    [1, 2, 3, 4],
+  );
+  assert.equal(
+    contract.components.schemas.BookmarkMarking.properties.colorIds.maxItems,
+    100,
+  );
+  assert.equal(
+    contract.components.schemas.BookmarkMarking.properties.colorIds.uniqueItems,
+    true,
+  );
+  assert.equal(
+    contract.components.schemas.BookmarkMarking.properties.colorIndexes.maxItems,
+    100,
+  );
+  assert.equal(
+    contract.components.schemas.BookmarkMarking.properties.colorIndexes.uniqueItems,
+    true,
+  );
   assert.equal(
     contract.components.schemas.BookmarkBackup.properties.markings.maxItems,
     800,

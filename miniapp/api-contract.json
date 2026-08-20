@@ -1189,9 +1189,39 @@
           "passage",
           "verse",
           "quote",
-          "reference",
-          "colorId",
           "createdAt"
+        ],
+        "oneOf": [
+          {
+            "required": ["colorId", "reference"],
+            "not": {
+              "anyOf": [
+                { "required": ["colorIds"] },
+                { "required": ["colorIndexes"] },
+                { "required": ["bookName"] }
+              ]
+            }
+          },
+          {
+            "required": ["colorIds", "reference"],
+            "not": {
+              "anyOf": [
+                { "required": ["colorId"] },
+                { "required": ["colorIndexes"] },
+                { "required": ["bookName"] }
+              ]
+            }
+          },
+          {
+            "required": ["colorIndexes", "bookName"],
+            "not": {
+              "anyOf": [
+                { "required": ["colorId"] },
+                { "required": ["colorIds"] },
+                { "required": ["reference"] }
+              ]
+            }
+          }
         ],
         "properties": {
           "id": {
@@ -1228,11 +1258,39 @@
             "minLength": 1,
             "maxLength": 180
           },
+          "bookName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
           "colorId": {
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
             "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "colorIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          },
+          "colorIndexes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 99
+            }
           },
           "createdAt": {
             "type": "integer",
@@ -1244,13 +1302,72 @@
       "BookmarkBackup": {
         "type": "object",
         "required": ["version", "exportedAt", "colors", "markings"],
+        "oneOf": [
+          {
+            "properties": {
+              "version": {
+                "enum": [1, 2]
+              },
+              "markings": {
+                "items": {
+                  "required": ["colorId", "reference"],
+                  "not": {
+                    "anyOf": [
+                      { "required": ["colorIds"] },
+                      { "required": ["colorIndexes"] },
+                      { "required": ["bookName"] }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "version": {
+                "const": 3
+              },
+              "markings": {
+                "items": {
+                  "required": ["colorIds", "reference"],
+                  "not": {
+                    "anyOf": [
+                      { "required": ["colorId"] },
+                      { "required": ["colorIndexes"] },
+                      { "required": ["bookName"] }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "version": {
+                "const": 4
+              },
+              "markings": {
+                "items": {
+                  "required": ["colorIndexes", "bookName"],
+                  "not": {
+                    "anyOf": [
+                      { "required": ["colorId"] },
+                      { "required": ["colorIds"] },
+                      { "required": ["reference"] }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ],
         "properties": {
           "format": {
             "const": "getbible-life-markings"
           },
           "version": {
             "type": "integer",
-            "enum": [1, 2]
+            "enum": [1, 2, 3, 4]
           },
           "exportedAt": {
             "type": "string",

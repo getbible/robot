@@ -40,6 +40,7 @@ class TelegramStorageMock {
   timeoutMethods = new Set();
   errors = new Map();
   falseMethods = new Set();
+  falseSetKeysOnce = new Set();
 
   getItem(key, callback) {
     this.calls.push(["getItem", key]);
@@ -65,14 +66,20 @@ class TelegramStorageMock {
 
   setItem(key, value, callback) {
     this.calls.push(["setItem", key, value]);
+    const refusedOnce = this.falseSetKeysOnce.delete(key);
     if (
       !this.timeoutMethods.has("setItem") &&
       !this.errors.has("setItem") &&
-      !this.falseMethods.has("setItem")
+      !this.falseMethods.has("setItem") &&
+      !refusedOnce
     ) {
       this.values.set(key, String(value));
     }
-    this.#reply("setItem", callback, !this.falseMethods.has("setItem"));
+    this.#reply(
+      "setItem",
+      callback,
+      !this.falseMethods.has("setItem") && !refusedOnce,
+    );
   }
 
   removeItem(key, callback) {
@@ -269,10 +276,20 @@ test("hydrates the newest account record and repairs local and device caches", a
   });
 
   assert.equal(storage.status.source, "cloud");
-  assert.equal(JSON.parse(storage.getItem(aggregateKey())).record_updated_at, 30);
+  const hydrated = JSON.parse(storage.getItem(aggregateKey()));
+  assert.equal(hydrated.version, 2);
+  assert.equal(hydrated.record_updated_at, 30);
+  assert.deepEqual(hydrated.bookmarks[0].topic_ids, ["grace"]);
   assert.equal(JSON.parse(local.getItem(aggregateKey())).bookmarks[0].text, "Cloud winner");
   await storage.flush();
   assert.equal(JSON.parse(device.values.get(`${ROOT}_cache`)).record_updated_at, 30);
+  assert.equal(JSON.parse(cloud.values.get(`${ROOT}_meta`)).version, 2);
+  const cloudBookmark = JSON.parse(
+    cloud.values.get(`${ROOT}_verse_043_0003_0016`),
+  ).bookmark;
+  assert.deepEqual(cloudBookmark.topic_indexes, [0]);
+  assert.equal(Object.hasOwn(cloudBookmark, "topic_ids"), false);
+  assert.equal(Object.hasOwn(cloudBookmark, "topic_id"), false);
   assert.equal(storage.status.pending, false);
   assert.ok(statuses.some((status) => status.phase === "syncing"));
 });
@@ -371,7 +388,7 @@ test("ignores a corrupt newer cloud commit instead of masking valid local data",
 
 test("preserves a future local aggregate for a newer app version", async () => {
   const local = new MemoryStorage();
-  const future = JSON.stringify({ version: 2, opaque: "keep me" });
+  const future = JSON.stringify({ version: 3, opaque: "keep me" });
   local.setItem(aggregateKey(), future);
 
   const storage = await TelegramBookmarkStorage.open({
@@ -384,6 +401,105 @@ test("preserves a future local aggregate for a newer app version", async () => {
   assert.equal(local.getItem(aggregateKey()), future);
   assert.equal(new BookmarkStore({ scope: SCOPE, storage }).persistent, false);
   assert.equal(local.getItem(aggregateKey()), future);
+});
+
+test("preserves a future cloud aggregate instead of overwriting it", async () => {
+  const local = new MemoryStorage();
+  const cloud = new TelegramStorageMock();
+  setAggregate(local, aggregate(10));
+  cloud.values.set(`${ROOT}_meta`, JSON.stringify({
+    version: 3,
+    record_updated_at: 90,
+  }));
+
+  const storage = await TelegramBookmarkStorage.open({
+    scope: SCOPE,
+    localStorage: local,
+    webApp: webApp({ cloud, version: "6.9" }),
+  });
+
+  assert.equal(storage.status.source, "cloud");
+  assert.equal(JSON.parse(storage.getItem(aggregateKey())).version, 3);
+  await storage.flush();
+  assert.equal(JSON.parse(cloud.values.get(`${ROOT}_meta`)).version, 3);
+  assert.equal(new BookmarkStore({ scope: SCOPE, storage }).persistent, false);
+});
+
+test("round-trips multi-topic verses through compact cloud topic indexes", async () => {
+  const cloud = new TelegramStorageMock();
+  const topics = [
+    { id: "grace", name: "Grace", color: "#bbf7d0" },
+    { id: "biblical-love", name: "Biblical Love", color: "#a16207" },
+  ];
+  const record = {
+    version: 2,
+    active_topic_id: "grace",
+    topics,
+    bookmarks: [{
+      ...bookmark(),
+      topic_ids: ["grace", "biblical-love"],
+      topic_id: "grace",
+    }],
+    record_updated_at: 61,
+  };
+  const writer = await TelegramBookmarkStorage.open({
+    scope: SCOPE,
+    localStorage: new MemoryStorage(),
+    webApp: webApp({ cloud, version: "6.9" }),
+  });
+
+  writer.setItem(aggregateKey(), JSON.stringify(record));
+  await writer.flush();
+
+  const wrapper = JSON.parse(
+    cloud.values.get(`${ROOT}_verse_043_0003_0016`),
+  );
+  assert.deepEqual(wrapper.bookmark.topic_indexes, [0, 1]);
+  assert.equal(Object.hasOwn(wrapper.bookmark, "topic_ids"), false);
+  assert.ok(
+    cloud.values.get(`${ROOT}_verse_043_0003_0016`).length <=
+      TELEGRAM_CLOUD_VALUE_MAX_CHARS,
+  );
+
+  const reader = await TelegramBookmarkStorage.open({
+    scope: SCOPE,
+    localStorage: new MemoryStorage(),
+    webApp: webApp({ cloud, version: "6.9" }),
+  });
+  const reopened = JSON.parse(reader.getItem(aggregateKey()));
+  assert.equal(reopened.version, 2);
+  assert.deepEqual(reopened.bookmarks[0].topic_ids, [
+    "grace",
+    "biblical-love",
+  ]);
+  assert.equal(reopened.bookmarks[0].topic_id, "grace");
+});
+
+test("rejects malformed version-two topic membership", async () => {
+  for (const changes of [
+    { topic_ids: [] },
+    { topic_ids: ["grace", "grace"] },
+    { topic_ids: ["grace"], topic_id: "biblical-love" },
+  ]) {
+    const local = new MemoryStorage();
+    const invalid = aggregate(62, {
+      version: 2,
+      bookmarks: [bookmark({
+        topic_ids: ["grace"],
+        ...changes,
+      })],
+    });
+    setAggregate(local, invalid);
+
+    const storage = await TelegramBookmarkStorage.open({
+      scope: SCOPE,
+      localStorage: local,
+      webApp: webApp({ version: "6.8" }),
+    });
+
+    assert.equal(storage.getItem(aggregateKey()), null);
+    assert.equal(local.getItem(aggregateKey()), null);
+  }
 });
 
 test("coalesces rapid writes, diffs verse keys, and commits metadata last", async () => {
@@ -440,6 +556,146 @@ test("coalesces rapid writes, diffs verse keys, and commits metadata last", asyn
   assert.equal(
     [...cloud.values.keys()].filter((key) => key.includes("_verse_")).length,
     1,
+  );
+});
+
+test("rewrites only a changed bookmark and the last-written commit metadata", async () => {
+  const cloud = new TelegramStorageMock();
+  const storage = await TelegramBookmarkStorage.open({
+    scope: SCOPE,
+    localStorage: new MemoryStorage(),
+    webApp: webApp({ cloud, version: "6.9" }),
+  });
+  const secondVerse = bookmark({
+    id: "bookmark_2",
+    book: 1,
+    book_name: "Genesis",
+    chapter: 1,
+    verse: 1,
+    reference: "Genesis 1:1",
+    text: "In the beginning.",
+  });
+  storage.setItem(aggregateKey(), JSON.stringify(aggregate(1, {
+    bookmarks: [bookmark(), secondVerse],
+  })));
+  await storage.flush();
+
+  const topicKey = `${ROOT}_topic_000`;
+  const changedKey = `${ROOT}_verse_043_0003_0016`;
+  const unchangedKey = `${ROOT}_verse_001_0001_0001`;
+  const topicBefore = cloud.values.get(topicKey);
+  const unchangedBefore = cloud.values.get(unchangedKey);
+  cloud.calls.length = 0;
+
+  storage.setItem(aggregateKey(), JSON.stringify(aggregate(2, {
+    bookmarks: [
+      bookmark({ text: "Changed verse", updated_at: 11 }),
+      secondVerse,
+    ],
+  })));
+  await storage.flush();
+
+  assert.deepEqual(
+    cloud.calls
+      .filter(([method]) => method === "setItem")
+      .map(([, key]) => key),
+    [changedKey, `${ROOT}_meta`],
+  );
+  assert.equal(cloud.values.get(topicKey), topicBefore);
+  assert.equal(cloud.values.get(unchangedKey), unchangedBefore);
+  assert.equal(
+    Object.hasOwn(JSON.parse(cloud.values.get(changedKey)), "record_updated_at"),
+    false,
+  );
+  assert.match(
+    JSON.parse(cloud.values.get(`${ROOT}_meta`)).payload_fingerprint,
+    /^fnv2x32-[0-9a-f]{16}$/,
+  );
+});
+
+test("rejects an item mutation until its fingerprint metadata is committed", async () => {
+  const local = new MemoryStorage();
+  const cloud = new TelegramStorageMock();
+  const writer = await TelegramBookmarkStorage.open({
+    scope: SCOPE,
+    localStorage: new MemoryStorage(),
+    webApp: webApp({ cloud, version: "6.9" }),
+  });
+  writer.setItem(aggregateKey(), JSON.stringify(aggregate(1)));
+  await writer.flush();
+  setAggregate(local, aggregate(1));
+
+  const verseKey = `${ROOT}_verse_043_0003_0016`;
+  const partialWrapper = JSON.parse(cloud.values.get(verseKey));
+  partialWrapper.bookmark.text = "Uncommitted partial value";
+  cloud.values.set(verseKey, JSON.stringify(partialWrapper));
+
+  const reader = await TelegramBookmarkStorage.open({
+    scope: SCOPE,
+    localStorage: local,
+    webApp: webApp({ cloud, version: "6.9" }),
+  });
+
+  assert.equal(reader.status.source, "local");
+  assert.equal(
+    JSON.parse(reader.getItem(aggregateKey())).bookmarks[0].text,
+    "For God so loved the world.",
+  );
+});
+
+test("automatically retries a transient partial cloud commit", async () => {
+  const cloud = new TelegramStorageMock();
+  const storage = await TelegramBookmarkStorage.open({
+    scope: SCOPE,
+    localStorage: new MemoryStorage(),
+    webApp: webApp({ cloud, version: "6.9" }),
+  });
+  const secondVerse = bookmark({
+    id: "bookmark_2",
+    book: 1,
+    book_name: "Genesis",
+    chapter: 1,
+    verse: 1,
+    reference: "Genesis 1:1",
+    text: "In the beginning.",
+  });
+  storage.setItem(aggregateKey(), JSON.stringify(aggregate(1, {
+    bookmarks: [bookmark(), secondVerse],
+  })));
+  await storage.flush();
+
+  const refusedKey = `${ROOT}_verse_043_0003_0016`;
+  const partialSuccessKey = `${ROOT}_verse_001_0001_0001`;
+  cloud.calls.length = 0;
+  cloud.falseSetKeysOnce.add(refusedKey);
+  storage.setItem(aggregateKey(), JSON.stringify(aggregate(2, {
+    bookmarks: [
+      bookmark({ text: "Retried", updated_at: 11 }),
+      { ...secondVerse, text: "Written on first attempt", updated_at: 11 },
+    ],
+  })));
+  await storage.flush();
+
+  const setKeys = cloud.calls
+    .filter(([method]) => method === "setItem")
+    .map(([, key]) => key);
+  assert.equal(setKeys.filter((key) => key === refusedKey).length, 2);
+  assert.equal(setKeys.filter((key) => key === partialSuccessKey).length, 1);
+  assert.equal(setKeys.at(-1), `${ROOT}_meta`);
+  assert.equal(storage.status.cloud, "synced");
+  assert.equal(storage.status.lastError, null);
+
+  const reader = await TelegramBookmarkStorage.open({
+    scope: SCOPE,
+    localStorage: new MemoryStorage(),
+    webApp: webApp({ cloud, version: "6.9" }),
+  });
+  const reopened = JSON.parse(reader.getItem(aggregateKey()));
+  assert.equal(reader.status.source, "cloud");
+  assert.equal(reopened.record_updated_at, 2);
+  assert.deepEqual(
+    reopened.bookmarks.map((item) => item.text).sort(),
+    ["Retried", "Written on first attempt"].sort(),
   );
 });
 
@@ -570,8 +826,18 @@ test("commits the maximum escaped bookmark within one cloud value", async () => 
     localStorage: local,
     webApp: webApp({ cloud, version: "6.9" }),
   });
+  const topics = Array.from({ length: MAX_BOOKMARK_TOPICS }, (_, index) => ({
+    id: `topic_${index}`,
+    name: `Topic ${index}`,
+    color: BOOKMARK_TOPIC_COLORS[index % BOOKMARK_TOPIC_COLORS.length],
+  }));
   const record = aggregate(60, {
+    version: 2,
+    active_topic_id: topics[0].id,
+    topics,
     bookmarks: [bookmark({
+      topic_ids: topics.map((topic) => topic.id),
+      topic_id: topics[0].id,
       reference: "\\".repeat(180),
       book_name: "\\".repeat(128),
       text: "\\".repeat(1_024),

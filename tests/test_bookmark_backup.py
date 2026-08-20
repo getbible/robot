@@ -6,6 +6,7 @@ from modules.bookmark_backup import (
     MAX_BOOKMARK_BACKUP_BYTES,
     MAX_BOOKMARK_MARKINGS,
     MAX_BOOKMARK_TOPICS,
+    MAX_BOOKMARK_TOPICS_PER_MARKING,
     BookmarkBackupError,
     BookmarkRestoreFile,
     bookmark_backup_document,
@@ -40,6 +41,17 @@ def _backup() -> dict[str, object]:
     }
 
 
+def _backup_v4() -> dict[str, object]:
+    backup = _backup()
+    backup["version"] = 4
+    marking = backup["markings"][0]  # type: ignore[index]
+    marking.pop("reference")
+    marking.pop("colorId")
+    marking["bookName"] = "John"
+    marking["colorIndexes"] = [0]
+    return backup
+
+
 class BookmarkBackupTestCase(unittest.TestCase):
     def test_validates_and_canonicalizes_portable_json(self) -> None:
         document = bookmark_backup_document(_backup())
@@ -68,6 +80,149 @@ class BookmarkBackupTestCase(unittest.TestCase):
         document = bookmark_backup_document(backup)
 
         self.assertEqual(document.value, backup)
+
+    def test_accepts_v3_multi_topic_markings_and_counts_verses(self) -> None:
+        backup = _backup()
+        backup["version"] = 3
+        backup["colors"].append(  # type: ignore[union-attr]
+            {"id": "love", "name": "Love", "value": "#a16207"}
+        )
+        marking = backup["markings"][0]  # type: ignore[index]
+        marking.pop("colorId")
+        marking["colorIds"] = ["grace", "love"]
+
+        document = bookmark_backup_document(backup)
+
+        self.assertEqual(document.bookmark_count, 1)
+        self.assertEqual(document.topic_count, 2)
+        self.assertEqual(document.value, backup)
+
+    def test_v3_rejects_invalid_multi_topic_assignments(self) -> None:
+        invalid_color_ids: tuple[object, ...] = (
+            None,
+            "grace",
+            [],
+            ["grace", "grace"],
+            ["missing"],
+            ["grace"] * (MAX_BOOKMARK_TOPICS_PER_MARKING + 1),
+        )
+        for color_ids in invalid_color_ids:
+            backup = _backup()
+            backup["version"] = 3
+            marking = backup["markings"][0]  # type: ignore[index]
+            marking.pop("colorId")
+            marking["colorIds"] = color_ids
+            with self.subTest(color_ids=color_ids), self.assertRaisesRegex(
+                BookmarkBackupError,
+                "topics?|unknown topic",
+            ):
+                bookmark_backup_document(backup)
+
+        mixed = _backup()
+        mixed["version"] = 3
+        mixed["markings"][0]["colorIds"] = ["grace"]  # type: ignore[index]
+        with self.assertRaisesRegex(BookmarkBackupError, "topics"):
+            bookmark_backup_document(mixed)
+
+        legacy_with_v3_field = _backup()
+        legacy_with_v3_field["markings"][0]["colorIds"] = ["grace"]  # type: ignore[index]
+        with self.assertRaisesRegex(BookmarkBackupError, "topics"):
+            bookmark_backup_document(legacy_with_v3_field)
+
+    def test_accepts_v4_indexed_topics_and_rejects_mixed_fields(self) -> None:
+        backup = _backup_v4()
+        backup["colors"].append(  # type: ignore[union-attr]
+            {"id": "love", "name": "Love", "value": "#a16207"}
+        )
+        backup["markings"][0]["colorIndexes"] = [0, 1]  # type: ignore[index]
+
+        document = bookmark_backup_document(backup)
+
+        self.assertEqual(document.bookmark_count, 1)
+        self.assertEqual(document.topic_count, 2)
+        self.assertEqual(document.value, backup)
+
+        invalid_indexes: tuple[object, ...] = (
+            None,
+            "0",
+            [],
+            [0, 0],
+            [-1],
+            [2],
+            [True],
+            list(range(MAX_BOOKMARK_TOPICS_PER_MARKING + 1)),
+        )
+        for indexes in invalid_indexes:
+            invalid = copy.deepcopy(backup)
+            invalid["markings"][0]["colorIndexes"] = indexes  # type: ignore[index]
+            with self.subTest(indexes=indexes), self.assertRaisesRegex(
+                BookmarkBackupError,
+                "topics?|topic index",
+            ):
+                bookmark_backup_document(invalid)
+
+        for field, value in (
+            ("colorId", "grace"),
+            ("colorIds", ["grace"]),
+            ("reference", "John 3:16"),
+        ):
+            mixed = copy.deepcopy(backup)
+            mixed["markings"][0][field] = value  # type: ignore[index]
+            with self.subTest(field=field), self.assertRaises(
+                BookmarkBackupError,
+            ):
+                bookmark_backup_document(mixed)
+
+    def test_worst_case_utf8_v4_pretty_json_round_trips_under_cap(self) -> None:
+        maximum_name = "漢" * 80
+        maximum_book_name = "漢" * 128
+        maximum_quote = "漢" * 1024
+
+        def fixed_id(prefix: str, index: int) -> str:
+            lead = f"{prefix}{index:03d}"
+            return lead + ("x" * (128 - len(lead)))
+
+        colors = [
+            {
+                "id": fixed_id("t", index),
+                "name": maximum_name,
+                "value": "#abcdef",
+            }
+            for index in range(MAX_BOOKMARK_TOPICS)
+        ]
+        markings = [
+            {
+                "id": fixed_id("b", index),
+                "passage": {
+                    "translation": "a" * 30,
+                    "book": 200,
+                    "chapter": 1000,
+                },
+                "verse": index + 1,
+                "start": None,
+                "end": None,
+                "quote": maximum_quote,
+                "bookName": maximum_book_name,
+                "colorIndexes": list(range(MAX_BOOKMARK_TOPICS)),
+                "createdAt": (2**53) - 1,
+            }
+            for index in range(MAX_BOOKMARK_MARKINGS)
+        ]
+        backup = {
+            "format": "getbible-life-markings",
+            "version": 4,
+            "exportedAt": "2026-08-20T10:00:00.000Z",
+            "colors": colors,
+            "markings": markings,
+            "notes": [],
+        }
+        pretty = json.dumps(backup, ensure_ascii=False, indent=2).encode("utf-8")
+
+        self.assertLessEqual(len(pretty), MAX_BOOKMARK_BACKUP_BYTES)
+        reopened = parse_bookmark_backup_bytes(pretty)
+        self.assertEqual(reopened.bookmark_count, MAX_BOOKMARK_MARKINGS)
+        self.assertEqual(reopened.topic_count, MAX_BOOKMARK_TOPICS)
+        self.assertEqual(reopened.value, backup)
 
     def test_restore_callback_is_durable_and_owner_bound(self) -> None:
         callback_key = ":".join(("123", "fixture-key"))
@@ -149,7 +304,7 @@ class BookmarkBackupTestCase(unittest.TestCase):
         invalid_values: tuple[tuple[object, str], ...] = (
             ([], "JSON object"),
             ({**_backup(), "format": "another-format"}, "format"),
-            ({**_backup(), "version": 3}, "version"),
+            ({**_backup(), "version": 5}, "version"),
             ({**_backup(), "version": True}, "version"),
             ({**_backup(), "exportedAt": None}, "date"),
             ({**_backup(), "exportedAt": "not-a-date"}, "date"),

@@ -1,0 +1,3 @@
+# Preserve the supplied catalog source byte-for-byte; its spacing is covered by
+# the audited SHA-256 and trimmed only by the deterministic generator.
+data/global-bookmarks/tag-verse.csv -whitespace

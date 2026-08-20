@@ -98,7 +98,16 @@ function installTelegramMock() {
       safeAreaInset: { top: 0, right: 0, bottom: 18, left: 0 },
       contentSafeAreaInset: { top: 56, right: 0, bottom: 34, left: 0 },
       isFullscreen: false,
-      BackButton: { onClick() {}, offClick() {}, show() {}, hide() {} },
+      BackButton: {
+        onClick(handler) { window.__telegramState.backHandler = handler; },
+        offClick(handler) {
+          if (window.__telegramState.backHandler === handler) {
+            window.__telegramState.backHandler = null;
+          }
+        },
+        show() {},
+        hide() {},
+      },
       HapticFeedback: { selectionChanged() {}, notificationOccurred() {} },
       showConfirm(_message, callback) { callback(true); },
       onEvent(name, handler) {
@@ -365,14 +374,20 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     true,
   );
 
-  // Selecting in the reader opens the anchored bookmark menu. Assignment is
-  // browser-local first, appears on Home, and remains outside the five-item
-  // footer while the explicit chat backup alone calls Robot.
+  // Selecting in the reader reveals a compact menu trigger without opening it.
+  // Multiple topic assignments remain browser-local first and outside the
+  // five-item footer while the explicit chat backup alone calls Robot.
   await page.locator('[data-reader-verse="2"]').click();
   await page.waitForFunction(() => (
-    !document.querySelector("#bookmark-popover")?.hidden &&
+    document.querySelector("#bookmark-popover")?.hidden &&
     document.querySelector('[data-bookmark-trigger="gbd_kjv_043_0003_0002"]')
-      ?.getAttribute("aria-expanded") === "true"
+      ?.textContent === "•••"
+  ));
+  await page.locator(
+    '[data-bookmark-trigger="gbd_kjv_043_0003_0002"]',
+  ).click();
+  await page.waitForFunction(() => (
+    !document.querySelector("#bookmark-popover")?.hidden
   ));
   assert.match(
     await page.locator('#bookmark-topic-picker option[value="biblical-love"]')
@@ -382,13 +397,21 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   assert.equal(
     await page.locator('#bookmark-topic-picker option[value="biblical-love"]')
       .evaluate((option) => option.style.color),
-    "rgb(249, 168, 212)",
+    "rgb(161, 98, 7)",
   );
   await page.locator("#bookmark-topic-picker").selectOption("grace");
   await page.waitForFunction(() => (
     document.querySelector('#bible-verses [data-reader-verse="2"]')
       ?.closest(".reader-verse-row")?.dataset.bookmarkColor === "bbf7d0" &&
-    document.querySelector("#bookmark-popover")?.hidden
+    !document.querySelector("#bookmark-popover")?.hidden &&
+    document.querySelector('[data-bookmark-topic-open="grace"]')
+  ));
+  await page.locator("#bookmark-topic-picker").selectOption("biblical-love");
+  await page.waitForFunction(() => (
+    document.querySelectorAll("#bookmark-assigned-topics .bookmark-assigned-topic")
+      .length === 2 &&
+    !document.querySelector('#bookmark-topic-picker option[value="grace"]') &&
+    !document.querySelector('#bookmark-topic-picker option[value="biblical-love"]')
   ));
   const storedBookmark = await page.evaluate(() => {
     const key = Object.keys(window.localStorage).find((candidate) =>
@@ -397,9 +420,23 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     const record = key ? JSON.parse(window.localStorage.getItem(key)) : null;
     return record?.bookmarks?.[0] ?? null;
   });
-  assert.equal(storedBookmark?.topic_id, "grace");
+  assert.deepEqual(storedBookmark?.topic_ids, ["grace", "biblical-love"]);
   assert.equal(storedBookmark?.chapter, 3);
   assert.equal(storedBookmark?.verse, 2);
+
+  await page.locator('[data-bookmark-topic-open="grace"]').click();
+  await page.waitForFunction(() => (
+    document.querySelector("#app")?.dataset.activeRoute === "bookmarks" &&
+    !document.querySelector("#bookmark-detail")?.hidden &&
+    !document.querySelector("#bookmark-back-to-verse")?.hidden
+  ));
+  await page.locator("#bookmark-back-to-verse").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#app")?.dataset.activeRoute === "bible" &&
+    document.querySelector('[data-reader-verse="2"]')
+      ?.closest(".reader-verse-row")?.dataset.bookmarkColor === "bbf7d0" &&
+    document.querySelector("#bookmark-popover")?.hidden
+  ));
 
   await page.locator('[data-route="home"]').click();
   await page.waitForFunction(() => (
@@ -407,7 +444,10 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   ));
   assert.equal(await page.locator(".home-actions .home-action").count(), 3);
   assert.equal(await page.locator("#home-bookmarks").isVisible(), true);
-  assert.match(await page.locator("#home-bookmarks-meta").innerText(), /One bookmark/);
+  assert.match(
+    await page.locator("#home-bookmarks-meta").innerText(),
+    /One personal verse/,
+  );
   assert.equal(
     await page.locator("#translation-shortcut").evaluate(
       (button) => getComputedStyle(button).display,
@@ -425,21 +465,127 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     ),
     "none",
   );
-  assert.equal(await page.locator(".bookmark-group-card").count(), 60);
+  assert.equal(await page.locator(".bookmark-group-card").count(), 61);
   await page.locator('[data-bookmark-topic="grace"]').click();
   await page.waitForFunction(() => (
     !document.querySelector("#bookmark-detail")?.hidden &&
     document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 1
   ));
   assert.match(await page.locator("#bookmark-list").innerText(), /John 3:2/);
+  assert.equal(await page.locator("#load-topic-global-bookmarks").isVisible(), true);
+  await page.locator("#load-topic-global-bookmarks").click();
+  await page.waitForFunction(() => (
+    document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 53 &&
+    document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length === 52
+  ));
+  assert.equal(
+    await page.locator("#bookmark-list [data-bookmark-remove]").count(),
+    53,
+  );
+  assert.equal(
+    await page.locator('#bookmark-list [data-bookmark-open^="global_grace_"]').count(),
+    52,
+  );
+  const hiddenGlobalId = await page.locator(
+    '#bookmark-list [data-bookmark-open^="global_grace_"]',
+  ).first().getAttribute("data-bookmark-open");
+  await page.locator(
+    `#bookmark-list [data-bookmark-open="${hiddenGlobalId}"] + [data-bookmark-remove]`,
+  ).click();
+  await page.waitForFunction((bookmarkId) => {
+    const record = JSON.parse(
+      window.localStorage.getItem("getbible.miniapp.global-bookmarks.v2"),
+    );
+    return document.querySelectorAll("#bookmark-list .bookmark-list__global-badge")
+      .length === 51 && record.hidden_bookmark_ids.includes(bookmarkId);
+  }, hiddenGlobalId);
+  assert.match(
+    await page.locator("#load-topic-global-bookmarks-label").innerText(),
+    /Reload global verses/,
+  );
+  await page.locator("#load-topic-global-bookmarks").click();
+  await page.waitForFunction((bookmarkId) => {
+    const record = JSON.parse(
+      window.localStorage.getItem("getbible.miniapp.global-bookmarks.v2"),
+    );
+    return document.querySelectorAll("#bookmark-list .bookmark-list__global-badge")
+      .length === 52 && !record.hidden_bookmark_ids.includes(bookmarkId);
+  }, hiddenGlobalId);
+  assert.equal(await page.locator("#clear-topic-global-bookmarks").isVisible(), true);
+  await page.locator("#clear-topic-global-bookmarks").click();
+  await page.waitForFunction(() => (
+    document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 1 &&
+    document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length === 0 &&
+    document.querySelector("#bookmark-topic-global-status")?.textContent
+      ?.includes("Personal bookmarks were kept")
+  ));
+  assert.equal(
+    await page.evaluate(() => {
+      const record = JSON.parse(
+        window.localStorage.getItem("getbible.miniapp.global-bookmarks.v2"),
+      );
+      return record.enabled_topic_ids.includes("grace");
+    }),
+    false,
+  );
+  await page.locator("#bookmark-all-topics").click();
+  await page.locator("#load-global-bookmarks").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#global-bookmark-status")?.textContent
+      ?.includes("2155 global verse links") &&
+    document.querySelector("#global-bookmark-status")?.textContent
+      ?.includes("61 topics")
+  ));
+  await page.locator('[data-bookmark-topic="grace"]').click();
+  await page.waitForFunction(() => (
+    document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 53 &&
+    document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length === 52
+  ));
   await page.locator("#bookmark-all-topics").click();
   await page.locator("#backup-bookmarks").click();
   await page.waitForFunction(() => (
     document.querySelector("#bookmark-backup-status")?.textContent ===
       "Backup saved in this private bot chat."
   ));
+  assert.equal(bookmarkBackupRequest?.backup?.version, 4);
   assert.equal(bookmarkBackupRequest?.backup?.markings?.length, 1);
-  assert.equal(bookmarkBackupRequest?.backup?.markings?.[0]?.colorId, "grace");
+  assert.deepEqual(
+    bookmarkBackupRequest?.backup?.markings?.[0]?.colorIndexes,
+    ["grace", "biblical-love"].map((topicId) =>
+      bookmarkBackupRequest.backup.colors.findIndex((topic) => topic.id === topicId)
+    ),
+  );
+  await page.locator('[data-bookmark-topic="spiritual-rebirth"]').click();
+  await page.waitForFunction(() => (
+    document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length === 44
+  ));
+  assert.equal(
+    await page.locator(
+      '[data-bookmark-open="global_spiritual-rebirth_43_3_3"]',
+    ).getAttribute("aria-label"),
+    "Open John 3:3 in King James Version (1769) (KJV). Global bookmark.",
+  );
+  await page.locator(
+    '[data-bookmark-open="global_spiritual-rebirth_43_3_3"]',
+  ).click();
+  await page.waitForFunction(() => (
+    document.querySelector("#app")?.dataset.activeRoute === "bible" &&
+    document.querySelector("#bible-reference")?.textContent === "John 3"
+  ));
+  await page.waitForFunction((scope) => {
+    const raw = window.localStorage.getItem(
+      `getbible.miniapp.last-read.v1:${scope}`,
+    );
+    return raw && JSON.parse(raw).verse === 3;
+  }, bookmarkScope);
+  await page.evaluate(() => window.__telegramState.backHandler?.());
+  await page.waitForFunction(() => (
+    document.querySelector("#app")?.dataset.activeRoute === "bookmarks" &&
+    document.querySelector("#bookmark-detail-title")?.textContent ===
+      "Spiritual Rebirth" &&
+    document.activeElement?.getAttribute("data-bookmark-open") ===
+      "global_spiritual-rebirth_43_3_3"
+  ));
   await page.locator('[data-route="bible"]').click();
   await page.waitForFunction(() => (
     document.querySelector("#app")?.dataset.activeRoute === "bible" &&
@@ -454,28 +600,20 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   await page.locator(
     '[data-bookmark-trigger="gbd_kjv_043_0003_0002"]',
   ).click();
-  await page.locator("#bookmark-topic-picker").selectOption("biblical-love");
+  await page.locator(
+    '[data-bookmark-topic-open="biblical-love"] + [data-bookmark-assignment-remove]',
+  ).click();
   await page.waitForFunction(() => {
     const key = Object.keys(window.localStorage).find((candidate) =>
       candidate.startsWith("getbible.miniapp.bookmarks.v1:")
     );
     const record = key ? JSON.parse(window.localStorage.getItem(key)) : null;
     return record?.bookmarks?.length === 1 &&
-      record.bookmarks[0].topic_id === "biblical-love";
+      record.bookmarks[0].topic_ids.length === 1 &&
+      record.bookmarks[0].topic_ids[0] === "grace" &&
+      document.querySelector('[data-bookmark-topic-open="grace"]');
   });
-  await page.locator(
-    '[data-bookmark-trigger="gbd_kjv_043_0003_0002"]',
-  ).click();
-  await page.locator("#remove-verse-bookmark").click();
-  await page.waitForFunction(() => {
-    const key = Object.keys(window.localStorage).find((candidate) =>
-      candidate.startsWith("getbible.miniapp.bookmarks.v1:")
-    );
-    const record = key ? JSON.parse(window.localStorage.getItem(key)) : null;
-    return record?.bookmarks?.length === 0 &&
-      !document.querySelector('#bible-verses [data-reader-verse="2"]')
-        ?.closest(".reader-verse-row")?.dataset.bookmarkColor;
-  });
+  await page.locator("#close-bookmark-popover").click();
 
   await page.locator("#bible-next").click();
   await page.waitForFunction(() => (

@@ -495,7 +495,49 @@
                 </button>
               </form>
               <div id="bookmark-topic-editor" class="bookmark-topic-editor"></div>
+              <div class="bookmark-topic-defaults">
+                <button
+                  id="restore-default-bookmark-topics"
+                  class="button button--secondary"
+                  type="button"
+                  aria-describedby="bookmark-default-topic-status"
+                >
+                  <span data-i18n="bookmarks.restore_default_tags">Restore default tags</span>
+                </button>
+                <p
+                  id="bookmark-default-topic-status"
+                  class="bookmark-topic-defaults__status"
+                  role="status"
+                  aria-live="polite"
+                ></p>
+              </div>
             </details>
+
+            <section class="bookmark-global" aria-labelledby="bookmark-global-title">
+              <div class="bookmark-global__copy">
+                <h2 id="bookmark-global-title" data-i18n="bookmarks.global_title">
+                  Global bookmark library
+                </h2>
+                <p data-i18n="bookmarks.global_help">
+                  Show the built-in getBible.Life topic verses in this browser without changing your
+                  personal bookmarks, sync, or backups. Reload them to restore missing topics.
+                </p>
+              </div>
+              <button
+                id="load-global-bookmarks"
+                class="button button--primary bookmark-global__load"
+                type="button"
+                aria-describedby="global-bookmark-status"
+              >
+                <span data-i18n="bookmarks.load_global_tags">Load Global Tags</span>
+              </button>
+              <p
+                id="global-bookmark-status"
+                class="bookmark-global__status"
+                role="status"
+                aria-live="polite"
+              ></p>
+            </section>
 
             <section class="bookmark-backup" aria-labelledby="bookmark-backup-title">
               <h2 id="bookmark-backup-title" data-i18n="bookmarks.backup_title">Backup and restore</h2>
@@ -525,15 +567,48 @@
           </div>
 
           <div id="bookmark-detail" hidden>
-            <button id="bookmark-all-topics" class="bookmark-back" type="button">
-              <span aria-hidden="true">‹</span>
-              <span data-i18n="bookmarks.all_topics">All topics</span>
-            </button>
+            <div class="bookmark-detail__navigation">
+              <button id="bookmark-all-topics" class="bookmark-back" type="button">
+                <span aria-hidden="true">‹</span>
+                <span data-i18n="bookmarks.all_topics">All topics</span>
+              </button>
+              <button id="bookmark-back-to-verse" class="bookmark-back" type="button" hidden>
+                <span aria-hidden="true">↩</span>
+                <span data-i18n="bookmarks.back_to_verse">Back to verse</span>
+              </button>
+            </div>
             <div class="bookmark-detail__heading">
               <span id="bookmark-detail-dot" class="bookmark-dot" aria-hidden="true"></span>
-              <div>
+              <div class="bookmark-detail__copy">
                 <h2 id="bookmark-detail-title"></h2>
                 <p id="bookmark-detail-count"></p>
+                <p
+                  id="bookmark-topic-global-status"
+                  class="bookmark-detail__global-status"
+                  role="status"
+                  aria-live="polite"
+                ></p>
+              </div>
+              <div class="bookmark-detail__actions">
+                <button
+                  id="load-topic-global-bookmarks"
+                  class="button button--secondary"
+                  type="button"
+                  hidden
+                >
+                  <span
+                    id="load-topic-global-bookmarks-label"
+                    data-i18n="bookmarks.load_topic_global"
+                  >Load global verses</span>
+                </button>
+                <button
+                  id="clear-topic-global-bookmarks"
+                  class="button button--secondary"
+                  type="button"
+                  hidden
+                >
+                  <span data-i18n="bookmarks.clear_topic_global">Clear global verses</span>
+                </button>
               </div>
             </div>
             <div id="bookmark-detail-empty" class="empty-selection bookmark-detail__empty">
@@ -566,24 +641,24 @@
         hidden
       >
         <div class="bookmark-popover__context">
-          <span class="bookmark-popover__icon" aria-hidden="true">◇</span>
+          <span class="bookmark-popover__icon" aria-hidden="true">•••</span>
           <strong id="bookmark-popover-reference"></strong>
         </div>
         <div class="bookmark-popover__actions">
-          <button id="bookmark-active-topic" class="bookmark-active-topic" type="button">
-            <span id="bookmark-active-topic-dot" class="bookmark-dot" aria-hidden="true"></span>
-            <span id="bookmark-active-topic-name"></span>
-          </button>
+          <div
+            id="bookmark-assigned-topics"
+            class="bookmark-assigned-topics"
+            role="list"
+            aria-label="Assigned bookmark topics"
+            data-i18n-aria-label="bookmarks.assigned_topics"
+            hidden
+          ></div>
           <label class="bookmark-topic-picker">
-            <span class="sr-only" data-i18n="bookmarks.choose_topic">Choose another topic</span>
-            <select id="bookmark-topic-picker" aria-label="Choose another topic" data-i18n-aria-label="bookmarks.choose_topic">
-              <option value="" disabled selected data-i18n="bookmarks.more_topics">More topics…</option>
+            <span class="sr-only" data-i18n="bookmarks.choose_topic">Add another topic</span>
+            <select id="bookmark-topic-picker" aria-label="Add another topic" data-i18n-aria-label="bookmarks.choose_topic">
+              <option value="" disabled selected data-i18n="bookmarks.more_topics">Add to another topic…</option>
             </select>
           </label>
-          <button id="remove-verse-bookmark" class="bookmark-popover__plain" type="button">
-            <span aria-hidden="true">⊘</span>
-            <span data-i18n="bookmarks.none">None</span>
-          </button>
           <button
             id="close-bookmark-popover"
             class="bookmark-popover__close"

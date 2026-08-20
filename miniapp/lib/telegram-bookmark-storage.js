@@ -17,9 +17,11 @@ const CLOUD_VALUE_LIMIT = 4_096;
 const CLOUD_KEY_LIMIT = 1_024;
 const CLOUD_WRITE_CONCURRENCY = 8;
 const CLOUD_READ_BATCH_SIZE = 100;
+const BOOKMARK_SYNC_MAX_ATTEMPTS = 3;
 const DEFAULT_TIMEOUT_MS = 2_500;
 const LAST_READ_STORAGE_PREFIX = "getbible.miniapp.last-read.v1";
 const STORAGE_UNKNOWN = Symbol("telegram-storage-unknown");
+const BOOKMARK_AGGREGATE_VERSION = 2;
 
 export const TELEGRAM_BOOKMARK_CLOUD_MAX_KEYS =
   1 + MAX_BOOKMARK_TOPICS + MAX_BOOKMARKS;
@@ -35,6 +37,7 @@ export class TelegramBookmarkStorage {
   #cloud;
   #cloudRoot;
   #cloudSnapshot = new Map();
+  #completedSequence = 0;
   #desired = null;
   #device;
   #deviceKey;
@@ -128,14 +131,15 @@ export class TelegramBookmarkStorage {
 
   setItem(key, value) {
     this.#requireAggregateKey(key);
-    const raw = String(value);
+    const inputRaw = String(value);
+    const parsed = parseAggregate(inputRaw);
+    const raw = parsed && !parsed.future ? parsed.raw : inputRaw;
     this.#memoryRaw = raw;
     this.#writeLocal(this.#aggregateKey, raw);
-    const parsed = parseAggregate(raw);
     this.#setStatus({
       recordUpdatedAt: parsed?.recordUpdatedAt ?? this.#status.recordUpdatedAt,
     });
-    if (!parsed?.future) {
+    if (parsed && !parsed.future) {
       this.#queueSync(raw);
     }
   }
@@ -400,50 +404,86 @@ export class TelegramBookmarkStorage {
     }
     this.#desired = { sequence: ++this.#sequence, raw };
     this.#setStatus({ pending: true });
-    if (!this.#syncPromise) {
-      this.#syncPromise = Promise.resolve()
-        .then(() => this.#drainSync())
-        .finally(() => {
-          this.#syncPromise = null;
-          this.#setStatus({
-            phase: this.#status.lastError ? "degraded" : "ready",
-            pending: false,
-          });
-        });
+    this.#startSync();
+  }
+
+  #startSync() {
+    if (
+      this.#syncPromise ||
+      !this.#desired ||
+      this.#desired.sequence <= this.#completedSequence
+    ) {
+      return;
     }
+    this.#syncPromise = Promise.resolve()
+      .then(() => this.#drainSync())
+      .finally(() => {
+        this.#syncPromise = null;
+        const pending = Boolean(
+          this.#desired &&
+          this.#desired.sequence > this.#completedSequence
+        );
+        this.#setStatus({
+          phase: pending
+            ? "syncing"
+            : this.#status.lastError ? "degraded" : "ready",
+          pending,
+        });
+        // A synchronous BookmarkStore mutation can land after the drain loop
+        // exits but before this promise settles. Do not strand that write.
+        this.#startSync();
+      });
   }
 
   async #drainSync() {
-    let completed = 0;
-    while (this.#desired && this.#desired.sequence > completed) {
+    while (
+      this.#desired &&
+      this.#desired.sequence > this.#completedSequence
+    ) {
       const target = this.#desired;
-      const errors = [];
-      this.#setStatus({ phase: "syncing", lastError: null });
-      const tasks = [];
-      if (this.#device) {
-        this.#setStatus({ device: "syncing" });
-        tasks.push(
-          this.#syncDevice(target.raw)
-            .then(() => this.#setStatus({ device: "synced" }))
-            .catch((error) => {
-              errors.push(error);
-              this.#setStatus({ device: "error" });
-            }),
-        );
+      let errors = [];
+      // Cloud snapshots are updated per successful item, so a bounded retry
+      // replays only failed work and can finish an interrupted commit without
+      // waiting for another user mutation.
+      for (
+        let attempt = 1;
+        attempt <= BOOKMARK_SYNC_MAX_ATTEMPTS;
+        attempt += 1
+      ) {
+        errors = [];
+        this.#setStatus({ phase: "syncing", lastError: null });
+        const tasks = [];
+        if (this.#device) {
+          this.#setStatus({ device: "syncing" });
+          tasks.push(
+            this.#syncDevice(target.raw)
+              .then(() => this.#setStatus({ device: "synced" }))
+              .catch((error) => {
+                errors.push(error);
+                this.#setStatus({ device: "error" });
+              }),
+          );
+        }
+        if (this.#cloud) {
+          this.#setStatus({ cloud: "syncing" });
+          tasks.push(
+            this.#syncCloud(target.raw)
+              .then(() => this.#setStatus({ cloud: "synced" }))
+              .catch((error) => {
+                errors.push(error);
+                this.#setStatus({ cloud: "error" });
+              }),
+          );
+        }
+        await Promise.all(tasks);
+        if (
+          errors.length === 0 ||
+          this.#desired?.sequence > target.sequence
+        ) {
+          break;
+        }
       }
-      if (this.#cloud) {
-        this.#setStatus({ cloud: "syncing" });
-        tasks.push(
-          this.#syncCloud(target.raw)
-            .then(() => this.#setStatus({ cloud: "synced" }))
-            .catch((error) => {
-              errors.push(error);
-              this.#setStatus({ cloud: "error" });
-            }),
-        );
-      }
-      await Promise.all(tasks);
-      completed = target.sequence;
+      this.#completedSequence = target.sequence;
       this.#setStatus({
         lastError: errors.length > 0 ? errorMessage(errors[0]) : null,
       });
@@ -506,27 +546,46 @@ export class TelegramBookmarkStorage {
   #buildCloudTarget(record) {
     const updatedAt = record.record_updated_at ?? 0;
     const target = new Map();
+    const topicIndexes = new Map();
     record.topics.forEach((topic, index) => {
+      topicIndexes.set(topic.id, index);
       target.set(
         `${this.#topicCloudPrefix()}${String(index).padStart(3, "0")}`,
-        cloudValue({ record_updated_at: updatedAt, topic }),
+        cloudValue({ topic }),
       );
     });
     for (const bookmark of record.bookmarks) {
       const key = `${this.#verseCloudPrefix()}${pad(bookmark.book, 3)}_${
         pad(bookmark.chapter, 4)
       }_${pad(bookmark.verse, 4)}`;
+      const topicIndexValues = bookmark.topic_ids.map((topicId) =>
+        topicIndexes.get(topicId)
+      );
+      if (topicIndexValues.some((index) => !Number.isInteger(index))) {
+        throw new TypeError("The bookmark aggregate is invalid.");
+      }
+      const compactBookmark = {
+        ...bookmark,
+        topic_indexes: topicIndexValues,
+      };
+      delete compactBookmark.topic_ids;
+      delete compactBookmark.topic_id;
       target.set(
         key,
-        cloudValue({ record_updated_at: updatedAt, bookmark }),
+        cloudValue({ bookmark: compactBookmark }),
       );
     }
+    // Item wrappers deliberately exclude the aggregate timestamp. This keeps
+    // unchanged values byte-stable, while the fingerprint lets the metadata
+    // remain the last, atomic commit marker for the complete payload.
+    const payloadFingerprint = cloudPayloadFingerprint(target);
     target.set(this.#metaCloudKey(), cloudValue({
       version: record.version,
       record_updated_at: updatedAt,
       active_topic_id: record.active_topic_id,
       topic_count: record.topics.length,
       bookmark_count: record.bookmarks.length,
+      payload_fingerprint: payloadFingerprint,
     }));
     if (target.size > CLOUD_KEY_LIMIT) {
       throw new RangeError("The Telegram CloudStorage key limit was exceeded.");
@@ -866,18 +925,18 @@ function parseAggregate(raw) {
     if (
       isRecord(value) &&
       Number.isInteger(value.version) &&
-      value.version > 1
+      value.version > BOOKMARK_AGGREGATE_VERSION
     ) {
       return {
         raw,
         value: null,
-        recordUpdatedAt: 0,
+        recordUpdatedAt: safeTimestamp(value.record_updated_at) ?? 0,
         future: true,
       };
     }
     if (
       !isRecord(value) ||
-      value.version !== 1 ||
+      (value.version !== 1 && value.version !== BOOKMARK_AGGREGATE_VERSION) ||
       !Array.isArray(value.topics) ||
       value.topics.length < 1 ||
       value.topics.length > MAX_BOOKMARK_TOPICS ||
@@ -890,10 +949,13 @@ function parseAggregate(raw) {
     const updatedAt = Object.hasOwn(value, "record_updated_at")
       ? safeTimestamp(value.record_updated_at)
       : 0;
-    if (updatedAt === null || !validAggregateItems(value)) {
+    if (updatedAt === null) {
       return null;
     }
-    const normalized = { ...value, record_updated_at: updatedAt };
+    const normalized = normalizeAggregate(value, updatedAt);
+    if (!normalized) {
+      return null;
+    }
     return {
       raw: JSON.stringify(normalized),
       value: normalized,
@@ -905,7 +967,7 @@ function parseAggregate(raw) {
   }
 }
 
-function validAggregateItems(value) {
+function normalizeAggregate(value, updatedAt) {
   const topicIds = new Set();
   for (const topic of value.topics) {
     if (
@@ -919,22 +981,34 @@ function validAggregateItems(value) {
       !COLOR_PATTERN.test(topic.color.toLowerCase()) ||
       topicIds.has(topic.id)
     ) {
-      return false;
+      return null;
     }
     topicIds.add(topic.id);
   }
   if (!topicIds.has(value.active_topic_id)) {
-    return false;
+    return null;
   }
   const verses = new Set();
+  const bookmarkIds = new Set();
+  const bookmarks = [];
   for (const bookmark of value.bookmarks) {
     const createdAt = safeTimestamp(bookmark?.created_at);
-    const updatedAt = safeTimestamp(bookmark?.updated_at ?? bookmark?.created_at);
+    const bookmarkUpdatedAt = safeTimestamp(
+      bookmark?.updated_at ?? bookmark?.created_at,
+    );
+    const bookmarkTopicIds = value.version === 1
+      ? [bookmark?.topic_id]
+      : bookmark?.topic_ids;
     if (
       !isRecord(bookmark) ||
       typeof bookmark.id !== "string" ||
       !ID_PATTERN.test(bookmark.id) ||
-      !topicIds.has(bookmark.topic_id) ||
+      bookmarkIds.has(bookmark.id) ||
+      !validTopicIds(bookmarkTopicIds, topicIds) ||
+      (
+        value.version === BOOKMARK_AGGREGATE_VERSION &&
+        bookmark.topic_id !== bookmarkTopicIds[0]
+      ) ||
       typeof bookmark.translation !== "string" ||
       !TRANSLATION_PATTERN.test(bookmark.translation.toLowerCase()) ||
       !boundedString(bookmark.reference, 180) ||
@@ -944,26 +1018,93 @@ function validAggregateItems(value) {
       !boundedInteger(bookmark.chapter, 1, 1_000) ||
       !boundedInteger(bookmark.verse, 1, 2_000) ||
       createdAt === null ||
-      updatedAt === null ||
-      updatedAt < createdAt
+      bookmarkUpdatedAt === null ||
+      bookmarkUpdatedAt < createdAt
     ) {
-      return false;
+      return null;
     }
     const key = `${bookmark.book}/${bookmark.chapter}/${bookmark.verse}`;
     if (verses.has(key)) {
-      return false;
+      return null;
     }
     verses.add(key);
+    bookmarkIds.add(bookmark.id);
+    bookmarks.push({
+      ...bookmark,
+      topic_ids: [...bookmarkTopicIds],
+      topic_id: bookmarkTopicIds[0],
+    });
   }
-  return true;
+  return {
+    version: BOOKMARK_AGGREGATE_VERSION,
+    active_topic_id: value.active_topic_id,
+    topics: value.topics.map((topic) => ({ ...topic })),
+    bookmarks,
+    record_updated_at: updatedAt,
+  };
+}
+
+function validTopicIds(value, allowedTopicIds) {
+  return Array.isArray(value) &&
+    value.length >= 1 &&
+    value.length <= MAX_BOOKMARK_TOPICS &&
+    new Set(value).size === value.length &&
+    value.every((topicId) =>
+      typeof topicId === "string" &&
+      ID_PATTERN.test(topicId) &&
+      allowedTopicIds.has(topicId)
+    );
+}
+
+function expandCloudBookmark(value, topics) {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.topic_indexes) ||
+    value.topic_indexes.length < 1 ||
+    value.topic_indexes.length > MAX_BOOKMARK_TOPICS ||
+    new Set(value.topic_indexes).size !== value.topic_indexes.length
+  ) {
+    return null;
+  }
+  const topicIds = value.topic_indexes.map((index) =>
+    Number.isInteger(index) && index >= 0 && index < topics.length
+      ? topics[index]?.id
+      : null
+  );
+  if (topicIds.some((topicId) => typeof topicId !== "string")) {
+    return null;
+  }
+  const bookmark = { ...value };
+  delete bookmark.topic_indexes;
+  return {
+    ...bookmark,
+    topic_ids: topicIds,
+    topic_id: topicIds[0],
+  };
 }
 
 function cloudAggregate(values, metaKey, topicPrefix, versePrefix) {
   const meta = parseJsonRecord(values.get(metaKey));
   const updatedAt = safeTimestamp(meta?.record_updated_at);
   if (
+    meta &&
+    Number.isInteger(meta.version) &&
+    meta.version > BOOKMARK_AGGREGATE_VERSION &&
+    updatedAt !== null
+  ) {
+    return {
+      raw: JSON.stringify({
+        version: meta.version,
+        record_updated_at: updatedAt,
+      }),
+      value: null,
+      recordUpdatedAt: updatedAt,
+      future: true,
+    };
+  }
+  if (
     !meta ||
-    meta.version !== 1 ||
+    (meta.version !== 1 && meta.version !== BOOKMARK_AGGREGATE_VERSION) ||
     updatedAt === null ||
     !boundedInteger(meta.topic_count, 1, MAX_BOOKMARK_TOPICS) ||
     !boundedInteger(meta.bookmark_count, 0, MAX_BOOKMARKS) ||
@@ -972,12 +1113,36 @@ function cloudAggregate(values, metaKey, topicPrefix, versePrefix) {
     return null;
   }
 
+  const fingerprinted = Object.hasOwn(meta, "payload_fingerprint");
+  if (
+    fingerprinted &&
+    (
+      typeof meta.payload_fingerprint !== "string" ||
+      !/^fnv2x32-[0-9a-f]{16}$/.test(meta.payload_fingerprint)
+    )
+  ) {
+    return null;
+  }
+  if (fingerprinted) {
+    const payload = new Map(
+      [...values].filter(([key]) =>
+        key.startsWith(topicPrefix) || key.startsWith(versePrefix)
+      ),
+    );
+    if (cloudPayloadFingerprint(payload) !== meta.payload_fingerprint) {
+      return null;
+    }
+  }
+
   const topics = [];
-  const bookmarks = [];
+  const encodedBookmarks = [];
   for (const [key, raw] of values) {
     if (key.startsWith(topicPrefix)) {
       const wrapper = parseJsonRecord(raw);
-      if (wrapper?.record_updated_at === updatedAt && isRecord(wrapper.topic)) {
+      if (
+        isRecord(wrapper?.topic) &&
+        (fingerprinted || wrapper.record_updated_at === updatedAt)
+      ) {
         const index = Number(key.slice(topicPrefix.length));
         if (Number.isInteger(index) && index >= 0) {
           topics[index] = wrapper.topic;
@@ -986,22 +1151,28 @@ function cloudAggregate(values, metaKey, topicPrefix, versePrefix) {
     } else if (key.startsWith(versePrefix)) {
       const wrapper = parseJsonRecord(raw);
       if (
-        wrapper?.record_updated_at === updatedAt &&
-        isRecord(wrapper.bookmark)
+        isRecord(wrapper?.bookmark) &&
+        (fingerprinted || wrapper.record_updated_at === updatedAt)
       ) {
-        bookmarks.push(wrapper.bookmark);
+        encodedBookmarks.push(wrapper.bookmark);
       }
     }
   }
+  const bookmarks = meta.version === 1
+    ? encodedBookmarks
+    : encodedBookmarks.map((bookmark) =>
+      expandCloudBookmark(bookmark, topics)
+    );
   if (
     topics.length !== meta.topic_count ||
     topics.some((topic) => !topic) ||
-    bookmarks.length !== meta.bookmark_count
+    bookmarks.length !== meta.bookmark_count ||
+    bookmarks.some((bookmark) => !bookmark)
   ) {
     return null;
   }
   return parseAggregate(JSON.stringify({
-    version: 1,
+    version: meta.version,
     active_topic_id: meta.active_topic_id,
     topics,
     bookmarks,
@@ -1097,6 +1268,30 @@ function cloudValue(value) {
     throw new RangeError("A Telegram CloudStorage value is too large.");
   }
   return raw;
+}
+
+/**
+ * Compact commit fingerprint for exact CloudStorage key/value payload bytes.
+ * This is an atomicity checksum, not an authentication primitive: the metadata
+ * is written only after all fingerprinted item mutations have succeeded.
+ */
+function cloudPayloadFingerprint(values) {
+  const entries = [...values.entries()].sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0
+  );
+  let left = 0x811c9dc5;
+  let right = 0x9e3779b9;
+  for (const [key, value] of entries) {
+    const framed = `${key.length}:${key}${value.length}:${value}`;
+    for (let index = 0; index < framed.length; index += 1) {
+      const unit = framed.charCodeAt(index);
+      left = Math.imul(left ^ unit, 0x01000193) >>> 0;
+      right = Math.imul(right ^ unit, 0x85ebca6b) >>> 0;
+    }
+  }
+  return `fnv2x32-${left.toString(16).padStart(8, "0")}${
+    right.toString(16).padStart(8, "0")
+  }`;
 }
 
 function parseJsonRecord(raw) {

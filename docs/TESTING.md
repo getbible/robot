@@ -113,15 +113,22 @@ Tests must prove:
 
 `BookmarkStore` and `TelegramBookmarkStorage` tests must cover:
 
-- the shipped colored topic catalog plus bounded add, rename, recolor, and
-  removal;
-- one complete bookmark per canonical book/chapter/verse across translations,
-  topic reassignment, removal, clear, and defensive snapshots;
-- maximum topic/bookmark counts and per-value sizes that fit Telegram storage
-  limits;
-- versioned bounded JSON export/import, compatible-format merge,
+- the shipped default topic definitions plus bounded add, rename, recolor,
+  removal warnings, and restoration of missing defaults without overwriting
+  user changes;
+- at most 800 personal records, each unique by canonical
+  book/chapter/verse across translations and assignable to multiple topics
+  without consuming another verse slot;
+- aggregate version 2, maximum topic/bookmark counts, and compact CloudStorage
+  topic indexes that fit Telegram per-value limits;
+- compact backup version 4 `colorIndexes`, version 1, 2, and 3 import,
+  compatible-format merge, worst-case UTF-8 pretty-JSON size,
   cross-translation deduplication, malformed input rejection, and no partial
   mutation on failure;
+- the 2,155-link/61-topic global catalog, unified personal/global ordering and
+  **G** marker, browser-local exclusions, and idempotent per-link,
+  per-topic, and all-catalog reset without personal sync or backup, including
+  renamed numeric-topic remapping;
 - authenticated user-scoped local keys with no raw Telegram user identifier;
 - newest-timestamp startup reconciliation across `localStorage`, Telegram
   `DeviceStorage`, and Telegram `CloudStorage`, including deterministic ties,
@@ -137,9 +144,10 @@ Tests must prove:
 
 Backend and browser tests must prove:
 
-- authenticated backup JSON is versioned, schema-validated, canonicalized,
-  size/count bounded, and delivered idempotently to the requesting user's
-  private bot chat;
+- authenticated personal backup JSON uses v4 `colorIndexes`, accepts v1/v2/v3 on
+  import, is schema-validated, canonicalized, size/count bounded, excludes
+  global links, and is delivered idempotently to the requesting user's private
+  bot chat;
 - ambiguous or incomplete delivery attempts cannot create an uncontrolled
   retry;
 - the document callback is owner-bound and accepted only from the owner's
@@ -166,13 +174,16 @@ modules, and browser APIs. It verifies:
    navigation work;
 5. Home shows Search, Bible, and History actions plus the Bookmarks summary,
    and Home/History/Selected/Bookmarks use the icon-only top bar;
-6. selecting a reader verse opens the anchored bookmark menu; assignment
-   updates the reader color and opens the topic view, reassignment updates
-   persisted state, removal clears persisted state and the reader color, and
-   the five-item footer remains usable;
+6. selecting a reader verse reveals a compact bottom-right ellipsis without
+   opening the menu; activating it opens the anchored menu, multi-topic
+   assignment updates the reader, topic navigation returns to all topics or the
+   source verse, and the five-item footer remains usable;
 7. an explicit chat-backup action sends the current bookmark document through
    the authenticated Robot endpoint; and
-8. no legacy Robot Scripture or history request is emitted.
+8. personal and global links share one topic list, global links carry **G**,
+   per-link hide and per-topic/all reset are browser-local, and no global link
+   enters personal backup or sync; and
+9. no legacy Robot Scripture or history request is emitted.
 
 Focused model, storage, API, and backend tests separately verify selection
 identity and unselect state transitions, Post authority and server failure
@@ -229,11 +240,18 @@ After all deterministic gates pass, deploy one validated commit and verify in Te
   completely;
 - history remains on the same browser after reopening but is absent on a clean
   second device;
-- bookmark assignment, topic management, and cross-translation canonical
-  deduplication work;
-- bookmarks and last-read synchronize on a second supported Telegram client;
-- JSON download/import and private-chat backup/restore work, including owner
-  validation, confirmation, and persistence before acknowledgement;
+- multi-topic personal assignment, topic management/default restoration, the
+  800-record bound, and cross-translation canonical deduplication work;
+- personal bookmarks and last-read synchronize on a second supported Telegram
+  client;
+- the unified topic list marks global links with **G** and supports per-link
+  hide plus per-topic/all reset without global sync or backup;
+- unchanged CloudStorage items remain stable, partial commits are rejected by
+  their metadata fingerprint, and transient writes retry without another user
+  action;
+- JSON v4 download/import and private-chat backup/restore work, including
+  v1/v2/v3 import, owner validation, confirmation, and persistence before
+  acknowledgement;
 - when private-chat backup transport fails, local JSON Download and Import stay
   enabled and usable;
 - private command and launcher cleanup still behaves as documented.

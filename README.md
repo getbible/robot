@@ -1,6 +1,6 @@
 # GetBible Robot
 
-GetBible Robot is a hardened Telegram interface for Scripture reading, search, history, bookmarking, selection, copying, and posting. The Mini App uses GetBible API V2 directly for public Scripture data. Temporary selections, durable device-local history, and the public Scripture cache stay in the browser; compact bookmarks and the last-read coordinate additionally synchronize through Telegram Mini App storage when the client supports it. Robot remains the authenticated Telegram control plane and the sole adapter for Librarian full-text search.
+GetBible Robot is a hardened Telegram interface for Scripture reading, search, history, bookmarking, selection, copying, and posting. The Mini App uses GetBible API V2 directly for public Scripture data. Temporary selections, durable device-local history, and the public Scripture cache stay in the browser; compact personal bookmarks and the last-read coordinate additionally synchronize through Telegram Mini App storage when the client supports it. Robot remains the authenticated Telegram control plane and the sole adapter for Librarian full-text search.
 
 ## Architecture at a glance
 
@@ -11,7 +11,8 @@ Telegram Mini App
   ├─ temporary ordered selection              → browser memory
   ├─ coordinate-only reading history          → scoped browser localStorage
   ├─ public Scripture cache                   → browser IndexedDB
-  ├─ bookmarks / topics / compact last-read   → localStorage + Telegram DeviceStorage / CloudStorage
+  ├─ personal bookmarks / topics / last-read  → localStorage + Telegram DeviceStorage / CloudStorage
+  ├─ global bookmark visibility / exclusions  → browser localStorage
   └─ auth / preferences / search / Post / backup → Robot
                                                    └─ search only → Librarian
 ```
@@ -63,23 +64,38 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   available from every surface, and each entry keeps its translation and can
   be reopened or removed individually; the complete history can also be
   cleared.
-- Selecting a reader verse exposes an anchored bookmark menu above it. A verse
-  can belong to one colored topic; bookmarking the same canonical
-  book/chapter/verse from another translation updates that bookmark rather than
-  creating a duplicate. The Bookmarks surface supports topic search, add,
-  rename, recolor, removal, topic detail, and clear-all workflows.
-- Bookmark topics, bookmarks, the active topic, and the compact last-read
-  coordinate reconcile by timestamp across scoped `localStorage`, Telegram
-  `DeviceStorage`, and Telegram `CloudStorage`. Unsupported or temporarily
-  unavailable Telegram storage degrades to the local copy without blocking
-  reading. History, selections, and downloaded Scripture never enter Telegram
-  storage.
+- Selecting a reader verse reveals a compact bottom-right ellipsis. The
+  anchored bookmark menu opens only when that control is activated. Each of
+  the 800 personal canonical verse records may belong to multiple colored
+  topics without consuming another verse slot; assigning an existing
+  translation-independent coordinate updates its record instead of duplicating
+  it.
+- The Bookmarks surface keeps personal and global verse links in one topic
+  list. Global links carry a **G** marker and may be hidden individually or
+  cleared per topic. Loading that topic or the complete catalog restores hidden
+  links without duplicating them. The built-in catalog contains 2,155 links
+  across 61 topics and only its browser-local visibility/exclusions are stored.
+  A scoped browser-only mapping keeps legacy numeric topics linked after a
+  rename; global data never enters personal synchronization or backups.
+- Topics support search, add, rename, recolor, removal, and clear-all. Removing
+  a topic warns that its personal verse assignments will also be removed.
+  **Restore default tags** recreates only missing defaults, preserving existing
+  recolors, renames, custom topics, and personal bookmarks.
+- Personal bookmark aggregate version 2, topics, the active topic, and the
+  compact last-read coordinate reconcile by timestamp across scoped
+  `localStorage`, Telegram `DeviceStorage`, and Telegram `CloudStorage`;
+  CloudStorage uses compact topic indexes for each bookmark. Unsupported or
+  temporarily unavailable Telegram storage degrades to the local copy without
+  blocking reading. History, selections, the global catalog, its exclusions,
+  and downloaded Scripture never enter Telegram storage.
 - Bookmark recovery supports both a local bounded JSON download/import and
   **Back up to chat**. Chat backup sends the validated JSON document to the
   user's private bot chat with an owner-bound **Restore bookmarks** button. A
   restore creates a fresh short-lived Mini App launch, merges only after user
   confirmation, persists the result, and explicitly acknowledges that launch;
-  the backup message itself remains available for later recovery.
+  the backup message itself remains available for later recovery. New backups
+  use compact version 4 `colorIndexes`; version 1, 2, and 3 documents remain
+  importable.
 
 Browser display text and UI identifiers are not final posting authority.
 
@@ -220,6 +236,9 @@ venv/bin/python -m unittest discover -s tests -v
 (cd miniapp && npm run test:browser)
 ```
 
+After reviewing an updated global source CSV, regenerate its deterministic
+browser catalog with `(cd miniapp && npm run generate:global-bookmarks)`.
+
 The permanent release gate requires:
 
 - Python 3.10, 3.11, 3.12, 3.13, and 3.14;
@@ -256,12 +275,16 @@ After deploying one exact green commit, verify:
 12. History remains available in the footer on every Mini App surface;
 13. revisiting a history location moves it to the top without duplication;
 14. individual and complete history clearing work;
-15. a bookmark can be assigned, moved between colored topics, reopened, and removed;
-16. bookmarks and last-read reconcile across supported Telegram clients while
+15. a personal bookmark can belong to multiple colored topics, be reopened,
+    unassigned per topic, and remain within the 800-verse bound;
+16. personal bookmarks and last-read reconcile across supported Telegram clients while
     history and Scripture caches remain device-local;
 17. JSON download/import and private-chat backup/restore both work, including
     user confirmation and one-launch acknowledgement;
-18. private command and launcher cleanup still works.
+18. the unified topic list identifies global links with **G**, supports
+    per-link hide and per-topic/all-catalog reset, and never includes those
+    links in personal sync or backup;
+19. private command and launcher cleanup still works.
 
 Record the deployed commit SHA and permanent CI/CodeQL run links with release evidence.
 
