@@ -166,9 +166,10 @@ modules, and browser APIs. It verifies:
    navigation work;
 5. Home shows Search, Bible, and History actions plus the Bookmarks summary,
    and Home/History/Selected/Bookmarks use the icon-only top bar;
-6. selecting a reader verse opens the anchored bookmark menu; assignment opens
-   the updated topic view, reassignment and removal update persisted state and
-   the reader color, and the five-item footer remains usable;
+6. selecting a reader verse opens the anchored bookmark menu; assignment
+   updates the reader color and opens the topic view, reassignment updates
+   persisted state, removal clears persisted state and the reader color, and
+   the five-item footer remains usable;
 7. an explicit chat-backup action sends the current bookmark document through
    the authenticated Robot endpoint; and
 8. no legacy Robot Scripture or history request is emitted.
