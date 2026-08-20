@@ -3108,7 +3108,6 @@ function renderBookmarks() {
     !topicIds.has(state.bookmarks.selectedTopicId)
   ) {
     clearBookmarkNavigation();
-    state.bookmarks.selectedTopicId = null;
   }
 
   elements.bookmarksSummary.textContent = summary;
@@ -3224,7 +3223,6 @@ function onBookmarkGroupAction(event) {
 function showAllBookmarkTopics() {
   const previousTopicId = state.bookmarks.selectedTopicId;
   clearBookmarkNavigation();
-  state.bookmarks.selectedTopicId = null;
   renderBookmarks();
   syncBackAction();
   window.requestAnimationFrame(() => {
@@ -3238,6 +3236,7 @@ function showAllBookmarkTopics() {
 }
 
 function clearBookmarkNavigation() {
+  state.bookmarks.selectedTopicId = null;
   state.bookmarks.originVerse = null;
   state.bookmarks.originTopicId = null;
   state.bookmarks.originBookmarkId = null;
@@ -3744,7 +3743,6 @@ async function loadGlobalBookmarks() {
         GLOBAL_BOOKMARK_CATALOG_VERSION,
       );
       clearBookmarkNavigation();
-      state.bookmarks.selectedTopicId = null;
       renderBookmarks();
       if (state.bible.status === "ready") {
         renderBible();
@@ -3963,7 +3961,6 @@ async function restoreBookmarksFromChat() {
       return;
     }
     clearBookmarkNavigation();
-    state.bookmarks.selectedTopicId = null;
     renderBookmarks();
     if (state.bible.status === "ready") {
       renderBible();
@@ -4006,7 +4003,6 @@ async function importBookmarkBackup() {
       byteLength: file.size,
     });
     clearBookmarkNavigation();
-    state.bookmarks.selectedTopicId = null;
     renderBookmarks();
     if (state.bible.status === "ready") {
       renderBible();

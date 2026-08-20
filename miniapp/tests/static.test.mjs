@@ -245,6 +245,10 @@ test("keeps Bookmarks on Home while preserving the five-item footer", async () =
   assert.match(app, /const ICON_ONLY_ROUTES = new Set\(\[[\s\S]*?"home"[\s\S]*?"selection"[\s\S]*?"bookmarks"/);
   assert.match(app, /new BookmarkStore\([\s\S]*?storage: bookmarkStorage/);
   assert.match(app, /bookmarkStore\.apply\(verse, topic\.id\)/);
+  assert.match(
+    app,
+    /function clearBookmarkNavigation\(\) \{\s*state\.bookmarks\.selectedTopicId = null/,
+  );
   assert.match(app, /api\.backupBookmarks/);
   assert.match(app, /api\.acknowledgeBookmarkRestore/);
   assert.match(css, /\.reader-verse-row/);
