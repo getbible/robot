@@ -97,7 +97,7 @@ test("ships the exact ordered GetBible deployment topics and palette", () => {
       .update(JSON.stringify(DEFAULT_BOOKMARK_TOPICS))
       .digest("hex"),
     // Full ordered id/name/color fingerprint of the reference deployment.
-    "e0365d53dda5dc5d992b10bedea272f850b1a7bdff96e4e19a49ff8fd1bc8ba8",
+    "e0365d53dda5dc5d992b10bedea272f850b1a7bdff96e4e19a49ff8fd1bc8ba8", // pragma: allowlist secret
   );
 });
 
