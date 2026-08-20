@@ -261,7 +261,6 @@ function cloneEntry(entry) {
 
 function sameHistoryLocation(left, right) {
   const sameChapter =
-    left.translation === right.translation &&
     left.book === right.book &&
     left.chapter === right.chapter;
   return (

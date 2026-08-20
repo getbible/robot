@@ -161,6 +161,26 @@ test("chapter reads remain browser-direct and calculate adjacent navigation", as
   );
 });
 
+test("display-only chapter reads reuse content without loading navigation maps", async () => {
+  const { api, transport } = createApi();
+
+  const scripture = await api.chapter("kjv", 43, 4, 2, {
+    includeNavigation: false,
+  });
+
+  assert.equal(scripture.target_verse, 2);
+  assert.deepEqual(scripture.navigation, { previous: null, next: null });
+  assert.deepEqual(transport.calls, [[
+    "consistent",
+    "kjv/43/4.json",
+    "kjv/43/4.sha",
+  ]]);
+  await assert.rejects(
+    api.chapter("kjv", 43, 4, 2, { includeNavigation: "no" }),
+    /navigation option/,
+  );
+});
+
 test("reference resolution uses query API without persisting search content", async () => {
   const { api, transport } = createApi();
 

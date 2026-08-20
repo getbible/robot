@@ -67,7 +67,8 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - History is a permanent fifth bottom-navigation route. Its normal page keeps
   the footer visible, follows Selected's heading and empty-state layout, and
   shows only the centered getBible icon in the top bar.
-- Choosing an entry restores both translation and exact coordinate.
+- Each entry shows verse text for the current translation, and choosing it
+  restores the exact coordinate without changing that translation.
 - Individual removal and full reset are local, and full reset removes the
   storage key.
 - Displaying, recording, removing, and clearing history issue no Robot request.
@@ -78,7 +79,7 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 
 - A selected Bible verse exposes an anchored, accessible topic menu without
   changing the five-item footer.
-- Home exposes Search, Bible, and History primary actions plus Selected,
+- Home exposes Search and Bible primary actions plus conditional Selected,
   History, and Bookmarks summaries. Only Search and Bible show the translation
   control; Home, History, Selected, and Bookmarks use the centered icon-only
   top bar.
@@ -87,8 +88,9 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - Whole-verse bookmark identity is canonical book/chapter/verse across
   translations; reassignment updates the existing bookmark rather than
   duplicating it.
-- Topic search/detail/add/rename/recolor/removal and bookmark
-  assign/move/reopen/remove/clear behavior derive from `BookmarkStore`.
+- Topic search/detail, localized read-only built-in names, custom
+  add/rename, recolor/removal, and bookmark assign/move/reopen/remove/clear
+  behavior derive from `BookmarkStore`.
 - The newest valid timestamped bookmark aggregate reconciles deterministically
   across scoped browser `localStorage`, Telegram `DeviceStorage`, and Telegram
   `CloudStorage`; writes are coalesced and partial API failure preserves an

@@ -29,6 +29,10 @@ import {
 import { LatestRequestCoordinator } from "./lib/request-coordinator.js";
 import { ReadingHistoryStore } from "./lib/reading-history-store.js";
 import {
+  SCRIPTURE_EXCERPT_MAXIMUM_CONCURRENCY,
+  ScriptureExcerptResolver,
+} from "./lib/scripture-excerpt-resolver.js";
+import {
   BOOKMARK_BACKUP_MAX_BYTES,
   BOOKMARK_TOPIC_COLORS,
   BookmarkBackupError,
@@ -56,6 +60,7 @@ let bookmarkStore = null;
 let bookmarkStorage = null;
 let globalBookmarkPreferences = null;
 let api = null;
+let scriptureExcerpts = null;
 let filterDraft = null;
 let accessAction = () => window.location.reload();
 let readerPositionTimer = null;
@@ -73,9 +78,13 @@ let bookmarkDownloadUrl = null;
 let bookmarkBackupTask = null;
 let globalBookmarkTask = null;
 let lastReadRevision = 0;
+let historyExcerptController = null;
+let bookmarkExcerptController = null;
 const searchPageRequests = new LatestRequestCoordinator();
 const MAX_BOOK_CACHE_ENTRIES = 8;
 const MAX_CHAPTER_CACHE_ENTRIES = 24;
+const EXCERPT_HYDRATION_BATCH_SIZE =
+  SCRIPTURE_EXCERPT_MAXIMUM_CONCURRENCY;
 const ICON_ONLY_ROUTES = new Set([
   "home",
   "history",
@@ -155,6 +164,7 @@ const ERROR_MESSAGE_KEYS = Object.freeze({
   bookmark_backup_unavailable: "bookmarks.backup_failed",
   bookmark_restore_not_found: "bookmarks.restore_failed",
   global_bookmark_unavailable: "bookmarks.global_verse_unavailable",
+  history_scripture_unavailable: "history.verse_unavailable",
   forbidden: "error.forbidden",
   internal_error: "common.request_failed",
   invalid_request: "common.request_failed",
@@ -335,6 +345,15 @@ async function boot() {
   }
 
   api = new MiniAppApi(bridge.initData);
+  scriptureExcerpts = new ScriptureExcerptResolver({
+    loadChapter: async ({ translation, book, chapter, verse }) => {
+      const scripture = normalizeScripture(
+        await api.scripturePreview(translation, book, chapter, verse),
+        { translation, book, chapter },
+      );
+      return scripture.verses;
+    },
+  });
   try {
     elements.bootMessage.textContent = i18n.t("gate.securing");
     const payload = await openBoundSession(api, {
@@ -750,6 +769,12 @@ function showExpiredAccess() {
 
 function setRoute(requestedRoute) {
   const route = routeName(requestedRoute);
+  if (route !== "history") {
+    cancelHistoryExcerptHydration();
+  }
+  if (route !== "bookmarks") {
+    cancelBookmarkExcerptHydration();
+  }
   const currentView = document.querySelector(`[data-view="${state.route}"]`);
   const moveFocusToRoute =
     route !== state.route && currentView?.contains(document.activeElement);
@@ -1059,15 +1084,24 @@ function renderReadingHistory({
   elements.readingHistoryEmpty.hidden = count > 0;
   elements.readingHistoryList.hidden = count === 0;
   if (!renderItems) {
+    if (state.route !== "history") {
+      cancelHistoryExcerptHydration();
+    }
     return;
   }
+  cancelHistoryExcerptHydration();
   elements.readingHistoryList.replaceChildren();
-  readingHistory.snapshot().forEach((entry) => {
-    elements.readingHistoryList.append(createReadingHistoryItem(entry));
+  const entries = readingHistory.snapshot();
+  const translation = state.translation;
+  entries.forEach((entry) => {
+    elements.readingHistoryList.append(
+      createReadingHistoryItem(entry, translation),
+    );
   });
+  hydrateReadingHistory(entries, translation);
 }
 
-function createReadingHistoryItem(entry) {
+function createReadingHistoryItem(entry, translationCode) {
   const item = document.createElement("li");
   item.className = "history-item";
 
@@ -1079,35 +1113,127 @@ function createReadingHistoryItem(entry) {
     "aria-label",
     i18n.t("history.open_aria", {
       reference: entry.reference,
-      translation: translationName(entry.translation),
+      translation: translationName(translationCode),
     }),
   );
 
   const reference = document.createElement("strong");
   reference.dir = "auto";
+  reference.dataset.historyReference = entry.id;
   reference.textContent = entry.reference;
   const translation = document.createElement("span");
   translation.dir = "auto";
-  translation.textContent = translationName(entry.translation);
+  translation.dataset.historyTranslation = entry.id;
+  translation.textContent = translationName(translationCode);
   const kind = document.createElement("small");
   kind.textContent = i18n.t(
     entry.kind === "selection" ? "history.selection" : "history.chapter",
   );
-  open.append(reference, translation, kind);
+  const text = document.createElement("span");
+  text.className = "history-item__text";
+  text.dataset.historyText = entry.id;
+  text.id = `history-excerpt-${entry.id}`;
+  text.dir = "auto";
+  text.textContent = i18n.t("common.loading_scripture");
+  open.setAttribute("aria-describedby", text.id);
+  open.append(reference, translation, kind, text);
 
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "history-item__remove";
   remove.dataset.historyRemove = entry.id;
+  remove.dataset.historyDisplayReference = entry.reference;
   remove.setAttribute(
     "aria-label",
     `${i18n.t("history.remove_aria", {
       reference: entry.reference,
-    })} · ${translationName(entry.translation)}`,
+    })} · ${translationName(translationCode)}`,
   );
   remove.textContent = "×";
   item.append(open, remove);
   return item;
+}
+
+function hydrateReadingHistory(entries, translation) {
+  if (!scriptureExcerpts || entries.length === 0 || state.route !== "history") {
+    return;
+  }
+  const targets = entries.map((entry) => ({
+    id: entry.id,
+    translation,
+    book: entry.book,
+    chapter: entry.chapter,
+    verse: entry.verse,
+  }));
+  historyExcerptController = startVisibleScriptureExcerptHydration({
+    targets,
+    root: elements.historyView,
+    elementForTarget: (target) => elements.readingHistoryList.querySelector(
+      `[data-history-open="${target.id}"]`,
+    ),
+    isCurrent: () =>
+      state.route === "history" && state.translation === translation,
+    onPending: (target) => {
+      elements.readingHistoryList.querySelector(
+        `[data-history-open="${target.id}"]`,
+      )?.setAttribute("aria-busy", "true");
+    },
+    onResult: (target, verse) => {
+      const reference = elements.readingHistoryList.querySelector(
+        `[data-history-reference="${target.id}"]`,
+      );
+      const text = elements.readingHistoryList.querySelector(
+        `[data-history-text="${target.id}"]`,
+      );
+      if (!reference?.isConnected || !text?.isConnected) {
+        return;
+      }
+      const open = text.closest("[data-history-open]");
+      open?.setAttribute("aria-busy", "false");
+      if (!verse || verse.status === "error") {
+        text.textContent = i18n.t(
+          navigator.onLine ? "common.request_failed" : "error.network",
+        );
+        return;
+      }
+      if (verse.status === "unavailable") {
+        text.textContent = i18n.t("history.verse_unavailable");
+        return;
+      }
+      reference.textContent = verse.reference;
+      const translationLabel = elements.readingHistoryList.querySelector(
+        `[data-history-translation="${target.id}"]`,
+      );
+      if (translationLabel?.isConnected) {
+        translationLabel.textContent = translationName(translation);
+      }
+      text.textContent = verse.text;
+      open?.setAttribute(
+        "aria-label",
+        i18n.t("history.open_aria", {
+          reference: verse.reference,
+          translation: translationName(translation),
+        }),
+      );
+      const remove = elements.readingHistoryList.querySelector(
+        `[data-history-remove="${target.id}"]`,
+      );
+      remove?.setAttribute(
+        "aria-label",
+        `${i18n.t("history.remove_aria", {
+          reference: verse.reference,
+        })} · ${translationName(translation)}`,
+      );
+      if (remove) {
+        remove.dataset.historyDisplayReference = verse.reference;
+      }
+    },
+  });
+}
+
+function cancelHistoryExcerptHydration() {
+  historyExcerptController?.abort();
+  historyExcerptController = null;
 }
 
 function onReadingHistoryAction(event) {
@@ -1118,9 +1244,11 @@ function onReadingHistoryAction(event) {
       (item) => item.id === remove.dataset.historyRemove,
     );
     const entry = items[index];
+    const displayedReference =
+      remove.dataset.historyDisplayReference || entry?.reference;
     if (entry && readingHistory.remove(entry.id)) {
       renderReadingHistory();
-      announce(i18n.t("history.removed", { reference: entry.reference }));
+      announce(i18n.t("history.removed", { reference: displayedReference }));
       const remaining = [
         ...elements.readingHistoryList.querySelectorAll("[data-history-open]"),
       ];
@@ -1143,30 +1271,39 @@ function onReadingHistoryAction(event) {
 }
 
 async function openReadingHistoryEntry(entry) {
+  const translation = state.translation;
   await openBibleAtVerse({
-    translation: entry.translation,
+    translation,
     reference: entry.reference,
     book_number: entry.book,
     book_name: entry.book_name,
     chapter: entry.chapter,
     verse: entry.verse,
     highlights: [],
+  }, {
+    exactVerse: true,
+    recordHistory: false,
+    unavailableMessageKey: "history.verse_unavailable",
   });
   if (
     state.route !== "bible" ||
     state.bible.status !== "ready" ||
-    state.translation !== entry.translation ||
+    state.translation !== translation ||
     state.bible.selectedBook?.number !== entry.book ||
     state.bible.selectedChapter?.number !== entry.chapter
   ) {
     return;
   }
+  const openedVerse = state.bible.verses.find(
+    (verse) => verse.verse === entry.verse,
+  );
+  recordReadingHistory(entry.kind, openedVerse);
   window.requestAnimationFrame(() => {
     const target = elements.bibleVerses.querySelector(
       `[data-reader-verse="${entry.verse}"]`,
     ) ?? elements.biblePassage;
     target.focus({ preventScroll: true });
-    announce(entry.reference);
+    announce(openedVerse?.reference ?? state.bible.reference);
   });
 }
 
@@ -1255,8 +1392,18 @@ function syncTranslationControls() {
 
 function syncInterfaceLocale(code) {
   const translation = state.translations.find((item) => item.code === code);
+  const previousLocale = i18n.locale;
   i18n.setLocale(translation?.lang ?? "en", translation?.direction ?? "ltr");
   i18n.apply();
+  if (i18n.locale !== previousLocale) {
+    // These are transient rendered messages, not application state. Clear or
+    // refresh them so a completed action from the previous locale cannot
+    // leave one English (or otherwise stale) sentence in the new view.
+    elements.bookmarkDefaultTopicStatus.textContent = "";
+    elements.bookmarkBackupStatus.textContent = bookmarkBackupTask
+      ? i18n.t("bookmarks.backup_sending")
+      : "";
+  }
 }
 
 function openTranslationSelector() {
@@ -1892,14 +2039,22 @@ function trimLru(cache, maximum) {
   }
 }
 
-function globalBookmarkUnavailableError() {
-  return new ApiError(i18n.t("bookmarks.global_verse_unavailable"), {
-    code: "global_bookmark_unavailable",
+function scriptureCoordinateUnavailableError(
+  messageKey = "bookmarks.global_verse_unavailable",
+) {
+  return new ApiError(i18n.t(messageKey), {
+    code: messageKey === "history.verse_unavailable"
+      ? "history_scripture_unavailable"
+      : "global_bookmark_unavailable",
     retryable: false,
   });
 }
 
-async function loadBibleBooks({ exactVerse = false } = {}) {
+async function loadBibleBooks({
+  exactVerse = false,
+  recordHistory = true,
+  unavailableMessageKey = "bookmarks.global_verse_unavailable",
+} = {}) {
   const requestId = ++state.bible.requestId;
   state.bible.status = "loading";
   state.bible.error = null;
@@ -1926,7 +2081,13 @@ async function loadBibleBooks({ exactVerse = false } = {}) {
     );
     if (entrypoint) {
       renderBible();
-      await selectBibleBook(entrypoint.book_number, entrypoint.chapter);
+      await selectBibleBook(
+        entrypoint.book_number,
+        entrypoint.chapter,
+        1,
+        [],
+        { exactVerse, recordHistory, unavailableMessageKey },
+      );
       return;
     }
     const resume = state.bible.resumeLocation;
@@ -1938,12 +2099,12 @@ async function loadBibleBooks({ exactVerse = false } = {}) {
           resume.chapter,
           resume.verse,
           state.bible.focusHighlights,
-          { exactVerse },
+          { exactVerse, recordHistory, unavailableMessageKey },
         );
         return;
       }
       if (exactVerse) {
-        throw globalBookmarkUnavailableError();
+        throw scriptureCoordinateUnavailableError(unavailableMessageKey);
       }
     }
   } catch (error) {
@@ -1974,7 +2135,11 @@ async function selectBibleBook(
   requestedChapter = null,
   targetVerse = 1,
   focusHighlights = [],
-  { exactVerse = false } = {},
+  {
+    exactVerse = false,
+    recordHistory = true,
+    unavailableMessageKey = "bookmarks.global_verse_unavailable",
+  } = {},
 ) {
   persistVisibleReaderPosition();
   const requestId = ++state.bible.requestId;
@@ -1990,7 +2155,7 @@ async function selectBibleBook(
   if (!book) {
     state.bible.status = exactVerse ? "error" : "choose_book";
     state.bible.error = exactVerse
-      ? safeError(globalBookmarkUnavailableError())
+      ? safeError(scriptureCoordinateUnavailableError(unavailableMessageKey))
       : null;
     renderBible();
     if (exactVerse) {
@@ -2016,12 +2181,12 @@ async function selectBibleBook(
         requestedChapter,
         targetVerse,
         focusHighlights,
-        { exactVerse },
+        { exactVerse, recordHistory, unavailableMessageKey },
       );
       return;
     }
     if (exactVerse && Number.isInteger(requestedChapter)) {
-      throw globalBookmarkUnavailableError();
+      throw scriptureCoordinateUnavailableError(unavailableMessageKey);
     }
   } catch (error) {
     if (handleSessionError(error)) {
@@ -2043,7 +2208,11 @@ async function selectBibleChapter(
   requestedChapterNumber = null,
   targetVerse = 1,
   focusHighlights = [],
-  { exactVerse = false } = {},
+  {
+    exactVerse = false,
+    recordHistory = true,
+    unavailableMessageKey = "bookmarks.global_verse_unavailable",
+  } = {},
 ) {
   persistVisibleReaderPosition();
   const requestId = ++state.bible.requestId;
@@ -2058,7 +2227,7 @@ async function selectBibleChapter(
   if (!chapter || !state.bible.selectedBook) {
     state.bible.status = exactVerse ? "error" : "choose_chapter";
     state.bible.error = exactVerse
-      ? safeError(globalBookmarkUnavailableError())
+      ? safeError(scriptureCoordinateUnavailableError(unavailableMessageKey))
       : null;
     renderBible();
     if (exactVerse) {
@@ -2093,7 +2262,7 @@ async function selectBibleChapter(
       exactVerse &&
       !scripture.verses.some((verse) => verse.verse === targetVerse)
     ) {
-      throw globalBookmarkUnavailableError();
+      throw scriptureCoordinateUnavailableError(unavailableMessageKey);
     }
     if (requestId !== state.bible.requestId) {
       return;
@@ -2128,7 +2297,9 @@ async function selectBibleChapter(
     const visitedVerse = state.bible.verses.find(
       (verse) => verse.verse === state.bible.targetVerse,
     ) ?? state.bible.verses[0];
-    recordReadingHistory("chapter", visitedVerse);
+    if (recordHistory) {
+      recordReadingHistory("chapter", visitedVerse);
+    }
     void saveReaderPosition();
     scrollReaderToVerse(state.bible.targetVerse);
     announce(state.bible.reference);
@@ -2162,11 +2333,20 @@ async function openChapterLocation(location) {
 
 async function openBibleAtVerse(
   verse,
-  { fromSearch = false, exactVerse = false } = {},
+  {
+    fromSearch = false,
+    exactVerse = false,
+    recordHistory = true,
+    unavailableMessageKey = "bookmarks.global_verse_unavailable",
+  } = {},
 ) {
   if (!verse) {
     return;
   }
+  // An explicit result, bookmark, or History choice supersedes any direct
+  // reference supplied by the launch. A still-pending books request must not
+  // consume that older intent after this navigation has taken ownership.
+  state.bible.entryReference = "";
   state.scrollPositions.set(state.route, currentRouteScrollTop());
   state.bible.returnToSearch = fromSearch;
   state.bible.focusHighlights = fromSearch ? verse.highlights : [];
@@ -2192,7 +2372,7 @@ async function openBibleAtVerse(
   renderLocalizedState();
   setRoute("bible");
   if (translationChanged || state.bible.books.length === 0) {
-    await loadBibleBooks({ exactVerse });
+    await loadBibleBooks({ exactVerse, recordHistory, unavailableMessageKey });
     return;
   }
   await selectBibleBook(
@@ -2200,7 +2380,7 @@ async function openBibleAtVerse(
     verse.chapter,
     verse.verse,
     state.bible.focusHighlights,
-    { exactVerse },
+    { exactVerse, recordHistory, unavailableMessageKey },
   );
 }
 
@@ -2974,6 +3154,34 @@ function globalBookmarkTopicMappings() {
   return globalBookmarkPreferences?.topicMappings ?? null;
 }
 
+function coreBookmarkTopicDefinition(topicId) {
+  if (typeof topicId !== "string" || !topicId) {
+    return null;
+  }
+  const topic = bookmarkStore?.topic(topicId);
+  if (!topic) {
+    return null;
+  }
+  return GLOBAL_BOOKMARK_CATALOG.topicDefinitionForLocalTopic(
+    topicId,
+    [topic],
+    globalBookmarkTopicMappings(),
+  );
+}
+
+function bookmarkTopicPresentation(topic) {
+  const definition = coreBookmarkTopicDefinition(topic?.id);
+  return {
+    core: Boolean(definition),
+    definition,
+    name: definition ? i18n.t(definition.name_key) : topic?.name ?? "",
+  };
+}
+
+function bookmarkTopicDisplayName(topic) {
+  return bookmarkTopicPresentation(topic).name;
+}
+
 function bookmarkAssignmentsForVerse(
   verse,
   snapshot = bookmarkStore?.snapshot(),
@@ -3136,6 +3344,7 @@ function renderBookmarks() {
   elements.bookmarkDetail.hidden = !state.bookmarks.selectedTopicId;
 
   if (state.route !== "bookmarks") {
+    cancelBookmarkExcerptHydration();
     return;
   }
   if (state.bookmarks.selectedTopicId) {
@@ -3165,11 +3374,21 @@ function renderBookmarkGroups() {
     return;
   }
   const query = state.bookmarks.search.trim().toLocaleLowerCase();
-  const topics = snapshot.topics.filter((topic) =>
-    !query || topic.name.toLocaleLowerCase().includes(query)
-  );
+  const topics = snapshot.topics.filter((topic) => {
+    if (!query) {
+      return true;
+    }
+    const presentation = bookmarkTopicPresentation(topic);
+    return [
+      presentation.name,
+      topic.name,
+      presentation.definition?.name,
+      ...(presentation.definition?.aliases ?? []),
+    ].some((name) => name?.toLocaleLowerCase().includes(query));
+  });
   const fragment = document.createDocumentFragment();
   for (const topic of topics) {
+    const topicName = bookmarkTopicDisplayName(topic);
     const count = bookmarkViewForTopic(topic.id, snapshot).length;
     const button = document.createElement("button");
     button.type = "button";
@@ -3179,7 +3398,7 @@ function renderBookmarkGroups() {
     button.setAttribute(
       "aria-label",
       i18n.t("bookmarks.open_group_aria", {
-        name: topic.name,
+        name: topicName,
         count: i18n.plural("bookmarks.count", count),
       }),
     );
@@ -3189,7 +3408,7 @@ function renderBookmarkGroups() {
     const copy = document.createElement("span");
     copy.className = "bookmark-group-card__copy";
     const name = document.createElement("strong");
-    name.textContent = topic.name;
+    name.textContent = topicName;
     const usage = document.createElement("span");
     usage.className = "bookmark-group-card__count";
     usage.textContent = i18n.plural("bookmarks.count", count);
@@ -3300,6 +3519,7 @@ function returnToBookmarkOriginTopic() {
 }
 
 function renderBookmarkDetail(topicId) {
+  cancelBookmarkExcerptHydration();
   const topic = bookmarkStore?.topic(topicId);
   if (!topic) {
     return;
@@ -3324,9 +3544,10 @@ function renderBookmarkDetail(topicId) {
     canonicalTopicId && globalBookmarkPreferences?.hasTopic(canonicalTopicId),
   );
   const bookmarks = bookmarkViewForTopic(topicId, snapshot);
+  const topicName = bookmarkTopicDisplayName(topic);
   applyBookmarkColor(elements.bookmarkDetail, topic.color);
   elements.bookmarkDetailTitle.tabIndex = -1;
-  elements.bookmarkDetailTitle.textContent = topic.name;
+  elements.bookmarkDetailTitle.textContent = topicName;
   elements.bookmarkDetailCount.textContent = i18n.plural(
     "bookmarks.count",
     bookmarks.length,
@@ -3384,6 +3605,9 @@ function renderBookmarkDetail(topicId) {
       : bookmark.translation;
     const referenceText = document.createElement("span");
     referenceText.textContent = `${bookmark.reference} · ${translation.toUpperCase()}`;
+    if (bookmark.source === GLOBAL_BOOKMARK_SOURCE) {
+      referenceText.dataset.bookmarkPreviewReference = bookmark.id;
+    }
     reference.append(referenceText);
     if (bookmark.source === GLOBAL_BOOKMARK_SOURCE) {
       const marker = document.createElement("span");
@@ -3395,16 +3619,25 @@ function renderBookmarkDetail(topicId) {
     }
     const text = document.createElement("span");
     text.className = "bookmark-list__text";
-    text.textContent = bookmark.text;
-    open.append(reference);
-    if (bookmark.text) {
-      open.append(text);
+    text.id = `bookmark-excerpt-${bookmark.id}`;
+    if (bookmark.source === GLOBAL_BOOKMARK_SOURCE) {
+      text.dataset.bookmarkPreviewText = bookmark.id;
     }
+    text.textContent = bookmark.source === GLOBAL_BOOKMARK_SOURCE
+      ? i18n.t("common.loading_scripture")
+      : bookmark.text;
+    open.append(reference);
+    text.hidden = bookmark.source !== GLOBAL_BOOKMARK_SOURCE && !bookmark.text;
+    if (!text.hidden) {
+      open.setAttribute("aria-describedby", text.id);
+    }
+    open.append(text);
 
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "bookmark-list__remove";
     remove.dataset.bookmarkRemove = bookmark.id;
+    remove.dataset.bookmarkDisplayReference = bookmark.reference;
     remove.setAttribute(
       "aria-label",
       bookmark.source === GLOBAL_BOOKMARK_SOURCE
@@ -3413,7 +3646,7 @@ function renderBookmarkDetail(topicId) {
         })
         : i18n.t("bookmarks.remove_topic_assignment_aria", {
           reference: bookmark.reference,
-          name: topic.name,
+          name: topicName,
         }),
     );
     remove.textContent = "×";
@@ -3421,6 +3654,238 @@ function renderBookmarkDetail(topicId) {
     fragment.append(item);
   }
   elements.bookmarkList.replaceChildren(fragment);
+  hydrateGlobalBookmarkDetail(
+    bookmarks.filter((bookmark) =>
+      bookmark.source === GLOBAL_BOOKMARK_SOURCE
+    ),
+    topicId,
+    state.translation,
+  );
+}
+
+function hydrateGlobalBookmarkDetail(bookmarks, topicId, translation) {
+  if (
+    !scriptureExcerpts ||
+    bookmarks.length === 0 ||
+    state.route !== "bookmarks"
+  ) {
+    return;
+  }
+  const targets = bookmarks.map((bookmark) => ({
+    id: bookmark.id,
+    translation,
+    book: bookmark.book,
+    chapter: bookmark.chapter,
+    verse: bookmark.verse,
+  }));
+  bookmarkExcerptController = startVisibleScriptureExcerptHydration({
+    targets,
+    root: elements.bookmarksView,
+    elementForTarget: (target) => elements.bookmarkList.querySelector(
+      `[data-bookmark-open="${target.id}"]`,
+    ),
+    isCurrent: () =>
+      state.route === "bookmarks" &&
+      state.bookmarks.selectedTopicId === topicId &&
+      state.translation === translation,
+    onPending: (target) => {
+      elements.bookmarkList.querySelector(
+        `[data-bookmark-open="${target.id}"]`,
+      )?.setAttribute("aria-busy", "true");
+    },
+    onResult: (target, verse) => {
+      const reference = elements.bookmarkList.querySelector(
+        `[data-bookmark-preview-reference="${target.id}"]`,
+      );
+      const text = elements.bookmarkList.querySelector(
+        `[data-bookmark-preview-text="${target.id}"]`,
+      );
+      if (!reference?.isConnected || !text?.isConnected) {
+        return;
+      }
+      const open = text.closest("[data-bookmark-open]");
+      open?.setAttribute("aria-busy", "false");
+      if (!verse || verse.status === "error") {
+        text.textContent = i18n.t(
+          navigator.onLine ? "common.request_failed" : "error.network",
+        );
+        return;
+      }
+      if (verse.status === "unavailable") {
+        text.textContent = i18n.t("bookmarks.global_verse_unavailable");
+        return;
+      }
+      reference.textContent = `${verse.reference} · ${translation.toUpperCase()}`;
+      text.textContent = verse.text;
+      open?.setAttribute(
+        "aria-label",
+        i18n.t("bookmarks.open_global_aria", {
+          reference: verse.reference,
+          translation: translationName(translation),
+        }),
+      );
+      const remove = elements.bookmarkList.querySelector(
+        `[data-bookmark-remove="${target.id}"]`,
+      );
+      remove?.setAttribute(
+        "aria-label",
+        i18n.t("bookmarks.remove_global_aria", {
+          reference: verse.reference,
+        }),
+      );
+      if (remove) {
+        remove.dataset.bookmarkDisplayReference = verse.reference;
+      }
+    },
+  });
+}
+
+function cancelBookmarkExcerptHydration() {
+  bookmarkExcerptController?.abort();
+  bookmarkExcerptController = null;
+}
+
+/**
+ * Hydrate the first screenful immediately, then resolve nearby rows as they
+ * enter the scroll viewport. History and global bookmarks share this one
+ * bounded path so a long list cannot eagerly launch hundreds of chapter reads.
+ */
+function startVisibleScriptureExcerptHydration({
+  targets,
+  root,
+  elementForTarget,
+  isCurrent,
+  onPending,
+  onResult,
+}) {
+  if (!scriptureExcerpts || targets.length === 0) {
+    return null;
+  }
+  const controller = new AbortController();
+  const queued = [];
+  const reconnectTargets = new Map();
+  const scheduledIds = new Set();
+  const targetsByElement = new Map();
+  let observer = null;
+  let draining = false;
+  let drainScheduled = false;
+
+  const requestDrain = () => {
+    if (draining || drainScheduled || controller.signal.aborted) {
+      return;
+    }
+    drainScheduled = true;
+    window.queueMicrotask(() => {
+      drainScheduled = false;
+      void drain();
+    });
+  };
+
+  const schedule = (target) => {
+    if (
+      controller.signal.aborted ||
+      scheduledIds.has(target.id) ||
+      !isCurrent()
+    ) {
+      return;
+    }
+    scheduledIds.add(target.id);
+    reconnectTargets.delete(target.id);
+    queued.push(target);
+    onPending(target);
+    requestDrain();
+  };
+
+  const drain = async () => {
+    if (draining || controller.signal.aborted) {
+      return;
+    }
+    draining = true;
+    try {
+      while (queued.length > 0 && !controller.signal.aborted) {
+        if (!isCurrent()) {
+          controller.abort();
+          return;
+        }
+        const batch = queued.splice(0, EXCERPT_HYDRATION_BATCH_SIZE);
+        await Promise.all(batch.map(async (target) => {
+          let verse = null;
+          try {
+            [verse] = await scriptureExcerpts.resolve([target], {
+              signal: controller.signal,
+            });
+          } catch {
+            // A row-level failure renders its localized unavailable state and
+            // never holds back the other visible rows in this bounded group.
+          }
+          if (!controller.signal.aborted && isCurrent()) {
+            onResult(target, verse ?? null);
+            if (!verse || verse.status === "error") {
+              scheduledIds.delete(target.id);
+              reconnectTargets.set(target.id, target);
+            }
+          }
+        }));
+      }
+    } finally {
+      draining = false;
+      if (queued.length > 0 && !controller.signal.aborted) {
+        requestDrain();
+      }
+    }
+  };
+
+  const Observer = window.IntersectionObserver;
+  if (typeof Observer === "function") {
+    observer = new Observer((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) {
+          continue;
+        }
+        const target = targetsByElement.get(entry.target);
+        if (target) {
+          observer.unobserve(entry.target);
+          schedule(target);
+        }
+      }
+    }, {
+      root,
+      rootMargin: "360px 0px",
+    });
+  }
+
+  targets.forEach((target, index) => {
+    const element = elementForTarget(target);
+    if (!element) {
+      return;
+    }
+    element.addEventListener("focusin", () => {
+      observer?.unobserve(element);
+      schedule(target);
+    }, { once: true });
+    if (index < EXCERPT_HYDRATION_BATCH_SIZE || !observer) {
+      schedule(target);
+      return;
+    }
+    targetsByElement.set(element, target);
+    observer.observe(element);
+  });
+
+  const retryOnReconnect = () => {
+    const retryTargets = [...reconnectTargets.values()];
+    reconnectTargets.clear();
+    retryTargets.forEach(schedule);
+  };
+  window.addEventListener("online", retryOnReconnect);
+
+  controller.signal.addEventListener("abort", () => {
+    observer?.disconnect();
+    window.removeEventListener("online", retryOnReconnect);
+    queued.length = 0;
+    reconnectTargets.clear();
+    targetsByElement.clear();
+  }, { once: true });
+  return controller;
 }
 
 async function onBookmarkListAction(event) {
@@ -3453,6 +3918,8 @@ async function onBookmarkListAction(event) {
     return;
   }
   if (remove) {
+    const displayedReference =
+      remove.dataset.bookmarkDisplayReference || bookmark.reference;
     const rows = [...elements.bookmarkList.querySelectorAll(
       ".bookmark-list__item",
     )];
@@ -3471,8 +3938,8 @@ async function onBookmarkListAction(event) {
         ? "bookmarks.global_removed"
         : "bookmarks.removed_from_topic",
       {
-        reference: bookmark.reference,
-        name: bookmarkStore.topic(topicId)?.name ?? "",
+        reference: displayedReference,
+        name: bookmarkTopicDisplayName(bookmarkStore.topic(topicId)),
       },
     ));
     focusBookmarkListAfterRemoval(removalIndex);
@@ -3512,6 +3979,7 @@ function renderBookmarkTopicEditor() {
   }
   const fragment = document.createDocumentFragment();
   for (const topic of snapshot.topics) {
+    const presentation = bookmarkTopicPresentation(topic);
     const row = document.createElement("div");
     row.className = "bookmark-topic-editor__row";
     row.dataset.topicEditor = topic.id;
@@ -3522,17 +3990,29 @@ function renderBookmarkTopicEditor() {
     const dot = document.createElement("span");
     dot.className = "bookmark-dot";
     dot.setAttribute("aria-hidden", "true");
-    const name = document.createElement("input");
-    name.className = "bookmark-topic-editor__name";
-    name.type = "text";
-    name.maxLength = 80;
-    name.required = true;
-    name.value = topic.name;
-    name.dataset.topicName = topic.id;
-    name.setAttribute(
-      "aria-label",
-      i18n.t("bookmarks.rename_aria", { name: topic.name }),
+    const name = document.createElement(
+      presentation.core ? "span" : "input",
     );
+    name.className = `bookmark-topic-editor__name${
+      presentation.core ? " bookmark-topic-editor__name--core" : ""
+    }`;
+    if (presentation.core) {
+      name.textContent = presentation.name;
+      name.setAttribute(
+        "aria-label",
+        `${presentation.name}. ${i18n.t("bookmarks.core_topic_name")}`,
+      );
+    } else {
+      name.type = "text";
+      name.maxLength = 80;
+      name.required = true;
+      name.value = topic.name;
+      name.dataset.topicName = topic.id;
+      name.setAttribute(
+        "aria-label",
+        i18n.t("bookmarks.rename_aria", { name: presentation.name }),
+      );
+    }
     identity.append(dot, name);
 
     const color = document.createElement("input");
@@ -3541,7 +4021,7 @@ function renderBookmarkTopicEditor() {
     color.dataset.topicColor = topic.id;
     color.setAttribute(
       "aria-label",
-      i18n.t("bookmarks.color_aria", { name: topic.name }),
+      i18n.t("bookmarks.color_aria", { name: presentation.name }),
     );
     setBookmarkColorInput(color, topic.color);
 
@@ -3556,7 +4036,7 @@ function renderBookmarkTopicEditor() {
     remove.dataset.topicDelete = topic.id;
     remove.setAttribute(
       "aria-label",
-      i18n.t("bookmarks.remove_topic_aria", { name: topic.name }),
+      i18n.t("bookmarks.remove_topic_aria", { name: presentation.name }),
     );
     remove.textContent = "×";
     actions.append(save, remove);
@@ -3581,7 +4061,11 @@ function onBookmarkTopicCreate(event) {
     renderBookmarks();
     announce(i18n.t("bookmarks.topic_added"));
   } catch (error) {
-    toast(error instanceof Error ? error.message : i18n.t("common.request_failed"));
+    toast(i18n.t(
+      error instanceof RangeError
+        ? "bookmarks.topic_limit"
+        : "bookmarks.invalid_topic",
+    ));
   }
 }
 
@@ -3642,11 +4126,14 @@ async function onBookmarkTopicEdit(event) {
     const name = row?.querySelector("[data-topic-name]")?.value;
     const color = row?.querySelector("[data-topic-color]")?.value;
     try {
-      bookmarkStore.updateTopic(topic.id, { name, color });
+      bookmarkStore.updateTopic(
+        topic.id,
+        coreBookmarkTopicDefinition(topic.id) ? { color } : { name, color },
+      );
       renderBookmarks();
       announce(i18n.t("bookmarks.topic_updated"));
     } catch {
-      toast(i18n.t("common.request_failed"));
+      toast(i18n.t("bookmarks.invalid_topic"));
     }
     return;
   }
@@ -3656,6 +4143,7 @@ async function onBookmarkTopicEdit(event) {
   }
   const count = bookmarkStore.topicUsage(topic.id);
   const snapshot = bookmarkStore.snapshot();
+  const topicName = bookmarkTopicDisplayName(topic);
   const canonicalTopicId = GLOBAL_BOOKMARK_CATALOG.canonicalTopicId(
     topic.id,
     snapshot.topics,
@@ -3672,12 +4160,12 @@ async function onBookmarkTopicEdit(event) {
   const confirmed = await bridge.confirm(
     globalCount > 0
       ? i18n.t("bookmarks.topic_delete_global_confirm", {
-        name: topic.name,
+        name: topicName,
         personal: count,
         global: globalCount,
       })
       : i18n.plural("bookmarks.topic_delete_confirm", count, {
-        name: topic.name,
+        name: topicName,
       }),
   );
   if (!confirmed || !bookmarkStore.topic(topic.id)) {
@@ -4128,6 +4616,7 @@ function renderBookmarkPopoverAssignments(assignments) {
     if (!topic) {
       continue;
     }
+    const topicName = bookmarkTopicDisplayName(topic);
     const row = document.createElement("div");
     row.className = "bookmark-assigned-topic";
     row.setAttribute("role", "listitem");
@@ -4143,14 +4632,14 @@ function renderBookmarkPopoverAssignments(assignments) {
         assignment.source === GLOBAL_BOOKMARK_SOURCE
           ? "bookmarks.open_global_topic_aria"
           : "bookmarks.open_topic_aria",
-        { name: topic.name },
+        { name: topicName },
       ),
     );
     const dot = document.createElement("span");
     dot.className = "bookmark-dot";
     dot.setAttribute("aria-hidden", "true");
     const name = document.createElement("span");
-    name.textContent = topic.name;
+    name.textContent = topicName;
     open.append(dot, name);
     if (assignment.source === GLOBAL_BOOKMARK_SOURCE) {
       const marker = document.createElement("span");
@@ -4176,7 +4665,7 @@ function renderBookmarkPopoverAssignments(assignments) {
           ? "bookmarks.remove_global_topic_assignment_aria"
           : "bookmarks.remove_topic_assignment_aria",
         {
-          name: topic.name,
+          name: topicName,
           reference: assignment.reference,
         },
       ),
@@ -4203,7 +4692,7 @@ function populateBookmarkTopicPicker(assignedTopicIds) {
     }
     const option = document.createElement("option");
     option.value = topic.id;
-    option.textContent = `● ${topic.name}`;
+    option.textContent = `● ${bookmarkTopicDisplayName(topic)}`;
     option.style.color = topic.color;
     options.push(option);
   }
@@ -4301,7 +4790,7 @@ function applyPopoverBookmark(topicId) {
   bridge.notifySelection();
   announce(i18n.t("bookmarks.saved", {
     reference: verse.reference,
-    name: topic.name,
+    name: bookmarkTopicDisplayName(topic),
   }));
   reopenBookmarkPopover(selectionId, topic.id);
 }
@@ -4327,7 +4816,7 @@ function removePopoverBookmarkAssignment({ id, topicId, source }) {
       : "bookmarks.removed_from_topic",
     {
       reference: verse.reference,
-      name: bookmarkStore.topic(topicId)?.name ?? "",
+      name: bookmarkTopicDisplayName(bookmarkStore.topic(topicId)),
     },
   ));
   reopenBookmarkPopover(selectionId);
@@ -4767,6 +5256,9 @@ function invalidateClientSessionState() {
   bookmarkStore = null;
   bookmarkStorage = null;
   readingHistory = null;
+  cancelHistoryExcerptHydration();
+  cancelBookmarkExcerptHydration();
+  scriptureExcerpts = null;
   if (bookmarkDownloadUrl) {
     URL.revokeObjectURL(bookmarkDownloadUrl);
     bookmarkDownloadUrl = null;

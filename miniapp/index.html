@@ -61,7 +61,7 @@
           >
           <span class="brand__copy">
             <span class="brand__name">getBible<span>.Life</span></span>
-            <span class="brand__tagline">The words of eternal life</span>
+            <span class="brand__tagline" data-i18n="home.tagline">The words of eternal life</span>
           </span>
         </div>
         <button
@@ -102,7 +102,7 @@
               <img src="./assets/getbible-upright.png" width="42" height="55" alt="">
               <span>
                 <strong>getBible<span>.Life</span></strong>
-                <small>The words of eternal life</small>
+                <small data-i18n="home.tagline">The words of eternal life</small>
               </span>
             </div>
             <div class="home-hero__copy">
@@ -132,14 +132,6 @@
               </span>
               <span aria-hidden="true">›</span>
             </button>
-            <button class="home-action" type="button" data-home-route="history">
-              <span class="home-action__icon" aria-hidden="true">↶</span>
-              <span>
-                <strong data-i18n="home.history">See history</strong>
-                <small data-i18n="home.history_hint">Return to recently opened Scripture</small>
-              </span>
-              <span aria-hidden="true">›</span>
-            </button>
           </div>
 
           <div class="home-summaries">
@@ -152,14 +144,14 @@
           </div>
           <div id="home-history" class="home-summary" hidden>
             <div>
-              <strong id="home-history-title">Reading history</strong>
+              <strong id="home-history-title" data-i18n="home.history_preview">Reading history</strong>
               <span id="home-history-meta"></span>
             </div>
             <button type="button" data-home-route="history" data-i18n="home.review">Review</button>
           </div>
           <div id="home-bookmarks" class="home-summary home-summary--bookmarks">
             <div>
-              <strong id="home-bookmarks-title">Bookmarks</strong>
+              <strong id="home-bookmarks-title" data-i18n="home.bookmarks_preview">Bookmarks</strong>
               <span id="home-bookmarks-meta"></span>
             </div>
             <button type="button" data-home-route="bookmarks" data-i18n="home.manage">Manage</button>

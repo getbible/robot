@@ -175,6 +175,18 @@ export class MiniAppApi {
     return payload;
   }
 
+  scripturePreview(translation, book, chapter, verse = 1) {
+    return this.#publicRequest(() =>
+      this.#publicApi.chapter(
+        translation,
+        book,
+        chapter,
+        verse,
+        { includeNavigation: false },
+      ),
+    );
+  }
+
   resolveReference(translation, reference) {
     return this.#publicRequest(() =>
       this.#publicApi.resolveReference(translation, reference),

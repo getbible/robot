@@ -56,18 +56,19 @@ function fulfillPublicText(route, body, contentType = "text/plain") {
   });
 }
 
-function chapterPayload(translation, chapter) {
+function chapterPayload(translation, book, chapter) {
   const label = translation.toUpperCase();
+  const bookName = bookNames[book - 1];
   return {
     abbreviation: translation,
-    book_nr: 43,
-    book_name: "John",
+    book_nr: book,
+    book_name: bookName,
     chapter,
-    name: `John ${chapter}`,
-    testament: "new",
+    name: `${bookName} ${chapter}`,
+    testament: book < 40 ? "old" : "new",
     verses: Array.from({ length: 40 }, (_, index) => ({
       verse: index + 1,
-      text: `${label} John ${chapter} text ${index + 1}`,
+      text: `${label} ${bookName} ${chapter} text ${index + 1}`,
     })),
   };
 }
@@ -175,6 +176,56 @@ async function ensureBottomNavigationExpanded(page) {
   });
 }
 
+async function assertBookmarkPopoverControlsDoNotOverlap(page) {
+  await page.evaluate(() => new Promise((resolvePromise) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(resolvePromise);
+    });
+  }));
+  const layout = await page.evaluate(() => {
+    const popover = document.querySelector("#bookmark-popover");
+    const close = document.querySelector("#close-bookmark-popover");
+    const removals = [
+      ...document.querySelectorAll("[data-bookmark-assignment-remove]"),
+    ];
+    const rect = (element) => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        bottom: bounds.bottom,
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
+      };
+    };
+    const overlaps = (first, second) => (
+      first.left < second.right &&
+      first.right > second.left &&
+      first.top < second.bottom &&
+      first.bottom > second.top
+    );
+    const popoverRect = rect(popover);
+    const closeRect = rect(close);
+    return {
+      closeInsidePopover:
+        closeRect.left >= popoverRect.left &&
+        closeRect.right <= popoverRect.right &&
+        closeRect.top >= popoverRect.top &&
+        closeRect.bottom <= popoverRect.bottom,
+      overlapCount: removals
+        .map(rect)
+        .filter((removeRect) => overlaps(closeRect, removeRect))
+        .length,
+      popoverHidden: popover.hidden,
+      removalCount: removals.length,
+    };
+  });
+
+  assert.equal(layout.popoverHidden, false);
+  assert.ok(layout.removalCount > 0);
+  assert.equal(layout.closeInsidePopover, true);
+  assert.equal(layout.overlapCount, 0);
+}
+
 test("reader navigation uses direct GetBible API calls in a real browser", async (context) => {
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
   const browser = await chromium.launch({
@@ -245,15 +296,14 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   const publicRequests = [];
   const robotRequests = [];
   const chapterBodies = new Map();
-  for (const translation of ["kjv", "aov"]) {
-    for (const chapter of [3, 4]) {
-      const body = jsonBody(chapterPayload(translation, chapter));
-      chapterBodies.set(
-        `${translation}:${chapter}`,
-        { body, sha: sha1(body) },
-      );
+  const publicChapter = (translation, book, chapter) => {
+    const key = `${translation}:${book}:${chapter}`;
+    if (!chapterBodies.has(key)) {
+      const body = jsonBody(chapterPayload(translation, book, chapter));
+      chapterBodies.set(key, { body, sha: sha1(body) });
     }
-  }
+    return chapterBodies.get(key);
+  };
 
   await page.route("https://telegram.org/**", (route) => route.fulfill({
     status: 200,
@@ -289,18 +339,28 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
         verses: Array.from({ length: 40 }, (_, verse) => verse + 1),
       })), 200, true);
     }
-    const shaMatch = /^(kjv|aov)\/43\/(3|4)\.sha$/.exec(path);
+    const shaMatch = /^(kjv|aov)\/(\d{1,3})\/(\d{1,3})\.sha$/.exec(path);
     if (shaMatch) {
+      const book = Number(shaMatch[2]);
+      const chapter = Number(shaMatch[3]);
+      if (!bookNames[book - 1] || chapter < 1) {
+        return fulfillJson(route, { error: "not found" }, 404, true);
+      }
       return fulfillPublicText(
         route,
-        chapterBodies.get(`${shaMatch[1]}:${shaMatch[2]}`).sha,
+        publicChapter(shaMatch[1], book, chapter).sha,
       );
     }
-    const jsonMatch = /^(kjv|aov)\/43\/(3|4)\.json$/.exec(path);
+    const jsonMatch = /^(kjv|aov)\/(\d{1,3})\/(\d{1,3})\.json$/.exec(path);
     if (jsonMatch) {
+      const book = Number(jsonMatch[2]);
+      const chapter = Number(jsonMatch[3]);
+      if (!bookNames[book - 1] || chapter < 1) {
+        return fulfillJson(route, { error: "not found" }, 404, true);
+      }
       return fulfillPublicText(
         route,
-        chapterBodies.get(`${jsonMatch[1]}:${jsonMatch[2]}`).body,
+        publicChapter(jsonMatch[1], book, chapter).body,
         "application/json",
       );
     }
@@ -439,6 +499,11 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     !document.querySelector('#bookmark-topic-picker option[value="grace"]') &&
     !document.querySelector('#bookmark-topic-picker option[value="biblical-love"]')
   ));
+  await assertBookmarkPopoverControlsDoNotOverlap(page);
+  await page.setViewportSize({ width: 320, height: 844 });
+  await assertBookmarkPopoverControlsDoNotOverlap(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await assertBookmarkPopoverControlsDoNotOverlap(page);
   const storedBookmark = await page.evaluate(() => {
     const key = Object.keys(window.localStorage).find((candidate) =>
       candidate.startsWith("getbible.miniapp.bookmarks.v1:")
@@ -466,11 +531,20 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   ));
 
   await ensureBottomNavigationExpanded(page);
+  const expectedHomeHistoryCount = await page.evaluate((storageKey) => (
+    JSON.parse(window.localStorage.getItem(storageKey)).items.length
+  ), readingHistoryStorageKey);
+  assert.ok(expectedHomeHistoryCount > 0);
   await page.locator('[data-route="home"]').click();
   await page.waitForFunction(() => (
     document.querySelector("#app")?.dataset.activeRoute === "home"
   ));
-  assert.equal(await page.locator(".home-actions .home-action").count(), 3);
+  assert.equal(await page.locator(".home-actions .home-action").count(), 2);
+  assert.equal(await page.locator("#home-history").isVisible(), true);
+  assert.equal(
+    await page.locator("#home-history-meta").innerText(),
+    `${expectedHomeHistoryCount} places`,
+  );
   assert.equal(await page.locator("#home-bookmarks").isVisible(), true);
   assert.match(
     await page.locator("#home-bookmarks-meta").innerText(),
@@ -482,6 +556,28 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     ),
     "none",
   );
+  const narrowHomeActions = await page.locator(".home-action")
+    .evaluateAll((actions) => actions.map((action) => {
+      const bounds = action.getBoundingClientRect();
+      return { bottom: bounds.bottom, left: bounds.left, top: bounds.top };
+    }));
+  assert.ok(Math.abs(narrowHomeActions[0].left - narrowHomeActions[1].left) < 1);
+  assert.ok(narrowHomeActions[0].bottom <= narrowHomeActions[1].top);
+  await page.setViewportSize({ width: 780, height: 844 });
+  const wideHomeActions = await page.locator(".home-action")
+    .evaluateAll((actions) => actions.map((action) => {
+      const bounds = action.getBoundingClientRect();
+      return {
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
+        width: bounds.width,
+      };
+    }));
+  assert.ok(Math.abs(wideHomeActions[0].top - wideHomeActions[1].top) < 1);
+  assert.ok(wideHomeActions[0].right <= wideHomeActions[1].left);
+  assert.ok(Math.abs(wideHomeActions[0].width - wideHomeActions[1].width) < 1);
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('#home-bookmarks [data-home-route="bookmarks"]').click();
   await page.waitForFunction(() => (
     document.querySelector("#app")?.dataset.activeRoute === "bookmarks" &&
@@ -662,7 +758,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     await page.locator('[data-reader-verse="1"]').innerText(),
     /KJV John 4 text 1/,
   );
-  const historyCountAfterNextChapter = historyCountBeforeNextChapter + 1;
+  const historyCountAfterNextChapter = historyCountBeforeNextChapter;
   await page.waitForFunction((expectedCount) => (
     document.querySelector("#bible-history-count")?.textContent ===
       String(expectedCount)
@@ -671,6 +767,15 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     () => preferences.reader_location.chapter === 4,
     "reader preference did not reach John 4",
   );
+  const johnFourHistory = await page.evaluate((storageKey) => {
+    const record = JSON.parse(window.localStorage.getItem(storageKey));
+    return record.items.filter((item) => (
+      item.kind === "chapter" && item.book === 43 && item.chapter === 4
+    ));
+  }, readingHistoryStorageKey);
+  assert.equal(johnFourHistory.length, 1);
+  assert.equal(johnFourHistory[0].translation, "kjv");
+  assert.equal(johnFourHistory[0].verse, 1);
 
   // Dispatch both actions in one browser task. The chapter navigation clears
   // the visible verse list before the queued selection finishes, so history
@@ -715,7 +820,96 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   ));
   assert.equal(await page.locator("#bible-history").isVisible(), true);
 
+  // Changing the active Bible translation localizes the bookmark surface and
+  // keeps History tied to the reader's current choice rather than each visit's
+  // recorded translation metadata.
+  await page.locator("#translation-shortcut").click();
+  await page.locator("#translation-select").selectOption("aov");
+  await page.waitForFunction(() => (
+    !document.querySelector("#translation-dialog")?.open &&
+    document.documentElement.lang === "af" &&
+    document.querySelector("#translation-short-label")?.textContent === "AOV" &&
+    document.querySelector('#bible-verses [data-reader-verse="1"]')
+  ));
+  await waitForCondition(
+    () => preferences.translation === "aov",
+    "translation preference did not reach AOV",
+  );
+  await ensureBottomNavigationExpanded(page);
+  await page.locator('[data-route="home"]').click();
+  await page.waitForFunction(() => (
+    document.querySelector("#app")?.dataset.activeRoute === "home"
+  ));
+  assert.equal(
+    await page.locator("#home-hero [data-i18n=\"home.tagline\"]").innerText(),
+    "Die woorde van die ewige lewe",
+  );
+  await page.locator('#home-bookmarks [data-home-route="bookmarks"]').click();
+  await page.waitForFunction(() => (
+    document.querySelector("#app")?.dataset.activeRoute === "bookmarks"
+  ));
+  assert.equal(await page.locator("#bookmarks-title").innerText(), "Boekmerke");
+  assert.equal(await page.locator("#bookmark-backup-status").innerText(), "");
+  const localizedSpiritualRebirth = page.locator(
+    '.bookmark-group-card[data-bookmark-topic="spiritual-rebirth"]',
+  );
+  assert.equal(
+    await localizedSpiritualRebirth.locator("strong").innerText(),
+    "Geestelike wedergeboorte",
+  );
+  await localizedSpiritualRebirth.click();
+  await page.waitForFunction(() => (
+    !document.querySelector("#bookmark-detail")?.hidden &&
+    document.querySelector("#bookmark-detail-title")?.textContent ===
+      "Geestelike wedergeboorte"
+  ));
+  assert.equal(
+    await page.locator("#bookmark-detail-title").innerText(),
+    "Geestelike wedergeboorte",
+  );
+  const globalExcerpt = page.locator(
+    '[data-bookmark-preview-text="global_spiritual-rebirth_43_3_3"]',
+  );
+  await globalExcerpt.scrollIntoViewIfNeeded();
+  await page.waitForFunction(() => {
+    const excerpt = document.querySelector(
+      '[data-bookmark-preview-text="global_spiritual-rebirth_43_3_3"]',
+    );
+    return excerpt && !excerpt.hidden &&
+      excerpt.textContent === "AOV John 3 text 3";
+  });
+  assert.equal(
+    await page.locator(
+      '[data-bookmark-open="global_spiritual-rebirth_43_3_3"]',
+    ).getAttribute("aria-describedby"),
+    await globalExcerpt.getAttribute("id"),
+  );
+  await page.locator("#bookmark-all-topics").click();
+  await page.waitForFunction(() => (
+    !document.querySelector("#bookmark-groups-panel")?.hidden
+  ));
+  assert.equal(
+    await page.locator(
+      '.bookmark-group-card[data-bookmark-topic="grace"] strong',
+    ).innerText(),
+    "Genade",
+  );
+  await page.locator("#bookmark-topic-manager summary").click();
+  const coreGraceEditor = page.locator('[data-topic-editor="grace"]');
+  assert.equal(
+    await coreGraceEditor.locator(".bookmark-topic-editor__name--core").innerText(),
+    "Genade",
+  );
+  assert.equal(await coreGraceEditor.locator('[data-topic-name="grace"]').count(), 0);
+  assert.equal(await coreGraceEditor.locator('[data-topic-color="grace"]').count(), 1);
+  assert.equal(await coreGraceEditor.locator('[data-topic-delete="grace"]').count(), 1);
+  await ensureBottomNavigationExpanded(page);
+
   await page.setViewportSize({ width: 320, height: 844 });
+  const historyCountBeforeHistoryUi = Number(
+    await page.locator("#bible-history-count").innerText(),
+  );
+  assert.equal(Number.isSafeInteger(historyCountBeforeHistoryUi), true);
   const robotRequestsBeforeHistoryUi = robotRequests.length;
   await page.locator("#bible-history").click();
   await page.waitForFunction(() => (
@@ -732,8 +926,9 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   assert.equal(await page.locator("#close-reading-history").count(), 0);
   assert.equal(
     await page.locator(".history-item").count(),
-    historyCountAfterConcurrentActions,
+    historyCountBeforeHistoryUi,
   );
+  assert.equal(await page.locator("#reading-history-title").innerText(), "Geskiedenis");
   const historyLayout = await page.evaluate(() => {
     const view = document.querySelector("#history-view");
     const heading = document.querySelector(".history-heading");
@@ -824,24 +1019,35 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     const record = JSON.parse(
       window.localStorage.getItem(storageKey),
     );
-    return record.items.map((item) => (
-      `${item.translation}:${item.book}:${item.chapter}:${item.verse}`
-    ));
+    return record.items.map((item) => item.kind === "chapter"
+      ? `chapter:${item.book}:${item.chapter}`
+      : `verse:${item.book}:${item.chapter}:${item.verse}`
+    );
   }, readingHistoryStorageKey);
   assert.equal(new Set(storedLocations).size, storedLocations.length);
   const selectedHistory = page.locator(".history-item")
     .filter({ has: page.getByText("John 4:16", { exact: true }) })
     .filter({
-      has: page.getByText("King James Version (1769) (KJV)", {
+      has: page.getByText("Afrikaanse Ou Vertaling (AOV)", {
         exact: true,
       }),
-    });
+  });
   assert.equal(await selectedHistory.count(), 1);
-  assert.match(await selectedHistory.innerText(), /King James Version \(1769\).*KJV/);
-  assert.match(await selectedHistory.innerText(), /Verse selected/);
+  await selectedHistory.scrollIntoViewIfNeeded();
+  await page.waitForFunction(() => [...document.querySelectorAll(
+    ".history-item__text",
+  )].some((excerpt) => excerpt.textContent === "AOV John 4 text 16"));
+  assert.match(await selectedHistory.innerText(), /Afrikaanse Ou Vertaling.*AOV/);
+  assert.match(await selectedHistory.innerText(), /Vers gekies/);
+  assert.match(await selectedHistory.innerText(), /AOV John 4 text 16/);
+  assert.equal(
+    await selectedHistory.locator("[data-history-open]")
+      .getAttribute("aria-describedby"),
+    await selectedHistory.locator(".history-item__text").getAttribute("id"),
+  );
 
   await selectedHistory.locator("[data-history-remove]").click();
-  const historyCountAfterRemoval = historyCountAfterConcurrentActions - 1;
+  const historyCountAfterRemoval = historyCountBeforeHistoryUi - 1;
   assert.equal(
     await page.locator(".history-item").count(),
     historyCountAfterRemoval,
@@ -852,24 +1058,32 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   );
   assert.equal(robotRequests.length, robotRequestsBeforeHistoryUi);
 
-  const storedTranslationHistory = page.locator(".history-item")
-    .filter({ has: page.getByText("John 4:16", { exact: true }) })
+  const currentTranslationHistory = page.locator(".history-item")
+    .filter({ has: page.getByText("John 3:8", { exact: true }) })
     .filter({
       has: page.getByText("Afrikaanse Ou Vertaling (AOV)", { exact: true }),
     });
-  assert.equal(await storedTranslationHistory.count(), 1);
-  await storedTranslationHistory
+  assert.equal(await currentTranslationHistory.count(), 1);
+  await currentTranslationHistory.scrollIntoViewIfNeeded();
+  await page.waitForFunction(() => [...document.querySelectorAll(
+    ".history-item__text",
+  )].some((excerpt) => excerpt.textContent === "AOV John 3 text 8"));
+  assert.match(
+    await currentTranslationHistory.innerText(),
+    /AOV John 3 text 8/,
+  );
+  await currentTranslationHistory
     .locator("[data-history-open]")
     .click();
   await page.waitForFunction(() => (
-    document.querySelector("#bible-reference")?.textContent === "John 4" &&
+    document.querySelector("#bible-reference")?.textContent === "John 3" &&
     document.querySelector("#bible-translation-label")?.textContent
       ?.includes("AOV") &&
-    document.activeElement?.getAttribute("data-reader-verse") === "16"
+    document.activeElement?.getAttribute("data-reader-verse") === "8"
   ));
   assert.match(
-    await page.locator('[data-reader-verse="16"]').innerText(),
-    /AOV John 4 text 16/,
+    await page.locator('[data-reader-verse="8"]').innerText(),
+    /AOV John 3 text 8/,
   );
   await page.waitForFunction((expectedCount) => (
     document.querySelector("#bible-history-count")?.textContent ===
@@ -883,26 +1097,26 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       count: record.items.length,
       first: record.items[0],
       matching: record.items.filter((item) => (
-        item.translation === "aov" &&
         item.book === 43 &&
-        item.chapter === 4 &&
-        item.verse === 16
+        item.chapter === 3 &&
+        item.verse === 8
       )).length,
     };
   }, readingHistoryStorageKey);
   assert.equal(promotedHistory.count, historyCountAfterRemoval);
   assert.equal(promotedHistory.matching, 1);
+  assert.equal(promotedHistory.first.kind, "selection");
   assert.equal(promotedHistory.first.translation, "aov");
-  assert.equal(promotedHistory.first.chapter, 4);
-  assert.equal(promotedHistory.first.verse, 16);
+  assert.equal(promotedHistory.first.chapter, 3);
+  assert.equal(promotedHistory.first.verse, 8);
   await waitForCondition(
     () => (
       preferences.translation === "aov" &&
       preferences.reader_location.translation === "aov" &&
-      preferences.reader_location.chapter === 4 &&
-      preferences.reader_location.verse === 16
+      preferences.reader_location.chapter === 3 &&
+      preferences.reader_location.verse === 8
     ),
-    "reader preference did not restore the stored AOV location",
+    "reader preference did not open history in the current AOV translation",
   );
 
   await ensureBottomNavigationExpanded(page);
@@ -913,8 +1127,13 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   ));
   const firstPromotedHistory = page.locator(".history-item").first();
   assert.equal(await firstPromotedHistory.isVisible(), true);
-  assert.match(await firstPromotedHistory.innerText(), /John 4:16/);
+  await page.waitForFunction(() => (
+    document.querySelector(".history-item:first-child .history-item__text")
+      ?.textContent === "AOV John 3 text 8"
+  ));
+  assert.match(await firstPromotedHistory.innerText(), /John 3:8/);
   assert.match(await firstPromotedHistory.innerText(), /AOV/);
+  assert.match(await firstPromotedHistory.innerText(), /AOV John 3 text 8/);
   const robotRequestsBeforeClear = robotRequests.length;
   await page.locator("#clear-reading-history").click();
   await page.waitForFunction(() => (
@@ -944,6 +1163,9 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     await page.locator(`[data-route="${route}"]`).click();
     assert.equal(await page.locator("#bottom-nav").isVisible(), true);
     assert.equal(await page.locator("#bible-history").isVisible(), true);
+    if (route === "home") {
+      assert.equal(await page.locator("#home-history").isHidden(), true);
+    }
     const translationDisplay = await page.locator("#translation-shortcut")
       .evaluate((button) => getComputedStyle(button).display);
     assert.equal(translationDisplay === "none", route !== "search");
@@ -957,6 +1179,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     "kjv/43/4.json",
     "aov/books.json",
     "aov/43/chapters.json",
+    "aov/43/3.json",
     "aov/43/4.json",
   ]) {
     assert.ok(publicRequests.includes(expected), `missing public request: ${expected}`);

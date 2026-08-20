@@ -168,7 +168,16 @@ export class GetBibleApi {
     });
   }
 
-  async chapter(translation, book, chapter, targetVerse = 1) {
+  async chapter(
+    translation,
+    book,
+    chapter,
+    targetVerse = 1,
+    { includeNavigation = true } = {},
+  ) {
+    if (typeof includeNavigation !== "boolean") {
+      throw new TypeError("Chapter navigation option is invalid.");
+    }
     const code = normalizeTranslationCode(translation);
     const bookNumber = boundedInteger(book, 1, 200, "Book number");
     const chapterNumber = boundedInteger(chapter, 1, 1_000, "Chapter number");
@@ -204,6 +213,15 @@ export class GetBibleApi {
       });
       return normalized;
     });
+    if (!includeNavigation) {
+      return {
+        ...scripture,
+        target_verse: nearestVerse(
+          scripture.items.map((item) => item.verse),
+          target,
+        ),
+      };
+    }
     return this.#presentChapter(scripture, target);
   }
 

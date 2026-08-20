@@ -3,70 +3,17 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import {
+  CORE_BOOKMARK_TOPIC_DEFINITIONS,
+} from "../miniapp/lib/bookmark-topic-definitions.js";
 
-const TAG_IDS = new Map([
-  ["Adultery", "adultery"],
-  ["Authority of the Bible", "authority-of-the-bible"],
-  ["Baptism", "baptism"],
-  ["Biblical Love", "biblical-love"],
-  ["Blessings & Curses", "blessings-and-curses"],
-  ["Christian Clothing", "christian-clothing"],
-  ["Christian Offices", "christian-offices"],
-  ["Communion", "communion"],
-  ["Conditional Security", "conditional-security"],
-  ["Dating", "dating"],
-  ["Dietary Guidance", "dietary-guidance"],
-  ["Discipline", "discipline"],
-  ["Education", "education"],
-  ["Effective Prayer", "effective-prayer"],
-  ["Family Planning", "family-planning"],
-  ["Fear Not", "fear-not"],
-  ["First Day", "first-day"],
-  ["Flattery", "flattery"],
-  ["Free Will", "free-will"],
-  ["God's Judgement", "gods-judgment"],
-  ["Grace", "grace"],
-  ["Home Church", "home-church"],
-  ["Immutability", "immutability"],
-  ["Jesus Christ's Deity", "jesus-christs-deity"],
-  ["Jesus Christ's Humanity", "jesus-christs-humanity"],
-  ["Leadership", "leadership"],
-  ["Longevity", "longevity"],
-  ["Man's Role", "mans-role"],
-  ["Marriage", "marriage"],
-  ["Music's Influence", "musics-influence"],
-  ["No Fellowship", "no-fellowship"],
-  ["No One is Good", "no-one-is-good"],
-  ["Nonresistance", "non-resistance"],
-  ["Not Under the Law", "not-under-the-law"],
-  ["Obey God's Commandments", "obey-gods-commandments"],
-  ["Obey Government Laws", "obey-government-laws"],
-  ["Omnipotence", "omnipotent"],
-  ["Omnipresence", "omnipresent"],
-  ["Omniscience", "omniscient"],
-  ["Orderly Home", "orderly-home"],
-  ["Ordinance", "ordinances"],
-  ["Prince of this World", "prince-of-this-world"],
-  ["Providence", "providence"],
-  ["Renewing of the Mind", "renewing-of-the-mind"],
-  ["Repentance", "repentance"],
-  ["Saved by Faith", "saved-by-faith"],
-  ["Sodomy", "sodomy"],
-  ["Spirit of Prophecy", "spirit-of-prophecy"],
-  ["Spiritual Gifts", "spiritual-gifts"],
-  ["Spiritual Judgement", "spiritual-judgment"],
-  ["Spiritual Rebirth", "spiritual-rebirth"],
-  ["Temptation", "temptation"],
-  ["What is Life", "what-is-life"],
-  ["Wine", "wine"],
-  ["Wisdom Cause", "wisdom-cause"],
-  ["Wisdom Fruit", "wisdom-fruit"],
-  ["Wisdom Origin", "wisdom-origin"],
-  ["Wisdom Value", "wisdom-value"],
-  ["Woman's Role", "womans-role"],
-  ["Word of God", "word-of-god"],
-  ["Worldly Wisdom", "worldly-wisdom"],
-]);
+const tagEntries = CORE_BOOKMARK_TOPIC_DEFINITIONS.flatMap((definition) =>
+  [definition.name, ...definition.aliases].map((name) => [name, definition.id])
+);
+const TAG_IDS = new Map(tagEntries);
+if (TAG_IDS.size !== tagEntries.length) {
+  throw new TypeError("Canonical bookmark topic names and aliases must be unique.");
+}
 
 // Protestant canon order, matching the numeric book identifiers used by the
 // mini app and source CSV. Keeping this table beside the generator prevents a

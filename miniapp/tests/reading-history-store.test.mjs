@@ -99,22 +99,43 @@ test("moves a repeated coordinate to the front with its stable id", () => {
   ]);
 });
 
-test("keeps exact verses and translations as distinct history locations", () => {
+test("coalesces an exact coordinate across event kinds and translations", () => {
   const history = store(new MemoryStorage());
-  history.record(visit({ kind: "selection" }));
+  const chapter = history.record(visit());
+  const selection = history.record(visit({
+    kind: "selection",
+    translation: "aov",
+  }));
+
+  assert.equal(history.size, 1);
+  assert.equal(selection.id, chapter.id);
+  assert.deepEqual(
+    history.snapshot().map(({ id, kind }) => ({ id, kind })),
+    [
+      { id: selection.id, kind: "selection" },
+    ],
+  );
+});
+
+test("keeps exact verses distinct and coalesces translations by coordinate", () => {
+  const history = store(new MemoryStorage());
+  const first = history.record(visit({ kind: "selection" }));
   history.record(visit({
     kind: "selection",
     reference: "John 3:2",
     verse: 2,
   }));
-  history.record(visit({ kind: "selection", translation: "aov" }));
+  const translated = history.record(visit({
+    kind: "selection",
+    translation: "aov",
+  }));
 
+  assert.equal(translated.id, first.id);
   assert.deepEqual(
     history.snapshot().map(({ translation, verse }) => ({ translation, verse })),
     [
       { translation: "aov", verse: 1 },
       { translation: "kjv", verse: 2 },
-      { translation: "kjv", verse: 1 },
     ],
   );
 });
@@ -177,7 +198,7 @@ test("compacts repeated coordinates restored from version one storage", () => {
         visited_at: 2,
       },
       {
-        ...visit(),
+        ...visit({ kind: "selection", translation: "aov" }),
         id: "visit_legacy_duplicate",
         visited_at: 1,
       },

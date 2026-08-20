@@ -130,6 +130,48 @@ test("reader selection and unselection stay in browser state", async () => {
   );
 });
 
+test("display-only Scripture previews never become selectable authority", async () => {
+  const robotRequests = [];
+  const publicCalls = [];
+  const api = client({
+    onRobotRequest: (request) => robotRequests.push(request.url),
+    publicApi: {
+      async translations() {
+        return [{ code: "kjv" }];
+      },
+      async chapter(translation, book, chapter, verse, options) {
+        publicCalls.push([translation, book, chapter, verse, options ?? null]);
+        return {
+          translation,
+          book: { number: book },
+          chapter,
+          items: [READER_VERSE],
+        };
+      },
+    },
+  });
+  await api.createSession("LaunchToken123456");
+
+  const preview = await api.scripturePreview("kjv", 43, 3, 16);
+  assert.equal(preview.items[0].text, READER_VERSE.text);
+  assert.throws(
+    () => api.addBasketItem(READER_VERSE.selection_id),
+    (error) => error?.code === "invalid_selection",
+  );
+
+  await api.scripture("kjv", 43, 3, 16);
+  const selected = await api.addBasketItem(READER_VERSE.selection_id);
+  assert.equal(selected.items[0].selection_id, READER_VERSE.selection_id);
+  assert.deepEqual(publicCalls, [
+    ["kjv", 43, 3, 16, { includeNavigation: false }],
+    ["kjv", 43, 3, 16, null],
+  ]);
+  assert.equal(
+    robotRequests.some((url) => /\/(?:scripture|history)(?:\?|$)/.test(url)),
+    false,
+  );
+});
+
 test("reader and Librarian verses use the same local basket contract", async () => {
   const searchVerse = {
     selection_id: "OpaqueSearchSelectionToken123",

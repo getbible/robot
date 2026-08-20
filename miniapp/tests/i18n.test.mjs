@@ -68,3 +68,49 @@ test("resolves exact, regional, historical, and unknown translation locales", ()
   assert.equal(resolveLocale("grc", available), "grc");
   assert.equal(resolveLocale("not a locale", available), "en");
 });
+
+test("uses governed few forms for integer bookmark counts", () => {
+  const originalDocument = globalThis.document;
+  const expected = {
+    cs: ["2 záložky", "5 záložek"],
+    pl: ["2 zakładki", "5 zakładek"],
+    ru: ["2 закладки", "5 закладок"],
+    uk: ["2 закладки", "5 закладок"],
+  };
+
+  try {
+    globalThis.document = {
+      documentElement: { lang: "en", dir: "ltr" },
+    };
+    const i18n = new I18n();
+
+    for (const [locale, [few, many]] of Object.entries(expected)) {
+      i18n.setLocale(locale);
+      assert.equal(i18n.plural("bookmarks.count", 2), few, locale);
+      assert.equal(i18n.plural("bookmarks.count", 5), many, locale);
+    }
+    i18n.setLocale("cu");
+    assert.equal(i18n.plural("bookmarks.count", 2), "2 закладки");
+    assert.equal(i18n.plural("bookmarks.count", 5), "5 закладок");
+    assert.equal(i18n.plural("bookmarks.count", 21), "21 закладка");
+
+    i18n.setLocale("ru");
+    assert.equal(i18n.plural("bookmarks.count", 21), "21 закладка");
+    assert.doesNotMatch(
+      i18n.plural("bookmarks.default_tags_restored", 21),
+      /\{count\}/,
+    );
+    i18n.setLocale("uk");
+    assert.equal(i18n.plural("bookmarks.count", 21), "21 закладка");
+
+    i18n.setLocale("tl");
+    assert.equal(i18n.plural("bookmarks.count", 2), "2 bookmark");
+    i18n.setLocale("tsg");
+    assert.equal(i18n.plural("bookmarks.count", 5), "5 bookmark");
+
+    i18n.setLocale("fr");
+    assert.equal(i18n.plural("bookmarks.count", 0), "0 signets");
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
