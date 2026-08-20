@@ -4,7 +4,11 @@ import test from "node:test";
 import {
   READING_HISTORY_STORAGE_KEY,
   ReadingHistoryStore,
+  readingHistoryStorageKey,
 } from "../lib/reading-history-store.js";
+
+const ACCOUNT_SCOPE = "a".repeat(64);
+const OTHER_ACCOUNT_SCOPE = "b".repeat(64);
 
 class MemoryStorage {
   values = new Map();
@@ -39,6 +43,7 @@ function store(storage, { maximum = 1_000, start = 1_000 } = {}) {
   let now = start;
   let id = 0;
   return new ReadingHistoryStore({
+    scope: ACCOUNT_SCOPE,
     storage,
     maximum,
     clock: () => now++,
@@ -157,7 +162,8 @@ test("revisiting a full history moves one item without evicting another", () => 
 
 test("compacts repeated coordinates restored from version one storage", () => {
   const storage = new MemoryStorage();
-  storage.setItem(READING_HISTORY_STORAGE_KEY, JSON.stringify({
+  const key = readingHistoryStorageKey(ACCOUNT_SCOPE);
+  storage.setItem(key, JSON.stringify({
     version: 1,
     items: [
       {
@@ -183,7 +189,7 @@ test("compacts repeated coordinates restored from version one storage", () => {
     ],
   }));
 
-  const history = new ReadingHistoryStore({ storage });
+  const history = new ReadingHistoryStore({ scope: ACCOUNT_SCOPE, storage });
 
   assert.equal(history.size, 2);
   assert.deepEqual(
@@ -194,12 +200,12 @@ test("compacts repeated coordinates restored from version one storage", () => {
     ],
   );
   assert.deepEqual(
-    JSON.parse(storage.getItem(READING_HISTORY_STORAGE_KEY)).items,
+    JSON.parse(storage.getItem(key)).items,
     history.snapshot(),
   );
 });
 
-test("persists bounded coordinate-only history in session storage", () => {
+test("persists bounded coordinate-only history in scoped local storage", () => {
   const storage = new MemoryStorage();
   const history = store(storage, { maximum: 2 });
 
@@ -207,22 +213,28 @@ test("persists bounded coordinate-only history in session storage", () => {
   history.record(visit({ chapter: 2, reference: "John 2:1" }));
   history.record(visit({ chapter: 3, reference: "John 3:1" }));
 
-  const raw = storage.getItem(READING_HISTORY_STORAGE_KEY);
+  const key = readingHistoryStorageKey(ACCOUNT_SCOPE);
+  const raw = storage.getItem(key);
   assert.ok(raw);
   assert.doesNotMatch(raw, /text|session_token|init_data|user_id/);
+  assert.equal(storage.getItem(READING_HISTORY_STORAGE_KEY), null);
+  assert.equal(key.includes(ACCOUNT_SCOPE), true);
   assert.deepEqual(
     history.snapshot().map((entry) => entry.chapter),
     [3, 2],
   );
 });
 
-test("restores, removes, and clears individual session history entries", () => {
+test("restores, removes, and clears individual durable history entries", () => {
   const storage = new MemoryStorage();
   const first = store(storage);
   const one = first.record(visit());
   first.record(visit({ chapter: 4, reference: "John 4:1" }));
 
-  const restored = new ReadingHistoryStore({ storage });
+  const restored = new ReadingHistoryStore({
+    scope: ACCOUNT_SCOPE,
+    storage,
+  });
   assert.equal(restored.size, 2);
   assert.equal(restored.remove(one.id), true);
   assert.deepEqual(
@@ -232,8 +244,61 @@ test("restores, removes, and clears individual session history entries", () => {
   assert.equal(restored.remove("missing"), false);
   assert.equal(restored.clear(), true);
   assert.equal(restored.size, 0);
-  assert.equal(storage.getItem(READING_HISTORY_STORAGE_KEY), null);
+  assert.equal(
+    storage.getItem(readingHistoryStorageKey(ACCOUNT_SCOPE)),
+    null,
+  );
   assert.equal(restored.clear(), false);
+});
+
+test("isolates durable history between authenticated account scopes", () => {
+  const storage = new MemoryStorage();
+  const firstAccount = store(storage);
+  firstAccount.record(visit());
+
+  const otherAccount = new ReadingHistoryStore({
+    scope: OTHER_ACCOUNT_SCOPE,
+    storage,
+  });
+  assert.deepEqual(otherAccount.snapshot(), []);
+  otherAccount.record(visit({
+    chapter: 4,
+    reference: "John 4:1",
+  }));
+
+  assert.equal(
+    new ReadingHistoryStore({
+      scope: ACCOUNT_SCOPE,
+      storage,
+    }).snapshot()[0].chapter,
+    3,
+  );
+  assert.equal(
+    new ReadingHistoryStore({
+      scope: OTHER_ACCOUNT_SCOPE,
+      storage,
+    }).snapshot()[0].chapter,
+    4,
+  );
+  assert.equal(storage.values.size, 2);
+});
+
+test("requires a lowercase SHA-256 account scope", () => {
+  assert.throws(
+    () => new ReadingHistoryStore({ storage: new MemoryStorage() }),
+    /scope/i,
+  );
+  assert.throws(
+    () => new ReadingHistoryStore({
+      scope: "A".repeat(64),
+      storage: new MemoryStorage(),
+    }),
+    /scope/i,
+  );
+  assert.throws(
+    () => readingHistoryStorageKey("short"),
+    /scope/i,
+  );
 });
 
 test("returns defensive snapshots and rejects malformed visits", () => {
@@ -264,10 +329,12 @@ test("returns defensive snapshots and rejects malformed visits", () => {
 
 test("discards corrupt persistence and falls back to memory on storage failure", () => {
   const corrupt = new MemoryStorage();
-  corrupt.setItem(READING_HISTORY_STORAGE_KEY, "{not-json");
+  const key = readingHistoryStorageKey(ACCOUNT_SCOPE);
+  corrupt.setItem(key, "{not-json");
   const recovered = store(corrupt);
   assert.deepEqual(recovered.snapshot(), []);
-  assert.equal(corrupt.getItem(READING_HISTORY_STORAGE_KEY), null);
+  assert.equal(corrupt.getItem(key), null);
+  assert.equal(recovered.persistent, true);
 
   const unavailable = {
     getItem() {
@@ -281,6 +348,20 @@ test("discards corrupt persistence and falls back to memory on storage failure",
     },
   };
   const memoryOnly = store(unavailable);
+  assert.equal(memoryOnly.persistent, false);
   assert.doesNotThrow(() => memoryOnly.record(visit()));
   assert.equal(memoryOnly.size, 1);
+});
+
+test("keeps new history in memory after a quota failure", () => {
+  const storage = new MemoryStorage();
+  storage.setItem = () => {
+    throw new Error("quota");
+  };
+  const history = store(storage);
+
+  assert.doesNotThrow(() => history.record(visit()));
+  assert.equal(history.size, 1);
+  assert.equal(history.persistent, false);
+  assert.deepEqual(history.snapshot().map((entry) => entry.chapter), [3]);
 });

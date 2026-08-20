@@ -1,6 +1,8 @@
-const STORAGE_KEY = "getbible.miniapp.reading-history";
+const STORAGE_PREFIX = "getbible.miniapp.reading-history.v1";
+const LEGACY_STORAGE_KEY = "getbible.miniapp.reading-history";
 const RECORD_VERSION = 1;
 const DEFAULT_MAXIMUM = 1_000;
+const SCOPE_PATTERN = /^[a-f0-9]{64}$/;
 const TRANSLATION_PATTERN = /^[a-z0-9][a-z0-9_-]{0,29}$/;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const HISTORY_KINDS = new Set(["chapter", "selection"]);
@@ -9,16 +11,24 @@ export class ReadingHistoryStore {
   #clock;
   #idFactory;
   #items;
+  #key;
   #maximum;
+  #persistent;
   #sequence = 0;
   #storage;
 
   constructor({
-    storage = browserSessionStorage(),
+    scope,
+    storage = browserLocalStorage(),
     maximum = DEFAULT_MAXIMUM,
     clock = Date.now,
     idFactory = null,
   } = {}) {
+    if (typeof scope !== "string" || !SCOPE_PATTERN.test(scope)) {
+      throw new TypeError(
+        "An authenticated reading history storage scope is required.",
+      );
+    }
     if (!Number.isInteger(maximum) || maximum < 1 || maximum > 1_000) {
       throw new RangeError("Reading history maximum must be between 1 and 1000.");
     }
@@ -28,7 +38,9 @@ export class ReadingHistoryStore {
     if (idFactory !== null && typeof idFactory !== "function") {
       throw new TypeError("Reading history idFactory must be a function.");
     }
-    this.#storage = storage;
+    this.#key = readingHistoryStorageKey(scope);
+    this.#storage = storageLike(storage) ? storage : null;
+    this.#persistent = Boolean(this.#storage);
     this.#maximum = maximum;
     this.#clock = clock;
     this.#idFactory = idFactory;
@@ -37,6 +49,10 @@ export class ReadingHistoryStore {
 
   get size() {
     return this.#items.length;
+  }
+
+  get persistent() {
+    return this.#persistent;
   }
 
   record(visit) {
@@ -97,15 +113,14 @@ export class ReadingHistoryStore {
   }
 
   #read() {
-    if (!storageLike(this.#storage)) {
-      this.#storage = null;
+    if (!this.#storage) {
       return [];
     }
     let raw;
     try {
-      raw = this.#storage.getItem(STORAGE_KEY);
+      raw = this.#storage.getItem(this.#key);
     } catch {
-      this.#storage = null;
+      this.#disablePersistence();
       return [];
     }
     if (!raw) {
@@ -125,19 +140,19 @@ export class ReadingHistoryStore {
       if (items.length !== record.items.length) {
         try {
           this.#storage.setItem(
-            STORAGE_KEY,
+            this.#key,
             JSON.stringify({ version: RECORD_VERSION, items }),
           );
         } catch {
-          this.#storage = null;
+          this.#disablePersistence();
         }
       }
       return items;
     } catch {
       try {
-        this.#storage.removeItem(STORAGE_KEY);
+        this.#storage.removeItem(this.#key);
       } catch {
-        this.#storage = null;
+        this.#disablePersistence();
       }
       return [];
     }
@@ -149,24 +164,42 @@ export class ReadingHistoryStore {
     }
     try {
       if (this.#items.length === 0) {
-        this.#storage.removeItem(STORAGE_KEY);
+        this.#storage.removeItem(this.#key);
         return;
       }
       this.#storage.setItem(
-        STORAGE_KEY,
+        this.#key,
         JSON.stringify({
           version: RECORD_VERSION,
           items: this.#items,
         }),
       );
     } catch {
-      this.#storage = null;
+      this.#disablePersistence();
     }
+  }
+
+  #disablePersistence() {
+    this.#storage = null;
+    this.#persistent = false;
   }
 }
 
-export const READING_HISTORY_STORAGE_KEY = STORAGE_KEY;
+export const READING_HISTORY_STORAGE_PREFIX = STORAGE_PREFIX;
+// Kept for callers that imported the original constant. The store deliberately
+// does not migrate this unscoped record because its account ownership is
+// unknowable.
+export const READING_HISTORY_STORAGE_KEY = LEGACY_STORAGE_KEY;
 export const DEFAULT_READING_HISTORY_MAXIMUM = DEFAULT_MAXIMUM;
+
+export function readingHistoryStorageKey(scope) {
+  if (typeof scope !== "string" || !SCOPE_PATTERN.test(scope)) {
+    throw new TypeError(
+      "An authenticated reading history storage scope is required.",
+    );
+  }
+  return `${STORAGE_PREFIX}:${scope}`;
+}
 
 function normalizeEntry(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -257,9 +290,9 @@ function defaultIdentifier(visitedAt, sequence) {
   return `visit_${Math.floor(visitedAt).toString(36)}_${sequence.toString(36)}_${entropy}`;
 }
 
-function browserSessionStorage() {
+function browserLocalStorage() {
   try {
-    return globalThis.sessionStorage ?? null;
+    return globalThis.localStorage ?? null;
   } catch {
     return null;
   }

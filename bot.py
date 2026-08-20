@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 from collections.abc import Awaitable
@@ -18,6 +19,9 @@ from telegram import (
     BotCommand,
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputFile,
     MenuButtonCommands,
     MenuButtonWebApp,
     WebAppInfo,
@@ -33,6 +37,14 @@ from telegram.ext import (
 )
 
 from config import ConfigurationError, Settings
+from modules.bookmark_backup import (
+    BOOKMARK_RESTORE_CALLBACK_PREFIX,
+    MAX_BOOKMARK_BACKUP_BYTES,
+    BookmarkBackupDocument,
+    BookmarkBackupUnavailable,
+    BookmarkRestoreFile,
+    bookmark_restore_callback_data,
+)
 from modules.cache_maintenance import CacheJanitor
 from modules.commands import (
     APPLICATION_SERVICES_SLOT,
@@ -44,6 +56,7 @@ from modules.commands import (
     SERVICE_SLOT,
     SETTINGS_SLOT,
     bible_command,
+    bookmark_restore_callback,
     error_handler,
     help_command,
     interaction_callback,
@@ -276,12 +289,95 @@ def build_application(settings: Settings) -> Application:
                     )
             await application.bot.send_message(chat_id=user_id, text=text)
 
+        async def send_bookmark_backup(
+            user_id: int,
+            document: BookmarkBackupDocument,
+        ) -> int:
+            try:
+                message = await application.bot.send_document(
+                    chat_id=user_id,
+                    document=InputFile(
+                        document.payload,
+                        filename=document.filename,
+                    ),
+                    caption=(
+                        "GetBible bookmark backup\n"
+                        f"{document.bookmark_count} bookmarks · "
+                        f"{document.topic_count} topics\n"
+                        "Keep this message as your portable backup. Tap Restore "
+                        "bookmarks to review and merge it on any Telegram client."
+                    ),
+                    disable_content_type_detection=True,
+                    reply_markup=InlineKeyboardMarkup(
+                        [[
+                            InlineKeyboardButton(
+                                "Restore bookmarks",
+                                callback_data=bookmark_restore_callback_data(
+                                    user_id,
+                                    settings.telegram_api_token,
+                                ),
+                            )
+                        ]]
+                    ),
+                )
+            except TelegramError as error:
+                raise BookmarkBackupUnavailable(
+                    "Telegram could not store the bookmark backup."
+                ) from error
+            message_id = getattr(message, "message_id", None)
+            if (
+                isinstance(message_id, bool)
+                or not isinstance(message_id, int)
+                or message_id <= 0
+            ):
+                raise BookmarkBackupUnavailable(
+                    "Telegram returned an invalid bookmark backup message."
+                )
+            return message_id
+
+        async def load_bookmark_backup(restore: BookmarkRestoreFile) -> bytes:
+            try:
+                telegram_file = await application.bot.get_file(restore.file_id)
+                remote_size = getattr(telegram_file, "file_size", None)
+                remote_unique_id = getattr(telegram_file, "file_unique_id", None)
+                if (
+                    remote_unique_id != restore.file_unique_id
+                    or
+                    remote_size is not None
+                    and (
+                        isinstance(remote_size, bool)
+                        or not isinstance(remote_size, int)
+                        or remote_size != restore.file_size
+                        or remote_size > MAX_BOOKMARK_BACKUP_BYTES
+                    )
+                ):
+                    raise BookmarkBackupUnavailable(
+                        "Telegram bookmark backup metadata changed."
+                    )
+                payload = bytes(await telegram_file.download_as_bytearray())
+            except BookmarkBackupUnavailable:
+                raise
+            except TelegramError as error:
+                raise BookmarkBackupUnavailable(
+                    "Telegram could not retrieve the bookmark backup."
+                ) from error
+            if (
+                len(payload) != restore.file_size
+                or len(payload) > MAX_BOOKMARK_BACKUP_BYTES
+            ):
+                raise BookmarkBackupUnavailable(
+                    "Telegram returned an invalid bookmark backup document."
+                )
+            return payload
+
         mini_app = MiniAppServer(
             settings=settings,
             service=service,
             preferences=preferences,
             limiter=limiter,
             post_scripture=post_mini_app_scripture,
+            send_bookmark_backup=send_bookmark_backup,
+            load_bookmark_backup=load_bookmark_backup,
             cleanup_launch=cleanup_mini_app_launch,
             abuse_warning=send_abuse_warning,
         )
@@ -303,6 +399,12 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("bible", bible_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(
+        CallbackQueryHandler(
+            bookmark_restore_callback,
+            pattern=rf"^{re.escape(BOOKMARK_RESTORE_CALLBACK_PREFIX)}",
+        )
+    )
     application.add_handler(CallbackQueryHandler(interaction_callback, pattern=r"^gb:"))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, interaction_reply)

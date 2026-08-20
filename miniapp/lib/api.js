@@ -207,6 +207,30 @@ export class MiniAppApi {
     });
   }
 
+  backupBookmarks(backup, idempotencyKey) {
+    return this.#request("bookmarks/backup", {
+      method: "POST",
+      body: {
+        idempotency_key: idempotencyKey,
+        backup,
+      },
+      timeoutMs: 30_000,
+    });
+  }
+
+  restoreBookmarks() {
+    return this.#request("bookmarks/restore", {
+      timeoutMs: 30_000,
+    });
+  }
+
+  acknowledgeBookmarkRestore() {
+    return this.#request("bookmarks/restore", {
+      method: "DELETE",
+      keepalive: true,
+    });
+  }
+
   registerSelections(selections) {
     return this.#selections.registerMany(selections);
   }

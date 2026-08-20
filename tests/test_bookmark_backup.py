@@ -1,0 +1,329 @@
+import copy
+import json
+import unittest
+
+from modules.bookmark_backup import (
+    MAX_BOOKMARK_BACKUP_BYTES,
+    MAX_BOOKMARK_MARKINGS,
+    MAX_BOOKMARK_TOPICS,
+    BookmarkBackupError,
+    BookmarkRestoreFile,
+    bookmark_backup_document,
+    bookmark_restore_callback_data,
+    parse_bookmark_backup_bytes,
+    valid_bookmark_restore_callback,
+)
+
+
+def _backup() -> dict[str, object]:
+    return {
+        "format": "getbible-life-markings",
+        "version": 2,
+        "exportedAt": "2026-08-20T10:00:00.000Z",
+        "colors": [
+            {"id": "grace", "name": "Grace", "value": "#bbf7d0"},
+        ],
+        "markings": [
+            {
+                "id": "bookmark_1",
+                "passage": {"translation": "kjv", "book": 43, "chapter": 3},
+                "verse": 16,
+                "start": None,
+                "end": None,
+                "quote": "For God so loved the world.",
+                "reference": "John 3:16",
+                "colorId": "grace",
+                "createdAt": 1_777_000_000_000,
+            }
+        ],
+        "notes": [],
+    }
+
+
+class BookmarkBackupTestCase(unittest.TestCase):
+    def test_validates_and_canonicalizes_portable_json(self) -> None:
+        document = bookmark_backup_document(_backup())
+        reopened = parse_bookmark_backup_bytes(document.payload)
+
+        self.assertEqual(document.bookmark_count, 1)
+        self.assertEqual(document.topic_count, 1)
+        self.assertEqual(document.filename, "getbible-bookmarks-20260820-100000Z.json")
+        self.assertEqual(reopened.value, _backup())
+        self.assertNotIn(b"user_id", document.payload)
+        self.assertEqual(
+            document.payload,
+            json.dumps(
+                _backup(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8"),
+        )
+
+    def test_accepts_legacy_backup_without_format_marker(self) -> None:
+        backup = _backup()
+        backup.pop("format")
+        backup["version"] = 1
+
+        document = bookmark_backup_document(backup)
+
+        self.assertEqual(document.value, backup)
+
+    def test_restore_callback_is_durable_and_owner_bound(self) -> None:
+        callback = bookmark_restore_callback_data(200, "123:secret")
+
+        self.assertLessEqual(len(callback.encode("utf-8")), 64)
+        self.assertTrue(
+            valid_bookmark_restore_callback(
+                callback,
+                user_id=200,
+                secret="123:secret",
+            )
+        )
+        self.assertFalse(
+            valid_bookmark_restore_callback(
+                callback,
+                user_id=201,
+                secret="123:secret",
+            )
+        )
+
+    def test_native_maximum_ascii_bookmark_export_fits_delivery_cap(self) -> None:
+        backup = _backup()
+        template = backup["markings"][0]  # type: ignore[index]
+        markings = []
+        for index in range(800):
+            marking = copy.deepcopy(template)
+            marking["id"] = f"bookmark_{index}"
+            marking["quote"] = "x" * 3000
+            markings.append(marking)
+        backup["markings"] = markings
+
+        document = bookmark_backup_document(backup)
+
+        self.assertLessEqual(len(document.payload), MAX_BOOKMARK_BACKUP_BYTES)
+
+    def test_rejects_invalid_topics_entries_and_oversized_documents(self) -> None:
+        orphan = _backup()
+        orphan["markings"][0]["colorId"] = "missing"  # type: ignore[index]
+        with self.assertRaisesRegex(BookmarkBackupError, "unknown topic"):
+            bookmark_backup_document(orphan)
+
+        duplicate = _backup()
+        duplicate["colors"] = [
+            duplicate["colors"][0],  # type: ignore[index]
+            duplicate["colors"][0],  # type: ignore[index]
+        ]
+        with self.assertRaisesRegex(BookmarkBackupError, "topic"):
+            bookmark_backup_document(duplicate)
+
+        with self.assertRaisesRegex(BookmarkBackupError, "large"):
+            parse_bookmark_backup_bytes(b" " * (MAX_BOOKMARK_BACKUP_BYTES + 1))
+
+    def test_restore_file_is_small_json_metadata_only(self) -> None:
+        restore = BookmarkRestoreFile.validated(
+            file_id="telegram-file-id",
+            file_unique_id="telegram-unique-id",
+            file_name="getbible-bookmarks.json",
+            file_size=1024,
+        )
+
+        self.assertEqual(restore.file_size, 1024)
+        with self.assertRaisesRegex(BookmarkBackupError, "JSON"):
+            BookmarkRestoreFile.validated(
+                file_id="telegram-file-id",
+                file_unique_id="telegram-unique-id",
+                file_name="bookmarks.zip",
+                file_size=1024,
+            )
+
+    def test_rejects_invalid_json_and_envelope_metadata(self) -> None:
+        for payload in (b"\xff", b"{"):
+            with self.subTest(payload=payload), self.assertRaisesRegex(
+                BookmarkBackupError,
+                "UTF-8 JSON",
+            ):
+                parse_bookmark_backup_bytes(payload)
+
+        invalid_values: tuple[tuple[object, str], ...] = (
+            ([], "JSON object"),
+            ({**_backup(), "format": "another-format"}, "format"),
+            ({**_backup(), "version": 3}, "version"),
+            ({**_backup(), "version": True}, "version"),
+            ({**_backup(), "exportedAt": None}, "date"),
+            ({**_backup(), "exportedAt": "not-a-date"}, "date"),
+            ({**_backup(), "exportedAt": "2026-08-20T10:00:00"}, "timezone"),
+            ({**_backup(), "exportedAt": "0001-01-01T00:00:00+23:59"}, "date"),
+            ({**_backup(), "exportedAt": "9999-12-31T23:59:59-23:59"}, "date"),
+        )
+        for value, message in invalid_values:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                BookmarkBackupError,
+                message,
+            ):
+                bookmark_backup_document(value)
+
+    def test_rejects_invalid_collection_shapes(self) -> None:
+        invalid_collections = (
+            {**_backup(), "colors": None},
+            {**_backup(), "colors": []},
+            {
+                **_backup(),
+                "colors": [
+                    {"id": f"topic_{index}", "name": "Topic", "value": "#123456"}
+                    for index in range(MAX_BOOKMARK_TOPICS + 1)
+                ],
+            },
+            {**_backup(), "markings": None},
+            {**_backup(), "markings": [None] * (MAX_BOOKMARK_MARKINGS + 1)},
+            {**_backup(), "notes": None},
+            {**_backup(), "notes": [{}] * (MAX_BOOKMARK_MARKINGS + 1)},
+        )
+        for value in invalid_collections:
+            with self.subTest(
+                field_types=tuple(type(item) for item in value.values())
+            ), self.assertRaisesRegex(BookmarkBackupError, "collections"):
+                bookmark_backup_document(value)
+
+    def test_rejects_malformed_topics_and_markings(self) -> None:
+        invalid_documents: list[tuple[dict[str, object], str]] = []
+
+        not_a_topic = _backup()
+        not_a_topic["colors"] = ["grace"]
+        invalid_documents.append((not_a_topic, "topic"))
+
+        for field, topic_value in (
+            ("id", "bad topic id"),
+            ("name", " "),
+            ("value", "green"),
+        ):
+            document = _backup()
+            document["colors"][0][field] = topic_value  # type: ignore[index]
+            invalid_documents.append((document, "topic"))
+
+        not_a_marking = _backup()
+        not_a_marking["markings"] = ["bookmark"]
+        invalid_documents.append((not_a_marking, "entry"))
+
+        invalid_marking_fields: tuple[tuple[str, object, str], ...] = (
+            ("id", "bad bookmark id", "entry"),
+            ("passage", "John 3", "entry"),
+            ("quote", None, "quote"),
+            ("reference", " ", "reference"),
+            ("createdAt", True, "timestamp"),
+            ("verse", 0, "verse"),
+        )
+        for field, marking_value, message in invalid_marking_fields:
+            document = _backup()
+            document["markings"][0][field] = marking_value  # type: ignore[index]
+            invalid_documents.append((document, message))
+
+        duplicate_marking = _backup()
+        duplicate_marking["markings"] = [
+            duplicate_marking["markings"][0],  # type: ignore[index]
+            duplicate_marking["markings"][0],  # type: ignore[index]
+        ]
+        invalid_documents.append((duplicate_marking, "entry"))
+
+        invalid_translation = _backup()
+        invalid_translation["markings"][0]["passage"]["translation"] = "KJV!"  # type: ignore[index]
+        invalid_documents.append((invalid_translation, "translation"))
+
+        invalid_passage_integer = _backup()
+        invalid_passage_integer["markings"][0]["passage"]["book"] = "43"  # type: ignore[index]
+        invalid_documents.append((invalid_passage_integer, "book"))
+
+        for document, message in invalid_documents:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                BookmarkBackupError,
+                message,
+            ):
+                bookmark_backup_document(document)
+
+    def test_validates_text_ranges_notes_and_canonical_size(self) -> None:
+        partial_marking = _backup()
+        partial_marking["markings"][0]["start"] = 0  # type: ignore[index]
+        with self.assertRaisesRegex(BookmarkBackupError, "text range"):
+            bookmark_backup_document(partial_marking)
+
+        ranged_marking = _backup()
+        ranged_marking["markings"][0]["start"] = 0  # type: ignore[index]
+        ranged_marking["markings"][0]["end"] = 4  # type: ignore[index]
+        document = bookmark_backup_document(ranged_marking)
+        self.assertEqual(document.bookmark_count, 0)
+
+        invalid_note = _backup()
+        invalid_note["notes"] = ["note"]
+        with self.assertRaisesRegex(BookmarkBackupError, "note"):
+            bookmark_backup_document(invalid_note)
+
+        invalid_json_value = _backup()
+        invalid_json_value["notes"] = [{"value": float("nan")}]
+        with self.assertRaisesRegex(BookmarkBackupError, "invalid JSON values"):
+            bookmark_backup_document(invalid_json_value)
+
+        invalid_unicode = _backup()
+        invalid_unicode["notes"] = [{"value": "broken \ud800 text"}]
+        with self.assertRaisesRegex(BookmarkBackupError, "invalid JSON values"):
+            bookmark_backup_document(invalid_unicode)
+
+        oversized = _backup()
+        oversized["notes"] = [{"value": "x" * MAX_BOOKMARK_BACKUP_BYTES}]
+        with self.assertRaisesRegex(BookmarkBackupError, "too large"):
+            bookmark_backup_document(oversized)
+
+    def test_rejects_invalid_restore_callback_inputs(self) -> None:
+        invalid_identities = (
+            (True, "secret"),
+            ("200", "secret"),
+            (0, "secret"),
+            ((2**52), "secret"),
+            (200, ""),
+            (200, None),
+        )
+        for user_id, secret in invalid_identities:
+            with self.subTest(
+                user_id=user_id,
+                secret=secret,
+            ), self.assertRaisesRegex(ValueError, "identity"):
+                bookmark_restore_callback_data(user_id, secret)  # type: ignore[arg-type]
+
+        self.assertFalse(
+            valid_bookmark_restore_callback(
+                "not-a-callback",
+                user_id=200,
+                secret="secret",
+            )
+        )
+        self.assertFalse(
+            valid_bookmark_restore_callback(
+                "gbr:200:abcdefghijklmnop",
+                user_id=0,
+                secret="secret",
+            )
+        )
+
+    def test_restore_file_rejects_invalid_bounded_fields(self) -> None:
+        invalid_fields = (
+            {"file_id": None},
+            {"file_unique_id": " "},
+            {"file_name": "x" * 256 + ".json"},
+            {"file_size": True},
+            {"file_size": 0},
+            {"file_size": MAX_BOOKMARK_BACKUP_BYTES + 1},
+        )
+        defaults: dict[str, object] = {
+            "file_id": "telegram-file-id",
+            "file_unique_id": "telegram-unique-id",
+            "file_name": "getbible-bookmarks.json",
+            "file_size": 1024,
+        }
+        for changes in invalid_fields:
+            with self.subTest(changes=changes), self.assertRaises(
+                BookmarkBackupError
+            ):
+                BookmarkRestoreFile.validated(**(defaults | changes))
+
+
+if __name__ == "__main__":
+    unittest.main()

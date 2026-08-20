@@ -8,6 +8,7 @@ from unittest.mock import patch
 from urllib.parse import urlencode
 
 from modules import miniapp_sessions
+from modules.bookmark_backup import BookmarkBackupDocument, BookmarkRestoreFile
 from modules.catalog import (
     BookOption,
     ChapterContent,
@@ -26,6 +27,31 @@ from modules.service import ScriptureQuery, SearchPage
 TOKEN = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
 PUBLIC_URL = "https://robot.example/getbible"
 ORIGIN = "https://robot.example"
+
+
+def _bookmark_backup() -> dict[str, object]:
+    return {
+        "format": "getbible-life-markings",
+        "version": 2,
+        "exportedAt": "2026-08-20T10:00:00.000Z",
+        "colors": [
+            {"id": "grace", "name": "Grace", "value": "#bbf7d0"},
+        ],
+        "markings": [
+            {
+                "id": "bookmark_1",
+                "passage": {"translation": "kjv", "book": 43, "chapter": 3},
+                "verse": 16,
+                "start": None,
+                "end": None,
+                "quote": "For God so loved the world.",
+                "reference": "John 3:16",
+                "colorId": "grace",
+                "createdAt": 1_777_000_000_000,
+            }
+        ],
+        "notes": [],
+    }
 
 
 def _init_data(
@@ -301,6 +327,15 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.post_error: Exception | None = None
         self.post_started: asyncio.Event | None = None
         self.post_release: asyncio.Event | None = None
+        self.bookmark_backup_started: asyncio.Event | None = None
+        self.bookmark_backup_release: asyncio.Event | None = None
+        self.bookmark_backup_error: Exception | None = None
+        self.bookmark_backups: list[tuple[int, BookmarkBackupDocument]] = []
+        self.loaded_restore_files: list[BookmarkRestoreFile] = []
+        self.restore_payload = json.dumps(
+            _bookmark_backup(),
+            separators=(",", ":"),
+        ).encode()
 
         async def post_scripture(
             launch: object,
@@ -318,6 +353,23 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         async def cleanup_launch(launch: object) -> None:
             self.cleaned_launches.append(launch)
 
+        async def send_bookmark_backup(
+            user_id: int,
+            document: BookmarkBackupDocument,
+        ) -> int:
+            self.bookmark_backups.append((user_id, document))
+            if self.bookmark_backup_started is not None:
+                self.bookmark_backup_started.set()
+            if self.bookmark_backup_release is not None:
+                await self.bookmark_backup_release.wait()
+            if self.bookmark_backup_error is not None:
+                raise self.bookmark_backup_error
+            return 701
+
+        async def load_bookmark_backup(restore: BookmarkRestoreFile) -> bytes:
+            self.loaded_restore_files.append(restore)
+            return self.restore_payload
+
         async def abuse_warning(user_id: int, chat_id: int, text: str) -> None:
             self.warnings.append((user_id, chat_id, text))
 
@@ -333,6 +385,8 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             ),
             public_url=PUBLIC_URL,
             post_scripture=post_scripture,
+            send_bookmark_backup=send_bookmark_backup,
+            load_bookmark_backup=load_bookmark_backup,
             cleanup_launch=cleanup_launch,
             abuse_warning=abuse_warning,
         )
@@ -373,6 +427,160 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(wrong_method.status, 405)
         self.assertEqual(wrong_method.headers["Allow"], "POST, OPTIONS")
         self.assertEqual(self.limiter.calls, [])
+
+    async def test_bookmark_backup_is_private_bounded_and_idempotent(self) -> None:
+        token = await self.exchange()
+        body = {
+            "idempotency_key": "abcdef0123456789",
+            "backup": _bookmark_backup(),
+        }
+
+        first = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/bookmarks/backup",
+                token=token,
+                body=body,
+            )
+        )
+        repeated = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/bookmarks/backup",
+                token=token,
+                body=body,
+            )
+        )
+
+        self.assertEqual(first.status, 200)
+        self.assertEqual(repeated.status, 200)
+        self.assertFalse(json.loads(first.body)["idempotent_replay"])
+        self.assertTrue(json.loads(repeated.body)["idempotent_replay"])
+        self.assertEqual(len(self.bookmark_backups), 1)
+        user_id, document = self.bookmark_backups[0]
+        self.assertEqual(user_id, 42)
+        self.assertEqual(document.bookmark_count, 1)
+        self.assertNotIn(b"user_id", document.payload)
+        self.assertEqual(self.limiter.details[-1][2], 1.0)
+
+        changed = _bookmark_backup()
+        changed["markings"] = []
+        conflict = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/bookmarks/backup",
+                token=token,
+                body={**body, "backup": changed},
+            )
+        )
+        self.assertEqual(conflict.status, 400)
+        self.assertEqual(json.loads(conflict.body)["error"], "invalid_request")
+
+    async def test_restore_payload_requires_owner_launch_and_explicit_ack(self) -> None:
+        restore = BookmarkRestoreFile.validated(
+            file_id="telegram-file-id",
+            file_unique_id="telegram-unique-id",
+            file_name="getbible-bookmarks.json",
+            file_size=len(self.restore_payload),
+        )
+        launch = self.launches.create_launch(
+            user_id=42,
+            target_chat_id=42,
+            initial_route="bookmarks",
+            bookmark_restore=restore,
+        )
+        self.active_init_data = _init_data(start_param=launch.token)
+        session_response = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={
+                    "init_data": self.active_init_data,
+                    "launch_token": launch.token,
+                },
+            )
+        )
+        self.assertEqual(session_response.status, 201)
+        session_payload = json.loads(session_response.body)
+        self.assertEqual(session_payload["entrypoint"]["route"], "bookmarks")
+        self.assertTrue(
+            session_payload["entrypoint"]["bookmark_restore_available"]
+        )
+        token = session_payload["session_token"]
+
+        first = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/bookmarks/restore",
+                token=token,
+            )
+        )
+        repeated = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/bookmarks/restore",
+                token=token,
+            )
+        )
+        self.assertEqual(first.status, 200)
+        self.assertEqual(repeated.status, 200)
+        self.assertEqual(json.loads(first.body)["backup"], _bookmark_backup())
+        self.assertEqual(len(self.loaded_restore_files), 2)
+
+        acknowledged = await self.api.handle(
+            self.request(
+                "DELETE",
+                "/getbible/api/v1/bookmarks/restore",
+                token=token,
+            )
+        )
+        missing = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/bookmarks/restore",
+                token=token,
+            )
+        )
+        self.assertEqual(acknowledged.status, 204)
+        self.assertEqual(missing.status, 404)
+        self.assertEqual(
+            json.loads(missing.body)["error"],
+            "bookmark_restore_not_found",
+        )
+
+    async def test_ambiguous_bookmark_delivery_cannot_be_retried(self) -> None:
+        token = await self.exchange()
+        body = {
+            "idempotency_key": "abcdef0123456789",
+            "backup": _bookmark_backup(),
+        }
+        self.bookmark_backup_error = RuntimeError("ambiguous Telegram failure")
+
+        first = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/bookmarks/backup",
+                token=token,
+                body=body,
+            )
+        )
+        self.bookmark_backup_error = None
+        retry = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/bookmarks/backup",
+                token=token,
+                body={**body, "idempotency_key": "dead-beef-dead-beef"},
+            )
+        )
+
+        self.assertEqual(first.status, 500)
+        self.assertEqual(retry.status, 409)
+        self.assertEqual(
+            json.loads(retry.body)["error"],
+            "bookmark_backup_outcome_locked",
+        )
+        self.assertEqual(len(self.bookmark_backups), 1)
 
     async def test_atomic_browser_post_handles_multiple_verses_as_one_action(self) -> None:
         token = await self.exchange()
@@ -1259,6 +1467,60 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(posted.status, 200)
         self.assertEqual(revoked.status, 204)
         self.assertEqual(len(self.posted), 1)
+        self.assertIsNone(self.sessions.get(first_token, touch=False))
+
+    async def test_active_bookmark_backup_pins_session_until_revoke(self) -> None:
+        first_token = await self.exchange(query_id="bookmark-first")
+        first_init_data = self.active_init_data
+        first_session = self.sessions.get(first_token, touch=False)
+        self.assertIsNotNone(first_session)
+        self.bookmark_backup_started = asyncio.Event()
+        self.bookmark_backup_release = asyncio.Event()
+        backing_up = asyncio.create_task(
+            self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/bookmarks/backup",
+                    token=first_token,
+                    init_data=first_init_data,
+                    body={
+                        "idempotency_key": "abcdef0123456789",
+                        "backup": _bookmark_backup(),
+                    },
+                )
+            )
+        )
+        await self.bookmark_backup_started.wait()
+
+        second_token = await self.exchange(query_id="bookmark-second")
+        third_token = await self.exchange(query_id="bookmark-third")
+
+        self.assertIs(
+            self.sessions.get(first_token, touch=False),
+            first_session,
+        )
+        self.assertIsNone(self.sessions.get(second_token, touch=False))
+        self.assertIsNotNone(self.sessions.get(third_token, touch=False))
+
+        revoking = asyncio.create_task(
+            self.api.handle(
+                self.request(
+                    "DELETE",
+                    "/getbible/api/v1/session",
+                    token=first_token,
+                    init_data=first_init_data,
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(revoking.done())
+
+        self.bookmark_backup_release.set()
+        backed_up, revoked = await asyncio.gather(backing_up, revoking)
+
+        self.assertEqual(backed_up.status, 200)
+        self.assertEqual(revoked.status, 204)
+        self.assertEqual(len(self.bookmark_backups), 1)
         self.assertIsNone(self.sessions.get(first_token, touch=False))
 
     async def test_delayed_content_returns_unauthorized_after_session_eviction(

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, replace
 from typing import Literal
 from urllib.parse import quote, urlencode, urlsplit
 
+from .bookmark_backup import BookmarkRestoreFile
 from .interactions import SearchResult
 from .miniapp_auth import TelegramMiniAppPrincipal
 
@@ -28,7 +29,7 @@ MAX_MINIAPP_PROCESS_RETAINED_SELECTIONS = 250_000
 _MINIAPP_SELECTION_OVERHEAD_BYTES = 2048
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
-MiniAppRoute = Literal["home", "bible", "search"]
+MiniAppRoute = Literal["home", "bible", "search", "bookmarks"]
 
 
 class MiniAppSessionExpiredError(ValueError):
@@ -58,6 +59,7 @@ class MiniAppLaunch:
     prompt_ephemeral_message_id: int | None = None
     source_ephemeral_message_id: int | None = None
     source_ephemeral_receiver_user_id: int | None = None
+    bookmark_restore: BookmarkRestoreFile | None = None
 
 
 class MiniAppLaunchStore:
@@ -90,6 +92,7 @@ class MiniAppLaunchStore:
         initial_query: str = "",
         source_ephemeral_message_id: int | None = None,
         source_ephemeral_receiver_user_id: int | None = None,
+        bookmark_restore: BookmarkRestoreFile | None = None,
     ) -> MiniAppLaunch:
         if (
             isinstance(user_id, bool)
@@ -106,8 +109,17 @@ class MiniAppLaunchStore:
             or message_thread_id <= 0
         ):
             raise ValueError("message_thread_id must be a positive integer or None.")
-        if initial_route not in {"home", "bible", "search"}:
+        if initial_route not in {"home", "bible", "search", "bookmarks"}:
             raise ValueError("initial_route is invalid.")
+        if bookmark_restore is not None and (
+            not isinstance(bookmark_restore, BookmarkRestoreFile)
+            or initial_route != "bookmarks"
+            or target_chat_id != user_id
+            or message_thread_id is not None
+        ):
+            raise ValueError(
+                "Bookmark restore launches must target the owner's private chat."
+            )
         source_values = (
             source_ephemeral_message_id,
             source_ephemeral_receiver_user_id,
@@ -145,6 +157,7 @@ class MiniAppLaunchStore:
                 source_ephemeral_receiver_user_id=(
                     source_ephemeral_receiver_user_id
                 ),
+                bookmark_restore=bookmark_restore,
             )
             self._launches[token] = launch
             while len(self._launches) > self._max_launches:
@@ -364,6 +377,16 @@ class MiniAppPostAttempt:
 
 
 @dataclass(slots=True)
+class MiniAppBookmarkBackupAttempt:
+    """Document-bound Telegram delivery state for idempotent backup retries."""
+
+    idempotency_key: str
+    document_digest: bytes
+    state: MiniAppPostState = "pending"
+    message_id: int | None = None
+
+
+@dataclass(slots=True)
 class MiniAppSession:
     """One opaque browser session bound to one authenticated Telegram user."""
 
@@ -381,9 +404,19 @@ class MiniAppSession:
     available_selections: OrderedDict[str, MiniAppSelection] = field(default_factory=OrderedDict)
     basket: list[MiniAppSelection] = field(default_factory=list)
     post_attempts: OrderedDict[str, MiniAppPostAttempt] = field(default_factory=OrderedDict)
+    bookmark_backup_attempts: OrderedDict[
+        str,
+        MiniAppBookmarkBackupAttempt,
+    ] = field(default_factory=OrderedDict)
     post_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    bookmark_io_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     retained_selection_bytes: int = 0
     retained_selection_count: int = 0
+
+
+def _session_busy(session: MiniAppSession) -> bool:
+    """Return whether an external side effect currently pins this session."""
+    return session.post_lock.locked() or session.bookmark_io_lock.locked()
 
 
 class MiniAppSessionStore:
@@ -449,7 +482,7 @@ class MiniAppSessionStore:
                     (
                         token
                         for token in user_sessions
-                        if not self._sessions[token].post_lock.locked()
+                        if not _session_busy(self._sessions[token])
                     ),
                     None,
                 )
@@ -539,7 +572,7 @@ class MiniAppSessionStore:
                     session.user_id == user_id
                     and session.launch.token == launch_token
                     and now - session.created_at >= self._ttl
-                    and not session.post_lock.locked()
+                    and not _session_busy(session)
                 ):
                     self._drop_session_locked(token)
                     self._expired += 1
@@ -845,6 +878,103 @@ class MiniAppSessionStore:
             ):
                 attempt.state = "failed"
 
+    def begin_bookmark_backup(
+        self,
+        session: MiniAppSession,
+        idempotency_key: str,
+        document_digest: bytes,
+    ) -> tuple[MiniAppBookmarkBackupAttempt, bool]:
+        """Reserve one backup delivery without retaining the document body."""
+        with self._guard:
+            if self._sessions.get(session.token) is not session:
+                raise MiniAppSessionExpiredError(
+                    "Mini App session is no longer active."
+                )
+            existing = session.bookmark_backup_attempts.get(idempotency_key)
+            if existing is not None:
+                session.bookmark_backup_attempts.move_to_end(idempotency_key)
+                if existing.document_digest != document_digest:
+                    raise MiniAppSessionInputError(
+                        "Idempotency key belongs to a different bookmark backup."
+                    )
+                return existing, False
+            for attempt in session.bookmark_backup_attempts.values():
+                if attempt.document_digest == document_digest:
+                    return attempt, False
+            attempt = MiniAppBookmarkBackupAttempt(
+                idempotency_key=idempotency_key,
+                document_digest=document_digest,
+            )
+            session.bookmark_backup_attempts[idempotency_key] = attempt
+            while len(session.bookmark_backup_attempts) > 8:
+                session.bookmark_backup_attempts.popitem(last=False)
+            return attempt, True
+
+    def complete_bookmark_backup(
+        self,
+        session: MiniAppSession,
+        idempotency_key: str,
+        document_digest: bytes,
+        message_id: int,
+    ) -> None:
+        with self._guard:
+            if self._sessions.get(session.token) is not session:
+                raise MiniAppSessionExpiredError(
+                    "Mini App session is no longer active."
+                )
+            attempt = session.bookmark_backup_attempts.get(idempotency_key)
+            if (
+                attempt is None
+                or attempt.document_digest != document_digest
+                or attempt.state != "pending"
+                or isinstance(message_id, bool)
+                or not isinstance(message_id, int)
+                or message_id <= 0
+            ):
+                raise ValueError("Mini App bookmark backup reservation is invalid.")
+            attempt.state = "completed"
+            attempt.message_id = message_id
+
+    def fail_bookmark_backup(
+        self,
+        session: MiniAppSession,
+        idempotency_key: str,
+        document_digest: bytes,
+    ) -> None:
+        """Keep an indeterminate Telegram document send closed to retries."""
+        with self._guard:
+            if self._sessions.get(session.token) is not session:
+                return
+            attempt = session.bookmark_backup_attempts.get(idempotency_key)
+            if (
+                attempt is not None
+                and attempt.document_digest == document_digest
+                and attempt.state == "pending"
+            ):
+                attempt.state = "failed"
+
+    def bookmark_restore(
+        self,
+        session: MiniAppSession,
+    ) -> BookmarkRestoreFile | None:
+        """Return the Telegram file reference for one authenticated launch."""
+        with self._guard:
+            if self._sessions.get(session.token) is not session:
+                return None
+            return session.launch.bookmark_restore
+
+    def acknowledge_bookmark_restore(self, session: MiniAppSession) -> bool:
+        """Forget a restore file only after the browser explicitly acknowledges it."""
+        with self._guard:
+            if self._sessions.get(session.token) is not session:
+                raise MiniAppSessionExpiredError(
+                    "Mini App session is no longer active."
+                )
+            if session.launch.bookmark_restore is None:
+                return False
+            session.launch.bookmark_restore = None
+            return True
+
     def search(self, session: MiniAppSession, token: str) -> MiniAppSearch | None:
         if _TOKEN_RE.fullmatch(token) is None:
             return None
@@ -889,7 +1019,7 @@ class MiniAppSessionStore:
             for token, session in self._sessions.items()
             if (
                 now - session.created_at >= self._ttl
-                and not session.post_lock.locked()
+                and not _session_busy(session)
             )
         ]
         for token in expired_sessions:
@@ -1090,7 +1220,7 @@ class MiniAppSessionStore:
                     for token, current in self._sessions.items()
                     if (
                         current is not session
-                        and not current.post_lock.locked()
+                        and not _session_busy(current)
                     )
                 ),
                 None,
@@ -1108,7 +1238,7 @@ class MiniAppSessionStore:
             (
                 token
                 for token, session in self._sessions.items()
-                if not session.post_lock.locked()
+                if not _session_busy(session)
             ),
             None,
         )

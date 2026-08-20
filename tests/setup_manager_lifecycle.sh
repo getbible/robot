@@ -674,6 +674,9 @@ assert_contains "$CADDY_ROUTES" "bot.example.com {"
 assert_contains "$CADDY_ROUTES" "@gb_alpha_static path /getbible/alpha /getbible/alpha/"
 assert_contains "$CADDY_ROUTES" "/getbible/alpha/api/v1/session"
 assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/post'
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/bookmarks/backup'
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/bookmarks/restore'
+assert_contains "$CADDY_ROUTES" 'max_size 5MB'
 assert_contains "$CADDY_ROUTES" 'respond "" 404'
 assert_contains "$CADDY_ROUTES" "reverse_proxy 127.0.0.1:9201"
 assert_equal "$(grep -Fc "$CADDY_IMPORT_BEGIN" "$CADDYFILE")" "1"
@@ -760,7 +763,7 @@ https://bot.example.com/getbible/alpha
 9201
 EOF
 assert_equal "$(grep -Fc "$CADDY_IMPORT_BEGIN" "$CADDYFILE")" "1"
-assert_equal "$(grep -Fc "reverse_proxy 127.0.0.1:9201" "$CADDY_ROUTES")" "3"
+assert_equal "$(grep -Fc "reverse_proxy 127.0.0.1:9201" "$CADDY_ROUTES")" "4"
 
 CADDYFILE_HASH=$(sha256sum "$CADDYFILE" | awk '{print $1}')
 CADDY_ROUTES_HASH=$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')

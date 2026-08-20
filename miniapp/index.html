@@ -132,14 +132,38 @@
               </span>
               <span aria-hidden="true">›</span>
             </button>
+            <button class="home-action" type="button" data-home-route="history">
+              <span class="home-action__icon" aria-hidden="true">↶</span>
+              <span>
+                <strong data-i18n="home.history">See history</strong>
+                <small data-i18n="home.history_hint">Return to recently opened Scripture</small>
+              </span>
+              <span aria-hidden="true">›</span>
+            </button>
           </div>
 
-          <div id="home-selection" class="home-selection" hidden>
+          <div class="home-summaries">
+          <div id="home-selection" class="home-summary" hidden>
             <div>
               <strong id="home-selection-title">Selection ready</strong>
               <span id="home-selection-meta"></span>
             </div>
             <button type="button" data-home-route="selection" data-i18n="home.review">Review</button>
+          </div>
+          <div id="home-history" class="home-summary" hidden>
+            <div>
+              <strong id="home-history-title">Reading history</strong>
+              <span id="home-history-meta"></span>
+            </div>
+            <button type="button" data-home-route="history" data-i18n="home.review">Review</button>
+          </div>
+          <div id="home-bookmarks" class="home-summary home-summary--bookmarks">
+            <div>
+              <strong id="home-bookmarks-title">Bookmarks</strong>
+              <span id="home-bookmarks-meta"></span>
+            </div>
+            <button type="button" data-home-route="bookmarks" data-i18n="home.manage">Manage</button>
+          </div>
           </div>
         </section>
 
@@ -386,6 +410,188 @@
             hidden
           ></ol>
         </section>
+
+        <section
+          id="bookmarks-view"
+          class="view"
+          data-view="bookmarks"
+          aria-labelledby="bookmarks-title"
+          hidden
+        >
+          <div class="selection-heading bookmarks-heading">
+            <div>
+              <p class="eyebrow" data-i18n="bookmarks.eyebrow">Your study</p>
+              <h1 id="bookmarks-title" tabindex="-1" data-i18n="bookmarks.title">Bookmarks</h1>
+              <p id="bookmarks-summary"></p>
+            </div>
+            <button
+              id="clear-bookmarks"
+              class="text-button text-button--danger"
+              type="button"
+              hidden
+            >
+              <span data-i18n="bookmarks.clear">Clear all</span>
+            </button>
+          </div>
+
+          <p
+            id="bookmark-storage-warning"
+            class="bookmark-storage-warning"
+            role="status"
+            data-i18n="bookmarks.storage_warning"
+            hidden
+          >
+            Telegram sync is unavailable on this client. Your local copy still works;
+            back it up before clearing app data.
+          </p>
+
+          <div id="bookmark-groups-panel">
+            <label class="bookmark-search" for="bookmark-topic-search">
+              <span data-i18n="bookmarks.search_label">Find a bookmark topic</span>
+              <input
+                id="bookmark-topic-search"
+                type="search"
+                maxlength="80"
+                autocomplete="off"
+                placeholder="Search topics"
+                data-i18n-placeholder="bookmarks.search_placeholder"
+              >
+            </label>
+            <div
+              id="bookmark-group-list"
+              class="bookmark-group-list"
+              role="list"
+              aria-label="Bookmark topics"
+              data-i18n-aria-label="bookmarks.groups_label"
+            ></div>
+            <p
+              id="bookmark-groups-empty"
+              class="bookmark-empty-copy"
+              data-i18n="bookmarks.no_match"
+              hidden
+            >No topics match your search.</p>
+
+            <details id="bookmark-topic-manager" class="bookmark-topic-manager">
+              <summary data-i18n="bookmarks.manage_topics">Manage topic names and colors</summary>
+              <form id="bookmark-topic-form" class="bookmark-topic-form">
+                <label>
+                  <span data-i18n="bookmarks.topic_name">Topic name</span>
+                  <input
+                    id="bookmark-topic-name"
+                    type="text"
+                    maxlength="80"
+                    autocomplete="off"
+                    required
+                    placeholder="New topic"
+                    data-i18n-placeholder="bookmarks.new_topic"
+                  >
+                </label>
+                <label>
+                  <span data-i18n="bookmarks.topic_color">Topic color</span>
+                  <input id="bookmark-topic-color" type="color" value="#fde68a">
+                </label>
+                <button class="button button--secondary" type="submit">
+                  <span data-i18n="bookmarks.add_topic">Add topic</span>
+                </button>
+              </form>
+              <div id="bookmark-topic-editor" class="bookmark-topic-editor"></div>
+            </details>
+
+            <section class="bookmark-backup" aria-labelledby="bookmark-backup-title">
+              <h2 id="bookmark-backup-title" data-i18n="bookmarks.backup_title">Backup and restore</h2>
+              <p data-i18n="bookmarks.backup_help">
+                Bookmarks sync across your Telegram devices. You can also keep a
+                recovery copy in this private bot chat.
+              </p>
+              <div class="bookmark-backup__actions">
+                <button id="backup-bookmarks" class="button button--secondary" type="button">
+                  <span data-i18n="bookmarks.backup">Back up to chat</span>
+                </button>
+                <button id="download-bookmarks" class="button button--secondary" type="button">
+                  <span data-i18n="bookmarks.download">Download JSON</span>
+                </button>
+                <button id="import-bookmarks" class="button button--secondary" type="button">
+                  <span data-i18n="bookmarks.import">Import bookmarks</span>
+                </button>
+                <input
+                  id="bookmark-import-file"
+                  type="file"
+                  accept="application/json,.json"
+                  hidden
+                >
+              </div>
+              <p id="bookmark-backup-status" class="bookmark-backup__status" role="status"></p>
+            </section>
+          </div>
+
+          <div id="bookmark-detail" hidden>
+            <button id="bookmark-all-topics" class="bookmark-back" type="button">
+              <span aria-hidden="true">‹</span>
+              <span data-i18n="bookmarks.all_topics">All topics</span>
+            </button>
+            <div class="bookmark-detail__heading">
+              <span id="bookmark-detail-dot" class="bookmark-dot" aria-hidden="true"></span>
+              <div>
+                <h2 id="bookmark-detail-title"></h2>
+                <p id="bookmark-detail-count"></p>
+              </div>
+            </div>
+            <div id="bookmark-detail-empty" class="empty-selection bookmark-detail__empty">
+              <div class="empty-selection__icon" aria-hidden="true">◇</div>
+              <h2 data-i18n="bookmarks.group_empty_title">No bookmarks in this topic yet</h2>
+              <p data-i18n="bookmarks.group_empty_body">
+                Select a verse in the Bible, then choose this topic from the bookmark menu.
+              </p>
+              <button class="button button--primary" type="button" data-home-route="bible">
+                <span data-i18n="selection.browse">Open the Bible</span>
+              </button>
+            </div>
+            <ol
+              id="bookmark-list"
+              class="bookmark-list"
+              aria-label="Saved bookmark verses"
+              data-i18n-aria-label="bookmarks.list_label"
+              hidden
+            ></ol>
+          </div>
+        </section>
+      </div>
+
+      <div
+        id="bookmark-popover"
+        class="bookmark-popover"
+        role="dialog"
+        aria-labelledby="bookmark-popover-reference"
+        data-placement="above"
+        hidden
+      >
+        <div class="bookmark-popover__context">
+          <span class="bookmark-popover__icon" aria-hidden="true">◇</span>
+          <strong id="bookmark-popover-reference"></strong>
+        </div>
+        <div class="bookmark-popover__actions">
+          <button id="bookmark-active-topic" class="bookmark-active-topic" type="button">
+            <span id="bookmark-active-topic-dot" class="bookmark-dot" aria-hidden="true"></span>
+            <span id="bookmark-active-topic-name"></span>
+          </button>
+          <label class="bookmark-topic-picker">
+            <span class="sr-only" data-i18n="bookmarks.choose_topic">Choose another topic</span>
+            <select id="bookmark-topic-picker" aria-label="Choose another topic" data-i18n-aria-label="bookmarks.choose_topic">
+              <option value="" disabled selected data-i18n="bookmarks.more_topics">More topics…</option>
+            </select>
+          </label>
+          <button id="remove-verse-bookmark" class="bookmark-popover__plain" type="button">
+            <span aria-hidden="true">⊘</span>
+            <span data-i18n="bookmarks.none">None</span>
+          </button>
+          <button
+            id="close-bookmark-popover"
+            class="bookmark-popover__close"
+            type="button"
+            aria-label="Close bookmark menu"
+            data-i18n-aria-label="bookmarks.close_palette"
+          >×</button>
+        </div>
       </div>
 
       <nav

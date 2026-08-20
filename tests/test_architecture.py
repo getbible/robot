@@ -13,6 +13,7 @@ LAYERS = {
     "container.runtime": 0,
     "modules.__init__": 0,
     "modules.audit": 0,
+    "modules.bookmark_backup": 0,
     "modules.cache_maintenance": 0,
     "modules.catalog": 0,
     "modules.ephemeral": 0,

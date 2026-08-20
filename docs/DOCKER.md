@@ -408,14 +408,17 @@ Preserve `Host`, set trusted forwarding headers at the proxy, and do not expose
 plain HTTP directly to the internet. Apply:
 
 - request-header and request-body timeouts;
-- a 64 KiB body cap;
+- a 64 KiB body cap for ordinary routes, with a narrowly matched exception of
+  at least 4 MiB + 4 KiB only for `POST .../api/v1/bookmarks/backup` (the
+  supplied Caddy configuration uses 5 MiB for that endpoint);
 - an idle connection timeout;
 - connection and request-rate budgets;
 - current TLS certificate and protocol policy.
 
-The embedded Tornado server independently applies a 16 KiB header cap, 64 KiB
-body cap, 10-second body timeout, 30-second idle/header timeout, and 128 KiB
-socket buffer.
+The embedded Tornado server independently applies a 16 KiB header cap, a
+64 KiB ordinary body cap, a 4 MiB + 4 KiB cap only for the exact bookmark
+backup POST route, a 10-second body timeout, a 30-second idle/header timeout,
+and a 64 KiB socket buffer.
 
 ## Capacity and incident logs
 
