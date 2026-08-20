@@ -46,7 +46,7 @@ function store(storage, { maximum = 1_000, start = 1_000 } = {}) {
   });
 }
 
-test("records every successful chapter and selection newest first", () => {
+test("records distinct successful chapter and selection locations newest first", () => {
   const history = store(new MemoryStorage());
 
   history.record(visit());
@@ -69,15 +69,133 @@ test("records every successful chapter and selection newest first", () => {
   );
 });
 
-test("retains repeated coordinates and keeps translations distinct", () => {
+test("moves a repeated coordinate to the front with its stable id", () => {
   const history = store(new MemoryStorage());
-  history.record(visit());
-  history.record(visit());
-  history.record(visit({ translation: "aov" }));
+  const first = history.record(visit());
+  const second = history.record(visit({
+    reference: "John 4:1",
+    chapter: 4,
+  }));
+  const revisited = history.record(visit({
+    kind: "selection",
+    reference: "John 3:1",
+  }));
+
+  assert.equal(history.size, 2);
+  assert.equal(revisited.id, first.id);
+  assert.deepEqual(history.snapshot(), [
+    {
+      ...revisited,
+      id: first.id,
+      kind: "selection",
+      visited_at: 1_002,
+    },
+    second,
+  ]);
+});
+
+test("keeps exact verses and translations as distinct history locations", () => {
+  const history = store(new MemoryStorage());
+  history.record(visit({ kind: "selection" }));
+  history.record(visit({
+    kind: "selection",
+    reference: "John 3:2",
+    verse: 2,
+  }));
+  history.record(visit({ kind: "selection", translation: "aov" }));
 
   assert.deepEqual(
-    history.snapshot().map((entry) => entry.translation),
-    ["aov", "kjv", "kjv"],
+    history.snapshot().map(({ translation, verse }) => ({ translation, verse })),
+    [
+      { translation: "aov", verse: 1 },
+      { translation: "kjv", verse: 2 },
+      { translation: "kjv", verse: 1 },
+    ],
+  );
+});
+
+test("moves a repeated chapter to the front regardless of target verse", () => {
+  const history = store(new MemoryStorage());
+  const first = history.record(visit());
+  history.record(visit({
+    kind: "selection",
+    reference: "John 3:8",
+    verse: 8,
+  }));
+  const revisited = history.record(visit({
+    reference: "John 3:16",
+    verse: 16,
+  }));
+
+  assert.equal(history.size, 2);
+  assert.equal(revisited.id, first.id);
+  assert.deepEqual(
+    history.snapshot().map(({ kind, reference }) => ({ kind, reference })),
+    [
+      { kind: "chapter", reference: "John 3:16" },
+      { kind: "selection", reference: "John 3:8" },
+    ],
+  );
+});
+
+test("revisiting a full history moves one item without evicting another", () => {
+  const history = store(new MemoryStorage(), { maximum: 2 });
+  const first = history.record(visit());
+  const second = history.record(visit({
+    reference: "John 4:1",
+    chapter: 4,
+  }));
+
+  history.record(visit());
+
+  assert.equal(history.size, 2);
+  assert.deepEqual(
+    history.snapshot().map((entry) => entry.id),
+    [first.id, second.id],
+  );
+});
+
+test("compacts repeated coordinates restored from version one storage", () => {
+  const storage = new MemoryStorage();
+  storage.setItem(READING_HISTORY_STORAGE_KEY, JSON.stringify({
+    version: 1,
+    items: [
+      {
+        ...visit({ kind: "selection" }),
+        id: "visit_newest",
+        visited_at: 3,
+      },
+      {
+        ...visit({ chapter: 4, reference: "John 4:16", verse: 16 }),
+        id: "visit_other",
+        visited_at: 2,
+      },
+      {
+        ...visit(),
+        id: "visit_legacy_duplicate",
+        visited_at: 1,
+      },
+      {
+        ...visit({ chapter: 4, reference: "John 4:1" }),
+        id: "visit_legacy_chapter_duplicate",
+        visited_at: 0,
+      },
+    ],
+  }));
+
+  const history = new ReadingHistoryStore({ storage });
+
+  assert.equal(history.size, 2);
+  assert.deepEqual(
+    history.snapshot().map(({ id, kind }) => ({ id, kind })),
+    [
+      { id: "visit_newest", kind: "selection" },
+      { id: "visit_other", kind: "chapter" },
+    ],
+  );
+  assert.deepEqual(
+    JSON.parse(storage.getItem(READING_HISTORY_STORAGE_KEY)).items,
+    history.snapshot(),
   );
 });
 

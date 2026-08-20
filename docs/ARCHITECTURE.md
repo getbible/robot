@@ -170,17 +170,22 @@ The active WebView selection is intentionally ephemeral and identity-free outsid
 
 ## Reading history lifecycle
 
-Successful chapter opens and successful verse selections append a normalized
-coordinate to `ReadingHistoryStore`. Entries retain only a local identifier,
-event kind, translation, reference, book name/number, chapter, verse, and visit
-time. They never retain verse bodies, Telegram identity, launch data, or Robot
-credentials.
+Successful chapter opens and successful verse selections record a normalized
+coordinate in `ReadingHistoryStore`. Chapter visits share translation, book,
+and chapter identity even when their target verse changes. Verse selections
+share full translation, book, chapter, and verse identity, and an exact
+coordinate also coalesces across event kinds. A revisit refreshes metadata and
+visit time, preserves its local identifier, and moves it to the front instead
+of adding a duplicate. Entries retain only that identifier, event kind,
+translation, reference, book name/number, chapter, verse, and visit time. They
+never retain verse bodies, Telegram identity, launch data, or Robot credentials.
 
-History is newest-first, bounded to 1,000 entries, and stored under a versioned
-`sessionStorage` key. Reopening an entry restores both its translation and exact
-coordinate. Individual removal and full reset are local browser operations and
-issue no Robot request. Storage rejection falls back to memory for the active
-page.
+History is unique and newest-first, bounded to 1,000 entries, and stored under
+a versioned `sessionStorage` key. Restoration compacts legacy duplicate
+coordinates newest-first. Reopening an entry restores both its translation and
+exact coordinate. Individual removal and full reset are local browser
+operations and issue no Robot request. Storage rejection falls back to memory
+for the active page.
 
 ## Search
 
