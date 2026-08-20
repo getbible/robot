@@ -149,6 +149,32 @@ async function serveStatic(route) {
   return route.fulfill({ status: 200, contentType: mime, body: await readFile(file) });
 }
 
+async function ensureBottomNavigationExpanded(page) {
+  // Reader jumps schedule their scroll and resulting collapse across animation
+  // frames. Drain that work before inspecting the footer so the test cannot
+  // race a visible button that is about to become intentionally hidden.
+  await page.evaluate(() => new Promise((resolvePromise) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(resolvePromise);
+    });
+  }));
+  const navigation = page.locator("#bottom-nav");
+  if (await navigation.evaluate((element) => (
+    element.classList.contains("is-collapsed")
+  ))) {
+    await page.locator("#bottom-nav-handle").click();
+  }
+  await page.waitForFunction(() => {
+    const navigationElement = document.querySelector("#bottom-nav");
+    const handle = document.querySelector("#bottom-nav-handle");
+    const items = document.querySelector(".bottom-nav__items");
+    return !navigationElement?.classList.contains("is-collapsed") &&
+      handle?.getAttribute("aria-expanded") === "true" &&
+      getComputedStyle(items).visibility === "visible" &&
+      getComputedStyle(items).pointerEvents !== "none";
+  });
+}
+
 test("reader navigation uses direct GetBible API calls in a real browser", async (context) => {
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
   const browser = await chromium.launch({
@@ -435,9 +461,11 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     document.querySelector("#app")?.dataset.activeRoute === "bible" &&
     document.querySelector('[data-reader-verse="2"]')
       ?.closest(".reader-verse-row")?.dataset.bookmarkColor === "bbf7d0" &&
-    document.querySelector("#bookmark-popover")?.hidden
+    document.querySelector("#bookmark-popover")?.hidden &&
+    document.activeElement?.matches('[data-reader-verse="2"]')
   ));
 
+  await ensureBottomNavigationExpanded(page);
   await page.locator('[data-route="home"]').click();
   await page.waitForFunction(() => (
     document.querySelector("#app")?.dataset.activeRoute === "home"
@@ -847,9 +875,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     "reader preference did not restore the stored AOV location",
   );
 
-  if (await bottomNavigation.evaluate((nav) => nav.classList.contains("is-collapsed"))) {
-    await page.locator("#bottom-nav-handle").click();
-  }
+  await ensureBottomNavigationExpanded(page);
   await page.locator("#bible-history").click();
   await page.waitForFunction(() => (
     document.querySelector("#app")?.dataset.activeRoute === "history" &&
