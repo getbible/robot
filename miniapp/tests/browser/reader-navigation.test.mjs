@@ -484,7 +484,8 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   );
   await page.locator('#home-bookmarks [data-home-route="bookmarks"]').click();
   await page.waitForFunction(() => (
-    document.querySelector("#app")?.dataset.activeRoute === "bookmarks"
+    document.querySelector("#app")?.dataset.activeRoute === "bookmarks" &&
+    document.querySelectorAll(".bookmark-group-card").length === 61
   ));
   assert.equal(await page.locator("#bottom-nav").isVisible(), true);
   assert.equal(
