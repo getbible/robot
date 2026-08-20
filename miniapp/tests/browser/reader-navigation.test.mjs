@@ -495,7 +495,9 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     "none",
   );
   assert.equal(await page.locator(".bookmark-group-card").count(), 61);
-  await page.locator('[data-bookmark-topic="grace"]').click();
+  await page.locator(
+    '.bookmark-group-card[data-bookmark-topic="grace"]',
+  ).click();
   await page.waitForFunction(() => (
     !document.querySelector("#bookmark-detail")?.hidden &&
     document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 1
@@ -565,7 +567,9 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     document.querySelector("#global-bookmark-status")?.textContent
       ?.includes("61 topics")
   ));
-  await page.locator('[data-bookmark-topic="grace"]').click();
+  await page.locator(
+    '.bookmark-group-card[data-bookmark-topic="grace"]',
+  ).click();
   await page.waitForFunction(() => (
     document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 53 &&
     document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length === 52
@@ -584,7 +588,9 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       bookmarkBackupRequest.backup.colors.findIndex((topic) => topic.id === topicId)
     ),
   );
-  await page.locator('[data-bookmark-topic="spiritual-rebirth"]').click();
+  await page.locator(
+    '.bookmark-group-card[data-bookmark-topic="spiritual-rebirth"]',
+  ).click();
   await page.waitForFunction(() => (
     document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length === 44
   ));
