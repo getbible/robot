@@ -78,8 +78,16 @@ test("keeps History as a first-class page in the permanent bottom navigation", a
   assert.match(html, /id="bible-next"/);
   assert.doesNotMatch(readerToolbar, /id="bible-history"/);
   assert.match(bottomNavigation, /id="bible-history"/);
-  assert.match(bottomNavigation, /class="bottom-nav__icon bottom-nav__history-icon"/);
-  assert.match(bottomNavigation, /aria-hidden="true"\s+focusable="false"/);
+  const navigationIcons = [...bottomNavigation.matchAll(/<svg\b[\s\S]*?<\/svg>/g)]
+    .map((match) => match[0]);
+  assert.equal(navigationIcons.length, 5);
+  for (const icon of navigationIcons) {
+    assert.match(icon, /class="bottom-nav__icon"/);
+    assert.match(icon, /viewBox="0 0 24 24"/);
+    assert.match(icon, /aria-hidden="true"/);
+    assert.match(icon, /focusable="false"/);
+  }
+  assert.doesNotMatch(bottomNavigation, /[⌂⌕▤✓]/);
   assert.match(historyTrigger, /data-route="history"/);
   assert.doesNotMatch(historyTrigger, /hidden|aria-haspopup|aria-expanded/);
   assert.match(
@@ -146,10 +154,12 @@ test("keeps History as a first-class page in the permanent bottom navigation", a
     css,
     /\.history-item__remove:focus-visible\s*{\s*outline-color: var\(--destructive\)/,
   );
+  assert.match(css, /\.bottom-nav\s*{[\s\S]*?--bottom-nav-icon-size: 24px/);
   assert.match(
     css,
-    /\.bottom-nav__history-icon\s*{[\s\S]*?width: 27px;[\s\S]*?fill: none;[\s\S]*?stroke: currentColor/,
+    /\.bottom-nav__icon\s*{[\s\S]*?width: var\(--bottom-nav-icon-size\);[\s\S]*?height: var\(--bottom-nav-icon-size\);[\s\S]*?stroke: currentColor/,
   );
+  assert.doesNotMatch(css, /bottom-nav__(?:book|history-icon)/);
   assert.doesNotMatch(
     css,
     /translateY\(calc\(100% - var\(--nav-handle-height\)/,
@@ -206,14 +216,28 @@ test("persists only scoped user data and keeps Telegram credentials session-only
     new URL("lib/telegram-bookmark-storage.js", root),
     "utf8",
   );
+  const globalBookmarkStorage = await readFile(
+    new URL("lib/global-bookmark-device-storage.js", root),
+    "utf8",
+  );
   const source = `${app}\n${api}\n${session}\n${history}`;
-  const durableData = `${history}\n${bookmarks}\n${telegramStorage}`;
+  const durableData =
+    `${history}\n${bookmarks}\n${telegramStorage}\n${globalBookmarkStorage}`;
 
   assert.match(session, /sessionStorage/);
   assert.doesNotMatch(session, /localStorage|DeviceStorage|CloudStorage/);
   assert.match(history, /browserLocalStorage/);
   assert.match(telegramStorage, /CloudStorage/);
   assert.match(telegramStorage, /DeviceStorage/);
+  assert.match(globalBookmarkStorage, /DeviceStorage/);
+  assert.doesNotMatch(globalBookmarkStorage, /\.CloudStorage/);
+  assert.match(globalBookmarkStorage, /SCOPE_PATTERN/);
+  assert.match(globalBookmarkStorage, /GLOBAL_BOOKMARK_LOCAL_MIRROR_PREFIX/);
+  assert.match(app, /GlobalBookmarkDeviceStorage\.open\(\{[\s\S]*?scope: storageScope/);
+  assert.match(
+    app,
+    /new GlobalBookmarkPreferences\(\{[\s\S]*?storage: globalBookmarkStorage/,
+  );
   assert.doesNotMatch(durableData, /session_token|init_data|bearer_token/i);
   assert.doesNotMatch(source, /setItem\([^,]+,\s*(?:bridge\.)?initData/);
   assert.match(session, /subtle\.digest\("SHA-256"/);
@@ -291,12 +315,31 @@ test("keeps global and personal bookmarks in one controllable topic list", async
   const app = await readFile(new URL("app.js", root), "utf8");
   const css = await readFile(new URL("styles.css", root), "utf8");
 
-  const topicManager = html.indexOf('id="bookmark-topic-manager"');
+  const globalControls = html.indexOf('class="bookmark-global"');
   const loadAll = html.indexOf('id="load-global-bookmarks"');
+  const removeAll = html.indexOf('id="clear-global-bookmarks"');
+  const search = html.indexOf('id="bookmark-topic-search"');
+  const groupList = html.indexOf('id="bookmark-group-list"');
+  const topicManager = html.indexOf('id="bookmark-topic-manager"');
   const backup = html.indexOf('id="bookmark-backup-title"');
-  assert.ok(topicManager >= 0 && topicManager < loadAll && loadAll < backup);
+  assert.ok(
+    globalControls >= 0 &&
+    globalControls < loadAll &&
+    loadAll < removeAll &&
+    removeAll < search &&
+    search < groupList &&
+    groupList < topicManager &&
+    topicManager < backup,
+  );
+  assert.match(html, /class="bookmark-global__info"/);
+  assert.match(html, /data-i18n-aria-label="bookmarks\.global_info_aria"/);
   assert.match(html, /id="restore-default-bookmark-topics"/);
   assert.match(app, /bookmarkStore\.ensureTopics\([\s\S]*?defaultsOnly: true/);
+  assert.match(
+    app,
+    /async function clearGlobalBookmarks[\s\S]*?globalBookmarkPreferences\.clear\(\)/,
+  );
+  assert.match(app, /bookmarks\.global_clear_confirm/);
 
   const detail = html.indexOf('id="bookmark-detail"');
   const bookmarkList = html.indexOf('id="bookmark-list"');
@@ -410,7 +453,7 @@ test("ships complete governed catalogs for every GetBible translation language",
     translatedLocales,
   );
   assert.equal(baseKeys.length, 159);
-  assert.equal(extensionKeys.length, 173);
+  assert.equal(extensionKeys.length, 178);
   assert.equal(topicKeys.length, 61);
   assert.equal(new Set([...baseKeys, ...extensionKeys]).size, englishKeys.length);
   assert.deepEqual([...new Set([...baseKeys, ...extensionKeys])].sort(), englishKeys);

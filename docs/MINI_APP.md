@@ -1,6 +1,6 @@
 # Telegram Mini App
 
-The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, temporary verse selection, and device-local history belong in the browser. Compact personal bookmarks and last-read coordinates additionally use Telegram Mini App storage when available; the global bookmark overlay remains browser-local. Robot remains the authenticated Telegram control plane, the Librarian search adapter, and the bounded relay for an explicit private-chat bookmark backup or restore.
+The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, temporary verse selection, and device-local history belong in the browser. Compact personal bookmarks and last-read coordinates additionally use Telegram Mini App storage when available. Global-topic preferences use scoped browser storage plus Telegram DeviceStorage, but deliberately remain outside CloudStorage and personal backup. Robot remains the authenticated Telegram control plane, the Librarian search adapter, and the bounded relay for an explicit private-chat bookmark backup or restore.
 
 ## Active doctrine
 
@@ -19,7 +19,7 @@ Post, and explicit bookmark chat backup/restore.
 | Selected verse order and highlighting | Browser memory |
 | Opened chapter and selected verse history | Scoped browser `localStorage` |
 | Personal bookmark aggregate v2, topics, and active topic | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage` |
-| Global bookmark visibility and per-link exclusions | Browser `localStorage` |
+| Global topic visibility, exclusions, and legacy mapping | Scoped `localStorage` + Telegram `DeviceStorage` only |
 | Compact last-read coordinate | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage`, with Robot preference compatibility |
 | Bookmark JSON download/import | Browser |
 | Private-chat bookmark backup/restore | Browser confirmation + Robot/Telegram transport |
@@ -40,7 +40,7 @@ Telegram WebView
   ├─ temporary ordered selection                     → BrowserSelectionStore
   ├─ unique coordinate history                       → scoped local ReadingHistoryStore
   ├─ personal bookmarks / topics / last-read         → local + Telegram storage adapter
-  └─ global bookmark visibility / exclusions         → browser localStorage
+  └─ global topic visibility / exclusions            → scoped localStorage + DeviceStorage
 ```
 
 Reader and search results are normalized into one verse descriptor. Coordinate identity is:
@@ -125,13 +125,15 @@ back to all topics and, when opened from the reader, back to the source verse.
 
 The Bookmarks surface lists personal and global verse links together in one
 topic list; global rows carry a **G** marker and progressively hydrate visible
-verse text for the currently selected translation without persisting that text. One global link may be hidden, or
-all global links may be cleared for one topic. Loading that topic or the full
-catalog resets its exclusions without duplication. The built-in catalog
-contains 2,155 links across 61 topics. Its visibility and exclusions remain in
-this browser and never consume, synchronize with, or back up personal records.
-A scoped browser-only mapping keeps legacy numeric topics attached to their
-canonical global topic after a rename or reload.
+verse text for the currently selected translation without persisting that text.
+Compact **Add all** and **Remove all** controls appear before search with a
+disclosure explaining that global topics are curated verse sets. One global
+link may be hidden, or all global links may be removed for one topic. Loading
+that topic or the full catalog resets its exclusions without duplication. The
+built-in catalog contains 2,155 links across 61 topics. Scoped visibility,
+exclusions, and the legacy numeric-topic mapping reconcile through localStorage
+and Telegram `DeviceStorage`, surviving a discarded Desktop WebView store.
+They never consume personal records, enter `CloudStorage`, or enter backups.
 
 Personal records are bounded to 800 canonical verses, and each may belong to
 multiple topics without consuming another verse slot. Built-in topic names are
@@ -152,10 +154,11 @@ identifiers on read. Stable item values plus a metadata fingerprint preserve
 metadata-last atomicity while avoiding full rewrites, and transient partial
 writes receive bounded automatic retries. The active topic and compact
 last-read participate; a
-timestamped cleared marker prevents an older remote position from reappearing
-after a failed sync. Selection, history, the global catalog and exclusions, and
-chapters do not. Unsupported Telegram storage leaves the local copy usable and
-shows a degraded-sync notice.
+  timestamped cleared marker prevents an older remote position from reappearing
+  after a failed sync. Global visibility and exclusions use their separate
+  DeviceStorage-only adapter; selection, history, the catalog itself, and
+  chapters do not enter Telegram storage. Unsupported Telegram storage leaves
+  the local copy usable and shows a degraded-sync notice.
 
 The Bookmarks page offers bounded personal JSON **Download** and **Import**,
 plus **Back up to chat**. New documents are version 4 and use bounded

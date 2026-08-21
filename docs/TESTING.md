@@ -132,10 +132,15 @@ Tests must prove:
   compatible-format merge, worst-case UTF-8 pretty-JSON size,
   cross-translation deduplication, malformed input rejection, and no partial
   mutation on failure;
-- the 2,155-link/61-topic global catalog, unified personal/global ordering and
-  **G** marker, browser-local exclusions, and idempotent per-link,
-  per-topic, and all-catalog reset without personal sync or backup, including
-  renamed numeric-topic remapping and display-only active-translation excerpts;
+- the 2,155-link/61-topic global catalog, unified personal/global ordering,
+  **G** marker, compact add-all/remove-all controls before search, and
+  idempotent per-link, per-topic, and all-catalog reset without personal sync
+  or backup, including renamed numeric-topic remapping and display-only
+  active-translation excerpts;
+- authenticated-scope global-preference reconciliation across localStorage and
+  Telegram `DeviceStorage`, including legacy migration, fresh-WebView restore,
+  deterministic timestamp ties, tombstones, coalescing, bounded retry, and a
+  proof that `CloudStorage` is never accessed;
 - authenticated user-scoped local keys with no raw Telegram user identifier;
 - newest-timestamp startup reconciliation across `localStorage`, Telegram
   `DeviceStorage`, and Telegram `CloudStorage`, including deterministic ties,
@@ -181,7 +186,8 @@ modules, and browser APIs. It verifies:
    navigation work;
 5. Home shows Search and Bible actions plus the conditional History and
    Bookmarks summaries,
-   and Home/History/Selected/Bookmarks use the icon-only top bar;
+   Home/History/Selected/Bookmarks use the icon-only top bar, and all five
+   footer icons share the same rendered box at mobile and desktop widths;
 6. selecting a reader verse reveals a compact bottom-right ellipsis without
    opening the menu; activating it opens the anchored menu, multi-topic
    assignment updates the reader, topic navigation returns to all topics or the
@@ -189,8 +195,9 @@ modules, and browser APIs. It verifies:
 7. an explicit chat-backup action sends the current bookmark document through
    the authenticated Robot endpoint; and
 8. personal and global links share one topic list, global links carry **G**,
-   per-link hide and per-topic/all reset are browser-local, and no global link
-   enters personal backup or sync; and
+   compact all-catalog controls precede search, per-link hide and
+   per-topic/all reset stay device-local, and no global link enters personal
+   backup or CloudStorage; and
 9. no legacy Robot Scripture or history request is emitted.
 
 Focused model, storage, API, and backend tests separately verify selection
@@ -223,7 +230,8 @@ Inject and verify independent failures for:
 - Librarian search timeout;
 - Robot session expiry;
 - unavailable or corrupt scoped browser-local history storage;
-- unavailable, partial, stale, or corrupt Telegram DeviceStorage/CloudStorage;
+- unavailable, partial, stale, or corrupt Telegram DeviceStorage/CloudStorage,
+  including independent failure of the DeviceStorage-only global-topic replica;
 - oversized, malformed, wrong-owner, missing, or changed bookmark backup
   documents;
 - restore persistence or acknowledgement failure;
@@ -252,8 +260,11 @@ After all deterministic gates pass, deploy one validated commit and verify in Te
   800-record bound, and cross-translation canonical deduplication work;
 - personal bookmarks and last-read synchronize on a second supported Telegram
   client;
-- the unified topic list marks global links with **G** and supports per-link
-  hide plus per-topic/all reset without global sync or backup;
+- the unified topic list marks global links with **G**, exposes equal-size
+  add-all/remove-all controls before search, and supports per-link hide plus
+  per-topic/all reset without personal sync or backup;
+- global topics survive reopening Telegram Desktop after its WebView
+  localStorage is cleared, using DeviceStorage without CloudStorage;
 - unchanged CloudStorage items remain stable, partial commits are rejected by
   their metadata fingerprint, and transient writes retry without another user
   action;

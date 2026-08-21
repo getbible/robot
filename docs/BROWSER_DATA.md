@@ -18,8 +18,9 @@ The reading and persistence split is:
 - scoped `localStorage` plus Telegram `DeviceStorage` and `CloudStorage` reconcile
   personal bookmark aggregate v2, colored topics, the active topic, and compact
   last-read coordinates;
-- browser `localStorage` alone owns global-catalog visibility and
-  per-link exclusions;
+- scoped browser `localStorage` plus Telegram `DeviceStorage` reconcile
+  device-local global-catalog visibility, per-link exclusions, and legacy
+  topic mapping; `CloudStorage` is excluded;
 - Robot authenticates Telegram, retains compatible reader preferences, accepts
   the final ordered post request, validates it, and sends authoritative
   Scripture or an explicitly requested bookmark backup document to Telegram.
@@ -40,7 +41,7 @@ The reading and persistence split is:
 | Reading history record/remove/clear | Yes | No | No |
 | Bookmark/topic editing and local import/export | Yes | No | No |
 | Bookmark and last-read device/cloud sync | Telegram Mini App storage | No | No |
-| Global catalog visibility and exclusions | Browser `localStorage` | No | No |
+| Global catalog visibility and exclusions | Scoped localStorage + Telegram DeviceStorage | No | No |
 | Private-chat bookmark backup/restore transport | Confirm/merge in browser | Yes | No |
 | Telegram authentication | No | Yes | No |
 | Reader preference compatibility | Compact Mini App storage copy | Yes | No |
@@ -137,12 +138,15 @@ The browser bundle provides 2,155 global verse links across 61 topics. They
 appear in the same topic list as personal records and carry a **G** marker.
 Their cards hydrate verse text for the currently selected translation from the
 bounded public chapter data plane; that text is not persisted as a bookmark.
-Only browser-local topic visibility and per-link exclusions are persisted. A
-link can be hidden, a topic can be cleared, and loading that topic or the full
-catalog restores its hidden links without duplication. Global links and these
-preferences never enter personal aggregate sync or backup documents. A
-separate browser-only record under the hashed account scope preserves the
-canonical mapping for renamed legacy numeric topics.
+Compact **Add all** and **Remove all** controls precede topic search; per-topic
+add/remove and per-link hiding remain available. Topic visibility, exclusions,
+and canonical mapping for renamed legacy numeric topics are timestamped under
+the hashed account scope and reconciled between browser `localStorage` and
+Telegram `DeviceStorage`. This restores the selection when a Telegram Desktop
+WebView discards its browser storage while keeping the state device-local:
+`CloudStorage` is never read or written. Loading one topic or the full catalog
+restores its hidden links without duplication. Global links and these
+preferences never enter the personal aggregate or backup documents.
 
 The provider boundary leaves room for a future authorized publishing source,
 but authorized-user global publishing is intentionally not implemented.

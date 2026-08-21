@@ -142,10 +142,17 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "bookmarks.group_empty_body":
     "Select a verse in the Bible, then choose this topic from the bookmark menu.",
   "bookmarks.list_label": "Saved bookmark verses",
-  "bookmarks.global_title": "Global bookmark library",
+  "bookmarks.global_title": "Global topics",
   "bookmarks.global_help":
-    "Show the built-in getBible.Life topic verses in this browser without changing your personal bookmarks, sync, or backups. Reload them at any time to restore missing topics.",
+    "Global topics are curated sets of verses that match each topic. Add or remove them one at a time or all at once, and create your own topics too.",
   "bookmarks.load_global_tags": "Load Global Tags",
+  "bookmarks.add_all_global": "Add all",
+  "bookmarks.remove_all_global": "Remove all",
+  "bookmarks.global_info_aria": "About global topics",
+  "bookmarks.global_clear_confirm":
+    "Remove all global verse links? Your personal bookmarks and topics will remain. You can add the global topics again at any time.",
+  "bookmarks.global_cleared":
+    "All global verse links were removed. Personal bookmarks and topics were kept.",
   "bookmarks.global_loading": "Loading the global bookmark library…",
   "bookmarks.global_loaded":
     "Loaded {bookmarks} global verse links across {topics} topics.",

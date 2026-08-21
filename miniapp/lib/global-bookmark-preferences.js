@@ -10,13 +10,12 @@ const GLOBAL_BOOKMARK_ID_PATTERN =
   /^global_([A-Za-z0-9_-]{1,128})_([1-9]\d{0,1})_([1-9]\d{0,3})_([1-9]\d{0,3})$/;
 
 /**
- * Persists only which bundled global topics are visible in this browser.
+ * Persists only which bundled global topics are visible on this device.
  *
- * The catalogue itself stays in the application's static assets. These
- * visibility and exclusions are deliberately not scoped to a Telegram user.
- * Only the canonical-to-local topic mapping is stored under the existing
- * hashed account scope so a legacy numeric topic remains linked after rename.
- * Neither record enters CloudStorage or backups.
+ * The catalogue itself stays in the application's static assets. The supplied
+ * storage adapter scopes both preferences and the canonical-to-local mapping
+ * to the authenticated user and may mirror them through Telegram
+ * DeviceStorage. Neither record enters CloudStorage or backups.
  */
 export class GlobalBookmarkPreferences {
   #allowedBookmarkIds;
@@ -86,6 +85,12 @@ export class GlobalBookmarkPreferences {
     return Object.fromEntries([...this.#topicMappings].sort(([left], [right]) =>
       left.localeCompare(right)
     ));
+  }
+
+  async flush() {
+    if (typeof this.#storage?.flush === "function") {
+      await this.#storage.flush();
+    }
   }
 
   setTopicMappings(value, localTopics) {

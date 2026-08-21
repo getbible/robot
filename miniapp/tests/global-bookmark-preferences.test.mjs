@@ -43,7 +43,7 @@ function globalBookmarksFor(topicId) {
   return GLOBAL_BOOKMARK_CATALOG.bookmarksForTopic(topicId, CATALOG_TOPICS);
 }
 
-test("persists per-topic visibility under one unscoped v2 browser key", () => {
+test("persists per-topic visibility under one v2 preference record", () => {
   const storage = new MemoryStorage();
   const firstAccount = new GlobalBookmarkPreferences({
     storage,

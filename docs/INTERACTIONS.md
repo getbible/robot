@@ -122,11 +122,22 @@ chosen topic.
    changed and the topics can be removed.
 5. Open a bookmarked verse in Bible or remove it from the topic detail view.
 
+Above topic search, **Add all** and **Remove all** control the complete bundled
+global-topic catalog. The adjacent information disclosure explains that these
+are curated sets of verses matching each topic. The same add/remove choice
+remains available inside each topic, and personal topics and bookmarks are
+preserved when global topics are removed.
+
 The browser writes each change to its scoped local copy immediately. On a
 supported Telegram client it asynchronously reconciles the newest timestamped
 bookmark/topic aggregate through `DeviceStorage` and `CloudStorage`. Compact
 last-read coordinates use the same hybrid strategy. History, selections,
 translation catalogs, and chapters remain browser-only.
+
+Global-topic visibility, exclusions, and renamed-topic mapping use a separate
+scoped local/`DeviceStorage` replica so Telegram Desktop can restore them after
+discarding WebView storage. They never use `CloudStorage` and never enter the
+personal bookmark aggregate or backup.
 
 ### Backup and restore
 

@@ -438,6 +438,49 @@
           </p>
 
           <div id="bookmark-groups-panel">
+            <section class="bookmark-global" aria-labelledby="bookmark-global-title">
+              <h2 id="bookmark-global-title" data-i18n="bookmarks.global_title">
+                Global topics
+              </h2>
+              <div class="bookmark-global__controls">
+                <button
+                  id="load-global-bookmarks"
+                  class="button button--secondary"
+                  type="button"
+                  aria-describedby="global-bookmark-status"
+                >
+                  <span data-i18n="bookmarks.add_all_global">Add all</span>
+                </button>
+                <button
+                  id="clear-global-bookmarks"
+                  class="button button--secondary bookmark-global__remove"
+                  type="button"
+                  aria-describedby="global-bookmark-status"
+                >
+                  <span data-i18n="bookmarks.remove_all_global">Remove all</span>
+                </button>
+                <details class="bookmark-global__info">
+                  <summary
+                    aria-label="About global topics"
+                    data-i18n-aria-label="bookmarks.global_info_aria"
+                  >
+                    <span aria-hidden="true">i</span>
+                  </summary>
+                  <p data-i18n="bookmarks.global_help">
+                    Global topics are curated sets of verses that match each topic. Add or
+                    remove them all here, or manage them one topic at a time. You can also
+                    create your own topics.
+                  </p>
+                </details>
+              </div>
+              <p
+                id="global-bookmark-status"
+                class="bookmark-global__status"
+                role="status"
+                aria-live="polite"
+              ></p>
+            </section>
+
             <label class="bookmark-search" for="bookmark-topic-search">
               <span data-i18n="bookmarks.search_label">Find a bookmark topic</span>
               <input
@@ -504,32 +547,6 @@
                 ></p>
               </div>
             </details>
-
-            <section class="bookmark-global" aria-labelledby="bookmark-global-title">
-              <div class="bookmark-global__copy">
-                <h2 id="bookmark-global-title" data-i18n="bookmarks.global_title">
-                  Global bookmark library
-                </h2>
-                <p data-i18n="bookmarks.global_help">
-                  Show the built-in getBible.Life topic verses in this browser without changing your
-                  personal bookmarks, sync, or backups. Reload them to restore missing topics.
-                </p>
-              </div>
-              <button
-                id="load-global-bookmarks"
-                class="button button--primary bookmark-global__load"
-                type="button"
-                aria-describedby="global-bookmark-status"
-              >
-                <span data-i18n="bookmarks.load_global_tags">Load Global Tags</span>
-              </button>
-              <p
-                id="global-bookmark-status"
-                class="bookmark-global__status"
-                role="status"
-                aria-live="polite"
-              ></p>
-            </section>
 
             <section class="bookmark-backup" aria-labelledby="bookmark-backup-title">
               <h2 id="bookmark-backup-title" data-i18n="bookmarks.backup_title">Backup and restore</h2>
@@ -679,15 +696,40 @@
         </button>
         <div class="bottom-nav__items">
           <button class="bottom-nav__item is-active" type="button" data-route="home">
-            <span class="bottom-nav__icon" aria-hidden="true">⌂</span>
+            <svg
+              class="bottom-nav__icon"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path d="M3 10.5 12 3l9 7.5"></path>
+              <path d="M5 9.5v10.5h14V9.5"></path>
+              <path d="M9.5 20v-6.5h5V20"></path>
+            </svg>
             <span data-i18n="nav.home">Home</span>
           </button>
           <button class="bottom-nav__item" type="button" data-route="search">
-            <span class="bottom-nav__icon" aria-hidden="true">⌕</span>
+            <svg
+              class="bottom-nav__icon"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <circle cx="11" cy="11" r="8"></circle>
+              <path d="m16.7 16.7 4.3 4.3"></path>
+            </svg>
             <span data-i18n="nav.search">Search</span>
           </button>
           <button class="bottom-nav__item" type="button" data-route="bible">
-            <span class="bottom-nav__icon bottom-nav__book" aria-hidden="true">▤</span>
+            <svg
+              class="bottom-nav__icon"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path d="M3 5h5.5A3.5 3.5 0 0 1 12 8.5V20a3.5 3.5 0 0 0-3.5-3.5H3z"></path>
+              <path d="M21 5h-5.5A3.5 3.5 0 0 0 12 8.5V20a3.5 3.5 0 0 1 3.5-3.5H21z"></path>
+            </svg>
             <span data-i18n="nav.bible">Bible</span>
           </button>
           <button
@@ -699,7 +741,7 @@
             data-i18n-aria-label="history.open"
           >
             <svg
-              class="bottom-nav__icon bottom-nav__history-icon"
+              class="bottom-nav__icon"
               viewBox="0 0 24 24"
               aria-hidden="true"
               focusable="false"
@@ -717,7 +759,15 @@
             >0</span>
           </button>
           <button class="bottom-nav__item" type="button" data-route="selection">
-            <span class="bottom-nav__icon" aria-hidden="true">✓</span>
+            <svg
+              class="bottom-nav__icon"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <circle cx="12" cy="12" r="9"></circle>
+              <path d="m7.5 12.5 3 3 6.5-7"></path>
+            </svg>
             <span data-i18n="nav.selected">Selected</span>
             <span id="nav-selection-count" class="bottom-nav__badge" hidden>0</span>
           </button>

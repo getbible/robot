@@ -44,6 +44,7 @@ import {
   GLOBAL_BOOKMARK_CATALOG_VERSION,
   GLOBAL_BOOKMARK_SOURCE,
 } from "./lib/global-bookmark-catalog.js";
+import { GlobalBookmarkDeviceStorage } from "./lib/global-bookmark-device-storage.js";
 import { GlobalBookmarkPreferences } from "./lib/global-bookmark-preferences.js";
 import { restoreBookmarkBackup } from "./lib/bookmark-restore.js";
 import { TelegramBookmarkStorage } from "./lib/telegram-bookmark-storage.js";
@@ -270,6 +271,7 @@ const elements = mapElements({
   restoreDefaultBookmarkTopics: "restore-default-bookmark-topics",
   bookmarkDefaultTopicStatus: "bookmark-default-topic-status",
   loadGlobalBookmarks: "load-global-bookmarks",
+  clearGlobalBookmarks: "clear-global-bookmarks",
   globalBookmarkStatus: "global-bookmark-status",
   bookmarkDetail: "bookmark-detail",
   bookmarkAllTopics: "bookmark-all-topics",
@@ -370,22 +372,30 @@ async function boot() {
 
     const storageScope = await bookmarkStorageScope(payload?.user?.id);
     readingHistory = new ReadingHistoryStore({ scope: storageScope });
+    const [globalBookmarkStorage, synchronizedBookmarkStorage] = await Promise.all([
+      GlobalBookmarkDeviceStorage.open({
+        scope: storageScope,
+        webApp: bridge.webApp,
+      }),
+      TelegramBookmarkStorage.open({
+        scope: storageScope,
+        webApp: bridge.webApp,
+        hydrateLastRead: true,
+        onStatus: (status) => {
+          state.bookmarks.storageStatus = status;
+          updateBookmarkStorageWarning();
+        },
+      }),
+    ]);
     globalBookmarkPreferences = new GlobalBookmarkPreferences({
       allowedTopicIds: GLOBAL_BOOKMARK_CATALOG
         .topicDefinitions()
         .map((definition) => definition.id),
       allowedBookmarkIds: GLOBAL_BOOKMARK_CATALOG.bookmarkIds(),
       scope: storageScope,
+      storage: globalBookmarkStorage,
     });
-    bookmarkStorage = await TelegramBookmarkStorage.open({
-      scope: storageScope,
-      webApp: bridge.webApp,
-      hydrateLastRead: true,
-      onStatus: (status) => {
-        state.bookmarks.storageStatus = status;
-        updateBookmarkStorageWarning();
-      },
-    });
+    bookmarkStorage = synchronizedBookmarkStorage;
     bookmarkStore = new BookmarkStore({
       scope: storageScope,
       storage: bookmarkStorage,
@@ -503,14 +513,18 @@ function attachListeners() {
     }
   }, { passive: true });
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden && state.route === "bible") {
-      persistVisibleReaderPosition();
+    if (document.hidden) {
+      if (state.route === "bible") {
+        persistVisibleReaderPosition();
+      }
+      void globalBookmarkPreferences?.flush();
     }
   });
   window.addEventListener("pagehide", () => {
     if (state.route === "bible") {
       persistVisibleReaderPosition();
     }
+    void globalBookmarkPreferences?.flush();
   });
 
   elements.searchForm.addEventListener("submit", (event) => {
@@ -688,11 +702,14 @@ function attachListeners() {
   elements.loadGlobalBookmarks.addEventListener("click", () => {
     void loadGlobalBookmarks();
   });
+  elements.clearGlobalBookmarks.addEventListener("click", () => {
+    void clearGlobalBookmarks();
+  });
   elements.loadTopicGlobalBookmarks.addEventListener("click", () => {
     void loadTopicGlobalBookmarks();
   });
   elements.clearTopicGlobalBookmarks.addEventListener("click", () => {
-    clearTopicGlobalBookmarks();
+    void clearTopicGlobalBookmarks();
   });
   elements.backupBookmarks.addEventListener("click", () => {
     void backupBookmarksToChat();
@@ -3926,6 +3943,7 @@ async function onBookmarkListAction(event) {
     const removalIndex = rows.indexOf(remove.closest(".bookmark-list__item"));
     if (bookmark.source === GLOBAL_BOOKMARK_SOURCE) {
       globalBookmarkPreferences.hideBookmark(bookmark.id);
+      void globalBookmarkPreferences.flush();
     } else {
       bookmarkStore.removeBookmarkTopic(bookmark.id, bookmark.topic_id);
     }
@@ -4173,6 +4191,7 @@ async function onBookmarkTopicEdit(event) {
   }
   if (canonicalTopicId) {
     globalBookmarkPreferences?.disableTopic(canonicalTopicId);
+    await globalBookmarkPreferences?.flush();
   }
   bookmarkStore.removeTopic(topic.id);
   renderBookmarks();
@@ -4230,13 +4249,15 @@ async function loadGlobalBookmarks() {
         definitions.map((definition) => definition.id),
         GLOBAL_BOOKMARK_CATALOG_VERSION,
       );
+      await globalBookmarkPreferences.flush();
       clearBookmarkNavigation();
       renderBookmarks();
       if (state.bible.status === "ready") {
         renderBible();
       }
       // Topic metadata can finish its existing Telegram replication in the
-      // background; the global associations themselves are browser-only.
+      // background; global associations remain device-local and never enter
+      // personal CloudStorage or backup records.
       if (bookmarkStorage) {
         void bookmarkStorage.flush().catch(() => undefined);
       }
@@ -4273,6 +4294,50 @@ async function loadGlobalBookmarks() {
   await globalBookmarkTask;
 }
 
+async function clearGlobalBookmarks() {
+  if (!bookmarkStore || !globalBookmarkPreferences || globalBookmarkTask) {
+    return;
+  }
+  const confirmed = await bridge.confirm(
+    i18n.t("bookmarks.global_clear_confirm"),
+  );
+  if (
+    !confirmed ||
+    !bookmarkStore ||
+    !globalBookmarkPreferences ||
+    globalBookmarkTask
+  ) {
+    return;
+  }
+  globalBookmarkTask = (async () => {
+    // Yield once so the shared task reference is installed before cleanup.
+    await Promise.resolve();
+    setGlobalBookmarkBusy(true);
+    try {
+      globalBookmarkPreferences.clear();
+      await globalBookmarkPreferences.flush();
+      clearBookmarkNavigation();
+      renderBookmarks();
+      if (state.bible.status === "ready") {
+        renderBible();
+      }
+      const message = i18n.t("bookmarks.global_cleared");
+      elements.globalBookmarkStatus.textContent = message;
+      bridge.notifySuccess();
+      announce(message);
+    } catch {
+      const message = i18n.t("bookmarks.global_failed");
+      elements.globalBookmarkStatus.textContent = message;
+      bridge.notifyError();
+      announce(message);
+    } finally {
+      globalBookmarkTask = null;
+      setGlobalBookmarkBusy(false);
+    }
+  })();
+  await globalBookmarkTask;
+}
+
 async function loadTopicGlobalBookmarks() {
   if (!bookmarkStore || !globalBookmarkPreferences || globalBookmarkTask) {
     return;
@@ -4296,6 +4361,7 @@ async function loadTopicGlobalBookmarks() {
         canonicalTopicId,
         GLOBAL_BOOKMARK_CATALOG_VERSION,
       );
+      await globalBookmarkPreferences.flush();
       renderBookmarks();
       const bookmarks = GLOBAL_BOOKMARK_CATALOG.bookmarksForTopic(
         topicId,
@@ -4319,7 +4385,7 @@ async function loadTopicGlobalBookmarks() {
   await globalBookmarkTask;
 }
 
-function clearTopicGlobalBookmarks() {
+async function clearTopicGlobalBookmarks() {
   if (!bookmarkStore || !globalBookmarkPreferences || globalBookmarkTask) {
     return;
   }
@@ -4333,6 +4399,7 @@ function clearTopicGlobalBookmarks() {
   if (!canonicalTopicId || !globalBookmarkPreferences.disableTopic(canonicalTopicId)) {
     return;
   }
+  await globalBookmarkPreferences.flush();
   renderBookmarks();
   const message = i18n.t("bookmarks.topic_global_cleared");
   elements.bookmarkTopicGlobalStatus.textContent = message;
@@ -4341,8 +4408,15 @@ function clearTopicGlobalBookmarks() {
 
 function setGlobalBookmarkBusy(busy) {
   const disabled = Boolean(busy) || !bookmarkStore;
+  elements.loadGlobalBookmarks.disabled = disabled;
+  elements.loadGlobalBookmarks.setAttribute("aria-busy", String(Boolean(busy)));
+  elements.clearGlobalBookmarks.disabled = disabled ||
+    !globalBookmarkPreferences?.enabled;
+  elements.clearGlobalBookmarks.setAttribute(
+    "aria-busy",
+    String(Boolean(busy)),
+  );
   for (const button of [
-    elements.loadGlobalBookmarks,
     elements.loadTopicGlobalBookmarks,
     elements.clearTopicGlobalBookmarks,
   ]) {
@@ -4807,6 +4881,9 @@ function removePopoverBookmarkAssignment({ id, topicId, source }) {
   if (!removed) {
     return;
   }
+  if (source === GLOBAL_BOOKMARK_SOURCE) {
+    void globalBookmarkPreferences.flush();
+  }
   closeBookmarkPopover({ restoreFocus: false });
   renderBookmarks();
   renderBible();
@@ -5255,6 +5332,7 @@ function invalidateClientSessionState() {
   state.bookmarks.storageStatus = null;
   bookmarkStore = null;
   bookmarkStorage = null;
+  globalBookmarkPreferences = null;
   readingHistory = null;
   cancelHistoryExcerptHydration();
   cancelBookmarkExcerptHydration();
