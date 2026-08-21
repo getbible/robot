@@ -4,6 +4,19 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Durable global topics and consistent navigation icons
+
+- Mirrored authenticated-scope global-topic visibility, exclusions, and legacy
+  mappings between localStorage and Telegram `DeviceStorage`, with timestamp
+  reconciliation, migration, tombstones, coalesced bounded retries, and no
+  `CloudStorage` access. Telegram Desktop can therefore restore global topics
+  after its WebView local storage is discarded.
+- Replaced the large global-topic explanation with compact **Add all**,
+  **Remove all**, and information controls before topic search, while retaining
+  per-topic add/remove and preserving every personal topic and bookmark.
+- Replaced the footer's mixed Unicode/SVG artwork with five icons sharing the
+  same 24-pixel SVG box on mobile and desktop.
+
 ### Localized bookmarks and translation-independent history
 
 - Removed the redundant unconditional **See history** Home action while keeping

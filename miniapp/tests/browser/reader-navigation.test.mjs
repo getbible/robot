@@ -14,6 +14,8 @@ const queryApiPattern = /^https:\/\/query\.getbible\.net\/v2\/.+/;
 const bookmarkScope = createHash("sha256")
   .update("getbible.miniapp.bookmarks.v1\u000042", "utf8")
   .digest("hex");
+const globalBookmarkPreferencesMirrorKey =
+  `getbible.miniapp.global-device.v1:${bookmarkScope}:preferences`;
 const readingHistoryStorageKey =
   `getbible.miniapp.reading-history.v1:${bookmarkScope}`;
 const bookNames = [
@@ -174,6 +176,21 @@ async function ensureBottomNavigationExpanded(page) {
       getComputedStyle(items).visibility === "visible" &&
       getComputedStyle(items).pointerEvents !== "none";
   });
+}
+
+async function assertBottomNavigationIconsMatch(page) {
+  await ensureBottomNavigationExpanded(page);
+  const icons = await page.locator("#bottom-nav .bottom-nav__icon")
+    .evaluateAll((elements) => elements.map((element) => {
+      const bounds = element.getBoundingClientRect();
+      return { height: bounds.height, width: bounds.width };
+    }));
+  assert.equal(icons.length, 5);
+  for (const icon of icons) {
+    assert.ok(Math.abs(icon.width - icon.height) < 0.5);
+    assert.ok(Math.abs(icon.width - icons[0].width) < 0.5);
+    assert.ok(Math.abs(icon.height - icons[0].height) < 0.5);
+  }
 }
 
 async function assertBookmarkPopoverControlsDoNotOverlap(page) {
@@ -459,6 +476,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     await page.locator("#bottom-nav #bible-history").isVisible(),
     true,
   );
+  await assertBottomNavigationIconsMatch(page);
 
   // Selecting in the reader reveals a compact menu trigger without opening it.
   // Multiple topic assignments remain browser-local first and outside the
@@ -564,6 +582,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   assert.ok(Math.abs(narrowHomeActions[0].left - narrowHomeActions[1].left) < 1);
   assert.ok(narrowHomeActions[0].bottom <= narrowHomeActions[1].top);
   await page.setViewportSize({ width: 780, height: 844 });
+  await assertBottomNavigationIconsMatch(page);
   const wideHomeActions = await page.locator(".home-action")
     .evaluateAll((actions) => actions.map((action) => {
       const bounds = action.getBoundingClientRect();
@@ -591,6 +610,31 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     "none",
   );
   assert.equal(await page.locator(".bookmark-group-card").count(), 61);
+  const globalControlsLayout = await page.evaluate(() => {
+    const section = document.querySelector(".bookmark-global").getBoundingClientRect();
+    const search = document.querySelector(".bookmark-search").getBoundingClientRect();
+    const targets = [
+      document.querySelector("#load-global-bookmarks"),
+      document.querySelector("#clear-global-bookmarks"),
+      document.querySelector(".bookmark-global__info > summary"),
+    ].map((element) => {
+      const bounds = element.getBoundingClientRect();
+      return { height: bounds.height, width: bounds.width };
+    });
+    return { sectionBottom: section.bottom, searchTop: search.top, targets };
+  });
+  assert.ok(globalControlsLayout.sectionBottom <= globalControlsLayout.searchTop);
+  for (const target of globalControlsLayout.targets) {
+    assert.ok(target.height >= 44);
+    assert.ok(target.width >= 44);
+  }
+  await page.locator(".bookmark-global__info > summary").click();
+  assert.equal(await page.locator(".bookmark-global__info > p").isVisible(), true);
+  assert.match(
+    await page.locator(".bookmark-global__info > p").innerText(),
+    /sets of verses that match each topic/i,
+  );
+  await page.locator(".bookmark-global__info > summary").click();
   await page.locator(
     '.bookmark-group-card[data-bookmark-topic="grace"]',
   ).click();
@@ -619,25 +663,29 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   await page.locator(
     `#bookmark-list [data-bookmark-open="${hiddenGlobalId}"] + [data-bookmark-remove]`,
   ).click();
-  await page.waitForFunction((bookmarkId) => {
-    const record = JSON.parse(
-      window.localStorage.getItem("getbible.miniapp.global-bookmarks.v2"),
-    );
+  await page.waitForFunction(({ bookmarkId, storageKey }) => {
+    const envelope = JSON.parse(window.localStorage.getItem(storageKey));
+    const record = JSON.parse(envelope.value);
     return document.querySelectorAll("#bookmark-list .bookmark-list__global-badge")
       .length === 51 && record.hidden_bookmark_ids.includes(bookmarkId);
-  }, hiddenGlobalId);
+  }, {
+    bookmarkId: hiddenGlobalId,
+    storageKey: globalBookmarkPreferencesMirrorKey,
+  });
   assert.match(
     await page.locator("#load-topic-global-bookmarks-label").innerText(),
     /Reload global verses/,
   );
   await page.locator("#load-topic-global-bookmarks").click();
-  await page.waitForFunction((bookmarkId) => {
-    const record = JSON.parse(
-      window.localStorage.getItem("getbible.miniapp.global-bookmarks.v2"),
-    );
+  await page.waitForFunction(({ bookmarkId, storageKey }) => {
+    const envelope = JSON.parse(window.localStorage.getItem(storageKey));
+    const record = JSON.parse(envelope.value);
     return document.querySelectorAll("#bookmark-list .bookmark-list__global-badge")
       .length === 52 && !record.hidden_bookmark_ids.includes(bookmarkId);
-  }, hiddenGlobalId);
+  }, {
+    bookmarkId: hiddenGlobalId,
+    storageKey: globalBookmarkPreferencesMirrorKey,
+  });
   assert.equal(await page.locator("#clear-topic-global-bookmarks").isVisible(), true);
   await page.locator("#clear-topic-global-bookmarks").click();
   await page.waitForFunction(() => (
@@ -647,12 +695,11 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       ?.includes("Personal bookmarks were kept")
   ));
   assert.equal(
-    await page.evaluate(() => {
-      const record = JSON.parse(
-        window.localStorage.getItem("getbible.miniapp.global-bookmarks.v2"),
-      );
+    await page.evaluate((storageKey) => {
+      const envelope = JSON.parse(window.localStorage.getItem(storageKey));
+      const record = JSON.parse(envelope.value);
       return record.enabled_topic_ids.includes("grace");
-    }),
+    }, globalBookmarkPreferencesMirrorKey),
     false,
   );
   await page.locator("#bookmark-all-topics").click();
@@ -662,6 +709,30 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       ?.includes("2155 global verse links") &&
     document.querySelector("#global-bookmark-status")?.textContent
       ?.includes("61 topics")
+  ));
+  assert.equal(await page.locator("#clear-global-bookmarks").isEnabled(), true);
+  await page.locator("#clear-global-bookmarks").click();
+  await page.waitForFunction((storageKey) => {
+    const envelope = JSON.parse(window.localStorage.getItem(storageKey));
+    const record = JSON.parse(envelope.value);
+    return record.enabled_topic_ids.length === 0 &&
+      document.querySelector("#global-bookmark-status")?.textContent
+        ?.includes("Personal bookmarks and topics were kept");
+  }, globalBookmarkPreferencesMirrorKey);
+  assert.equal(await page.locator("#clear-global-bookmarks").isDisabled(), true);
+  await page.locator(
+    '.bookmark-group-card[data-bookmark-topic="grace"]',
+  ).click();
+  await page.waitForFunction(() => (
+    document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 1 &&
+    document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length === 0
+  ));
+  await page.locator("#bookmark-all-topics").click();
+  await page.locator("#load-global-bookmarks").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#global-bookmark-status")?.textContent
+      ?.includes("2155 global verse links") &&
+    !document.querySelector("#clear-global-bookmarks")?.disabled
   ));
   await page.locator(
     '.bookmark-group-card[data-bookmark-topic="grace"]',

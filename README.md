@@ -12,7 +12,7 @@ Telegram Mini App
   ├─ coordinate-only reading history          → scoped browser localStorage
   ├─ public Scripture cache                   → browser IndexedDB
   ├─ personal bookmarks / topics / last-read  → localStorage + Telegram DeviceStorage / CloudStorage
-  ├─ global bookmark visibility / exclusions  → browser localStorage
+  ├─ global topic visibility / exclusions     → scoped localStorage + Telegram DeviceStorage
   └─ auth / preferences / search / Post / backup → Robot
                                                    └─ search only → Librarian
 ```
@@ -72,14 +72,17 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   translation-independent coordinate updates its record instead of duplicating
   it.
 - The Bookmarks surface keeps personal and global verse links in one topic
-  list. Global links carry a **G** marker and may be hidden individually or
-  cleared per topic. Loading that topic or the complete catalog restores hidden
-  links without duplicating them. The built-in catalog contains 2,155 links
-  across 61 topics and only its browser-local visibility/exclusions are stored.
-  A scoped browser-only mapping keeps legacy numeric topics linked after a
-  rename; global data never enters personal synchronization or backups. Global
-  rows resolve their verse text in the currently selected translation without
-  copying that text into personal storage.
+  list. Compact **Add all** and **Remove all** controls sit above topic search,
+  while each topic retains its own add/remove controls. Global links carry a
+  **G** marker and may also be hidden individually. Adding a topic or the
+  complete catalog restores its hidden links without duplicating them. The
+  built-in catalog contains 2,155 links across 61 topics. Its scoped visibility,
+  exclusions, and legacy numeric-topic mapping are mirrored through Telegram
+  `DeviceStorage` when supported, so a Telegram Desktop WebView can restore
+  them after its browser storage is discarded. They never enter CloudStorage,
+  personal synchronization, or backups. Global rows resolve their verse text
+  in the currently selected translation without copying that text into
+  personal storage.
 - Built-in topic names are localized display constants: they can be recolored
   or removed, but not renamed. Custom topics remain user-named and support add,
   rename, recolor, and removal. Removing any topic warns that its personal
@@ -91,8 +94,9 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   `localStorage`, Telegram `DeviceStorage`, and Telegram `CloudStorage`;
   CloudStorage uses compact topic indexes for each bookmark. Unsupported or
   temporarily unavailable Telegram storage degrades to the local copy without
-  blocking reading. History, selections, the global catalog, its exclusions,
-  and downloaded Scripture never enter Telegram storage.
+  blocking reading. Global visibility/exclusions use DeviceStorage only;
+  history, selections, the global catalog itself, and downloaded Scripture
+  never enter Telegram storage.
 - Bookmark recovery supports both a local bounded JSON download/import and
   **Back up to chat**. Chat backup sends the validated JSON document to the
   user's private bot chat with an owner-bound **Restore bookmarks** button. A

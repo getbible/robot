@@ -83,6 +83,8 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
   History, and Bookmarks summaries. Only Search and Bible show the translation
   control; Home, History, Selected, and Bookmarks use the centered icon-only
   top bar.
+- Home, Search, Bible, History, and Selected use one shared 24-pixel SVG icon
+  box at mobile and desktop widths.
 - Topic and bookmark counts, identifiers, names, colors, text excerpts, and
   serialized values are bounded.
 - Whole-verse bookmark identity is canonical book/chapter/verse across
@@ -98,6 +100,10 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - The compact last-read record contains only translation, book, chapter, verse,
   version, and timestamp, or a timestamped cleared marker, and uses the same
   local/device/cloud strategy without stale-position resurrection.
+- Compact global-topic add-all/remove-all controls precede topic search, while
+  per-topic controls remain available. Their scoped preferences restore from
+  Telegram `DeviceStorage` after local WebView storage loss and never access
+  `CloudStorage`, personal bookmark sync, or backup documents.
 - History, selections, translation catalogs, chapters, and public cache entries
   never enter Telegram user storage.
 

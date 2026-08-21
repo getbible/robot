@@ -54,7 +54,8 @@ No reader navigation, catalog load, chapter load, select, unselect, reorder, cle
 | `miniapp/lib/reading-history-store.js` | Bounded, durable, coordinate-only history in an authenticated user-scoped local key |
 | `miniapp/lib/bookmark-store.js` | Canonical personal verse records, multi-topic assignment, colored topic management, and portable JSON import/export |
 | `miniapp/lib/global-bookmark-catalog.js` | Built-in global topic/verse provider, default-topic definitions, and local-topic remapping |
-| `miniapp/lib/global-bookmark-preferences.js` | Browser-local global-topic visibility and per-link exclusions |
+| `miniapp/lib/global-bookmark-preferences.js` | Device-local global-topic visibility, per-link exclusions, and canonical-to-local mapping |
+| `miniapp/lib/global-bookmark-device-storage.js` | Scoped timestamp reconciliation for global-topic preferences across localStorage and Telegram DeviceStorage, explicitly excluding CloudStorage |
 | `miniapp/lib/telegram-bookmark-storage.js` | Aggregate-v2 timestamp reconciliation across localStorage, Telegram DeviceStorage, and Telegram CloudStorage, with compact cloud topic indexes |
 | `miniapp/lib/api.js` | Robot session/search/preferences/Post and bookmark backup/restore transport facade plus public API composition |
 | `miniapp/app.js` | UI orchestration and rendering only |
@@ -239,18 +240,20 @@ last-read record follows the same local/device/cloud pattern; clearing it writes
 a newer coordinate-free tombstone so a stale remote value cannot reappear.
 Existing Robot reader preferences remain a compatibility and availability
 fallback. No history entry, selection, chapter body, global catalog, global
-exclusion, or public-cache record is sent through this adapter.
+exclusion, or public-cache record is sent through the personal adapter.
 
 The browser-bundled global provider contains 2,155 verse links across 61
 topics. Personal and global rows share one topic list, with global rows marked
 **G**. Global rows hydrate display-only verse text for the active translation
-through the bounded public chapter data plane. Browser-local preferences alone
-determine which global topics and links
-are visible. A separate mapping under the hashed account scope preserves
-canonical-to-local identity when a legacy numeric topic is renamed. One link
-may be hidden, a topic may be cleared, and loading that topic or the complete
-catalog resets its exclusions without creating duplicates. These links never
-become personal records and never enter Telegram storage or backup documents.
+through the bounded public chapter data plane. Compact all-catalog add/remove
+controls appear before topic search; per-topic add/remove and per-link hiding
+remain available. A hashed-account-scoped adapter reconciles timestamped
+visibility, exclusions, and canonical-to-local mapping between localStorage
+and Telegram `DeviceStorage`, allowing Telegram Desktop to restore the state
+when its WebView storage is discarded. `CloudStorage` is deliberately excluded,
+so this state remains device-local. Loading one topic or the complete catalog
+also resets the relevant exclusions without creating duplicates. Global links
+never become personal records and never enter CloudStorage or backup documents.
 The catalog/provider boundary can later accept an
 authorized publishing source; user-authorized global publishing is intentionally
 not implemented.
@@ -376,8 +379,9 @@ A release is production-ready only when permanent CI and CodeQL pass on the exac
 - the 800-record bookmark bound, canonical deduplication, multi-topic
   assignments, default-topic restoration, aggregate-v2 reconciliation, and
   compact CloudStorage topic indexes;
-- the unified global/personal list, **G** marker, browser-local global
-  exclusions, and per-link/per-topic/all-catalog reset without personal sync;
+- the unified global/personal list, **G** marker, compact all-catalog controls,
+  scoped local/DeviceStorage restoration of global visibility and exclusions,
+  and per-link/per-topic/all-catalog reset without CloudStorage or personal sync;
 - bounded JSON download/import plus owner-bound private-chat backup, fresh
   one-time restore launch, compact v4 `colorIndexes` plus v1/v2/v3 import,
   persistence-before-acknowledgement, and absence of global links or backup
