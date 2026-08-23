@@ -7,7 +7,7 @@ regex>=2024.11,<2027
 # lock also contains dependencies selected only on older supported interpreters.
 exceptiongroup==1.3.1
 typing-extensions==4.16.0
-python-dotenv==1.2.2
+python-dotenv==1.2.3
 python-telegram-bot[webhooks]==22.8
 requests==2.34.2
 # Imported directly by the same-process Telegram Mini App HTTP adapter.
