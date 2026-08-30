@@ -11,7 +11,7 @@ probe_calls=0
 sleeps=0
 ready_after=4
 
-probe_mini_app_url() {
+probe_mini_app_surface() {
     ((probe_calls += 1))
     ((probe_calls >= ready_after))
 }
@@ -22,6 +22,11 @@ sleep() {
 
 mini_app_local_url() {
     printf 'http://127.0.0.1:9201/\n'
+}
+
+dotenv_value() {
+    [[ "$3" == "MINI_APP_PUBLIC_URL" ]] || return 1
+    printf 'https://bot.example.com/getbible/alpha\n'
 }
 
 verify_mini_app_local ignored-app ignored-env 5

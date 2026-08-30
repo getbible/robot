@@ -716,6 +716,18 @@
     "/contributions/status": {
       "get": {
         "summary": "Read the authenticated user's contributor status",
+        "parameters": [
+          {
+            "name": "details",
+            "in": "query",
+            "required": false,
+            "description": "Set to 1 to include private topic outcomes and review counts. Omit for the legacy four-field response.",
+            "schema": {
+              "type": "string",
+              "enum": ["1"]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Contributor application and enrolment state",
@@ -735,11 +747,26 @@
           },
           "500": {
             "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ContributionUnavailable"
           }
         }
       },
       "patch": {
         "summary": "Acknowledge the one-time contributor disclosure",
+        "parameters": [
+          {
+            "name": "details",
+            "in": "query",
+            "required": false,
+            "description": "Set to 1 to include private topic outcomes and review counts. Omit for the legacy four-field response.",
+            "schema": {
+              "type": "string",
+              "enum": ["1"]
+            }
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -784,7 +811,7 @@
             "$ref": "#/components/responses/InternalError"
           },
           "503": {
-            "$ref": "#/components/responses/InvalidRequest"
+            "$ref": "#/components/responses/ContributionUnavailable"
           }
         }
       }
@@ -828,9 +855,14 @@
                     "accepted": { "type": "integer", "minimum": 0, "maximum": 50 },
                     "replayed": { "type": "integer", "minimum": 0, "maximum": 50 },
                     "event_ids": {
+                      "description": "Opaque contributor-scoped receipt IDs keyed by client_event_id. Values are stable for exact replays and do not expose internal moderation row IDs.",
                       "type": "object",
                       "maxProperties": 50,
-                      "additionalProperties": { "type": "integer", "minimum": 1 }
+                      "additionalProperties": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                      }
                     }
                   }
                 }
@@ -1021,6 +1053,16 @@
       },
       "InternalError": {
         "description": "An unexpected server failure prevented the request from completing",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "ContributionUnavailable": {
+        "description": "Contributor synchronization is temporarily unavailable; the client must retain its last known eligible state and retry",
         "content": {
           "application/json": {
             "schema": {
@@ -1687,7 +1729,118 @@
             "enum": ["not_applied", "pending", "approved", "deferred", "rejected", "revoked", "unavailable"]
           },
           "can_contribute": { "type": "boolean" },
-          "disclosure_required": { "type": "boolean" }
+          "disclosure_required": { "type": "boolean" },
+          "topics": {
+            "$ref": "#/components/schemas/ContributionTopicOutcomes"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/ContributionSummary"
+          }
+        }
+      },
+      "ContributionCanonicalTopic": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "color", "aliases"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 80
+          },
+          "color": {
+            "type": "string",
+            "pattern": "^#[a-f0-9]{6}$"
+          },
+          "aliases": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 80
+            }
+          }
+        }
+      },
+      "ContributionTopicOutcome": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["local_topic_id", "state", "published"],
+        "properties": {
+          "local_topic_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["pending", "mapped", "rejected", "deferred"]
+          },
+          "published": {
+            "type": "boolean",
+            "description": "True only after this source mapping has reached the live catalogue. It can remain true while a later edit or delete is pending."
+          },
+          "canonical_topic_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "canonical_topic": {
+            "$ref": "#/components/schemas/ContributionCanonicalTopic"
+          }
+        }
+      },
+      "ContributionTopicOutcomes": {
+        "type": "array",
+        "maxItems": 1000,
+        "description": "Private local-to-canonical outcomes scoped to the authenticated numeric Telegram user. Contributor identity is never included.",
+        "items": {
+          "$ref": "#/components/schemas/ContributionTopicOutcome"
+        }
+      },
+      "ContributionSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["topics", "events"],
+        "properties": {
+          "topics": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pending", "mapped", "published", "rejected", "deferred"],
+            "properties": {
+              "pending": { "type": "integer", "minimum": 0, "maximum": 5000000 },
+              "mapped": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5000000,
+                "description": "All retained local-to-canonical mappings, including sources reopened for a later proposal; published is a subset."
+              },
+              "published": { "type": "integer", "minimum": 0, "maximum": 5000000 },
+              "rejected": { "type": "integer", "minimum": 0, "maximum": 5000000 },
+              "deferred": { "type": "integer", "minimum": 0, "maximum": 5000000 }
+            }
+          },
+          "events": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pending", "approved", "rejected", "deferred", "applied"],
+            "properties": {
+              "pending": { "type": "integer", "minimum": 0, "maximum": 5000000 },
+              "approved": { "type": "integer", "minimum": 0, "maximum": 5000000 },
+              "rejected": { "type": "integer", "minimum": 0, "maximum": 5000000 },
+              "deferred": { "type": "integer", "minimum": 0, "maximum": 5000000 },
+              "applied": { "type": "integer", "minimum": 0, "maximum": 5000000 }
+            }
+          }
         }
       },
       "ContributionTopicIdentity": {

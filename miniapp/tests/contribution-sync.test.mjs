@@ -67,6 +67,7 @@ class ContributionApiMock {
   disclosureCalls = 0;
   failureAt = null;
   onBatch = null;
+  statusCalls = 0;
   status = {
     enabled: true,
     state: "approved",
@@ -74,7 +75,10 @@ class ContributionApiMock {
     disclosure_required: false,
   };
 
-  async contributionStatus() { return { ...this.status }; }
+  async contributionStatus() {
+    this.statusCalls += 1;
+    return structuredClone(this.status);
+  }
   async acknowledgeContributionDisclosure() {
     this.disclosureCalls += 1;
     this.status.disclosure_required = false;
@@ -115,6 +119,530 @@ function bookmark(index, topicIds = ["grace"], overrides = {}) {
 function snapshot({ topics = [topic()], bookmarks = [] } = {}) {
   return { active_topic_id: topics[0]?.id ?? null, topics, bookmarks };
 }
+
+function reviewStatus(overrides = {}) {
+  return {
+    enabled: true,
+    state: "approved",
+    can_contribute: true,
+    disclosure_required: false,
+    topics: [],
+    summary: {
+      topics: {
+        pending: 0,
+        mapped: 0,
+        published: 0,
+        rejected: 0,
+        deferred: 0,
+      },
+      events: {
+        pending: 0,
+        approved: 0,
+        rejected: 0,
+        deferred: 0,
+        applied: 0,
+      },
+    },
+    ...overrides,
+  };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+test("seeds approved session status without a hidden network request", () => {
+  const api = new ContributionApiMock();
+  const initialStatus = reviewStatus({
+    topics: [{
+      local_topic_id: "my-topic",
+      state: "pending",
+      published: true,
+      canonical_topic_id: "reviewed-topic",
+      canonical_topic: {
+        id: "reviewed-topic",
+        name: "Reviewed Topic",
+        color: "#123456",
+        aliases: [],
+      },
+    }],
+    summary: {
+      topics: {
+        pending: 1,
+        mapped: 0,
+        published: 1,
+        rejected: 0,
+        deferred: 0,
+      },
+      events: {
+        pending: 2,
+        approved: 0,
+        rejected: 0,
+        deferred: 0,
+        applied: 4,
+      },
+    },
+  });
+  const sync = new ContributionSync({
+    scope: SCOPE,
+    api,
+    storage: new MemoryStorage(),
+    coreTopicIds: ["grace"],
+    initialStatus,
+  });
+
+  assert.equal(api.statusCalls, 0);
+  assert.equal(sync.canContribute, true);
+  assert.equal(sync.reviewDetailsAvailable, true);
+  assert.equal(sync.contributorState, "approved");
+  assert.equal(sync.baselineComplete, false);
+  assert.equal(sync.reviewSummary.events.pending, 2);
+  assert.equal(sync.topicOutcomes[0].canonical_topic_id, "reviewed-topic");
+  const exposed = sync.status;
+  exposed.topics[0].canonical_topic.aliases.push("mutated");
+  assert.deepEqual(sync.status.topics[0].canonical_topic.aliases, []);
+});
+
+test("retains legacy review provenance through status clones and reports", async () => {
+  const api = new ContributionApiMock();
+  const sync = new ContributionSync({
+    scope: SCOPE,
+    api,
+    storage: new MemoryStorage(),
+    coreTopicIds: ["grace"],
+    initialStatus: api.status,
+  });
+
+  assert.equal(sync.reviewDetailsAvailable, false);
+  const cloned = sync.status;
+  assert.equal(Object.hasOwn(cloned, "review_details_available"), false);
+  await sync.seedStatus(cloned);
+  assert.equal(sync.reviewDetailsAvailable, false);
+  const legacyReport = await sync.synchronizeNow(snapshot());
+  assert.equal(legacyReport.review_details_available, false);
+
+  api.status = reviewStatus();
+  await sync.refreshStatus();
+  assert.equal(sync.reviewDetailsAvailable, true);
+  api.status = {
+    enabled: true,
+    state: "approved",
+    can_contribute: true,
+    disclosure_required: false,
+  };
+  await sync.refreshStatus();
+  assert.equal(sync.reviewDetailsAvailable, false);
+});
+
+test("manual sync refreshes stale approval and returns current review outcomes", async () => {
+  const api = new ContributionApiMock();
+  const sync = new ContributionSync({
+    scope: SCOPE,
+    api,
+    storage: new MemoryStorage(),
+    coreTopicIds: ["grace"],
+    initialStatus: reviewStatus({
+      state: "pending",
+      can_contribute: false,
+    }),
+  });
+  assert.equal(sync.canContribute, false);
+  api.status = reviewStatus();
+  api.onBatch = () => {
+    api.status = reviewStatus({
+      topics: [{
+        local_topic_id: "my-topic",
+        state: "mapped",
+        published: false,
+        canonical_topic_id: "reviewed-topic",
+        canonical_topic: {
+          id: "reviewed-topic",
+          name: "Reviewed Topic",
+          color: "#123456",
+          aliases: [],
+        },
+      }],
+      summary: {
+        topics: {
+          pending: 0,
+          mapped: 1,
+          published: 0,
+          rejected: 0,
+          deferred: 0,
+        },
+        events: {
+          pending: 1,
+          approved: 0,
+          rejected: 0,
+          deferred: 0,
+          applied: 0,
+        },
+      },
+    });
+  };
+  const current = snapshot({
+    topics: [topic(), topic("my-topic", "My Topic")],
+    bookmarks: [bookmark(16, ["my-topic"])],
+  });
+
+  const result = await sync.synchronizeNow(current);
+
+  assert.equal(api.statusCalls, 2);
+  assert.equal(result.sent, 2);
+  assert.equal(result.pending, 0);
+  assert.equal(result.review_details_available, true);
+  assert.equal(result.status.summary.events.pending, 1);
+  assert.equal(result.topic_outcomes[0].canonical_topic_id, "reviewed-topic");
+  assert.equal(sync.canContribute, true);
+});
+
+test("manual sync reports a disclosure gate without submitting data", async () => {
+  const api = new ContributionApiMock();
+  api.status = reviewStatus({ disclosure_required: true });
+  const sync = new ContributionSync({
+    scope: SCOPE,
+    api,
+    storage: new MemoryStorage(),
+    coreTopicIds: ["grace"],
+    initialStatus: reviewStatus({
+      state: "pending",
+      can_contribute: false,
+    }),
+  });
+
+  const result = await sync.synchronizeNow(snapshot());
+
+  assert.equal(result.sent, 0);
+  assert.equal(result.status.disclosure_required, true);
+  assert.equal(api.statusCalls, 1);
+  assert.equal(api.batches.length, 0);
+});
+
+test("serializes concurrent status refreshes so the later authority wins", async () => {
+  const api = new ContributionApiMock();
+  const firstResponse = deferred();
+  const secondResponse = deferred();
+  const firstStarted = deferred();
+  const secondStarted = deferred();
+  api.statusCalls = 0;
+  api.contributionStatus = () => {
+    api.statusCalls += 1;
+    if (api.statusCalls === 1) {
+      firstStarted.resolve();
+      return firstResponse.promise;
+    }
+    secondStarted.resolve();
+    return secondResponse.promise;
+  };
+  const sync = new ContributionSync({
+    scope: SCOPE,
+    api,
+    storage: new MemoryStorage(),
+    coreTopicIds: ["grace"],
+    initialStatus: reviewStatus({ state: "pending", can_contribute: false }),
+  });
+
+  const older = sync.refreshStatus();
+  await firstStarted.promise;
+  const newer = sync.refreshStatus();
+  assert.equal(api.statusCalls, 1);
+
+  firstResponse.resolve(reviewStatus());
+  await secondStarted.promise;
+  assert.equal(api.statusCalls, 2);
+  secondResponse.resolve(reviewStatus({
+    state: "revoked",
+    can_contribute: false,
+  }));
+  await Promise.all([older, newer]);
+
+  assert.equal(sync.contributorState, "revoked");
+  assert.equal(sync.canContribute, false);
+});
+
+test("orders disclosure PATCH after an older status refresh", async () => {
+  const api = new ContributionApiMock();
+  const staleResponse = deferred();
+  const refreshStarted = deferred();
+  api.contributionStatus = () => {
+    api.statusCalls += 1;
+    refreshStarted.resolve();
+    return staleResponse.promise;
+  };
+  api.acknowledgeContributionDisclosure = async () => {
+    api.disclosureCalls += 1;
+    return reviewStatus({ disclosure_required: false });
+  };
+  const sync = new ContributionSync({
+    scope: SCOPE,
+    api,
+    storage: new MemoryStorage(),
+    coreTopicIds: ["grace"],
+    initialStatus: reviewStatus({ disclosure_required: true }),
+  });
+
+  const refresh = sync.refreshStatus();
+  await refreshStarted.promise;
+  const acknowledgement = sync.acknowledgeDisclosure();
+  assert.equal(api.disclosureCalls, 0);
+
+  staleResponse.resolve(reviewStatus({ disclosure_required: true }));
+  await refresh;
+  assert.equal(await acknowledgement, true);
+  assert.equal(api.disclosureCalls, 1);
+  assert.equal(sync.disclosureRequired, false);
+});
+
+test("a submit denial supersedes an older in-flight approved status", async () => {
+  const api = new ContributionApiMock();
+  const staleResponse = deferred();
+  const refreshStarted = deferred();
+  const submitStarted = deferred();
+  api.contributionStatus = () => {
+    api.statusCalls += 1;
+    refreshStarted.resolve();
+    return staleResponse.promise;
+  };
+  api.submitContributionEvents = async () => {
+    submitStarted.resolve();
+    throw Object.assign(new Error("contribution revoked"), {
+      code: "contribution_not_allowed",
+    });
+  };
+  const sync = new ContributionSync({
+    scope: SCOPE,
+    api,
+    storage: new MemoryStorage(),
+    coreTopicIds: ["grace"],
+    initialStatus: reviewStatus(),
+  });
+  const current = snapshot();
+  assert.equal(
+    sync.captureGlobalRemoval(
+      topic(),
+      { book: 43, chapter: 3, verse: 16 },
+      current,
+    ),
+    1,
+  );
+
+  const refresh = sync.refreshStatus();
+  await refreshStarted.promise;
+  const drain = sync.synchronize(current);
+  await submitStarted.promise;
+  staleResponse.resolve(reviewStatus());
+
+  await refresh;
+  await assert.rejects(
+    drain,
+    (error) => error.code === "contribution_not_allowed",
+  );
+  assert.equal(sync.canContribute, false);
+  assert.equal(sync.pendingCount, 1);
+});
+
+test("a generic 403 preserves authority and retries the pending journal", async () => {
+  const api = new ContributionApiMock();
+  const successfulSubmit = api.submitContributionEvents.bind(api);
+  const sync = new ContributionSync({
+    scope: SCOPE,
+    api,
+    storage: new MemoryStorage(),
+    coreTopicIds: ["grace"],
+    initialStatus: reviewStatus(),
+  });
+  const current = snapshot();
+  assert.equal(
+    sync.captureGlobalRemoval(
+      topic(),
+      { book: 43, chapter: 3, verse: 16 },
+      current,
+    ),
+    1,
+  );
+  api.submitContributionEvents = async () => {
+    throw Object.assign(new Error("origin policy rejected the request"), {
+      status: 403,
+      code: "forbidden",
+    });
+  };
+
+  await assert.rejects(
+    sync.synchronize(current),
+    (error) => error.status === 403 && error.code === "forbidden",
+  );
+  assert.equal(sync.canContribute, true);
+  assert.equal(sync.pendingCount, 1);
+
+  api.submitContributionEvents = successfulSubmit;
+  assert.deepEqual(await sync.synchronize(current), { sent: 1, pending: 0 });
+  assert.equal(api.batches[0][0].type, "verse_remove");
+});
+
+test("serializes status authority across clients sharing one journal", async () => {
+  const journal = new MemoryJournal();
+  const locks = new SerialLockManager();
+  const firstApi = new ContributionApiMock();
+  const secondApi = new ContributionApiMock();
+  const firstResponse = deferred();
+  const secondResponse = deferred();
+  const firstStarted = deferred();
+  const secondStarted = deferred();
+  firstApi.contributionStatus = () => {
+    firstApi.statusCalls += 1;
+    firstStarted.resolve();
+    return firstResponse.promise;
+  };
+  secondApi.contributionStatus = () => {
+    secondApi.statusCalls += 1;
+    secondStarted.resolve();
+    return secondResponse.promise;
+  };
+  const options = {
+    scope: SCOPE,
+    instanceScope: INSTANCE_SCOPE,
+    coreTopicIds: ["grace"],
+    journal,
+    lockManager: locks,
+  };
+  const first = await ContributionSync.open({ ...options, api: firstApi });
+  const second = await ContributionSync.open({ ...options, api: secondApi });
+
+  const older = first.refreshStatus();
+  await firstStarted.promise;
+  const newer = second.refreshStatus();
+  assert.equal(secondApi.statusCalls, 0);
+
+  firstResponse.resolve(reviewStatus());
+  await secondStarted.promise;
+  secondResponse.resolve(reviewStatus({
+    state: "revoked",
+    can_contribute: false,
+  }));
+  await Promise.all([older, newer]);
+  const reopened = await ContributionSync.open({
+    ...options,
+    api: new ContributionApiMock(),
+  });
+
+  assert.equal(reopened.contributorState, "revoked");
+  assert.equal(reopened.canContribute, false);
+});
+
+test("preserves a denied global removal and drains it after reapproval", async () => {
+  const api = new ContributionApiMock();
+  const successfulSubmit = api.submitContributionEvents.bind(api);
+  const sync = new ContributionSync({
+    scope: SCOPE,
+    api,
+    storage: new MemoryStorage(),
+    coreTopicIds: ["grace"],
+  });
+  const current = snapshot();
+  const coordinate = { book: 43, chapter: 3, verse: 16 };
+  await sync.refreshStatus();
+  await sync.synchronize(current);
+  assert.equal(
+    sync.captureGlobalRemoval(topic(), coordinate, current),
+    1,
+  );
+  assert.equal(sync.pendingCount, 1);
+
+  let deniedEvent = null;
+  let deniedCalls = 0;
+  api.submitContributionEvents = async (events) => {
+    deniedCalls += 1;
+    deniedEvent = structuredClone(events[0]);
+    throw Object.assign(new Error("contribution revoked"), {
+      status: 403,
+      code: "contribution_not_allowed",
+    });
+  };
+  await assert.rejects(
+    sync.synchronize(current),
+    (error) => error.status === 403,
+  );
+  assert.equal(sync.canContribute, false);
+  assert.equal(sync.pendingCount, 1);
+
+  for (const state of ["rejected", "revoked"]) {
+    api.status = reviewStatus({ state, can_contribute: false });
+    await sync.refreshStatus();
+    assert.equal(sync.canContribute, false);
+    assert.equal(sync.pendingCount, 1);
+    assert.deepEqual(await sync.synchronize(current), { sent: 0, pending: 1 });
+    assert.equal(deniedCalls, 1);
+    assert.equal(
+      sync.captureGlobalAddition(topic(), coordinate, current),
+      0,
+    );
+  }
+
+  api.status = reviewStatus();
+  await sync.refreshStatus();
+  assert.equal(sync.canContribute, true);
+  assert.equal(sync.baselineComplete, false);
+  api.submitContributionEvents = successfulSubmit;
+  const result = await sync.synchronize(current);
+
+  assert.deepEqual(result, { sent: 1, pending: 0 });
+  assert.equal(api.batches.flat()[0].type, "verse_remove");
+  assert.equal(api.batches.flat()[0].client_event_id, deniedEvent.client_event_id);
+  assert.equal(sync.pendingCount, 0);
+});
+
+test("stops compact recovery when authority changes during a drain", async () => {
+  const api = new ContributionApiMock();
+  let suspendAfterBatch = false;
+  let sync;
+  sync = new ContributionSync({
+    scope: SCOPE,
+    api,
+    storage: new MemoryStorage(),
+    coreTopicIds: ["grace"],
+    maximumOutboxEvents: 1,
+    batchPause: async () => {
+      if (!suspendAfterBatch) return;
+      suspendAfterBatch = false;
+      await sync.seedStatus(reviewStatus({
+        state: "revoked",
+        can_contribute: false,
+      }));
+    },
+  });
+  await sync.refreshStatus();
+  const empty = snapshot();
+  const one = snapshot({ bookmarks: [bookmark(1)] });
+  const two = snapshot({ bookmarks: [bookmark(1), bookmark(2)] });
+  await sync.synchronize(empty);
+  assert.equal(sync.captureMutation(empty, one), 1);
+  assert.equal(sync.captureMutation(one, two), 0);
+  assert.equal(sync.recovering, true);
+
+  suspendAfterBatch = true;
+  const blocked = await sync.synchronize(two);
+
+  assert.deepEqual(blocked, { sent: 1, pending: 0 });
+  assert.equal(sync.canContribute, false);
+  assert.equal(sync.recovering, true);
+  assert.equal(api.batches.length, 1);
+  assert.equal(
+    api.batches.flat().some((event) =>
+      event.client_event_id.startsWith("recovery:")
+    ),
+    false,
+  );
+
+  await sync.seedStatus(reviewStatus());
+  await sync.synchronize(two);
+  assert.equal(sync.recovering, false);
+});
 
 test("accepts every server status and gates baseline behind disclosure", async () => {
   const api = new ContributionApiMock();
@@ -200,6 +728,162 @@ test("baseline is reviewable, bounded, deterministic, and resumes by checkpoint"
   assert.equal(result.sent, 11);
   assert.equal(resumedApi.batches.length, 1);
   assert.equal(resumedApi.batches[0][0].client_event_id, baseline[50].client_event_id);
+});
+
+test("restarts a completed baseline once when a reopened snapshot changed", async () => {
+  const journal = new MemoryJournal();
+  const locks = new SerialLockManager();
+  const initial = snapshot({ bookmarks: [bookmark(1)] });
+  const changed = snapshot({ bookmarks: [bookmark(1), bookmark(2)] });
+  const options = {
+    scope: SCOPE,
+    instanceScope: INSTANCE_SCOPE,
+    coreTopicIds: ["grace"],
+    journal,
+    lockManager: locks,
+    initialStatus: reviewStatus(),
+  };
+  const first = await ContributionSync.open({
+    ...options,
+    api: new ContributionApiMock(),
+  });
+  assert.deepEqual(await first.synchronize(initial), { sent: 2, pending: 0 });
+
+  const reopenedApi = new ContributionApiMock();
+  const reopened = await ContributionSync.open({
+    ...options,
+    api: reopenedApi,
+  });
+  assert.equal(reopened.baselineComplete, true);
+  const result = await reopened.synchronize(changed);
+
+  assert.deepEqual(result, { sent: 3, pending: 0 });
+  assert.deepEqual(
+    reopenedApi.batches.flat().map((event) => event.type),
+    ["topic_upsert", "verse_add", "verse_add"],
+  );
+  assert.equal(reopenedApi.batches.flat().at(-1).verse.verse, 2);
+});
+
+test("validates an unchanged reopen once then uses the normal outbox", async () => {
+  const journal = new MemoryJournal();
+  const locks = new SerialLockManager();
+  const initial = snapshot({ bookmarks: [bookmark(1)] });
+  const changed = snapshot({ bookmarks: [bookmark(1), bookmark(2)] });
+  const options = {
+    scope: SCOPE,
+    instanceScope: INSTANCE_SCOPE,
+    coreTopicIds: ["grace"],
+    journal,
+    lockManager: locks,
+    initialStatus: reviewStatus(),
+  };
+  const first = await ContributionSync.open({
+    ...options,
+    api: new ContributionApiMock(),
+  });
+  await first.synchronize(initial);
+
+  const reopenedApi = new ContributionApiMock();
+  const reopened = await ContributionSync.open({
+    ...options,
+    api: reopenedApi,
+  });
+  assert.deepEqual(await reopened.synchronize(initial), { sent: 0, pending: 0 });
+  assert.equal(reopenedApi.batches.length, 0);
+
+  assert.equal(await reopened.captureMutation(initial, changed), 1);
+  assert.deepEqual(await reopened.synchronize(changed), { sent: 1, pending: 0 });
+  assert.equal(reopenedApi.batches.length, 1);
+  assert.equal(reopenedApi.batches[0].length, 1);
+  assert.equal(reopenedApi.batches[0][0].type, "verse_add");
+  assert.equal(reopenedApi.batches[0][0].verse.verse, 2);
+});
+
+test("drops stale personal outbox intent from a closed contribution gap", async () => {
+  const cases = [
+    {
+      name: "addition removed while closed",
+      baseline: snapshot(),
+      queued: snapshot({ bookmarks: [bookmark(1)] }),
+      current: snapshot(),
+    },
+    {
+      name: "removal restored while closed",
+      baseline: snapshot({ bookmarks: [bookmark(1)] }),
+      queued: snapshot(),
+      current: snapshot({ bookmarks: [bookmark(1)] }),
+    },
+  ];
+  for (const scenario of cases) {
+    const journal = new MemoryJournal();
+    const locks = new SerialLockManager();
+    const options = {
+      scope: SCOPE,
+      instanceScope: INSTANCE_SCOPE,
+      coreTopicIds: ["grace"],
+      journal,
+      lockManager: locks,
+      initialStatus: reviewStatus(),
+    };
+    const first = await ContributionSync.open({
+      ...options,
+      api: new ContributionApiMock(),
+    });
+    await first.synchronize(scenario.baseline);
+    assert.equal(
+      await first.captureMutation(scenario.baseline, scenario.queued),
+      1,
+      scenario.name,
+    );
+    assert.equal(first.pendingCount, 1, scenario.name);
+
+    const reopenedApi = new ContributionApiMock();
+    const reopened = await ContributionSync.open({
+      ...options,
+      api: reopenedApi,
+    });
+    assert.deepEqual(
+      await reopened.synchronize(scenario.current),
+      { sent: 0, pending: 0 },
+      scenario.name,
+    );
+    assert.equal(reopenedApi.batches.length, 0, scenario.name);
+    assert.equal(reopened.pendingCount, 0, scenario.name);
+  }
+});
+
+test("reopen validation preserves explicit global inverse intent", async () => {
+  const journal = new MemoryJournal();
+  const locks = new SerialLockManager();
+  const api = new ContributionApiMock();
+  const current = snapshot();
+  const options = {
+    scope: SCOPE,
+    instanceScope: INSTANCE_SCOPE,
+    coreTopicIds: ["grace"],
+    journal,
+    lockManager: locks,
+    initialStatus: reviewStatus(),
+  };
+  const first = await ContributionSync.open({ ...options, api });
+  await first.synchronize(current);
+  assert.equal(
+    await first.captureGlobalRemoval(
+      topic(),
+      { book: 43, chapter: 3, verse: 16 },
+      current,
+    ),
+    1,
+  );
+
+  const reopenedApi = new ContributionApiMock();
+  const reopened = await ContributionSync.open({
+    ...options,
+    api: reopenedApi,
+  });
+  assert.deepEqual(await reopened.synchronize(current), { sent: 1, pending: 0 });
+  assert.equal(reopenedApi.batches[0][0].type, "verse_remove");
 });
 
 test("paces every bounded batch in a large baseline", async () => {

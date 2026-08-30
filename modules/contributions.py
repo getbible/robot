@@ -48,6 +48,7 @@ MAX_ACTOR_LENGTH = 128
 MAX_DECISION_NOTE = 1000
 MAX_NOTIFICATION_TEXT = 2000
 MAX_TELEGRAM_ID = (1 << 52) - 1
+MAX_CONTRIBUTION_STATUS_TOPICS = 1000
 MAX_PUBLIC_OVERLAY_TOPICS = 39
 MAX_PUBLIC_OVERLAY_ASSOCIATIONS = 10_000
 MAX_PUBLIC_OVERLAY_BYTES = 2 * 1024 * 1024
@@ -150,6 +151,25 @@ _APPLICATION_NOTICE = {
         "not be submitted for project review."
     ),
 }
+
+
+def _empty_contribution_summary() -> dict[str, dict[str, int]]:
+    return {
+        "topics": {
+            "pending": 0,
+            "mapped": 0,
+            "published": 0,
+            "rejected": 0,
+            "deferred": 0,
+        },
+        "events": {
+            "pending": 0,
+            "approved": 0,
+            "rejected": 0,
+            "deferred": 0,
+            "applied": 0,
+        },
+    }
 
 
 class ContributionError(ValueError):
@@ -391,16 +411,36 @@ class ContributionStore:
         """Refresh bounded display metadata for an existing application only."""
         identity = _telegram_user_id(user_id)
         profile = _profile(first_name, last_name, username, language_code)
-        with self._guard, self._transaction() as connection:
-            connection.execute(
+        with self._guard:
+            connection = self._connection_required()
+            application = connection.execute(
                 """
-                UPDATE contributor_applications
-                SET first_name = ?, last_name = ?, username = ?, language_code = ?,
-                    updated_at = ?
-                WHERE user_id = ?
+                SELECT first_name, last_name, username, language_code
+                FROM contributor_applications WHERE user_id = ?
                 """,
-                (*profile, time.time_ns(), identity),
-            )
+                (identity,),
+            ).fetchone()
+            if application is None:
+                # The overwhelming majority of Mini App sessions belong to
+                # ordinary readers.  Do not acquire SQLite's writer lock merely
+                # to run an UPDATE that cannot match a contributor application.
+                return
+            if tuple(application) == profile:
+                return
+            with self._transaction() as connection:
+                connection.execute(
+                    """
+                    UPDATE contributor_applications
+                    SET first_name = ?, last_name = ?, username = ?, language_code = ?,
+                        updated_at = ?
+                    WHERE user_id = ?
+                      AND (
+                          first_name IS NOT ? OR last_name IS NOT ?
+                          OR username IS NOT ? OR language_code IS NOT ?
+                      )
+                    """,
+                    (*profile, time.time_ns(), identity, *profile),
+                )
 
     def application_for(self, user_id: int) -> ContributorApplication | None:
         identity = _telegram_user_id(user_id)
@@ -416,48 +456,218 @@ class ContributionStore:
             return None if row is None else _application(row)
 
     def contribution_status(self, user_id: int) -> dict[str, object]:
-        application = self.application_for(user_id)
-        state = application.state if application is not None else "not_applied"
+        """Return this contributor's enrolment and private reconciliation state.
+
+        Local topic IDs are meaningful only inside one contributor's browser.
+        They therefore never enter the public catalogue and are returned only
+        from this numeric-ID-scoped query.  A moderator mapping is not itself
+        publication: ``published`` becomes true only after an event has been
+        applied and the latest applied topic transition is not a delete.  The
+        no-transition case supports mappings to an already bundled topic.
+        """
+        identity = _telegram_user_id(user_id)
+        topic_states = {state: 0 for state in sorted(TOPIC_STATES)}
+        event_states = {state: 0 for state in sorted(REVIEW_STATES)}
+        with self._guard:
+            connection = self._connection_required()
+            application = connection.execute(
+                """
+                SELECT state, disclosure_acknowledged_at
+                FROM contributor_applications WHERE user_id = ?
+                """,
+                (identity,),
+            ).fetchone()
+            if application is None:
+                # Nearly every reader is not a contributor.  Keep ordinary
+                # session bootstrap to one indexed application lookup and do
+                # not scan private review tables for those readers.
+                return {
+                    "enabled": True,
+                    "state": "not_applied",
+                    "can_contribute": False,
+                    "disclosure_required": False,
+                    "topics": [],
+                    "summary": _empty_contribution_summary(),
+                }
+            topic_count_rows = connection.execute(
+                """
+                SELECT state, COUNT(*)
+                FROM contributor_source_topics
+                WHERE contributor_id = ?
+                GROUP BY state
+                """,
+                (identity,),
+            ).fetchall()
+            for row in topic_count_rows:
+                topic_states[str(row[0])] = int(row[1])
+            event_count_rows = connection.execute(
+                """
+                SELECT state, COUNT(*)
+                FROM contribution_events
+                WHERE contributor_id = ?
+                GROUP BY state
+                """,
+                (identity,),
+            ).fetchall()
+            for row in event_count_rows:
+                event_states[str(row[0])] = int(row[1])
+            rows = connection.execute(
+                """
+                WITH applied_topics AS (
+                    SELECT local_topic_id,
+                           MAX(id) AS latest_applied_event_id,
+                           MAX(CASE
+                               WHEN event_type IN ('topic_upsert', 'topic_delete')
+                               THEN id
+                           END) AS latest_transition_id
+                    FROM contribution_events
+                    WHERE contributor_id = ? AND state = 'applied'
+                    GROUP BY local_topic_id
+                )
+                SELECT source_topics.local_topic_id,
+                       source_topics.name,
+                       source_topics.color,
+                       source_topics.aliases,
+                       source_topics.state,
+                       source_topics.canonical_topic_id,
+                       canonical.definition_json AS canonical_definition_json,
+                       applied.latest_applied_event_id IS NOT NULL AS has_applied_event,
+                       transition.event_type AS latest_applied_topic_transition,
+                       SUM(CASE
+                           WHEN source_topics.canonical_topic_id IS NOT NULL
+                            AND applied.latest_applied_event_id IS NOT NULL
+                            AND COALESCE(transition.event_type, '') != 'topic_delete'
+                           THEN 1 ELSE 0
+                       END) OVER () AS published_count,
+                       SUM(CASE
+                           WHEN source_topics.canonical_topic_id IS NOT NULL
+                           THEN 1 ELSE 0
+                       END) OVER () AS mapped_count
+                FROM contributor_source_topics AS source_topics
+                LEFT JOIN contribution_canonical_topics AS canonical
+                  ON canonical.topic_id = source_topics.canonical_topic_id
+                LEFT JOIN applied_topics AS applied
+                  ON applied.local_topic_id = source_topics.local_topic_id
+                LEFT JOIN contribution_events AS transition
+                  ON transition.id = applied.latest_transition_id
+                 AND transition.contributor_id = source_topics.contributor_id
+                WHERE source_topics.contributor_id = ?
+                ORDER BY source_topics.updated_at DESC,
+                         source_topics.local_topic_id
+                LIMIT ?
+                """,
+                (identity, identity, MAX_CONTRIBUTION_STATUS_TOPICS),
+            ).fetchall()
+
+        state = str(application[0])
         approved = state == "approved"
+        published_count = int(rows[0][9]) if rows else 0
+        mapped_count = int(rows[0][10]) if rows else 0
+        topics: list[dict[str, object]] = []
+        for row in rows:
+            source_state = str(row[4])
+            canonical_id = cast(str | None, row[5])
+            published = bool(
+                canonical_id is not None
+                and row[7]
+                and row[8] != "topic_delete"
+            )
+            topic: dict[str, object] = {
+                "local_topic_id": str(row[0]),
+                "state": source_state,
+                "published": published,
+            }
+            if canonical_id is not None:
+                topic["canonical_topic_id"] = canonical_id
+            if canonical_id is not None and (source_state == "mapped" or published):
+                canonical_topic = _private_canonical_topic(row, canonical_id)
+                if canonical_topic is not None:
+                    topic["canonical_topic"] = canonical_topic
+            topics.append(topic)
+        topics.sort(key=lambda value: cast(str, value["local_topic_id"]))
+
         return {
             "enabled": True,
             "state": state,
             "can_contribute": approved,
             "disclosure_required": bool(
                 approved
-                and application is not None
-                and application.disclosure_acknowledged_at is None
+                and application[1] is None
             ),
+            "topics": topics,
+            "summary": {
+                "topics": {
+                    "pending": topic_states["pending"],
+                    "mapped": mapped_count,
+                    "published": published_count,
+                    "rejected": topic_states["rejected"],
+                    "deferred": topic_states["deferred"],
+                },
+                "events": {
+                    "pending": event_states["pending"],
+                    "approved": event_states["approved"],
+                    "rejected": event_states["rejected"],
+                    "deferred": event_states["deferred"],
+                    "applied": event_states["applied"],
+                },
+            },
         }
 
     def acknowledge_disclosure(self, user_id: int) -> dict[str, object]:
         identity = _telegram_user_id(user_id)
-        now = time.time_ns()
-        with self._guard, self._transaction() as connection:
-            cursor = connection.execute(
+        with self._guard:
+            connection = self._connection_required()
+            application = connection.execute(
                 """
-                UPDATE contributor_applications
-                SET disclosure_acknowledged_at = COALESCE(
-                        disclosure_acknowledged_at, ?
-                    ), updated_at = ?
-                WHERE user_id = ? AND state = 'approved'
+                SELECT state, disclosure_acknowledged_at
+                FROM contributor_applications WHERE user_id = ?
                 """,
-                (now, now, identity),
-            )
-            if cursor.rowcount != 1:
+                (identity,),
+            ).fetchone()
+            if application is None or application[0] != "approved":
                 raise ContributionNotAllowed(
                     "Only approved contributors can acknowledge this notice."
                 )
-            self._audit_locked(
-                connection,
-                actor=f"telegram:{identity}",
-                action="disclosure_acknowledged",
-                contributor_id=identity,
-                subject_type="application",
-                subject_id=str(identity),
-                detail={},
-                now=now,
-            )
+            if application[1] is None:
+                # Recheck under the write lock: another process may have
+                # acknowledged or revoked the application after the read above.
+                with self._transaction() as connection:
+                    application = connection.execute(
+                        """
+                        SELECT state, disclosure_acknowledged_at
+                        FROM contributor_applications WHERE user_id = ?
+                        """,
+                        (identity,),
+                    ).fetchone()
+                    if application is None or application[0] != "approved":
+                        raise ContributionNotAllowed(
+                            "Only approved contributors can acknowledge this notice."
+                        )
+                    if application[1] is None:
+                        now = time.time_ns()
+                        cursor = connection.execute(
+                            """
+                            UPDATE contributor_applications
+                            SET disclosure_acknowledged_at = ?, updated_at = ?
+                            WHERE user_id = ? AND state = 'approved'
+                              AND disclosure_acknowledged_at IS NULL
+                            """,
+                            (now, now, identity),
+                        )
+                        if cursor.rowcount != 1:
+                            raise ContributionNotAllowed(
+                                "Only approved contributors can acknowledge this notice."
+                            )
+                        self._audit_locked(
+                            connection,
+                            actor=f"telegram:{identity}",
+                            action="disclosure_acknowledged",
+                            contributor_id=identity,
+                            subject_type="application",
+                            subject_id=str(identity),
+                            detail={},
+                            now=now,
+                        )
         return self.contribution_status(identity)
 
     def list_applications(
@@ -2426,6 +2636,34 @@ def _source_topic(row: sqlite3.Row) -> SourceTopicRecord:
         created_at=int(row["created_at"]),
         updated_at=int(row["updated_at"]),
     )
+
+
+def _private_canonical_topic(
+    row: sqlite3.Row,
+    canonical_topic_id: str,
+) -> dict[str, object] | None:
+    """Return identity-free canonical metadata for one owner's reconciliation.
+
+    New contributed definitions have their own immutable moderation record.
+    Existing bundled definitions do not; while the source is mapped its
+    moderator-normalized source fields are safe as a convenience.  If a later
+    proposal reopens such a bundled mapping, those source fields are proposal
+    data again and the browser must use the freshly loaded public catalogue.
+    """
+    definition_json = row["canonical_definition_json"]
+    if definition_json is not None:
+        definition = json.loads(str(definition_json))
+        if isinstance(definition, dict):
+            return cast(dict[str, object], definition)
+    if row["state"] != "mapped" or row["name"] is None or row["color"] is None:
+        return None
+    aliases = json.loads(str(row["aliases"]))
+    return {
+        "id": canonical_topic_id,
+        "name": str(row["name"]),
+        "color": str(row["color"]),
+        "aliases": [str(value) for value in aliases],
+    }
 
 
 def _event(row: sqlite3.Row) -> ContributionEvent:

@@ -6,12 +6,14 @@ import {
   DEFAULT_FILTERS,
   abbreviateBookName,
   activeFilterCount,
+  contributionReviewDetailsAvailable,
   entrypointIntent,
   moveItem,
   nearestChapterVerse,
   normalizeBasket,
   normalizeBooks,
   normalizeChapters,
+  normalizeContributionStatus,
   normalizeFilters,
   normalizeReaderLocation,
   normalizeScripture,
@@ -58,6 +60,40 @@ test("normalizes the backend session bootstrap without retaining identity", () =
         verse: 16,
       },
     },
+    contributions: {
+      enabled: true,
+      state: "approved",
+      can_contribute: true,
+      disclosure_required: false,
+      topics: [{
+        local_topic_id: "my-grace-topic",
+        state: "pending",
+        published: true,
+        canonical_topic_id: "grace",
+        canonical_topic: {
+          id: "grace",
+          name: "Grace",
+          color: "#bbf7d0",
+          aliases: ["God's Grace"],
+        },
+      }],
+      summary: {
+        topics: {
+          pending: 1,
+          mapped: 0,
+          published: 1,
+          rejected: 0,
+          deferred: 0,
+        },
+        events: {
+          pending: 2,
+          approved: 0,
+          rejected: 0,
+          deferred: 0,
+          applied: 3,
+        },
+      },
+    },
     entrypoint: { route: "search", query: "eternal life" },
     translations: [
       {
@@ -91,7 +127,123 @@ test("normalizes the backend session bootstrap without retaining identity", () =
   assert.equal(session.entrypoint.route, "search");
   assert.equal(session.entrypoint.query, "eternal life");
   assert.equal(session.basket.count, 1);
+  assert.equal(session.contributions.can_contribute, true);
+  assert.equal(session.contributions.topics[0].published, true);
+  assert.equal(
+    session.contributions.topics[0].canonical_topic_id,
+    "grace",
+  );
+  assert.equal(session.contributions.summary.events.pending, 2);
+  assert.equal(
+    contributionReviewDetailsAvailable(session.contributions),
+    true,
+  );
   assert.equal(session.user, undefined);
+});
+
+test("normalizes legacy and current contributor status envelopes", () => {
+  const legacy = normalizeContributionStatus({
+    enabled: true,
+    state: "pending",
+    can_contribute: false,
+    disclosure_required: false,
+  });
+  assert.deepEqual(legacy, {
+    enabled: true,
+    state: "pending",
+    can_contribute: false,
+    disclosure_required: false,
+    topics: [],
+    summary: {
+      topics: {
+        pending: 0,
+        mapped: 0,
+        published: 0,
+        rejected: 0,
+        deferred: 0,
+      },
+      events: {
+        pending: 0,
+        approved: 0,
+        rejected: 0,
+        deferred: 0,
+        applied: 0,
+      },
+    },
+  });
+  assert.equal(contributionReviewDetailsAvailable(legacy), false);
+  assert.equal(
+    contributionReviewDetailsAvailable(normalizeContributionStatus(legacy)),
+    false,
+  );
+
+  const detailed = normalizeContributionStatus({
+    enabled: true,
+    state: "approved",
+    can_contribute: true,
+    disclosure_required: false,
+    topics: [],
+    summary: legacy.summary,
+  });
+  assert.equal(contributionReviewDetailsAvailable(detailed), true);
+  assert.equal(
+    contributionReviewDetailsAvailable(normalizeContributionStatus(detailed)),
+    true,
+  );
+  assert.deepEqual(Object.keys(detailed).sort(), [
+    "can_contribute",
+    "disclosure_required",
+    "enabled",
+    "state",
+    "summary",
+    "topics",
+  ]);
+  assert.equal(
+    normalizeContributionStatus(undefined).state,
+    "unavailable",
+  );
+});
+
+test("rejects unsafe contributor review outcomes", () => {
+  const summary = {
+    topics: {
+      pending: 0,
+      mapped: 0,
+      published: 1,
+      rejected: 0,
+      deferred: 0,
+    },
+    events: {
+      pending: 0,
+      approved: 0,
+      rejected: 0,
+      deferred: 0,
+      applied: 1,
+    },
+  };
+  assert.throws(() => normalizeContributionStatus({
+    enabled: true,
+    state: "approved",
+    can_contribute: true,
+    disclosure_required: false,
+    topics: [{
+      local_topic_id: "personal-topic",
+      state: "pending",
+      published: true,
+    }],
+    summary,
+  }), /topic outcome/i);
+  assert.throws(() => normalizeContributionStatus({
+    enabled: true,
+    state: "approved",
+    can_contribute: true,
+    disclosure_required: false,
+    topics: [],
+    summary: {
+      ...summary,
+      events: { ...summary.events, pending: -1 },
+    },
+  }), /review summary/i);
 });
 
 test("normalizes current backend book and chapter item envelopes", () => {

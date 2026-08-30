@@ -774,6 +774,24 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 "disclosure_required": True,
             },
         )
+        detailed = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/contributions/status?details=1",
+                token=token,
+            )
+        )
+        self.assertEqual(detailed.status, 200)
+        self.assertEqual(json.loads(detailed.body)["topics"], [])
+        self.assertEqual(json.loads(detailed.body)["summary"]["events"]["pending"], 0)
+        invalid_query = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/contributions/status?details=0",
+                token=token,
+            )
+        )
+        self.assertEqual(invalid_query.status, 400)
         # Signed display metadata may be retained for private audit display,
         # but only the numeric ID controls this approved record.
         self.assertEqual(self.contributions.application_for(42).first_name, "Grace")
@@ -781,13 +799,14 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         acknowledged = await self.api.handle(
             self.request(
                 "PATCH",
-                "/getbible/api/v1/contributions/status",
+                "/getbible/api/v1/contributions/status?details=1",
                 token=token,
                 body={"disclosure_acknowledged": True},
             )
         )
         self.assertEqual(acknowledged.status, 200)
         self.assertFalse(json.loads(acknowledged.body)["disclosure_required"])
+        self.assertIn("summary", json.loads(acknowledged.body))
 
         repeated = await self.api.handle(
             self.request(
@@ -798,6 +817,86 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(repeated.status, 200)
+
+        result = self.contributions.record_events(
+            42,
+            [
+                {
+                    "client_event_id": "topic.grace.status",
+                    "type": "topic_upsert",
+                    "topic": {
+                        "local_topic_id": "private.grace",
+                        "name": "Grace",
+                        "color": "#bbf7d0",
+                    },
+                }
+            ],
+        )
+        self.contributions.set_topic_mapping(
+            42,
+            "private.grace",
+            "grace",
+            state="mapped",
+            actor="admin",
+            canonical_definition={
+                "id": "grace",
+                "name": "Grace",
+                "color": "#bbf7d0",
+                "aliases": [],
+            },
+        )
+        event_id = result.event_ids["topic.grace.status"]
+        self.contributions.decide_event(event_id, "approved", actor="admin")
+        self.contributions.publish_approved_events_atomically(
+            {
+                "schema_version": 1,
+                "topics": [
+                    {
+                        "id": "grace",
+                        "name": "Grace",
+                        "color": "#bbf7d0",
+                        "aliases": [],
+                    }
+                ],
+                "associations": {
+                    "add": [
+                        {
+                            "topic_id": "grace",
+                            "book": 43,
+                            "chapter": 3,
+                            "verse": 16,
+                        }
+                    ],
+                    "remove": [],
+                },
+            },
+            [event_id],
+            actor="admin",
+        )
+        reconciled = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/contributions/status?details=1",
+                token=token,
+            )
+        )
+        reconciliation = json.loads(reconciled.body)
+        self.assertEqual(
+            reconciliation["topics"][0],
+            {
+                "local_topic_id": "private.grace",
+                "state": "mapped",
+                "published": True,
+                "canonical_topic_id": "grace",
+                "canonical_topic": {
+                    "id": "grace",
+                    "name": "Grace",
+                    "color": "#bbf7d0",
+                    "aliases": [],
+                },
+            },
+        )
+        self.assertNotIn("contributor_id", reconciled.body.decode())
 
     async def test_contributor_store_failure_never_blocks_scripture_session(self) -> None:
         self.contributions.close()
@@ -818,8 +917,74 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 "state": "unavailable",
                 "can_contribute": False,
                 "disclosure_required": False,
+                "topics": [],
+                "summary": {
+                    "topics": {
+                        "pending": 0,
+                        "mapped": 0,
+                        "published": 0,
+                        "rejected": 0,
+                        "deferred": 0,
+                    },
+                    "events": {
+                        "pending": 0,
+                        "approved": 0,
+                        "rejected": 0,
+                        "deferred": 0,
+                        "applied": 0,
+                    },
+                },
             },
         )
+        token = payload["session_token"]
+        explicit = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/contributions/status?details=1",
+                token=token,
+            )
+        )
+        self.assertEqual(explicit.status, 503)
+        self.assertEqual(
+            json.loads(explicit.body),
+            {
+                "error": "contributions_unavailable",
+                "message": "Contributor synchronization is temporarily unavailable.",
+                "retryable": True,
+            },
+        )
+        acknowledgement = await self.api.handle(
+            self.request(
+                "PATCH",
+                "/getbible/api/v1/contributions/status?details=1",
+                token=token,
+                body={"disclosure_acknowledged": True},
+            )
+        )
+        self.assertEqual(acknowledgement.status, 503)
+        self.assertTrue(json.loads(acknowledgement.body)["retryable"])
+
+    async def test_explicit_contribution_status_requires_a_configured_store(self) -> None:
+        token = await self.exchange()
+        with patch.object(self.api, "_contributions", None):
+            status = await self.api.handle(
+                self.request(
+                    "GET",
+                    "/getbible/api/v1/contributions/status",
+                    token=token,
+                )
+            )
+            acknowledgement = await self.api.handle(
+                self.request(
+                    "PATCH",
+                    "/getbible/api/v1/contributions/status",
+                    token=token,
+                    body={"disclosure_acknowledged": True},
+                )
+            )
+        for response in (status, acknowledgement):
+            self.assertEqual(response.status, 503)
+            self.assertTrue(json.loads(response.body)["retryable"])
 
     async def test_contribution_events_are_approval_gated_and_idempotent(self) -> None:
         self.contributions.submit_application(42, first_name="Grace")
@@ -933,6 +1098,77 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejected.status, 400)
         self.assertEqual(json.loads(rejected.body)["error"], "invalid_contribution")
         self.assertEqual(len(self.contributions.list_events()), 2)
+
+    async def test_contribution_receipts_are_stable_scoped_and_opaque(self) -> None:
+        payload = {
+            "events": [
+                {
+                    "client_event_id": "topic.shared.v1",
+                    "type": "topic_upsert",
+                    "topic": {
+                        "local_topic_id": "local.shared",
+                        "name": "Shared",
+                        "color": "#123456",
+                    },
+                }
+            ]
+        }
+        sessions: dict[int, tuple[str, str]] = {}
+        for user_id in (42, 43):
+            self.contributions.submit_application(user_id, first_name="Contributor")
+            self.contributions.decide_application(user_id, "approved", actor="admin")
+            self.contributions.acknowledge_disclosure(user_id)
+            init_data = _init_data(
+                user_id=user_id,
+                query_id=f"query-{user_id}",
+            )
+            exchanged = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/session",
+                    body={"init_data": init_data},
+                )
+            )
+            self.assertEqual(exchanged.status, 201)
+            sessions[user_id] = (json.loads(exchanged.body)["session_token"], init_data)
+
+        receipts: dict[int, int] = {}
+        for user_id, (token, init_data) in sessions.items():
+            submitted = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/contributions/events",
+                    token=token,
+                    init_data=init_data,
+                    body=payload,
+                )
+            )
+            self.assertEqual(submitted.status, 200)
+            receipt = json.loads(submitted.body)["event_ids"]["topic.shared.v1"]
+            self.assertGreaterEqual(receipt, 1)
+            self.assertLessEqual(receipt, 9_007_199_254_740_991)
+            receipts[user_id] = receipt
+
+        self.assertNotEqual(receipts[42], receipts[43])
+        internal_ids = {event.id for event in self.contributions.list_events()}
+        self.assertTrue(set(receipts.values()).isdisjoint(internal_ids))
+
+        token, init_data = sessions[42]
+        replayed = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                init_data=init_data,
+                body=payload,
+            )
+        )
+        self.assertEqual(replayed.status, 200)
+        self.assertEqual(json.loads(replayed.body)["replayed"], 1)
+        self.assertEqual(
+            json.loads(replayed.body)["event_ids"]["topic.shared.v1"],
+            receipts[42],
+        )
 
     async def test_live_catalog_is_authenticated_revisioned_and_revalidates_by_etag(
         self,
@@ -1146,6 +1382,74 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(response.status, 401)
+
+    async def test_identity_refresh_waits_for_a_successful_session_exchange(self) -> None:
+        self.contributions.submit_application(42, first_name="Old name")
+        original_observer = self.contributions.observe_identity
+        with patch.object(
+            self.contributions,
+            "observe_identity",
+            wraps=original_observer,
+        ) as observer:
+            invalid_init_data = _init_data(query_id="invalid-launch")
+            invalid_launch = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/session",
+                    body={
+                        "init_data": invalid_init_data,
+                        "launch_token": "abcdefghijklmnop",
+                    },
+                )
+            )
+            self.assertEqual(invalid_launch.status, 401)
+            observer.assert_not_called()
+
+            limited_init_data = _init_data(query_id="limited-launch")
+            self.limiter.rejection = RobotRateLimited(
+                30,
+                blocked=False,
+                new_block=False,
+                violation_count=1,
+                scopes=("user",),
+                user_id=42,
+                chat_id=42,
+                client_key="192.0.2.1",
+            )
+            limited = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/session",
+                    body={"init_data": limited_init_data},
+                )
+            )
+            self.assertEqual(limited.status, 429)
+            observer.assert_not_called()
+
+            self.limiter.rejection = None
+            accepted = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/session",
+                    body={"init_data": limited_init_data},
+                )
+            )
+            self.assertEqual(accepted.status, 201)
+            observer.assert_called_once()
+            self.assertEqual(
+                self.contributions.application_for(42).first_name,
+                "Grace",
+            )
+
+            replayed = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/session",
+                    body={"init_data": limited_init_data},
+                )
+            )
+            self.assertEqual(replayed.status, 409)
+            observer.assert_called_once()
 
     async def test_command_launch_is_owner_bound_and_sets_initial_route(self) -> None:
         launch = self.launches.create_launch(

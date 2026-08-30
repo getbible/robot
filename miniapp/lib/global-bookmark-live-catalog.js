@@ -16,6 +16,7 @@ export async function loadLiveGlobalBookmarkCatalog({
   scope,
   instanceScope,
   storage = browserLocalStorage(),
+  requireNetwork = false,
 } = {}) {
   if (!api || typeof api.bookmarkCatalog !== "function") {
     throw new TypeError("A bookmark catalogue API client is required.");
@@ -23,7 +24,8 @@ export async function loadLiveGlobalBookmarkCatalog({
   if (
     typeof scope !== "string" ||
     !SCOPE_PATTERN.test(scope) ||
-    !isMiniAppInstanceScope(instanceScope)
+    !isMiniAppInstanceScope(instanceScope) ||
+    typeof requireNetwork !== "boolean"
   ) {
     throw new TypeError("An authenticated bookmark catalogue scope is required.");
   }
@@ -34,7 +36,16 @@ export async function loadLiveGlobalBookmarkCatalog({
   try {
     const response = await api.bookmarkCatalog(cached?.etag ?? null);
     if (response?.not_modified === true) {
-      return cached ?? bundledResult();
+      if (cached) {
+        // The body still comes from the validated cache, but the server has
+        // authoritatively confirmed that its ETag is current. Callers must be
+        // able to distinguish this successful network round trip from the
+        // catch-path cache fallback after a request or validation failure.
+        return Object.freeze({ ...cached, source: "network" });
+      }
+      throw new TypeError(
+        "The bookmark catalogue cannot be not-modified without a cached copy.",
+      );
     }
     const accepted = acceptEnvelope(response, "network");
     // A validated authenticated 200 describes the server's current durable
@@ -43,7 +54,10 @@ export async function loadLiveGlobalBookmarkCatalog({
     // path above without rewriting the cache.
     writeCachedCatalog(persistent, key, response);
     return accepted;
-  } catch {
+  } catch (error) {
+    if (requireNetwork) {
+      throw error;
+    }
     return cached ?? bundledResult();
   }
 }

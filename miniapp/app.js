@@ -14,6 +14,8 @@ import {
   normalizeBasket,
   normalizeBooks,
   normalizeChapters,
+  contributionReviewDetailsAvailable,
+  normalizeContributionStatus,
   normalizeFilters,
   normalizeScripture,
   normalizeSearch,
@@ -71,13 +73,41 @@ let globalBookmarkDeviceStorage = null;
 let globalBookmarkPreferences = null;
 let globalBookmarkCatalog = GLOBAL_BOOKMARK_CATALOG;
 let globalBookmarkCatalogChecksum = null;
+let globalBookmarkCatalogAuthoritative = false;
+let globalBookmarkCatalogRefreshQueue = Promise.resolve();
+let globalBookmarkCatalogRetryTimer = null;
+let globalBookmarkCatalogRetryTimerDueAt = 0;
+let globalBookmarkCatalogRetryNotBefore = 0;
+let globalBookmarkCatalogRetryDelayMs = 2_000;
 let contributionSync = null;
+let contributionOpenTask = null;
 let contributionSyncTask = null;
+let contributionDisclosureTask = null;
+let contributionStatusRefreshTask = null;
+let contributionAuthorityRecoveryTask = null;
+let contributionManualSyncTask = null;
+let contributionStatusPollTimer = null;
+let contributionStatusPollTimerDueAt = 0;
+let contributionStatus = null;
+let verifiedPublishedContributionTopics = new Map();
+let pendingContributionOutcomeRefresh = null;
+let contributionOutcomeRefreshVersion = 0;
+let contributionLastStatusRefreshAt = 0;
+let contributionPresentationState = "idle";
+let contributionPresentationMessageKey = "bookmarks.contribution_sync_idle";
+let contributionPresentationMessageValues = {};
 let contributionRetryTimer = null;
+let contributionRetryTimerDueAt = 0;
+let contributionRetryTimerMode = "background";
+let contributionRetryNotBefore = 0;
 let contributionRetryDelayMs = 2_000;
 // The default server refill is one contribution request per five seconds.
 // Keep a margin so long baselines do not oscillate into the abuse backoff.
 let contributionBatchDelayMs = 5_250;
+const CONTRIBUTION_STATUS_POLL_MS = 60_000;
+const CONTRIBUTION_STATUS_STALE_MS = 15_000;
+const contributionRetryDelays = new WeakMap();
+const globalBookmarkCatalogRetryDelays = new WeakMap();
 let api = null;
 let scriptureExcerpts = null;
 let filterDraft = null;
@@ -316,6 +346,10 @@ const elements = mapElements({
   bookmarkTopicPicker: "bookmark-topic-picker",
   clearRecentBookmarkTopics: "clear-recent-bookmark-topics",
   contributorTopicGuidance: "contributor-topic-guidance",
+  contributorSync: "contributor-sync",
+  contributorSyncButton: "contributor-sync-button",
+  contributorSyncDetails: "contributor-sync-details",
+  contributorSyncStatus: "contributor-sync-status",
   closeBookmarkPopover: "close-bookmark-popover",
   selectionSummary: "selection-summary",
   clearSelection: "clear-selection",
@@ -404,6 +438,7 @@ async function boot() {
         }),
         GlobalBookmarkDeviceStorage.open({
           scope: storageScope,
+          instanceScope,
           webApp: bridge.webApp,
         }),
         TelegramBookmarkStorage.open({
@@ -418,13 +453,19 @@ async function boot() {
       ]);
     globalBookmarkCatalog = liveCatalog.catalog;
     globalBookmarkCatalogChecksum = liveCatalog.checksum;
+    globalBookmarkCatalogAuthoritative = liveCatalog.source === "network";
     globalBookmarkDeviceStorage = globalBookmarkStorage;
     globalBookmarkPreferences = new GlobalBookmarkPreferences({
-      allowedTopicIds: globalBookmarkCatalog
-        .topicDefinitions()
-        .map((definition) => definition.id),
-      allowedBookmarkIds: globalBookmarkCatalog.bookmarkIds(),
+      allowedTopicIds: globalBookmarkCatalogAuthoritative
+        ? globalBookmarkCatalog
+          .topicDefinitions()
+          .map((definition) => definition.id)
+        : null,
+      allowedBookmarkIds: globalBookmarkCatalogAuthoritative
+        ? globalBookmarkCatalog.bookmarkIds()
+        : null,
       scope: storageScope,
+      instanceScope,
       storage: globalBookmarkStorage,
     });
     bookmarkStorage = synchronizedBookmarkStorage;
@@ -432,29 +473,9 @@ async function boot() {
       scope: storageScope,
       storage: bookmarkStorage,
     });
-    const contributionOptions = {
-      scope: storageScope,
-      instanceScope,
-      api,
-      coreTopicIds: globalBookmarkCatalog
-        .topicDefinitions()
-        .map((definition) => definition.id),
-      // Pace background batches below the server's small per-user burst
-      // budget. A Retry-After response remains authoritative below.
-      batchPause: () => new Promise((resolve) =>
-        window.setTimeout(resolve, contributionBatchDelayMs)
-      ),
-    };
-    try {
-      contributionSync = await ContributionSync.open(contributionOptions);
-    } catch {
-      // IndexedDB/Web Locks may be unavailable in an older WebView. Personal
-      // bookmarks still open normally; online contribution retries remain
-      // memory-only and the contributor sees the durability warning.
-      contributionSync = new ContributionSync({
-        ...contributionOptions,
-        storage: null,
-      });
+    contributionStatus = session.contributions;
+    if (contributionStatus?.can_contribute) {
+      await ensureContributionSync(contributionStatus);
     }
     const storedLastRead = await bookmarkStorage.readLastRead();
     const synchronizedLastReadWasCleared = Boolean(
@@ -533,32 +554,206 @@ async function boot() {
 }
 
 async function initializeContributionSync() {
-  if (!contributionSync) {
-    return;
-  }
+  const generation = sessionGeneration;
+  let phase = "disclosure";
+  updateContributorPresentation();
   try {
-    const status = await contributionSync.refreshStatus();
-    updateContributorPresentation();
-    if (status.can_contribute && status.disclosure_required) {
-      await bridge.alert(i18n.t("bookmarks.contribution_disclosure"));
-      await contributionSync.acknowledgeDisclosure();
-      updateContributorPresentation();
+    if (contributionSync?.canContribute) {
+      await ensureContributionDisclosure();
+      if (generation !== sessionGeneration) {
+        return;
+      }
+      scheduleContributionSync();
     }
-    scheduleContributionSync();
-  } catch (error) {
-    if (error instanceof ApiError && [401, 409].includes(error.status)) {
-      handleSessionError(error);
-    } else if (
-      (error instanceof ApiError ? error.retryable : navigator.onLine !== false) &&
-      contributionRetryTimer === null
+    const reviewDetailsAvailable = contributionSync
+      ? contributionSync.reviewDetailsAvailable
+      : contributionReviewDetailsAvailable(contributionStatus);
+    const hasContributionMappings = Object.keys(
+      globalBookmarkPreferences?.contributionTopicMappings ?? {},
+    ).length > 0;
+    if (
+      contributionSync?.canContribute ||
+      hasContributionMappings ||
+      (contributionStatus?.topics?.length ?? 0) > 0
     ) {
-      const delay = contributionRetryDelay(error);
-      contributionRetryTimer = window.setTimeout(() => {
-        contributionRetryTimer = null;
-        void initializeContributionSync();
-      }, delay);
+      stageContributionTopicOutcomes(
+        contributionStatus?.topics,
+        { detailsAvailable: reviewDetailsAvailable },
+      );
+      phase = "catalog";
+      await refreshLiveGlobalBookmarkCatalog({ requireNetwork: true });
+      if (generation !== sessionGeneration) {
+        return;
+      }
     }
     updateContributorPresentation();
+  } catch (error) {
+    if (generation !== sessionGeneration) {
+      return;
+    }
+    if (contributionFailureIsRetryable(error)) {
+      if (phase === "catalog") {
+        scheduleGlobalBookmarkCatalogRetry(error);
+      } else if (contributionSync?.canContribute) {
+        scheduleContributionRetry(error);
+      }
+    }
+    if (phase === "catalog") {
+      setContributionPresentation(
+        "error",
+        "bookmarks.contribution_sync_catalog_error",
+      );
+    } else {
+      handleContributionSyncError(error);
+    }
+    updateContributorPresentation();
+  } finally {
+    if (generation === sessionGeneration) {
+      scheduleContributionStatusPoll();
+    }
+  }
+}
+
+function contributionStatusShouldPoll(status = contributionStatus) {
+  return Boolean(
+    status?.enabled &&
+    (
+      status.can_contribute ||
+      status.state === "pending" ||
+      contributionAuthorityUnknown(status)
+    )
+  );
+}
+
+function contributionApplicantCanCheck(status = contributionStatus) {
+  return Boolean(
+    status?.enabled &&
+    ["pending", "deferred"].includes(status.state)
+  );
+}
+
+function contributionAuthorityUnknown(status = contributionStatus) {
+  return Boolean(
+    status?.enabled &&
+    status.state === "approved" &&
+    !status.can_contribute
+  );
+}
+
+function contributionControlVisible(status = contributionStatus) {
+  return Boolean(
+    status?.enabled &&
+    (
+      status.can_contribute ||
+      contributionAuthorityUnknown(status) ||
+      ["pending", "deferred", "rejected", "revoked"].includes(status.state)
+    )
+  );
+}
+
+async function ensureContributionSync(initialStatus) {
+  if (contributionSync) {
+    return contributionSync;
+  }
+  if (!initialStatus?.enabled || !initialStatus.can_contribute) {
+    return null;
+  }
+  if (contributionOpenTask) {
+    return contributionOpenTask;
+  }
+  const contributionOptions = {
+    scope: bookmarkStorageScopeValue,
+    instanceScope,
+    api,
+    initialStatus,
+    coreTopicIds: globalBookmarkCatalog
+      .topicDefinitions()
+      .map((definition) => definition.id),
+    // Pace background batches below the server's small per-user burst
+    // budget. A Retry-After response remains authoritative below.
+    batchPause: () => new Promise((resolve) =>
+      window.setTimeout(resolve, contributionBatchDelayMs)
+    ),
+  };
+  const generation = sessionGeneration;
+  const openTask = (async () => {
+    let openedSync;
+    try {
+      openedSync = await ContributionSync.open(contributionOptions);
+    } catch {
+      // IndexedDB/Web Locks may be unavailable in an older WebView. Personal
+      // bookmarks still open normally; online contribution retries remain
+      // memory-only and the contributor sees the durability warning.
+      openedSync = new ContributionSync({
+        ...contributionOptions,
+        storage: null,
+      });
+    }
+    if (generation !== sessionGeneration) {
+      return null;
+    }
+    contributionSync = openedSync;
+    contributionStatus = contributionSync.status ?? initialStatus;
+    renderContributionMarkers();
+    return contributionSync;
+  })();
+  contributionOpenTask = openTask;
+  try {
+    return await openTask;
+  } finally {
+    if (contributionOpenTask === openTask) {
+      contributionOpenTask = null;
+    }
+  }
+}
+
+async function ensureContributionDisclosure() {
+  if (!contributionSync?.canContribute || !contributionSync.disclosureRequired) {
+    return false;
+  }
+  if (contributionDisclosureTask) {
+    return contributionDisclosureTask;
+  }
+  const generation = sessionGeneration;
+  const sync = contributionSync;
+  const disclosureTask = (async () => {
+    await bridge.alert(i18n.t("bookmarks.contribution_disclosure"));
+    if (
+      generation !== sessionGeneration ||
+      sync !== contributionSync
+    ) {
+      return false;
+    }
+    if (sync.canContribute && sync.disclosureRequired) {
+      await sync.acknowledgeDisclosure();
+      if (generation !== sessionGeneration || sync !== contributionSync) {
+        return false;
+      }
+      contributionStatus = sync.status;
+    }
+    return true;
+  })();
+  contributionDisclosureTask = disclosureTask;
+  try {
+    return await disclosureTask;
+  } finally {
+    if (contributionDisclosureTask === disclosureTask) {
+      contributionDisclosureTask = null;
+    }
+  }
+}
+
+function setContributionPresentation(stateName, messageKey, values = {}) {
+  contributionPresentationState = stateName;
+  contributionPresentationMessageKey = messageKey;
+  contributionPresentationMessageValues = values;
+  updateContributorPresentation();
+}
+
+function renderContributionMarkers() {
+  renderBookmarks();
+  if (state.bible.status === "ready") {
+    renderBible();
   }
 }
 
@@ -572,6 +767,824 @@ function updateContributorPresentation() {
   elements.contributorTopicGuidance.textContent = i18n.t(
     messageKey,
   );
+  const visible = contributionControlVisible();
+  elements.contributorSync.hidden = !visible;
+  if (!visible) {
+    return;
+  }
+  const waitingForApproval = !contributionStatus?.can_contribute;
+  const applicationState = contributionStatus?.state;
+  const passiveApplication = waitingForApproval &&
+    ["rejected", "revoked"].includes(applicationState);
+  let stateName = contributionPresentationState;
+  let statusKey = contributionPresentationMessageKey;
+  let values = contributionPresentationMessageValues;
+  if (
+    passiveApplication ||
+    (waitingForApproval && stateName !== "syncing" && stateName !== "error")
+  ) {
+    stateName = ["rejected", "revoked"].includes(applicationState)
+      ? "error"
+      : "pending";
+    statusKey = contributionApplicationMessageKey(applicationState);
+    values = {};
+  }
+  elements.contributorSync.dataset.state = stateName;
+  elements.contributorSync.setAttribute(
+    "aria-busy",
+    String(stateName === "syncing"),
+  );
+  elements.contributorSyncStatus.textContent = i18n.t(statusKey, values);
+  elements.contributorSyncButton.hidden = passiveApplication;
+  elements.contributorSyncButton.disabled =
+    passiveApplication || stateName === "syncing";
+  elements.contributorSyncButton.textContent = i18n.t(
+    stateName === "syncing"
+      ? "bookmarks.contribution_syncing"
+      : waitingForApproval
+        ? "bookmarks.contribution_check_status"
+        : "bookmarks.contribution_sync_now",
+  );
+  const details = contributionOutcomeDetails(contributionStatus?.summary);
+  elements.contributorSyncDetails.hidden = details.length === 0;
+  elements.contributorSyncDetails.textContent = details.join(" · ");
+}
+
+function contributionApplicationMessageKey(stateName) {
+  if (stateName === "deferred") {
+    return "bookmarks.contribution_application_deferred";
+  }
+  if (stateName === "rejected") {
+    return "bookmarks.contribution_application_rejected";
+  }
+  if (stateName === "revoked") {
+    return "bookmarks.contribution_access_revoked";
+  }
+  return "bookmarks.contribution_sync_pending";
+}
+
+function contributionOutcomeDetails(summary) {
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return [];
+  }
+  const topicSummary = {
+    ...summary.topics,
+    mapped: Math.max(
+      0,
+      (Number(summary.topics?.mapped) || 0) -
+        (Number(summary.topics?.published) || 0),
+    ),
+  };
+  return [
+    contributionOutcomeGroup(
+      "bookmarks.contribution_topic_outcomes",
+      topicSummary,
+      ["published", "mapped", "pending", "deferred", "rejected"],
+    ),
+    contributionOutcomeGroup(
+      "bookmarks.contribution_event_outcomes",
+      summary.events,
+      ["applied", "approved", "pending", "deferred", "rejected"],
+    ),
+  ].filter(Boolean);
+}
+
+function contributionOutcomeGroup(labelKey, value, outcomes) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "";
+  }
+  const details = outcomes.flatMap((outcome) => {
+    const count = Number(value[outcome]);
+    return Number.isSafeInteger(count) && count > 0
+      ? [i18n.t(`bookmarks.contribution_outcome_${outcome}`, { count })]
+      : [];
+  });
+  return details.length > 0
+    ? `${i18n.t(labelKey)} — ${details.join(", ")}`
+    : "";
+}
+
+function scheduleContributionStatusPoll(delay = CONTRIBUTION_STATUS_POLL_MS) {
+  if (!contributionStatusShouldPoll()) {
+    if (contributionStatusPollTimer !== null) {
+      window.clearTimeout(contributionStatusPollTimer);
+      contributionStatusPollTimer = null;
+    }
+    contributionStatusPollTimerDueAt = 0;
+    return;
+  }
+  const now = Date.now();
+  const retryRemaining = contributionRetryRemaining();
+  const authorityRecovery = contributionAuthorityUnknown() && retryRemaining > 0;
+  const normalizedDelay = Math.max(
+    authorityRecovery ? 1_000 : CONTRIBUTION_STATUS_POLL_MS,
+    Number.isFinite(delay) ? delay : CONTRIBUTION_STATUS_POLL_MS,
+  );
+  // A denied upload whose authority recheck failed must retry at the server's
+  // not-before deadline, not be pushed back to the ordinary one-minute poll by
+  // a later presentation update. Other polls may never bypass that deadline.
+  const dueAt = authorityRecovery
+    ? Math.max(now + 1_000, contributionRetryNotBefore)
+    : Math.max(now + normalizedDelay, contributionRetryNotBefore);
+  if (
+    contributionStatusPollTimer !== null &&
+    contributionStatusPollTimerDueAt >= contributionRetryNotBefore &&
+    contributionStatusPollTimerDueAt <= dueAt
+  ) {
+    return;
+  }
+  if (contributionStatusPollTimer !== null) {
+    window.clearTimeout(contributionStatusPollTimer);
+  }
+  contributionStatusPollTimerDueAt = dueAt;
+  contributionStatusPollTimer = window.setTimeout(() => {
+    contributionStatusPollTimer = null;
+    contributionStatusPollTimerDueAt = 0;
+    void refreshContributionStatus({
+      synchronizeWhenApproved: true,
+      allowPendingPoll: true,
+      allowAuthorityRecovery: true,
+    })
+      .catch(() => undefined);
+  }, Math.max(1, dueAt - now));
+}
+
+async function refreshContributionStatus({
+  force = false,
+  synchronizeWhenApproved = true,
+  refreshCatalog = true,
+  allowApplicantCheck = false,
+  allowPendingPoll = false,
+  allowAuthorityRecovery = false,
+  acknowledgeWhenApproved = true,
+} = {}) {
+  const generation = sessionGeneration;
+  if (
+    (
+      !contributionStatusShouldPoll() &&
+      !(allowApplicantCheck && contributionApplicantCanCheck()) &&
+      !(allowAuthorityRecovery && contributionAuthorityUnknown())
+    ) ||
+    !api
+  ) {
+    return contributionStatus;
+  }
+  if (contributionOpenTask) {
+    await contributionOpenTask.catch(() => null);
+    if (generation !== sessionGeneration) {
+      return null;
+    }
+  }
+  if (
+    contributionStatus?.state === "pending" &&
+    !contributionStatus?.can_contribute &&
+    !allowPendingPoll &&
+    !allowApplicantCheck
+  ) {
+    return contributionStatus;
+  }
+  if (contributionAuthorityUnknown() && !allowAuthorityRecovery) {
+    return contributionStatus;
+  }
+  const retryRemaining = contributionRetryRemaining();
+  if (retryRemaining > 0) {
+    scheduleContributionStatusPoll(retryRemaining);
+    return contributionStatus;
+  }
+  const now = Date.now();
+  if (
+    !force &&
+    now - contributionLastStatusRefreshAt < CONTRIBUTION_STATUS_STALE_MS
+  ) {
+    scheduleContributionStatusPoll();
+    return contributionStatus;
+  }
+  if (contributionStatusRefreshTask) {
+    return contributionStatusRefreshTask;
+  }
+  let statusRetryDelay = null;
+  let catalogRefreshStarted = false;
+  const refreshTask = (async () => {
+    const previousCanContribute = Boolean(contributionStatus?.can_contribute);
+    const hadContributionSync = Boolean(contributionSync);
+    let status = contributionSync
+      ? await contributionSync.refreshStatus()
+      : normalizeContributionStatus(await api.contributionStatus());
+    if (generation !== sessionGeneration) {
+      return null;
+    }
+    contributionLastStatusRefreshAt = Date.now();
+    contributionStatus = status;
+    contributionRetryNotBefore = 0;
+    contributionRetryDelayMs = 2_000;
+    const reviewDetailsAvailable = contributionSync
+      ? contributionSync.reviewDetailsAvailable
+      : contributionReviewDetailsAvailable(status);
+    if (status.can_contribute) {
+      await ensureContributionSync(status);
+      if (generation !== sessionGeneration) {
+        return null;
+      }
+      if (acknowledgeWhenApproved) {
+        await ensureContributionDisclosure();
+      }
+      if (generation !== sessionGeneration) {
+        return null;
+      }
+      status = contributionStatus ?? status;
+      if (synchronizeWhenApproved) {
+        scheduleContributionSync();
+      }
+      if (refreshCatalog) {
+        stageContributionTopicOutcomes(status.topics, {
+          detailsAvailable: reviewDetailsAvailable,
+        });
+        catalogRefreshStarted = true;
+        await refreshLiveGlobalBookmarkCatalog({ requireNetwork: true });
+        if (generation !== sessionGeneration) {
+          return null;
+        }
+      }
+      if (!["syncing", "success"].includes(contributionPresentationState)) {
+        setContributionPresentation(
+          "idle",
+          "bookmarks.contribution_sync_idle",
+        );
+      }
+    } else if (["pending", "deferred"].includes(status.state)) {
+      setContributionPresentation(
+        "pending",
+        status.state === "deferred"
+          ? "bookmarks.contribution_application_deferred"
+          : "bookmarks.contribution_sync_pending",
+      );
+    }
+    if (
+      !status.can_contribute &&
+      refreshCatalog &&
+      (
+        (status.topics?.length ?? 0) > 0 ||
+        Object.keys(
+          globalBookmarkPreferences?.contributionTopicMappings ?? {},
+        ).length > 0
+      )
+    ) {
+      stageContributionTopicOutcomes(status.topics, {
+        detailsAvailable: reviewDetailsAvailable,
+      });
+      catalogRefreshStarted = true;
+      await refreshLiveGlobalBookmarkCatalog({ requireNetwork: true });
+      if (generation !== sessionGeneration) {
+        return null;
+      }
+    }
+    if (
+      hadContributionSync &&
+      previousCanContribute !== Boolean(status.can_contribute)
+    ) {
+      renderContributionMarkers();
+    }
+    updateContributorPresentation();
+    return status;
+  })().catch((error) => {
+    if (generation !== sessionGeneration) {
+      return null;
+    }
+    if (contributionFailureIsRetryable(error)) {
+      statusRetryDelay = catalogRefreshStarted
+        ? scheduleGlobalBookmarkCatalogRetry(error)
+        : recordContributionRetryDeadline(error);
+    }
+    if (catalogRefreshStarted) {
+      setContributionPresentation(
+        "error",
+        "bookmarks.contribution_sync_catalog_error",
+      );
+    } else {
+      handleContributionSyncError(error);
+    }
+    throw error;
+  }).finally(() => {
+    if (contributionStatusRefreshTask === refreshTask) {
+      contributionStatusRefreshTask = null;
+    }
+    if (generation === sessionGeneration) {
+      scheduleContributionStatusPoll(
+        statusRetryDelay ?? CONTRIBUTION_STATUS_POLL_MS,
+      );
+    }
+  });
+  contributionStatusRefreshTask = refreshTask;
+  return refreshTask;
+}
+
+async function synchronizeContributionsNow() {
+  if (
+    contributionManualSyncTask ||
+    !contributionControlVisible() ||
+    ["rejected", "revoked"].includes(contributionStatus?.state)
+  ) {
+    return contributionManualSyncTask;
+  }
+  const generation = sessionGeneration;
+  const manualTask = (async () => {
+    setContributionPresentation(
+      "syncing",
+      "bookmarks.contribution_syncing",
+    );
+    let result = null;
+    let statusRetryDelay = null;
+    let phase = "status";
+    try {
+      if (!cancelContributionRetry({ respectAuthority: true })) {
+        setContributionPresentation(
+          "pending",
+          "bookmarks.contribution_sync_retry_wait",
+        );
+        return null;
+      }
+      const authorityCheck = contributionAuthorityUnknown();
+      const applicantCheck = contributionApplicantCanCheck() || authorityCheck;
+      if (applicantCheck) {
+        await refreshContributionStatus({
+          force: true,
+          synchronizeWhenApproved: false,
+          refreshCatalog: false,
+          allowApplicantCheck: true,
+          allowAuthorityRecovery: authorityCheck,
+          acknowledgeWhenApproved: false,
+        });
+        if (generation !== sessionGeneration) {
+          return null;
+        }
+        if (!contributionStatus?.can_contribute) {
+          return null;
+        }
+      }
+      if (!contributionSync?.canContribute) {
+        setContributionPresentation(
+          "pending",
+          contributionApplicationMessageKey(contributionStatus?.state),
+        );
+        return null;
+      }
+      phase = "upload";
+      result = await contributionSync.synchronizeNow(
+        bookmarkStore.snapshot(),
+      );
+      if (generation !== sessionGeneration) {
+        return null;
+      }
+      contributionStatus = result.status;
+      if (result.status.disclosure_required) {
+        phase = "disclosure";
+        await ensureContributionDisclosure();
+        if (generation !== sessionGeneration) {
+          return null;
+        }
+        phase = "upload";
+        result = await contributionSync.synchronizeNow(
+          bookmarkStore.snapshot(),
+        );
+        if (generation !== sessionGeneration) {
+          return null;
+        }
+        contributionStatus = result.status;
+      }
+      stageContributionTopicOutcomes(result.topic_outcomes, {
+        detailsAvailable: result.review_details_available === true,
+      });
+      const inactive = !result.status.can_contribute
+        ? adoptContributionAuthorityLoss(result.status)
+        : null;
+      phase = "catalog";
+      await refreshLiveGlobalBookmarkCatalog({ requireNetwork: true });
+      if (generation !== sessionGeneration) {
+        return null;
+      }
+      if (inactive) {
+        bridge.notifyError();
+        return null;
+      }
+      contributionRetryDelayMs = 2_000;
+      if (result.pending > 0) {
+        scheduleContributionRetry(null);
+        setContributionPresentation(
+          "pending",
+          result.pending === 1
+            ? "bookmarks.contribution_sync_waiting_one"
+            : "bookmarks.contribution_sync_waiting_other",
+          { count: result.pending },
+        );
+      } else if (result.sent > 0) {
+        setContributionPresentation(
+          "success",
+          result.sent === 1
+            ? "bookmarks.contribution_sync_sent_one"
+            : "bookmarks.contribution_sync_sent_other",
+          { count: result.sent },
+        );
+      } else {
+        setContributionPresentation(
+          "success",
+          "bookmarks.contribution_sync_complete",
+        );
+      }
+      bridge.notifySuccess();
+      return result;
+    } catch (error) {
+      if (generation !== sessionGeneration) {
+        return null;
+      }
+      const deniedSync = contributionSync;
+      const recoveredStatus = await refreshContributionAuthorityAfterDenial(
+        error,
+        deniedSync,
+        generation,
+      );
+      if (
+        generation !== sessionGeneration ||
+        (deniedSync && deniedSync !== contributionSync)
+      ) {
+        return null;
+      }
+      if (
+        recoveredStatus?.can_contribute &&
+        contributionSync?.canContribute &&
+        !contributionSync.disclosureRequired
+      ) {
+        setContributionPresentation(
+          "idle",
+          "bookmarks.contribution_sync_idle",
+        );
+        scheduleContributionSync();
+        return null;
+      }
+      const inactiveStatus = result?.status && !result.status.can_contribute
+        ? result.status
+        : contributionSync && !contributionSync.canContribute
+          ? contributionSync.status
+          : null;
+      const inactive = inactiveStatus
+        ? adoptContributionAuthorityLoss(inactiveStatus)
+        : null;
+      const catalogRefreshFailed = phase === "catalog";
+      setContributionPresentation(
+        inactive?.state ?? "error",
+        inactive?.messageKey ?? (catalogRefreshFailed
+          ? "bookmarks.contribution_sync_catalog_error"
+          : "bookmarks.contribution_sync_error"),
+      );
+      if (inactive) {
+        renderContributionMarkers();
+      }
+      bridge.notifyError();
+      if (!inactive) {
+        handleContributionSyncError(error);
+      }
+      if (contributionFailureIsRetryable(error)) {
+        if (phase === "catalog") {
+          scheduleGlobalBookmarkCatalogRetry(error);
+        } else if (!inactive && contributionSync?.canContribute) {
+          scheduleContributionRetry(error, { mode: "manual" });
+        } else if (!inactive) {
+          statusRetryDelay = recordContributionRetryDeadline(error);
+        }
+      }
+      return null;
+    } finally {
+      if (generation === sessionGeneration) {
+        const retryRemaining = contributionRetryRemaining();
+        scheduleContributionStatusPoll(
+          retryRemaining > 0
+            ? retryRemaining
+            : statusRetryDelay ?? CONTRIBUTION_STATUS_POLL_MS,
+        );
+      }
+    }
+  })().finally(() => {
+    if (contributionManualSyncTask === manualTask) {
+      contributionManualSyncTask = null;
+    }
+    if (generation === sessionGeneration) {
+      updateContributorPresentation();
+    }
+  });
+  contributionManualSyncTask = manualTask;
+  return manualTask;
+}
+
+function contributionInactivePresentation(status) {
+  const stateName = status?.state;
+  return {
+    state: ["pending", "deferred"].includes(stateName) ? "pending" : "error",
+    messageKey: ["pending", "deferred", "rejected", "revoked"].includes(
+      stateName,
+    )
+      ? contributionApplicationMessageKey(stateName)
+      : "bookmarks.contribution_sync_unavailable",
+  };
+}
+
+function adoptContributionAuthorityLoss(status = contributionSync?.status) {
+  if (!status || status.can_contribute) {
+    return null;
+  }
+  contributionStatus = status;
+  cancelContributionRetry({ respectAuthority: true });
+  const inactive = contributionInactivePresentation(status);
+  renderContributionMarkers();
+  setContributionPresentation(inactive.state, inactive.messageKey);
+  scheduleContributionStatusPoll();
+  return inactive;
+}
+
+function explicitContributionDenial(error) {
+  return error instanceof ApiError &&
+    error.status === 403 &&
+    error.code === "contribution_not_allowed";
+}
+
+function refreshContributionAuthorityAfterDenial(error, sync, generation) {
+  if (
+    !explicitContributionDenial(error) ||
+    !sync ||
+    generation !== sessionGeneration ||
+    sync !== contributionSync
+  ) {
+    return Promise.resolve(null);
+  }
+  const activeRecovery = contributionAuthorityRecoveryTask;
+  if (activeRecovery) {
+    return activeRecovery.generation === generation && activeRecovery.sync === sync
+      ? activeRecovery.promise
+      : Promise.resolve(null);
+  }
+
+  const recovery = { generation, sync, promise: null };
+  const recoveryPromise = (async () => {
+    const earlierRefresh = contributionStatusRefreshTask;
+    if (earlierRefresh) {
+      await earlierRefresh.catch(() => undefined);
+    }
+    if (generation !== sessionGeneration || sync !== contributionSync) {
+      return null;
+    }
+    try {
+      const status = await sync.refreshStatus();
+      if (generation !== sessionGeneration || sync !== contributionSync) {
+        return null;
+      }
+      contributionLastStatusRefreshAt = Date.now();
+      contributionStatus = status;
+      const detailsAvailable = sync.reviewDetailsAvailable;
+      const stagedOutcomes = stageContributionTopicOutcomes(status.topics, {
+        detailsAvailable,
+      });
+      const catalogTask = stagedOutcomes
+        ? refreshLiveGlobalBookmarkCatalog({ requireNetwork: true })
+          .catch((catalogError) => {
+            if (
+              generation === sessionGeneration &&
+              sync === contributionSync &&
+              contributionFailureIsRetryable(catalogError)
+            ) {
+              scheduleGlobalBookmarkCatalogRetry(catalogError);
+            }
+            return null;
+          })
+        : Promise.resolve(null);
+      if (status.can_contribute && status.disclosure_required) {
+        try {
+          await ensureContributionDisclosure();
+        } catch (disclosureError) {
+          if (
+            disclosureError instanceof ApiError &&
+            [401, 409].includes(disclosureError.status)
+          ) {
+            handleSessionError(disclosureError);
+            return null;
+          }
+          if (
+            generation === sessionGeneration &&
+            sync === contributionSync &&
+            contributionFailureIsRetryable(disclosureError)
+          ) {
+            scheduleContributionStatusPoll(
+              recordContributionRetryDeadline(disclosureError),
+            );
+          }
+        }
+      }
+      if (sync.canContribute && !sync.disclosureRequired) {
+        // Publication reconciliation has its own serialized retry lane and
+        // must never hold the preserved upload journal behind catalog latency.
+        void catalogTask;
+      } else {
+        await catalogTask;
+      }
+      if (generation !== sessionGeneration || sync !== contributionSync) {
+        return null;
+      }
+      contributionStatus = sync.status;
+      updateContributorPresentation();
+      return contributionStatus;
+    } catch (refreshError) {
+      if (generation !== sessionGeneration || sync !== contributionSync) {
+        return null;
+      }
+      if (
+        refreshError instanceof ApiError &&
+        [401, 409].includes(refreshError.status)
+      ) {
+        handleSessionError(refreshError);
+        return null;
+      }
+      if (contributionFailureIsRetryable(refreshError)) {
+        recordContributionRetryDeadline(refreshError);
+      }
+      // The POST denial already suspended upload and preserved the outbox.
+      // Keep that stale, deliberately inconsistent approval visible so a later
+      // explicit status check can recover after this one guarded GET failed.
+      contributionStatus = sync.status;
+      updateContributorPresentation();
+      return contributionStatus;
+    }
+  })().finally(() => {
+    if (contributionAuthorityRecoveryTask?.promise === recoveryPromise) {
+      contributionAuthorityRecoveryTask = null;
+    }
+  });
+  recovery.promise = recoveryPromise;
+  contributionAuthorityRecoveryTask = recovery;
+  return recoveryPromise;
+}
+
+function stageContributionTopicOutcomes(
+  outcomes,
+  { detailsAvailable = false } = {},
+) {
+  if (
+    !Array.isArray(outcomes) ||
+    (outcomes.length === 0 && !detailsAvailable)
+  ) {
+    return null;
+  }
+  pendingContributionOutcomeRefresh = {
+    version: ++contributionOutcomeRefreshVersion,
+    detailsAvailable,
+    outcomes: outcomes.map((outcome) => ({
+      ...outcome,
+      ...(outcome?.canonical_topic &&
+        typeof outcome.canonical_topic === "object"
+        ? { canonical_topic: { ...outcome.canonical_topic } }
+        : {}),
+    })),
+  };
+  return pendingContributionOutcomeRefresh;
+}
+
+async function reconcilePublishedContributionTopics(
+  outcomes,
+  generation = sessionGeneration,
+  { detailsAvailable = false } = {},
+) {
+  if (
+    generation !== sessionGeneration ||
+    !Array.isArray(outcomes) ||
+    !bookmarkStore ||
+    !globalBookmarkPreferences
+  ) {
+    return { mapped: 0, enabled: 0, unresolved: 0, changed: false };
+  }
+  const snapshot = bookmarkStore.snapshot();
+  const preferences = globalBookmarkPreferences;
+  const localTopicIds = new Set(snapshot.topics.map((topic) => topic.id));
+  const previousContributionMappings = preferences.contributionTopicMappings;
+  const previousContributorLocalTopicIds = new Set([
+    ...Object.values(previousContributionMappings),
+    ...verifiedPublishedContributionTopics.keys(),
+  ]);
+  const localTopicIdsByCanonical = new Map();
+  const currentOutcomeLocalTopicIds = new Set();
+  const mappings = {};
+  let unresolved = 0;
+  for (const outcome of outcomes) {
+    if (
+      typeof outcome?.local_topic_id === "string" &&
+      (
+        localTopicIds.has(outcome.local_topic_id) ||
+        previousContributorLocalTopicIds.has(outcome.local_topic_id)
+      )
+    ) {
+      currentOutcomeLocalTopicIds.add(outcome.local_topic_id);
+    }
+    if (outcome?.published !== true) {
+      continue;
+    }
+    if (
+      typeof outcome.local_topic_id !== "string" ||
+      !localTopicIds.has(outcome.local_topic_id)
+    ) {
+      continue;
+    }
+    if (
+      typeof outcome.canonical_topic_id !== "string" ||
+      !globalBookmarkCatalog.topicDefinition(outcome.canonical_topic_id)
+    ) {
+      unresolved += 1;
+      continue;
+    }
+    const localIds = localTopicIdsByCanonical.get(outcome.canonical_topic_id) ?? [];
+    localIds.push(outcome.local_topic_id);
+    localTopicIdsByCanonical.set(outcome.canonical_topic_id, localIds);
+  }
+  if (unresolved > 0) {
+    return { mapped: 0, enabled: 0, unresolved, changed: false };
+  }
+  for (const [canonicalTopicId, localIds] of localTopicIdsByCanonical) {
+    const existing = previousContributionMappings[canonicalTopicId];
+    mappings[canonicalTopicId] = existing && localTopicIds.has(existing)
+      && localIds.includes(existing)
+      ? existing
+      : [...new Set(localIds)].sort()[0];
+  }
+  const canonicalTopicIds = Object.keys(mappings);
+  const clearContributionMappings = detailsAvailable && outcomes.length === 0;
+  // A non-empty response patches only explicit topic outcomes. The protocol
+  // has no revision/completeness marker, so an omitted source must not erase a
+  // newer mapping committed by another WebView. A detailed empty set is the
+  // one explicit full-clear signal.
+  const nextVerifiedTopics = clearContributionMappings
+    ? new Map()
+    : new Map(verifiedPublishedContributionTopics);
+  for (const localTopicId of currentOutcomeLocalTopicIds) {
+    nextVerifiedTopics.delete(localTopicId);
+  }
+  for (const [canonicalTopicId, localIds] of localTopicIdsByCanonical) {
+    for (const localTopicId of localIds) {
+      nextVerifiedTopics.set(localTopicId, canonicalTopicId);
+    }
+  }
+  const verifiedTopicsChanged = !mapsEqual(
+    verifiedPublishedContributionTopics,
+    nextVerifiedTopics,
+  );
+  const mappingResult = await preferences.reconcileContributionTopicMappings({
+    clear: clearContributionMappings,
+    mappings,
+    promotedTopicIds: canonicalTopicIds,
+    replacedLocalTopicIds: [...currentOutcomeLocalTopicIds],
+    catalogVersion: globalBookmarkCatalog.version,
+    guard: () => (
+      generation === sessionGeneration &&
+      preferences === globalBookmarkPreferences
+    ),
+  }, snapshot.topics);
+  if (
+    mappingResult.stale ||
+    generation !== sessionGeneration ||
+    preferences !== globalBookmarkPreferences
+  ) {
+    return { mapped: 0, enabled: 0, unresolved: 0, changed: false };
+  }
+  verifiedPublishedContributionTopics = nextVerifiedTopics;
+  if (mappingResult.changed) {
+    await preferences.flush();
+    if (generation !== sessionGeneration) {
+      return {
+        mapped: canonicalTopicIds.length,
+        enabled: mappingResult.enabled,
+        unresolved,
+        changed: mappingResult.changed || verifiedTopicsChanged,
+      };
+    }
+  }
+  if (mappingResult.changed || verifiedTopicsChanged) {
+    renderContributionMarkers();
+  }
+  return {
+    mapped: canonicalTopicIds.length,
+    enabled: mappingResult.enabled,
+    unresolved,
+    changed: mappingResult.changed || verifiedTopicsChanged,
+  };
+}
+
+function handleContributionSyncError(error) {
+  if (error instanceof ApiError && [401, 409].includes(error.status)) {
+    handleSessionError(error);
+    return;
+  }
+  if (
+    contributionControlVisible() &&
+    contributionPresentationState !== "error"
+  ) {
+    setContributionPresentation(
+      "error",
+      "bookmarks.contribution_sync_error",
+    );
+  }
 }
 
 function mutatePersonalBookmarks(operation) {
@@ -691,77 +1704,413 @@ function scheduleContributionSync() {
     contributionSyncTask ||
     contributionRetryTimer !== null ||
     !contributionSync?.canContribute ||
+    contributionSync.disclosureRequired ||
     !bookmarkStore ||
+    contributionRetryRemaining() > 0 ||
     navigator.onLine === false
   ) {
     return;
   }
   const snapshot = bookmarkStore.snapshot();
+  const generation = sessionGeneration;
+  const sync = contributionSync;
   let completed = false;
-  contributionSyncTask = Promise.resolve()
-    .then(() => contributionSync.synchronize(snapshot))
+  let resumeAfterAuthorityRecovery = false;
+  const syncTask = Promise.resolve()
     .then(() => {
+      if (generation !== sessionGeneration || sync !== contributionSync) {
+        return null;
+      }
+      return sync.synchronize(snapshot);
+    })
+    .then(() => {
+      if (generation !== sessionGeneration || sync !== contributionSync) {
+        return;
+      }
       completed = true;
       contributionRetryDelayMs = 2_000;
     })
-    .catch((error) => {
+    .catch(async (error) => {
+      if (generation !== sessionGeneration || sync !== contributionSync) {
+        return;
+      }
       if (error instanceof ApiError && [401, 409].includes(error.status)) {
         handleSessionError(error);
         return;
       }
-      if (error instanceof ApiError ? error.retryable : navigator.onLine !== false) {
-        const delay = contributionRetryDelay(error);
-        contributionRetryTimer = window.setTimeout(() => {
-          contributionRetryTimer = null;
-          scheduleContributionSync();
-        }, delay);
+      const recoveredStatus = await refreshContributionAuthorityAfterDenial(
+        error,
+        sync,
+        generation,
+      );
+      if (generation !== sessionGeneration || sync !== contributionSync) {
+        return;
+      }
+      if (
+        recoveredStatus?.can_contribute &&
+        sync.canContribute &&
+        !sync.disclosureRequired
+      ) {
+        resumeAfterAuthorityRecovery = true;
+        return;
+      }
+      if (!sync.canContribute) {
+        adoptContributionAuthorityLoss(sync.status);
+        return;
+      }
+      if (contributionFailureIsRetryable(error)) {
+        scheduleContributionRetry(error);
       }
     })
     .finally(() => {
-      contributionSyncTask = null;
+      if (contributionSyncTask === syncTask) {
+        contributionSyncTask = null;
+      }
+      if (generation !== sessionGeneration || sync !== contributionSync) {
+        return;
+      }
       updateContributorPresentation();
       // Close the narrow race where a mutation is durably captured after the
       // drain observes an empty queue but before this task releases its local
       // single-flight marker.
       if (
-        completed &&
+        resumeAfterAuthorityRecovery ||
+        (completed &&
         contributionRetryTimer === null &&
-        (contributionSync?.pendingCount > 0 || contributionSync?.recovering)
+        (contributionSync?.pendingCount > 0 || contributionSync?.recovering))
       ) {
         queueMicrotask(scheduleContributionSync);
       }
     });
+  contributionSyncTask = syncTask;
 }
 
-async function refreshLiveGlobalBookmarkCatalog() {
-  if (!api || !bookmarkStorageScopeValue) {
-    return;
+function contributionFailureIsRetryable(error) {
+  return error instanceof ApiError
+    ? error.retryable && ![401, 409].includes(error.status)
+    : navigator.onLine !== false;
+}
+
+function scheduleContributionRetry(error, { mode = "background" } = {}) {
+  if (!contributionSync?.canContribute) {
+    return null;
   }
+  if (mode === "manual") {
+    contributionRetryTimerMode = "manual";
+  }
+  const delay = recordContributionRetryDeadline(error);
+  const now = Date.now();
+  const dueAt = Math.max(now + delay, contributionRetryNotBefore);
+  if (
+    contributionRetryTimer !== null &&
+    contributionRetryTimerDueAt >= dueAt
+  ) {
+    return Math.max(0, contributionRetryTimerDueAt - now);
+  }
+  if (contributionRetryTimer !== null) {
+    window.clearTimeout(contributionRetryTimer);
+  }
+  contributionRetryTimerDueAt = dueAt;
+  contributionRetryTimer = window.setTimeout(() => {
+    const retryMode = contributionRetryTimerMode;
+    contributionRetryTimer = null;
+    contributionRetryTimerDueAt = 0;
+    contributionRetryTimerMode = "background";
+    contributionRetryNotBefore = 0;
+    if (retryMode === "manual") {
+      void synchronizeContributionsNow();
+    } else {
+      scheduleContributionSync();
+    }
+  }, Math.max(1, dueAt - now));
+  return dueAt - now;
+}
+
+function cancelContributionRetry({ respectAuthority = false } = {}) {
+  if (
+    respectAuthority &&
+    contributionRetryNotBefore > Date.now()
+  ) {
+    return false;
+  }
+  if (contributionRetryTimer === null) {
+    contributionRetryNotBefore = 0;
+    contributionRetryTimerDueAt = 0;
+    contributionRetryTimerMode = "background";
+    return true;
+  }
+  window.clearTimeout(contributionRetryTimer);
+  contributionRetryTimer = null;
+  contributionRetryNotBefore = 0;
+  contributionRetryTimerDueAt = 0;
+  contributionRetryTimerMode = "background";
+  return true;
+}
+
+function contributionRetryRemaining() {
+  return Math.max(0, contributionRetryNotBefore - Date.now());
+}
+
+function recordContributionRetryDeadline(error) {
+  const delay = contributionRetryDelay(error);
+  contributionRetryNotBefore = Math.max(
+    contributionRetryNotBefore,
+    Date.now() + delay,
+  );
+  return contributionRetryRemaining();
+}
+
+function scheduleGlobalBookmarkCatalogRetry(error) {
+  const delay = recordGlobalBookmarkCatalogRetryDeadline(error);
+  const generation = sessionGeneration;
+  const dueAt = Date.now() + delay;
+  if (
+    globalBookmarkCatalogRetryTimer !== null &&
+    globalBookmarkCatalogRetryTimerDueAt >= dueAt
+  ) {
+    return globalBookmarkCatalogRetryTimerDueAt - Date.now();
+  }
+  if (globalBookmarkCatalogRetryTimer !== null) {
+    window.clearTimeout(globalBookmarkCatalogRetryTimer);
+  }
+  globalBookmarkCatalogRetryTimerDueAt = dueAt;
+  globalBookmarkCatalogRetryTimer = window.setTimeout(() => {
+    globalBookmarkCatalogRetryTimer = null;
+    globalBookmarkCatalogRetryTimerDueAt = 0;
+    if (generation !== sessionGeneration) {
+      return;
+    }
+    void refreshLiveGlobalBookmarkCatalog({ requireNetwork: true })
+      .then(() => {
+        if (
+          generation === sessionGeneration &&
+          !pendingContributionOutcomeRefresh &&
+          contributionPresentationState === "error" &&
+          contributionPresentationMessageKey ===
+            "bookmarks.contribution_sync_catalog_error"
+        ) {
+          if (contributionStatus?.can_contribute) {
+            setContributionPresentation(
+              "success",
+              "bookmarks.contribution_sync_complete",
+            );
+          } else {
+            const inactive = contributionInactivePresentation(
+              contributionStatus,
+            );
+            setContributionPresentation(inactive.state, inactive.messageKey);
+          }
+        }
+      })
+      .catch((retryError) => {
+        if (
+          generation === sessionGeneration &&
+          contributionFailureIsRetryable(retryError)
+        ) {
+          scheduleGlobalBookmarkCatalogRetry(retryError);
+        }
+      });
+  }, Math.max(1, dueAt - Date.now()));
+  return dueAt - Date.now();
+}
+
+function cancelGlobalBookmarkCatalogRetry() {
+  if (globalBookmarkCatalogRetryTimer !== null) {
+    window.clearTimeout(globalBookmarkCatalogRetryTimer);
+    globalBookmarkCatalogRetryTimer = null;
+  }
+  globalBookmarkCatalogRetryTimerDueAt = 0;
+  globalBookmarkCatalogRetryNotBefore = 0;
+  globalBookmarkCatalogRetryDelayMs = 2_000;
+}
+
+function globalBookmarkCatalogRetryRemaining() {
+  return Math.max(0, globalBookmarkCatalogRetryNotBefore - Date.now());
+}
+
+function recordGlobalBookmarkCatalogRetryDeadline(error) {
+  const delay = globalBookmarkCatalogRetryDelay(error);
+  globalBookmarkCatalogRetryNotBefore = Math.max(
+    globalBookmarkCatalogRetryNotBefore,
+    Date.now() + delay,
+  );
+  return globalBookmarkCatalogRetryRemaining();
+}
+
+function globalBookmarkCatalogRetryDelay(error) {
+  if (
+    error &&
+    typeof error === "object" &&
+    globalBookmarkCatalogRetryDelays.has(error)
+  ) {
+    return globalBookmarkCatalogRetryDelays.get(error);
+  }
+  let delay;
+  if (Number.isFinite(error?.retryAfter)) {
+    delay = Math.min(3_600_000, Math.max(250, error.retryAfter * 1_000));
+  } else {
+    delay = Math.min(
+      300_000,
+      Math.max(250, globalBookmarkCatalogRetryDelayMs),
+    );
+    globalBookmarkCatalogRetryDelayMs = Math.min(
+      300_000,
+      Math.max(2_000, delay * 2),
+    );
+  }
+  if (error && typeof error === "object") {
+    globalBookmarkCatalogRetryDelays.set(error, delay);
+  }
+  return delay;
+}
+
+function refreshLiveGlobalBookmarkCatalog({ requireNetwork = false } = {}) {
+  const retryRemaining = globalBookmarkCatalogRetryRemaining();
+  if (retryRemaining > 0) {
+    if (!requireNetwork) {
+      return Promise.resolve({ changed: false, source: "deferred" });
+    }
+    return Promise.reject(new ApiError(
+      i18n.t("error.rate_limited"),
+      {
+        code: "rate_limited",
+        status: 429,
+        retryable: true,
+        retryAfter: retryRemaining / 1_000,
+      },
+    ));
+  }
+  const generation = sessionGeneration;
+  const scope = bookmarkStorageScopeValue;
+  const requestApi = api;
+  const deviceStorage = globalBookmarkDeviceStorage;
+  const task = globalBookmarkCatalogRefreshQueue.then(() =>
+    performLiveGlobalBookmarkCatalogRefresh({
+      requireNetwork,
+      generation,
+      scope,
+      requestApi,
+      deviceStorage,
+    })
+  );
+  // Keep one ordered queue alive after a failed request. A later strict pull
+  // must start after the older response has settled so stale data can never
+  // replace a newer in-memory catalogue.
+  globalBookmarkCatalogRefreshQueue = task.catch(() => undefined);
+  return task;
+}
+
+async function performLiveGlobalBookmarkCatalogRefresh({
+  requireNetwork,
+  generation,
+  scope,
+  requestApi,
+  deviceStorage,
+}) {
+  if (
+    generation !== sessionGeneration ||
+    !requestApi ||
+    !scope ||
+    !bookmarkStore ||
+    !globalBookmarkPreferences ||
+    !deviceStorage ||
+    requestApi !== api ||
+    scope !== bookmarkStorageScopeValue ||
+    deviceStorage !== globalBookmarkDeviceStorage
+  ) {
+    return { changed: false, source: "unavailable" };
+  }
+  const stagedOutcomes = pendingContributionOutcomeRefresh;
   const result = await loadLiveGlobalBookmarkCatalog({
-    api,
-    scope: bookmarkStorageScopeValue,
+    api: requestApi,
+    scope,
     instanceScope,
+    requireNetwork,
   });
   if (
+    generation !== sessionGeneration ||
+    requestApi !== api ||
+    scope !== bookmarkStorageScopeValue ||
+    deviceStorage !== globalBookmarkDeviceStorage
+  ) {
+    return { changed: false, source: "stale" };
+  }
+  const unchanged = (
     result.checksum === globalBookmarkCatalogChecksum ||
     (result.checksum === null && globalBookmarkCatalogChecksum === null)
+  );
+  if (!unchanged && result.source !== "network") {
+    // A refresh fallback may be older than the already validated in-memory
+    // catalogue. Keep serving the newer effective view until a live response
+    // proves a replacement, instead of rolling the contributor back to P.
+    return { changed: false, source: result.source };
+  }
+  const shouldRebuildPreferences = !unchanged || (
+    result.source === "network" &&
+    !globalBookmarkCatalogAuthoritative
+  );
+  if (!unchanged) {
+    globalBookmarkCatalog = result.catalog;
+    globalBookmarkCatalogChecksum = result.checksum;
+  }
+  if (shouldRebuildPreferences) {
+    globalBookmarkCatalogAuthoritative = result.source === "network";
+    globalBookmarkPreferences = new GlobalBookmarkPreferences({
+      allowedTopicIds: globalBookmarkCatalog
+        .topicDefinitions()
+        .map((definition) => definition.id),
+      allowedBookmarkIds: globalBookmarkCatalog.bookmarkIds(),
+      scope,
+      instanceScope,
+      storage: deviceStorage,
+    });
+  }
+  let reconciliation = null;
+  if (
+    result.source === "network" &&
+    stagedOutcomes &&
+    pendingContributionOutcomeRefresh?.version === stagedOutcomes.version
   ) {
-    return;
+    reconciliation = await reconcilePublishedContributionTopics(
+      stagedOutcomes.outcomes,
+      generation,
+      { detailsAvailable: stagedOutcomes.detailsAvailable },
+    );
+    if (generation !== sessionGeneration) {
+      return { changed: false, source: "stale" };
+    }
+    if (
+      reconciliation.unresolved === 0 &&
+      pendingContributionOutcomeRefresh?.version === stagedOutcomes.version
+    ) {
+      pendingContributionOutcomeRefresh = null;
+    }
   }
-  globalBookmarkCatalog = result.catalog;
-  globalBookmarkCatalogChecksum = result.checksum;
-  globalBookmarkPreferences = new GlobalBookmarkPreferences({
-    allowedTopicIds: globalBookmarkCatalog
-      .topicDefinitions()
-      .map((definition) => definition.id),
-    allowedBookmarkIds: globalBookmarkCatalog.bookmarkIds(),
-    scope: bookmarkStorageScopeValue,
-    storage: globalBookmarkDeviceStorage,
-  });
-  renderBookmarks();
-  if (state.bible.status === "ready") {
-    renderBible();
+  if (shouldRebuildPreferences && !reconciliation?.changed) {
+    renderContributionMarkers();
   }
+  if (result.source === "network") {
+    if (!pendingContributionOutcomeRefresh) {
+      cancelGlobalBookmarkCatalogRetry();
+    } else {
+      const retryError = new ApiError(
+        i18n.t("bookmarks.contribution_sync_catalog_error"),
+        {
+          code: "global_bookmark_unavailable",
+          retryable: true,
+        },
+      );
+      scheduleGlobalBookmarkCatalogRetry(retryError);
+      if (requireNetwork) {
+        throw retryError;
+      }
+    }
+  }
+  return {
+    changed: shouldRebuildPreferences,
+    source: result.source,
+    unresolved: reconciliation?.unresolved ?? 0,
+  };
 }
 
 function attachListeners() {
@@ -769,9 +2118,17 @@ function attachListeners() {
   window.addEventListener("online", () => {
     updateConnectionState();
     void refreshLiveGlobalBookmarkCatalog();
+    void refreshContributionStatus({
+      force: true,
+      synchronizeWhenApproved: true,
+    }).catch(() => undefined);
     scheduleContributionSync();
   });
   window.addEventListener("offline", updateConnectionState);
+  window.addEventListener("focus", () => {
+    void refreshContributionStatus({ synchronizeWhenApproved: true })
+      .catch(() => undefined);
+  });
 
   document.querySelectorAll("[data-route]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -811,6 +2168,9 @@ function attachListeners() {
         persistVisibleReaderPosition();
       }
       void globalBookmarkPreferences?.flush();
+    } else {
+      void refreshContributionStatus({ synchronizeWhenApproved: true })
+        .catch(() => undefined);
     }
   });
   window.addEventListener("pagehide", () => {
@@ -983,6 +2343,9 @@ function attachListeners() {
   elements.bookmarkTopicForm.addEventListener("submit", onBookmarkTopicCreate);
   elements.bookmarkTopicEditor.addEventListener("click", onBookmarkTopicEdit);
   elements.bookmarkTopicEditor.addEventListener("change", onBookmarkTopicColorChange);
+  elements.contributorSyncButton.addEventListener("click", () => {
+    void synchronizeContributionsNow();
+  });
   elements.restoreDefaultBookmarkTopics.addEventListener("click", () => {
     restoreDefaultBookmarkTopics();
   });
@@ -1056,17 +2419,26 @@ function attachListeners() {
 }
 
 function contributionRetryDelay(error) {
-  const announcedDelay = Number.isFinite(error?.retryAfter)
-    ? error.retryAfter * 1_000
-    : contributionRetryDelayMs;
-  const delay = Math.min(300_000, Math.max(250, announcedDelay));
+  if (
+    error &&
+    typeof error === "object" &&
+    contributionRetryDelays.has(error)
+  ) {
+    return contributionRetryDelays.get(error);
+  }
+  let delay;
   if (Number.isFinite(error?.retryAfter)) {
-    contributionBatchDelayMs = Math.min(
+    delay = Math.min(3_600_000, Math.max(250, error.retryAfter * 1_000));
+  } else {
+    delay = Math.min(300_000, Math.max(250, contributionRetryDelayMs));
+    contributionRetryDelayMs = Math.min(
       300_000,
-      Math.max(contributionBatchDelayMs, delay + 250),
+      Math.max(2_000, delay * 2),
     );
   }
-  contributionRetryDelayMs = Math.min(300_000, Math.max(2_000, delay * 2));
+  if (error && typeof error === "object") {
+    contributionRetryDelays.set(error, delay);
+  }
   return delay;
 }
 
@@ -1895,6 +3267,7 @@ function renderLocalizedState() {
   renderBasketStatus();
   renderSelection();
   renderBookmarks();
+  updateContributorPresentation();
 }
 
 async function runSearch(rawQuery) {
@@ -3195,6 +4568,10 @@ function renderBible() {
   renderBibleToolbar(bible.reference, formatVerseCount(bible.verses.length));
   elements.bibleSearchReturn.hidden = !bible.returnToSearch;
   const selected = selectedIds();
+  const bookmarkSnapshot = bookmarkStore?.snapshot() ?? null;
+  const classifiedBookmarkTopics = bookmarkSnapshot
+    ? globallyClassifiedTopics(bookmarkSnapshot.topics)
+    : null;
   bible.verses.forEach((verse, index) => {
     elements.bibleVerses.append(
       createReaderVerse(
@@ -3202,6 +4579,8 @@ function renderBible() {
         selected,
         bible.verses[index - 1] ?? null,
         bible.verses[index + 1] ?? null,
+        bookmarkSnapshot,
+        classifiedBookmarkTopics,
       ),
     );
   });
@@ -3296,10 +4675,21 @@ function createVerseCard(verse, selected) {
   return result;
 }
 
-function createReaderVerse(verse, selected, previous, following) {
+function createReaderVerse(
+  verse,
+  selected,
+  previous,
+  following,
+  bookmarkSnapshot = null,
+  classifiedBookmarkTopics = null,
+) {
   const wrapper = document.createElement("div");
   wrapper.className = "reader-verse-row";
-  const assignments = bookmarkAssignmentsForVerse(verse);
+  const assignments = bookmarkAssignmentsForVerse(
+    verse,
+    bookmarkSnapshot,
+    classifiedBookmarkTopics,
+  );
   const highlightedAssignment = assignments.find(
     (assignment) => assignment.topic_id === state.bookmarks.originTopicId,
   ) ?? assignments[0] ?? null;
@@ -3307,7 +4697,10 @@ function createReaderVerse(verse, selected, previous, following) {
     highlightedAssignment?.topic_id,
   ) ?? null;
   if (bookmarkTopic) {
-    applyBookmarkColor(wrapper, bookmarkTopic.color);
+    applyBookmarkColor(
+      wrapper,
+      bookmarkTopicPresentation(bookmarkTopic).color,
+    );
     wrapper.dataset.bookmarkCount = String(assignments.length);
   }
 
@@ -3526,6 +4919,7 @@ function bookmarkTopicPresentation(topic) {
   return {
     core: Boolean(definition),
     definition,
+    color: definition?.color ?? topic?.color ?? BOOKMARK_TOPIC_COLORS[0],
     name: definition
       ? translated === definition.name_key ? definition.name : translated
       : topic?.name ?? "",
@@ -3534,6 +4928,34 @@ function bookmarkTopicPresentation(topic) {
 
 function bookmarkTopicDisplayName(topic) {
   return bookmarkTopicPresentation(topic).name;
+}
+
+function bookmarkTopicContributionMarker(topic) {
+  if (bookmarkTopicPresentation(topic).core) {
+    return {
+      label: "G",
+      title: i18n.t("bookmarks.global_marker"),
+    };
+  }
+  if (contributionSync?.canContribute) {
+    return {
+      label: "P",
+      title: i18n.t("bookmarks.contribution_pending_marker"),
+    };
+  }
+  return null;
+}
+
+function createBookmarkContributionBadge(marker) {
+  if (!marker) {
+    return null;
+  }
+  const badge = document.createElement("span");
+  badge.className = "bookmark-contribution-badge";
+  badge.textContent = marker.label;
+  badge.title = marker.title;
+  badge.setAttribute("aria-hidden", "true");
+  return badge;
 }
 
 function sortedBookmarkTopics(topics) {
@@ -3547,11 +4969,15 @@ function sortedBookmarkTopics(topics) {
 function bookmarkAssignmentsForVerse(
   verse,
   snapshot = bookmarkStore?.snapshot(),
+  classifiedTopics = null,
 ) {
   if (!bookmarkStore || !snapshot || !verse) {
     return [];
   }
   const assignments = new Map();
+  const classified = classifiedTopics ?? globallyClassifiedTopics(
+    snapshot.topics,
+  );
   for (const bookmark of globalBookmarkCatalog.bookmarksForVerse(
     verse,
     snapshot.topics,
@@ -3565,8 +4991,12 @@ function bookmarkAssignmentsForVerse(
     }
   }
   const personal = bookmarkStore.bookmarkFor(verse);
+  const coordinateKey = bookmarkCoordinateKey(verse);
   for (const topicId of bookmarkTopicIds(personal)) {
-    if (bookmarkStore.topic(topicId)) {
+    if (
+      bookmarkStore.topic(topicId) &&
+      !classified.get(topicId)?.coordinates.has(coordinateKey)
+    ) {
       assignments.set(topicId, {
         ...personal,
         topic_id: topicId,
@@ -3592,48 +5022,138 @@ function visibleGlobalBookmarksForTopic(topicId, topics) {
   );
 }
 
-function bookmarkViewForTopic(topicId, snapshot = bookmarkStore?.snapshot()) {
+function bookmarkViewForTopic(
+  topicId,
+  snapshot = bookmarkStore?.snapshot(),
+  classifiedTopics = null,
+) {
   if (!bookmarkStore || !snapshot) {
     return [];
   }
-  const personal = bookmarkStore.bookmarksForTopic(topicId);
-  const canonicalTopicId = globalBookmarkCatalog.canonicalTopicId(
-    topicId,
+  let personal = bookmarkStore.bookmarksForTopic(topicId);
+  const classified = classifiedTopics ?? globallyClassifiedTopics(
     snapshot.topics,
-    globalBookmarkTopicMappings(),
   );
-  if (
-    !canonicalTopicId ||
-    !globalBookmarkPreferences?.hasTopic(canonicalTopicId)
-  ) {
+  const globalTopic = classified.get(topicId);
+  if (!globalTopic) {
     return personal;
   }
-  const personalCoordinates = new Set(personal.map(bookmarkCoordinateKey));
-  const global = visibleGlobalBookmarksForTopic(topicId, snapshot.topics)
-    .filter((bookmark) => !personalCoordinates.has(bookmarkCoordinateKey(bookmark)));
+  personal = personal.filter(
+    (bookmark) => !globalTopic.coordinates.has(bookmarkCoordinateKey(bookmark)),
+  );
+  const global = globalTopic.enabled && globalTopic.renderGlobal
+    ? globalTopic.bookmarks.filter(
+      (bookmark) => !globalBookmarkPreferences?.isBookmarkHidden(bookmark.id),
+    )
+    : [];
   return [...personal, ...global].sort(compareBookmarkViewEntries);
 }
 
-function activeGlobalBookmarkStats(snapshot = bookmarkStore?.snapshot()) {
+function personalBookmarkCount(snapshot, classifiedTopics = null) {
+  const classified = classifiedTopics ?? globallyClassifiedTopics(
+    snapshot.topics,
+  );
+  return snapshot.bookmarks.filter((bookmark) =>
+    bookmarkTopicIds(bookmark).some((topicId) =>
+      !classified.get(topicId)?.coordinates.has(bookmarkCoordinateKey(bookmark))
+    )
+  ).length;
+}
+
+function globallyClassifiedTopics(topics) {
+  const classified = new Map();
+  const mappings = globalBookmarkTopicMappings();
+  const resolved = globalBookmarkCatalog.resolveTopics(topics, mappings);
+  const localTopicIds = new Set(topics.map((topic) => topic.id));
+  const publishedCanonicalByLocal = verifiedPublishedContributionTopics;
+  for (const [canonicalTopicId, localTopicId] of resolved) {
+    const enabled = Boolean(
+      globalBookmarkPreferences?.hasTopic(canonicalTopicId),
+    );
+    const published = publishedCanonicalByLocal.get(localTopicId) ===
+      canonicalTopicId;
+    if (!enabled && !published) {
+      continue;
+    }
+    const bookmarks = globalBookmarkCatalog.bookmarksForCanonicalTopic(
+      canonicalTopicId,
+      localTopicId,
+    );
+    classified.set(localTopicId, {
+      canonicalTopicId,
+      enabled,
+      bookmarks,
+      coordinates: enabled
+        ? new Set(bookmarks.map(bookmarkCoordinateKey))
+        : new Set(),
+      renderGlobal: true,
+    });
+  }
+  for (const [localTopicId, canonicalTopicId] of publishedCanonicalByLocal) {
+    if (
+      !localTopicIds.has(localTopicId) ||
+      !globalBookmarkCatalog.topicDefinition(canonicalTopicId) ||
+      classified.has(localTopicId)
+    ) {
+      continue;
+    }
+    const bookmarks = globalBookmarkCatalog.bookmarksForCanonicalTopic(
+      canonicalTopicId,
+      localTopicId,
+    );
+    const enabled = Boolean(
+      globalBookmarkPreferences?.hasTopic(canonicalTopicId),
+    );
+    classified.set(localTopicId, {
+      canonicalTopicId,
+      enabled,
+      bookmarks,
+      coordinates: enabled
+        ? new Set(bookmarks.map(bookmarkCoordinateKey))
+        : new Set(),
+      // One canonical topic renders its global rows under only the persisted
+      // primary local mapping. Secondary accepted locals retain only residual
+      // personal coordinates, avoiding duplicate G lists.
+      renderGlobal: false,
+    });
+  }
+  return classified;
+}
+
+function mapsEqual(left, right) {
+  if (left.size !== right.size) {
+    return false;
+  }
+  for (const [key, value] of left) {
+    if (right.get(key) !== value) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function activeGlobalBookmarkStats(
+  snapshot = bookmarkStore?.snapshot(),
+  classifiedTopics = null,
+) {
   if (!snapshot || !globalBookmarkPreferences) {
     return { bookmarks: 0, topics: 0 };
   }
-  const resolved = globalBookmarkCatalog.resolveTopics(
+  const classified = classifiedTopics ?? globallyClassifiedTopics(
     snapshot.topics,
-    globalBookmarkTopicMappings(),
-  );
-  const enabledTopics = [...resolved].filter(([canonicalTopicId]) =>
-    globalBookmarkPreferences.hasTopic(canonicalTopicId)
   );
   return {
-    bookmarks: enabledTopics.reduce(
-      (count, [, localTopicId]) => count + visibleGlobalBookmarksForTopic(
-        localTopicId,
-        snapshot.topics,
-      ).length,
+    bookmarks: [...classified.values()].reduce(
+      (count, topic) => count + (topic.enabled && topic.renderGlobal
+        ? topic.bookmarks.filter(
+          (bookmark) => !globalBookmarkPreferences.isBookmarkHidden(bookmark.id),
+        ).length
+        : 0),
       0,
     ),
-    topics: enabledTopics.length,
+    topics: [...classified.values()].filter(
+      (topic) => topic.enabled && topic.renderGlobal,
+    ).length,
   };
 }
 
@@ -3649,7 +5169,7 @@ function bookmarkSummary(personal, global) {
 }
 
 function bookmarkCoordinateKey(bookmark) {
-  return `${bookmark.book}/${bookmark.chapter}/${bookmark.verse}`;
+  return `${bookmark.book ?? bookmark.book_number}/${bookmark.chapter}/${bookmark.verse}`;
 }
 
 function compareBookmarkViewEntries(left, right) {
@@ -3668,9 +5188,9 @@ function renderBookmarks() {
     topics: [],
     bookmarks: [],
   };
-  globalBookmarkPreferences?.pruneTopicMappings(snapshot.topics);
-  const personalCount = snapshot.bookmarks.length;
-  const globalStats = activeGlobalBookmarkStats(snapshot);
+  const classifiedTopics = globallyClassifiedTopics(snapshot.topics);
+  const personalCount = personalBookmarkCount(snapshot, classifiedTopics);
+  const globalStats = activeGlobalBookmarkStats(snapshot, classifiedTopics);
   const summary = bookmarkSummary(personalCount, globalStats.bookmarks);
   const topicIds = new Set(snapshot.topics.map((topic) => topic.id));
   if (
@@ -3710,9 +5230,13 @@ function renderBookmarks() {
     return;
   }
   if (state.bookmarks.selectedTopicId) {
-    renderBookmarkDetail(state.bookmarks.selectedTopicId);
+    renderBookmarkDetail(
+      state.bookmarks.selectedTopicId,
+      snapshot,
+      classifiedTopics,
+    );
   } else {
-    renderBookmarkGroups();
+    renderBookmarkGroups(snapshot, classifiedTopics);
     renderBookmarkTopicEditor();
     setBookmarkColorInput(elements.bookmarkTopicColor);
   }
@@ -3728,14 +5252,19 @@ function updateBookmarkStorageWarning() {
   );
 }
 
-function renderBookmarkGroups() {
-  const snapshot = bookmarkStore?.snapshot();
+function renderBookmarkGroups(
+  snapshot = bookmarkStore?.snapshot(),
+  classifiedTopics = null,
+) {
   if (!snapshot) {
     elements.bookmarkGroupList.replaceChildren();
     elements.bookmarkGroupsEmpty.hidden = true;
     return;
   }
   const query = state.bookmarks.search.trim().toLocaleLowerCase();
+  const classified = classifiedTopics ?? globallyClassifiedTopics(
+    snapshot.topics,
+  );
   const topics = sortedBookmarkTopics(snapshot.topics.filter((topic) => {
     if (!query) {
       return true;
@@ -3750,13 +5279,14 @@ function renderBookmarkGroups() {
   }));
   const fragment = document.createDocumentFragment();
   for (const topic of topics) {
-    const topicName = bookmarkTopicDisplayName(topic);
-    const count = bookmarkViewForTopic(topic.id, snapshot).length;
+    const presentation = bookmarkTopicPresentation(topic);
+    const topicName = presentation.name;
+    const count = bookmarkViewForTopic(topic.id, snapshot, classified).length;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "bookmark-group-card";
     button.dataset.bookmarkTopic = topic.id;
-    applyBookmarkColor(button, topic.color);
+    applyBookmarkColor(button, presentation.color);
     button.setAttribute(
       "aria-label",
       i18n.t("bookmarks.open_group_aria", {
@@ -3769,12 +5299,21 @@ function renderBookmarkGroups() {
     dot.setAttribute("aria-hidden", "true");
     const copy = document.createElement("span");
     copy.className = "bookmark-group-card__copy";
+    const nameLine = document.createElement("span");
+    nameLine.className = "bookmark-group-card__name";
     const name = document.createElement("strong");
     name.textContent = topicName;
+    nameLine.append(name);
+    const marker = createBookmarkContributionBadge(
+      bookmarkTopicContributionMarker(topic),
+    );
+    if (marker) {
+      nameLine.append(marker);
+    }
     const usage = document.createElement("span");
     usage.className = "bookmark-group-card__count";
     usage.textContent = i18n.plural("bookmarks.count", count);
-    copy.append(name, usage);
+    copy.append(nameLine, usage);
     const arrow = document.createElement("span");
     arrow.setAttribute("aria-hidden", "true");
     arrow.textContent = "›";
@@ -3880,13 +5419,16 @@ function returnToBookmarkOriginTopic() {
   });
 }
 
-function renderBookmarkDetail(topicId) {
+function renderBookmarkDetail(
+  topicId,
+  snapshot = bookmarkStore?.snapshot(),
+  classifiedTopics = null,
+) {
   cancelBookmarkExcerptHydration();
   const topic = bookmarkStore?.topic(topicId);
-  if (!topic) {
+  if (!topic || !snapshot) {
     return;
   }
-  const snapshot = bookmarkStore.snapshot();
   const canonicalTopicId = globalBookmarkCatalog.canonicalTopicId(
     topicId,
     snapshot.topics,
@@ -3905,9 +5447,14 @@ function renderBookmarkDetail(topicId) {
   const globalsEnabled = Boolean(
     canonicalTopicId && globalBookmarkPreferences?.hasTopic(canonicalTopicId),
   );
-  const bookmarks = bookmarkViewForTopic(topicId, snapshot);
-  const topicName = bookmarkTopicDisplayName(topic);
-  applyBookmarkColor(elements.bookmarkDetail, topic.color);
+  const bookmarks = bookmarkViewForTopic(
+    topicId,
+    snapshot,
+    classifiedTopics,
+  );
+  const topicPresentation = bookmarkTopicPresentation(topic);
+  const topicName = topicPresentation.name;
+  applyBookmarkColor(elements.bookmarkDetail, topicPresentation.color);
   elements.bookmarkDetailTitle.tabIndex = -1;
   elements.bookmarkDetailTitle.textContent = topicName;
   elements.bookmarkDetailCount.textContent = i18n.plural(
@@ -3942,7 +5489,7 @@ function renderBookmarkDetail(topicId) {
   for (const bookmark of bookmarks) {
     const item = document.createElement("li");
     item.className = "bookmark-list__item";
-    applyBookmarkColor(item, topic.color);
+    applyBookmarkColor(item, topicPresentation.color);
 
     const open = document.createElement("button");
     open.type = "button";
@@ -3978,6 +5525,11 @@ function renderBookmarkDetail(topicId) {
       marker.setAttribute("aria-hidden", "true");
       marker.title = i18n.t("bookmarks.global_marker");
       reference.append(marker);
+    } else if (contributionSync?.canContribute) {
+      reference.append(createBookmarkContributionBadge({
+        label: "P",
+        title: i18n.t("bookmarks.contribution_pending_marker"),
+      }));
     }
     const text = document.createElement("span");
     text.className = "bookmark-list__text";
@@ -4351,7 +5903,7 @@ function renderBookmarkTopicEditor() {
     const row = document.createElement("div");
     row.className = "bookmark-topic-editor__row";
     row.dataset.topicEditor = topic.id;
-    applyBookmarkColor(row, topic.color);
+    applyBookmarkColor(row, presentation.color);
 
     const identity = document.createElement("div");
     identity.className = "bookmark-topic-editor__identity";
@@ -4382,6 +5934,12 @@ function renderBookmarkTopicEditor() {
       );
     }
     identity.append(dot, name);
+    const contributionMarker = createBookmarkContributionBadge(
+      bookmarkTopicContributionMarker(topic),
+    );
+    if (contributionMarker) {
+      identity.append(contributionMarker);
+    }
 
     const color = document.createElement("input");
     color.className = "bookmark-topic-editor__color";
@@ -4446,7 +6004,7 @@ function onBookmarkTopicCreate(event) {
   }
 }
 
-function restoreDefaultBookmarkTopics() {
+async function restoreDefaultBookmarkTopics() {
   if (!bookmarkStore) {
     return;
   }
@@ -4455,7 +6013,7 @@ function restoreDefaultBookmarkTopics() {
       globalBookmarkCatalog.topicDefinitions({ defaultsOnly: true }),
       globalBookmarkTopicMappings(),
     );
-    globalBookmarkPreferences?.setTopicMappings(
+    await globalBookmarkPreferences?.setTopicMappings(
       result.topic_ids,
       bookmarkStore.snapshot().topics,
     );
@@ -4564,6 +6122,10 @@ async function onBookmarkTopicEdit(event) {
     await globalBookmarkPreferences?.flush();
   }
   mutatePersonalBookmarks(() => bookmarkStore.removeTopic(topic.id));
+  await globalBookmarkPreferences?.pruneTopicMappings(
+    bookmarkStore.snapshot().topics,
+  );
+  await globalBookmarkPreferences?.flush();
   renderBookmarks();
   if (state.bible.status === "ready") {
     renderBible();
@@ -4613,7 +6175,7 @@ async function loadGlobalBookmarks() {
         definitions,
         globalBookmarkTopicMappings(),
       );
-      const mappingChanged = globalBookmarkPreferences.setTopicMappings(
+      const mappingChanged = await globalBookmarkPreferences.setTopicMappings(
         result.topic_ids,
         bookmarkStore.snapshot().topics,
       );
@@ -5090,10 +6652,11 @@ function renderBookmarkPopoverAssignments(assignments) {
       continue;
     }
     const topicName = bookmarkTopicDisplayName(topic);
+    const topicPresentation = bookmarkTopicPresentation(topic);
     const row = document.createElement("div");
     row.className = "bookmark-assigned-topic";
     row.setAttribute("role", "listitem");
-    applyBookmarkColor(row, topic.color);
+    applyBookmarkColor(row, topicPresentation.color);
 
     const open = document.createElement("button");
     open.type = "button";
@@ -5121,6 +6684,11 @@ function renderBookmarkPopoverAssignments(assignments) {
       marker.title = i18n.t("bookmarks.global_marker");
       marker.setAttribute("aria-hidden", "true");
       open.append(marker);
+    } else if (contributionSync?.canContribute) {
+      open.append(createBookmarkContributionBadge({
+        label: "P",
+        title: i18n.t("bookmarks.contribution_pending_marker"),
+      }));
     }
 
     const remove = document.createElement("button");
@@ -5192,7 +6760,7 @@ function bookmarkTopicOption(topic) {
     const option = document.createElement("option");
     option.value = topic.id;
     option.textContent = `● ${bookmarkTopicDisplayName(topic)}`;
-    option.style.color = topic.color;
+    option.style.color = bookmarkTopicPresentation(topic).color;
     return option;
 }
 
@@ -5741,6 +7309,31 @@ function handleSessionError(error) {
 
 function invalidateClientSessionState() {
   sessionGeneration += 1;
+  if (contributionStatusPollTimer !== null) {
+    window.clearTimeout(contributionStatusPollTimer);
+    contributionStatusPollTimer = null;
+  }
+  contributionStatusPollTimerDueAt = 0;
+  cancelContributionRetry();
+  cancelGlobalBookmarkCatalogRetry();
+  contributionSync = null;
+  contributionOpenTask = null;
+  contributionSyncTask = null;
+  contributionDisclosureTask = null;
+  contributionStatusRefreshTask = null;
+  contributionAuthorityRecoveryTask = null;
+  contributionManualSyncTask = null;
+  contributionStatus = null;
+  verifiedPublishedContributionTopics = new Map();
+  pendingContributionOutcomeRefresh = null;
+  contributionOutcomeRefreshVersion += 1;
+  contributionLastStatusRefreshAt = 0;
+  contributionPresentationState = "idle";
+  contributionPresentationMessageKey = "bookmarks.contribution_sync_idle";
+  contributionPresentationMessageValues = {};
+  contributionRetryDelayMs = 2_000;
+  contributionBatchDelayMs = 5_250;
+  globalBookmarkCatalogRefreshQueue = Promise.resolve();
   basketMutationTask = Promise.resolve();
   searchRequestId += 1;
   searchPageRequests.invalidate();
@@ -5762,7 +7355,12 @@ function invalidateClientSessionState() {
   state.bookmarks.storageStatus = null;
   bookmarkStore = null;
   bookmarkStorage = null;
+  bookmarkStorageScopeValue = null;
+  globalBookmarkDeviceStorage = null;
   globalBookmarkPreferences = null;
+  globalBookmarkCatalog = GLOBAL_BOOKMARK_CATALOG;
+  globalBookmarkCatalogChecksum = null;
+  globalBookmarkCatalogAuthoritative = false;
   readingHistory = null;
   cancelHistoryExcerptHydration();
   cancelBookmarkExcerptHydration();
