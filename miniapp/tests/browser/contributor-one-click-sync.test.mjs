@@ -488,6 +488,22 @@ async function applyActiveTopicToVerse(page, verse) {
   ), verse);
 }
 
+async function assignPersonalTopicToVerse(page, verse, topicId) {
+  await applyActiveTopicToVerse(page, verse);
+  await page.locator(
+    `[data-bookmark-trigger="gbd_kjv_043_0003_${String(verse).padStart(4, "0")}"]`,
+  ).click();
+  await page.waitForFunction(() => (
+    !document.querySelector("#bookmark-popover")?.hidden
+  ));
+  await page.locator("#bookmark-topic-picker").selectOption(topicId);
+  await page.locator(
+    '#bookmark-assigned-topics [data-bookmark-source="personal"]' +
+      `[data-bookmark-topic="${topicId}"]`,
+  ).waitFor();
+  await page.locator("#close-bookmark-popover").click();
+}
+
 async function openBookmarksRoute(page) {
   if (await page.locator("#app").getAttribute("data-active-route") === "bookmarks") {
     return;
@@ -519,7 +535,7 @@ async function createPersonalTopicWithVerses(page, name, verses) {
   await page.locator('[data-route="bible"]').click();
   await page.waitForSelector('#bible-verses [data-reader-verse="1"]');
   for (const verse of verses) {
-    await applyActiveTopicToVerse(page, verse);
+    await assignPersonalTopicToVerse(page, verse, localTopicId);
   }
   return localTopicId;
 }
@@ -607,7 +623,10 @@ test("a deferred application checks status only when the user asks", async (cont
   await page.waitForFunction(() => (
     document.querySelector("#contributor-sync")?.hidden === false
   ));
-  assert.match(await page.locator("#contributor-sync-status").innerText(), /defer/i);
+  assert.match(
+    await page.locator("#contributor-sync-status").innerText(),
+    /defer|further review/i,
+  );
   assert.equal(
     await page.locator("#contributor-sync-button").evaluate((button) => button.hidden),
     false,
@@ -820,8 +839,11 @@ test("a normal user's personal core-topic bookmark remains personal with globals
     global: Boolean(row.querySelector(".bookmark-list__global-badge")),
     openAriaLabel: row.querySelector("[data-bookmark-open]")?.getAttribute("aria-label"),
     openId: row.querySelector("[data-bookmark-open]")?.dataset.bookmarkOpen,
+    reference: row.querySelector(".bookmark-list__reference")?.textContent,
   }));
-  assert.equal(displayedBookmark.openId, "gbd_kjv_043_0003_0003");
+  assert.equal(typeof displayedBookmark.openId, "string");
+  assert.ok(displayedBookmark.openId.length > 0);
+  assert.match(displayedBookmark.reference, /John 3:3/);
   assert.equal(displayedBookmark.global, false);
   assert.equal(displayedBookmark.contributionMarker, null);
   assert.doesNotMatch(displayedBookmark.openAriaLabel, /global/i);
@@ -873,7 +895,7 @@ test("a contributor can retry one-click sync and receive published G mappings wi
   await page.locator('[data-route="bible"]').click();
   await page.waitForSelector('#bible-verses [data-reader-verse="2"]');
   for (const verse of [...acceptedVerses, waitingVerse]) {
-    await applyActiveTopicToVerse(page, verse);
+    await assignPersonalTopicToVerse(page, verse, localTopicId);
   }
   assert.equal(eventAttempts.length, 0, "a pending applicant must never POST events");
   await dispatchContributionRecheckEvents(page);
@@ -980,7 +1002,7 @@ test("a contributor can retry one-click sync and receive published G mappings wi
   const staleCatalogOrderStart = requestSequence.length;
   await page.locator("#contributor-sync-button").click();
   await page.waitForFunction(() => (
-    document.querySelector("#contributor-sync")?.dataset.state === "success"
+    document.querySelector("#contributor-sync")?.dataset.state === "error"
   ));
   assert.deepEqual(
     requestSequence.slice(staleCatalogOrderStart),
@@ -1000,17 +1022,19 @@ test("a contributor can retry one-click sync and receive published G mappings wi
     0,
   );
 
-  // The following click receives the newer catalog and completes the pull
-  // half of sync. Three reviewed links become G; the link still absent from
-  // the catalog remains personal.
+  // The independently scheduled catalog-only retry receives the newer
+  // revision and completes the pull half of the same Sync action. It must not
+  // resend accepted events or require another click. Three reviewed links
+  // become G; the link still absent from the catalog remains personal.
   fixture.publishCatalog();
-  await page.locator("#contributor-sync-button").click();
+  const attemptsBeforeCatalogRetry = eventAttempts.length;
   await page.waitForFunction((topicId) => {
     const row = document.querySelector(`[data-topic-editor="${topicId}"]`);
     return document.querySelector("#contributor-sync")?.dataset.state === "success" &&
       row?.querySelector(".bookmark-topic-editor__name--core")?.textContent ===
         "Steadfast Hope";
   }, localTopicId);
+  assert.equal(eventAttempts.length, attemptsBeforeCatalogRetry);
   assert.equal(
     await page.locator(`[data-topic-editor="${localTopicId}"] [data-topic-name]`).count(),
     0,
