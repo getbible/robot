@@ -1055,7 +1055,16 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     "global popover removal was not mirrored for review",
     15_000,
   );
-  await page.locator("#close-bookmark-popover").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#bookmark-popover")?.hidden === true &&
+    !document.querySelector(
+      '[data-bookmark-trigger="gbd_kjv_043_0003_0003"]',
+    )
+  ));
+  assert.equal(
+    await page.locator('[data-reader-verse="3"]').isVisible(),
+    true,
+  );
 
   const historyCountBeforeNextChapter = Number(
     await page.locator("#bible-history-count").innerText(),
