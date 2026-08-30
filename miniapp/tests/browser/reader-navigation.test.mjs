@@ -258,6 +258,7 @@ async function assertReaderStartsBelowToolbar(page) {
   const layout = await page.evaluate(() => {
     const chip = document.querySelector("#translation-shortcut")
       .getBoundingClientRect();
+    const titleBox = document.querySelector(".topbar").getBoundingClientRect();
     const toolbarElement = document.querySelector("#bible-heading");
     const toolbar = toolbarElement.getBoundingClientRect();
     const firstVerse = document.querySelector('[data-reader-verse="1"]')
@@ -269,9 +270,11 @@ async function assertReaderStartsBelowToolbar(page) {
       toolbarBackground: background,
       toolbarBottom: toolbar.bottom,
       toolbarTop: toolbar.top,
+      titleBoxBottom: titleBox.bottom,
     };
   });
-  assert.ok(Math.abs(layout.toolbarTop - layout.chipBottom) <= 1);
+  assert.ok(Math.abs(layout.toolbarTop - layout.titleBoxBottom) <= 1);
+  assert.ok(layout.chipBottom <= layout.titleBoxBottom);
   assert.ok(layout.firstVerseTop >= layout.toolbarBottom + 8);
   assert.doesNotMatch(layout.toolbarBackground, /rgba\([^)]*,\s*0\s*\)$/u);
   assert.notEqual(layout.toolbarBackground, "transparent");
