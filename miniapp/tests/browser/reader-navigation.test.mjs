@@ -346,6 +346,9 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   const consoleMessages = [];
   const pageErrors = [];
   const failedRequests = [];
+  const mockedRateLimitConsoleMessage =
+    "error: Failed to load resource: the server responded with a status of 429 " +
+    "(Too Many Requests)";
   page.on("console", (message) => {
     if (["error", "warning"].includes(message.type())) {
       consoleMessages.push(`${message.type()}: ${message.text()}`);
@@ -645,6 +648,13 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     15_000,
   );
   assert.ok(contributionAttempts >= 2);
+  // Chromium logs an HTTP error for the deliberately mocked first retry,
+  // even though fetch handles the response and the journal later succeeds.
+  await waitForCondition(
+    () => consoleMessages.includes(mockedRateLimitConsoleMessage),
+    "intentional contribution 429 was not reported by Chromium",
+  );
+  assert.deepEqual(consoleMessages.splice(0), [mockedRateLimitConsoleMessage]);
 
   await page.locator("#close-bookmark-popover").click();
   await page.locator('[data-reader-verse="3"]').click();
