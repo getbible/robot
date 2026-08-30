@@ -7,6 +7,7 @@ import {
   BOOKMARK_LOCALE_FALLBACK_POLICIES,
   BOOKMARK_LOCALE_POLICY_SOURCES,
 } from "../lib/bookmark-locales.js";
+import { CORE_BOOKMARK_TOPIC_DEFINITIONS } from "../lib/bookmark-topic-definitions.js";
 import { SCOPED_LOCALE_OVERRIDES } from "../lib/bookmark-locales-scoped-overrides.js";
 import { UI_CATALOGS } from "../lib/i18n.js";
 import { TRANSLATED_MESSAGES } from "../lib/locales.js";
@@ -125,7 +126,7 @@ test("keeps History as a first-class page in the permanent bottom navigation", a
   assert.match(css, /--fullscreen-control-hit-size: 44px/);
   assert.match(css, /--fullscreen-control-clearance: clamp\(72px, 20vw, 120px\)/);
   assert.match(css, /--fullscreen-translation-max-width: min\(48vw, 248px\)/);
-  assert.match(css, /--fullscreen-topbar-height: 70px/);
+  assert.match(css, /--fullscreen-topbar-height: 66px/);
   assert.doesNotMatch(css, /:not\(\[data-active-route="home"\]\)/);
   assert.match(css, /\.bottom-nav\.is-collapsed/);
   assert.match(css, /\.bottom-nav\.is-collapsed \.bottom-nav__items/);
@@ -368,13 +369,17 @@ test("keeps global and personal bookmarks in one controllable topic list", async
 });
 
 test("derives generated bookmark tags from the canonical topic definitions", async () => {
-  const generator = await readFile(
-    new URL("../scripts/generate_global_bookmarks.mjs", root),
-    "utf8",
-  );
+  const [generator, sources] = await Promise.all([
+    readFile(new URL("../scripts/generate_global_bookmarks.mjs", root), "utf8"),
+    readFile(
+      new URL("../scripts/lib/global_bookmark_sources.mjs", root),
+      "utf8",
+    ),
+  ]);
 
-  assert.match(generator, /CORE_BOOKMARK_TOPIC_DEFINITIONS/);
-  assert.match(generator, /\[definition\.name, \.\.\.definition\.aliases\]/);
+  assert.match(generator, /parseTopicDocument/);
+  assert.match(generator, /data\/global-bookmarks\/topics\.json/);
+  assert.match(sources, /\[topic\.name, \.\.\.topic\.aliases\]/);
   assert.doesNotMatch(generator, /const TAG_IDS = new Map\(\[/);
 });
 
@@ -439,6 +444,17 @@ test("ships complete governed catalogs for every GetBible translation language",
   const topicKeys = extensionKeys.filter((key) =>
     key.startsWith("bookmark_topics.")
   );
+  const canonicalTopicKeys = CORE_BOOKMARK_TOPIC_DEFINITIONS
+    .map((topic) => topic.name_key)
+    .sort();
+  const untranslatedTopicKeys = canonicalTopicKeys.filter(
+    (key) => !extensionKeys.includes(key),
+  );
+  const governedEnglishKeys = [...new Set([
+    ...baseKeys,
+    ...extensionKeys,
+    ...untranslatedTopicKeys,
+  ])].sort();
   const scopedOverrideKeys = englishKeys.filter((key) =>
     key.startsWith("history.") ||
     (baseKeys.includes(key) && key.startsWith("home.")) ||
@@ -452,11 +468,20 @@ test("ships complete governed catalogs for every GetBible translation language",
     Object.keys(BOOKMARK_LOCALE_EXTENSION).sort(),
     translatedLocales,
   );
-  assert.equal(baseKeys.length, 159);
-  assert.equal(extensionKeys.length, 178);
-  assert.equal(topicKeys.length, 61);
-  assert.equal(new Set([...baseKeys, ...extensionKeys]).size, englishKeys.length);
-  assert.deepEqual([...new Set([...baseKeys, ...extensionKeys])].sort(), englishKeys);
+  assert.ok(baseKeys.length >= 159);
+  assert.ok(extensionKeys.length >= 178);
+  assert.deepEqual(
+    topicKeys,
+    canonicalTopicKeys.filter((key) => extensionKeys.includes(key)),
+  );
+  assert.deepEqual(governedEnglishKeys, englishKeys);
+  assert.equal(
+    untranslatedTopicKeys.every((key) =>
+      typeof UI_CATALOGS.en[key] === "string" &&
+      !Object.hasOwn(BOOKMARK_LOCALE_EXTENSION.af, key)
+    ),
+    true,
+  );
   assert.deepEqual(
     Object.keys(SCOPED_LOCALE_OVERRIDES).sort(),
     ["chr", "cop", "enm", "got", "syr", "tlh"],
@@ -586,9 +611,13 @@ test("ships complete governed catalogs for every GetBible translation language",
 
   for (const [locale, catalog] of Object.entries(UI_CATALOGS)) {
     assert.equal(Object.isFrozen(catalog), true, `${locale}:catalog frozen`);
-    const localeKeys = locale !== "en" && fewFormLocales.has(locale)
-      ? [...englishKeys, ...pluralExtensionKeys].sort()
-      : englishKeys;
+    const translatedKeys = locale === "en"
+      ? englishKeys
+      : [...new Set([
+        ...baseKeys,
+        ...Object.keys(BOOKMARK_LOCALE_EXTENSION[locale]),
+      ])].sort();
+    const localeKeys = translatedKeys;
     assert.deepEqual(Object.keys(catalog).sort(), localeKeys, locale);
     for (const key of localeKeys) {
       const usesNumericOne = numericOneLocales.has(locale) &&

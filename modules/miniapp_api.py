@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import re
+import sqlite3
 import time
 from collections import Counter, OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -32,6 +33,14 @@ from .bookmark_backup import (
     parse_bookmark_backup_bytes,
 )
 from .catalog import BookOption, ChapterOption, TranslationOption
+from .contributions import (
+    MAX_CONTRIBUTION_BATCH,
+    ContributionError,
+    ContributionIdempotencyConflict,
+    ContributionNotAllowed,
+    ContributionStore,
+    normalize_catalog,
+)
 from .errors import (
     CircuitOpen,
     RobotBusy,
@@ -80,6 +89,21 @@ _SEARCH_ENUMS: dict[str, frozenset[str]] = {
     "diacritics": frozenset({"fold", "exact"}),
     "sort": frozenset({"canonical", "relevance"}),
 }
+_EMPTY_CONTRIBUTION_CATALOG = normalize_catalog(
+    {
+        "schema_version": 1,
+        "topics": [],
+        "associations": {"add": [], "remove": []},
+    }
+)
+_EMPTY_CONTRIBUTION_CHECKSUM = hashlib.sha256(
+    json.dumps(
+        _EMPTY_CONTRIBUTION_CATALOG,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+).hexdigest()
 
 
 class MiniAppApiInputError(ValueError):
@@ -186,6 +210,7 @@ class MiniAppApi:
         load_bookmark_backup: Callable[[BookmarkRestoreFile], Awaitable[bytes]]
         | None = None,
         cleanup_launch: Callable[[MiniAppLaunch], Awaitable[None]] | None = None,
+        contributions: ContributionStore | None = None,
         ingress_limiter: MiniAppIngressLimiter | None = None,
         replay_guard: TelegramInitDataReplayGuard | None = None,
         audit_settings: Settings | None = None,
@@ -221,6 +246,7 @@ class MiniAppApi:
         self._send_bookmark_backup = send_bookmark_backup
         self._load_bookmark_backup = load_bookmark_backup
         self._cleanup_launch = cleanup_launch
+        self._contributions = contributions
         self._replay_guard = replay_guard or TelegramInitDataReplayGuard(
             ttl_seconds=300,
             max_entries=20_000,
@@ -288,7 +314,8 @@ class MiniAppApi:
                 extra_headers={
                     "Access-Control-Allow-Methods": ("GET, POST, PUT, PATCH, DELETE, OPTIONS"),
                     "Access-Control-Allow-Headers": (
-                        "Authorization, Content-Type, X-Telegram-Init-Data"
+                        "Authorization, Content-Type, If-None-Match, "
+                        "X-Telegram-Init-Data"
                     ),
                     "Access-Control-Max-Age": "600",
                 },
@@ -373,6 +400,20 @@ class MiniAppApi:
                 if method != "PUT":
                     return self._method_not_allowed("PUT, OPTIONS")
                 return await self._update_preferences(session, request)
+            if parts.path == f"{self._api_prefix}/contributions/status":
+                if method == "GET":
+                    return self._contribution_status(session)
+                if method == "PATCH":
+                    return self._acknowledge_contribution_disclosure(session, request)
+                return self._method_not_allowed("GET, PATCH, OPTIONS")
+            if parts.path == f"{self._api_prefix}/contributions/events":
+                if method != "POST":
+                    return self._method_not_allowed("POST, OPTIONS")
+                return self._submit_contribution_events(session, request)
+            if parts.path == f"{self._api_prefix}/bookmarks/catalog":
+                if method != "GET":
+                    return self._method_not_allowed("GET, OPTIONS")
+                return self._contribution_catalog(request)
             if parts.path == f"{self._api_prefix}/bookmarks/backup":
                 if method != "POST":
                     return self._method_not_allowed("POST, OPTIONS")
@@ -417,6 +458,20 @@ class MiniAppApi:
             return self._error_response(400, "invalid_request", str(error))
         except MiniAppSessionInputError as error:
             return self._error_response(400, "invalid_request", str(error))
+        except ContributionIdempotencyConflict:
+            return self._error_response(
+                409,
+                "idempotency_conflict",
+                "A contribution event ID was reused with different data.",
+            )
+        except ContributionNotAllowed:
+            return self._error_response(
+                403,
+                "contribution_not_allowed",
+                "This Telegram user is not an approved contributor.",
+            )
+        except ContributionError as error:
+            return self._error_response(400, "invalid_contribution", str(error))
         except BookmarkBackupError as error:
             return self._error_response(400, "invalid_bookmark_backup", str(error))
         except BookmarkBackupUnavailable:
@@ -485,6 +540,9 @@ class MiniAppApi:
             f"{self._api_prefix}/basket/items": ("POST",),
             f"{self._api_prefix}/basket/order": ("PATCH",),
             f"{self._api_prefix}/preferences": ("PUT",),
+            f"{self._api_prefix}/contributions/status": ("GET", "PATCH"),
+            f"{self._api_prefix}/contributions/events": ("POST",),
+            f"{self._api_prefix}/bookmarks/catalog": ("GET",),
             f"{self._api_prefix}/bookmarks/backup": ("POST",),
             f"{self._api_prefix}/bookmarks/restore": ("GET", "DELETE"),
             f"{self._api_prefix}/post": ("POST",),
@@ -508,6 +566,22 @@ class MiniAppApi:
             raise MiniAppApiInputError("Session request contains unsupported fields.")
         init_data = _required_text(payload, "init_data", 8 * 1024)
         principal = self._validator.validate(init_data)
+        if self._contributions is not None:
+            try:
+                self._contributions.observe_identity(
+                    principal.user_id,
+                    first_name=principal.first_name,
+                    last_name=principal.last_name,
+                    username=principal.username,
+                    language_code=principal.language_code,
+                )
+            except (OSError, sqlite3.Error, RuntimeError):
+                # Contributor metadata is optional audit context. A busy or
+                # damaged moderation database must not prevent Bible reading.
+                LOGGER.warning(
+                    "Contributor identity metadata could not be refreshed",
+                    exc_info=True,
+                )
         supplied_launch = payload.get("launch_token")
         if supplied_launch is not None and not isinstance(supplied_launch, str):
             raise MiniAppApiInputError("launch_token must be text.")
@@ -661,6 +735,7 @@ class MiniAppApi:
                 "session_token": session.token,
                 "expires_in": int(self._sessions.snapshot()["ttl_seconds"]),
                 "user": {"id": session.user_id},
+                "contributions": self._contribution_status_payload(session.user_id),
                 "preferences": preferences.as_dict(),
                 "entrypoint": {
                     "route": session.launch.initial_route,
@@ -836,6 +911,7 @@ class MiniAppApi:
             f"{self._api_prefix}/post",
             f"{self._api_prefix}/bookmarks/backup",
             f"{self._api_prefix}/bookmarks/restore",
+            f"{self._api_prefix}/contributions/events",
         }
         if request.method.upper() != "DELETE" and path in expensive:
             return 1.0
@@ -862,6 +938,9 @@ class MiniAppApi:
             "basket/items",
             "basket/order",
             "preferences",
+            "contributions/status",
+            "contributions/events",
+            "bookmarks/catalog",
             "bookmarks/backup",
             "bookmarks/restore",
             "post",
@@ -1178,6 +1257,123 @@ class MiniAppApi:
         async with session.post_lock:
             self._sessions.clear_basket(session)
             return self._response(204, None)
+
+    def _contribution_status_payload(self, user_id: int) -> dict[str, object]:
+        store = self._contributions
+        if store is None:
+            return {
+                "enabled": False,
+                "state": "unavailable",
+                "can_contribute": False,
+                "disclosure_required": False,
+            }
+        try:
+            return store.contribution_status(user_id)
+        except (OSError, sqlite3.Error, RuntimeError):
+            LOGGER.warning(
+                "Contributor status is temporarily unavailable",
+                exc_info=True,
+            )
+            return {
+                "enabled": False,
+                "state": "unavailable",
+                "can_contribute": False,
+                "disclosure_required": False,
+            }
+
+    def _contribution_status(
+        self,
+        session: MiniAppSession,
+    ) -> MiniAppHttpResponse:
+        return self._response(
+            200,
+            self._contribution_status_payload(session.user_id),
+        )
+
+    def _acknowledge_contribution_disclosure(
+        self,
+        session: MiniAppSession,
+        request: MiniAppHttpRequest,
+    ) -> MiniAppHttpResponse:
+        payload = self._json_body(request)
+        if payload != {"disclosure_acknowledged": True}:
+            raise MiniAppApiInputError(
+                "Contribution status update must acknowledge the disclosure."
+            )
+        store = self._contributions
+        if store is None:
+            return self._error_response(
+                503,
+                "contributions_unavailable",
+                "Contributor synchronization is not configured on this instance.",
+                details={"retryable": True},
+            )
+        return self._response(200, store.acknowledge_disclosure(session.user_id))
+
+    def _submit_contribution_events(
+        self,
+        session: MiniAppSession,
+        request: MiniAppHttpRequest,
+    ) -> MiniAppHttpResponse:
+        store = self._contributions
+        if store is None:
+            return self._error_response(
+                503,
+                "contributions_unavailable",
+                "Contributor synchronization is not configured on this instance.",
+                details={"retryable": True},
+            )
+        payload = self._json_body(request)
+        if set(payload) != {"events"}:
+            raise MiniAppApiInputError("Contribution request must contain events.")
+        events = payload.get("events")
+        if not isinstance(events, list):
+            raise MiniAppApiInputError("events must be an array.")
+        if len(events) > MAX_CONTRIBUTION_BATCH:
+            raise MiniAppApiInputError(
+                f"events cannot contain more than {MAX_CONTRIBUTION_BATCH} items."
+            )
+        result = store.record_events(session.user_id, events)
+        return self._response(
+            200,
+            {
+                "accepted": result.accepted,
+                "replayed": result.replayed,
+                "event_ids": result.event_ids,
+            },
+        )
+
+    def _contribution_catalog(
+        self,
+        request: MiniAppHttpRequest,
+    ) -> MiniAppHttpResponse:
+        store = self._contributions
+        if store is None:
+            revision = 0
+            checksum = _EMPTY_CONTRIBUTION_CHECKSUM
+            catalog = _EMPTY_CONTRIBUTION_CATALOG
+            etag = f'"gb-catalog-0-{checksum[:16]}"'
+        else:
+            current = store.current_catalog()
+            revision = current.revision
+            checksum = current.checksum
+            catalog = current.catalog
+            etag = current.etag
+        headers = {
+            "Cache-Control": "private, no-cache, max-age=0, must-revalidate",
+            "ETag": etag,
+        }
+        if _header(request.headers, "if-none-match") == etag:
+            return self._response(304, None, extra_headers=headers)
+        return self._response(
+            200,
+            {
+                "revision": revision,
+                "checksum": checksum,
+                "catalog": catalog,
+            },
+            extra_headers=headers,
+        )
 
     async def _update_preferences(
         self,

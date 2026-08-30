@@ -3,6 +3,7 @@ import {
   BOOKMARK_STORAGE_PREFIX,
   MAX_BOOKMARKS,
   MAX_BOOKMARK_TOPICS,
+  MAX_RECENT_BOOKMARK_TOPICS,
 } from "./bookmark-store.js";
 
 const SCOPE_PATTERN = /^[a-f0-9]{64}$/;
@@ -21,7 +22,7 @@ const BOOKMARK_SYNC_MAX_ATTEMPTS = 3;
 const DEFAULT_TIMEOUT_MS = 2_500;
 const LAST_READ_STORAGE_PREFIX = "getbible.miniapp.last-read.v1";
 const STORAGE_UNKNOWN = Symbol("telegram-storage-unknown");
-const BOOKMARK_AGGREGATE_VERSION = 2;
+const BOOKMARK_AGGREGATE_VERSION = 3;
 
 export const TELEGRAM_BOOKMARK_CLOUD_MAX_KEYS =
   1 + MAX_BOOKMARK_TOPICS + MAX_BOOKMARKS;
@@ -583,6 +584,9 @@ export class TelegramBookmarkStorage {
       version: record.version,
       record_updated_at: updatedAt,
       active_topic_id: record.active_topic_id,
+      recent_topic_indexes: record.recent_topic_ids.map((topicId) =>
+        topicIndexes.get(topicId)
+      ),
       topic_count: record.topics.length,
       bookmark_count: record.bookmarks.length,
       payload_fingerprint: payloadFingerprint,
@@ -936,7 +940,7 @@ function parseAggregate(raw) {
     }
     if (
       !isRecord(value) ||
-      (value.version !== 1 && value.version !== BOOKMARK_AGGREGATE_VERSION) ||
+      ![1, 2, BOOKMARK_AGGREGATE_VERSION].includes(value.version) ||
       !Array.isArray(value.topics) ||
       value.topics.length < 1 ||
       value.topics.length > MAX_BOOKMARK_TOPICS ||
@@ -988,6 +992,21 @@ function normalizeAggregate(value, updatedAt) {
   if (!topicIds.has(value.active_topic_id)) {
     return null;
   }
+  const recentTopicIds = value.version >= 3
+    ? value.recent_topic_ids
+    : [];
+  if (
+    !Array.isArray(recentTopicIds) ||
+    recentTopicIds.length > MAX_BOOKMARK_TOPICS ||
+    new Set(recentTopicIds).size !== recentTopicIds.length ||
+    recentTopicIds.some((topicId) =>
+      typeof topicId !== "string" ||
+      !ID_PATTERN.test(topicId) ||
+      !topicIds.has(topicId)
+    )
+  ) {
+    return null;
+  }
   const verses = new Set();
   const bookmarkIds = new Set();
   const bookmarks = [];
@@ -1006,7 +1025,7 @@ function normalizeAggregate(value, updatedAt) {
       bookmarkIds.has(bookmark.id) ||
       !validTopicIds(bookmarkTopicIds, topicIds) ||
       (
-        value.version === BOOKMARK_AGGREGATE_VERSION &&
+        value.version >= 2 &&
         bookmark.topic_id !== bookmarkTopicIds[0]
       ) ||
       typeof bookmark.translation !== "string" ||
@@ -1038,6 +1057,7 @@ function normalizeAggregate(value, updatedAt) {
   return {
     version: BOOKMARK_AGGREGATE_VERSION,
     active_topic_id: value.active_topic_id,
+    recent_topic_ids: recentTopicIds.slice(0, MAX_RECENT_BOOKMARK_TOPICS),
     topics: value.topics.map((topic) => ({ ...topic })),
     bookmarks,
     record_updated_at: updatedAt,
@@ -1104,11 +1124,24 @@ function cloudAggregate(values, metaKey, topicPrefix, versePrefix) {
   }
   if (
     !meta ||
-    (meta.version !== 1 && meta.version !== BOOKMARK_AGGREGATE_VERSION) ||
+    ![1, 2, BOOKMARK_AGGREGATE_VERSION].includes(meta.version) ||
     updatedAt === null ||
     !boundedInteger(meta.topic_count, 1, MAX_BOOKMARK_TOPICS) ||
     !boundedInteger(meta.bookmark_count, 0, MAX_BOOKMARKS) ||
     typeof meta.active_topic_id !== "string"
+  ) {
+    return null;
+  }
+  const recentTopicIndexes = meta.version >= 3
+    ? meta.recent_topic_indexes
+    : [];
+  if (
+    !Array.isArray(recentTopicIndexes) ||
+    recentTopicIndexes.length > MAX_BOOKMARK_TOPICS ||
+    new Set(recentTopicIndexes).size !== recentTopicIndexes.length ||
+    recentTopicIndexes.some((index) =>
+      !Number.isInteger(index) || index < 0 || index >= meta.topic_count
+    )
   ) {
     return null;
   }
@@ -1174,6 +1207,9 @@ function cloudAggregate(values, metaKey, topicPrefix, versePrefix) {
   return parseAggregate(JSON.stringify({
     version: meta.version,
     active_topic_id: meta.active_topic_id,
+    recent_topic_ids: recentTopicIndexes
+      .slice(0, MAX_RECENT_BOOKMARK_TOPICS)
+      .map((index) => topics[index].id),
     topics,
     bookmarks,
     record_updated_at: updatedAt,

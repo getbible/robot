@@ -27,7 +27,7 @@
   --fullscreen-control-hit-size: 44px;
   --fullscreen-control-clearance: clamp(72px, 20vw, 120px);
   --fullscreen-translation-max-width: min(48vw, 248px);
-  --fullscreen-topbar-height: 70px;
+  --fullscreen-topbar-height: 66px;
   --fullscreen-control-safe-inline: max(var(--safe-left), var(--safe-right));
   --bridge-safe-area-inset-top: 0px;
   --bridge-safe-area-inset-right: 0px;
@@ -383,7 +383,7 @@ select:focus-visible {
 
 :root[data-telegram-fullscreen="true"]
   .app-shell.is-header-condensed {
-  --topbar-row-height: calc(var(--device-safe-top) + 40px);
+  --topbar-row-height: calc(var(--device-safe-top) + 36px);
 }
 
 :root[data-telegram-fullscreen="true"]
@@ -396,7 +396,7 @@ select:focus-visible {
       var(--fullscreen-control-safe-inline) +
         var(--fullscreen-control-clearance)
     )
-    4px
+    0
     calc(
       var(--fullscreen-control-safe-inline) +
         var(--fullscreen-control-clearance)
@@ -1397,7 +1397,7 @@ select:focus-visible {
   grid-template-columns: 44px minmax(0, 1fr) 44px;
   align-items: center;
   border-bottom: 1px solid var(--separator);
-  background: color-mix(in srgb, var(--page) 96%, transparent);
+  background: var(--page);
   backdrop-filter: blur(18px);
   transition:
     transform 180ms ease,
@@ -1827,6 +1827,12 @@ select:focus-visible {
 }
 
 .bookmark-topic-picker {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.bookmark-topic-picker label {
   display: block;
   min-width: 0;
 }
@@ -1842,6 +1848,23 @@ select:focus-visible {
   cursor: default;
 }
 
+.bookmark-topic-picker__clear {
+  min-height: 32px;
+  padding: 3px 7px;
+  justify-self: end;
+  border: 0;
+  border-radius: 8px;
+  color: var(--link);
+  background: transparent;
+  font-size: 0.68rem;
+  font-weight: 690;
+}
+
+.bookmark-topic-picker__clear:hover,
+.bookmark-topic-picker__clear:focus-visible {
+  background: var(--brand-soft);
+}
+
 .bookmark-popover__close {
   display: grid;
   width: 44px;
@@ -1850,6 +1873,7 @@ select:focus-visible {
   color: var(--muted);
   font-size: 1.35rem;
   font-weight: 400;
+  align-self: start;
 }
 
 .bookmark-assigned-topic__open:hover,
@@ -2255,6 +2279,17 @@ select:focus-visible {
 
 .bookmark-topic-form .button {
   min-height: 44px;
+}
+
+.bookmark-topic-manager__guidance {
+  margin: 10px 0 0;
+  padding: 9px 11px;
+  border-inline-start: 3px solid var(--brand);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--brand-soft);
+  font-size: 0.7rem;
+  line-height: 1.45;
 }
 
 .bookmark-topic-editor__name--core {

@@ -37,6 +37,10 @@ class TelegramMiniAppPrincipal:
     chat_instance: str | None
     chat_type: str | None
     start_param: str | None
+    first_name: str | None = None
+    last_name: str | None = None
+    username: str | None = None
+    language_code: str | None = None
 
     @property
     def rate_limit_chat_id(self) -> int:
@@ -144,6 +148,10 @@ class TelegramInitDataValidator:
 
         return TelegramMiniAppPrincipal(
             user_id=user_id,
+            first_name=_optional_json_text(user.get("first_name"), 64),
+            last_name=_optional_json_text(user.get("last_name"), 64),
+            username=_optional_json_text(user.get("username"), 64),
+            language_code=_optional_json_text(user.get("language_code"), 16),
             auth_date=auth_date,
             query_id=_optional_text(fields.get("query_id"), 256),
             chat_id=chat_id,
@@ -257,6 +265,22 @@ def _optional_text(value: str | None, maximum: int) -> str | None:
     if not value or len(value) > maximum or any(ord(character) < 32 for character in value):
         raise MiniAppAuthenticationError("Invalid Telegram authorization.")
     return value
+
+
+def _optional_json_text(value: object, maximum: int) -> str | None:
+    """Keep signed Telegram profile text bounded and inert for private audit display."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise MiniAppAuthenticationError("Invalid Telegram authorization.")
+    result = value.strip()
+    if (
+        not result
+        or len(result) > maximum
+        or any(ord(character) < 32 or ord(character) == 127 for character in result)
+    ):
+        raise MiniAppAuthenticationError("Invalid Telegram authorization.")
+    return result
 
 
 def _chat_type(value: str | None) -> str | None:

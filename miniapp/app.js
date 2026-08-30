@@ -39,13 +39,19 @@ import {
   BookmarkStore,
   bookmarkStorageScope,
 } from "./lib/bookmark-store.js";
+import { sortBookmarkTopics } from "./lib/bookmark-topic-sort.js";
+import {
+  ContributionSync,
+  isEnglishContributionTopicName,
+} from "./lib/contribution-sync.js";
 import {
   GLOBAL_BOOKMARK_CATALOG,
-  GLOBAL_BOOKMARK_CATALOG_VERSION,
   GLOBAL_BOOKMARK_SOURCE,
 } from "./lib/global-bookmark-catalog.js";
 import { GlobalBookmarkDeviceStorage } from "./lib/global-bookmark-device-storage.js";
+import { loadLiveGlobalBookmarkCatalog } from "./lib/global-bookmark-live-catalog.js";
 import { GlobalBookmarkPreferences } from "./lib/global-bookmark-preferences.js";
+import { miniAppInstanceScope } from "./lib/instance-scope.js";
 import { restoreBookmarkBackup } from "./lib/bookmark-restore.js";
 import { TelegramBookmarkStorage } from "./lib/telegram-bookmark-storage.js";
 import { TelegramBridge } from "./lib/telegram.js";
@@ -56,10 +62,22 @@ import {
 
 const bridge = new TelegramBridge();
 const i18n = new I18n();
+const instanceScope = miniAppInstanceScope(document.baseURI);
 let readingHistory = null;
 let bookmarkStore = null;
 let bookmarkStorage = null;
+let bookmarkStorageScopeValue = null;
+let globalBookmarkDeviceStorage = null;
 let globalBookmarkPreferences = null;
+let globalBookmarkCatalog = GLOBAL_BOOKMARK_CATALOG;
+let globalBookmarkCatalogChecksum = null;
+let contributionSync = null;
+let contributionSyncTask = null;
+let contributionRetryTimer = null;
+let contributionRetryDelayMs = 2_000;
+// The default server refill is one contribution request per five seconds.
+// Keep a margin so long baselines do not oscillate into the abuse backoff.
+let contributionBatchDelayMs = 5_250;
 let api = null;
 let scriptureExcerpts = null;
 let filterDraft = null;
@@ -92,6 +110,8 @@ const ICON_ONLY_ROUTES = new Set([
   "selection",
   "bookmarks",
 ]);
+
+class ContributorTopicLanguageError extends Error {}
 
 const state = {
   route: "home",
@@ -294,6 +314,8 @@ const elements = mapElements({
   bookmarkPopoverReference: "bookmark-popover-reference",
   bookmarkAssignedTopics: "bookmark-assigned-topics",
   bookmarkTopicPicker: "bookmark-topic-picker",
+  clearRecentBookmarkTopics: "clear-recent-bookmark-topics",
+  contributorTopicGuidance: "contributor-topic-guidance",
   closeBookmarkPopover: "close-bookmark-popover",
   selectionSummary: "selection-summary",
   clearSelection: "clear-selection",
@@ -371,27 +393,37 @@ async function boot() {
     }
 
     const storageScope = await bookmarkStorageScope(payload?.user?.id);
+    bookmarkStorageScopeValue = storageScope;
     readingHistory = new ReadingHistoryStore({ scope: storageScope });
-    const [globalBookmarkStorage, synchronizedBookmarkStorage] = await Promise.all([
-      GlobalBookmarkDeviceStorage.open({
-        scope: storageScope,
-        webApp: bridge.webApp,
-      }),
-      TelegramBookmarkStorage.open({
-        scope: storageScope,
-        webApp: bridge.webApp,
-        hydrateLastRead: true,
-        onStatus: (status) => {
-          state.bookmarks.storageStatus = status;
-          updateBookmarkStorageWarning();
-        },
-      }),
-    ]);
+    const [liveCatalog, globalBookmarkStorage, synchronizedBookmarkStorage] =
+      await Promise.all([
+        loadLiveGlobalBookmarkCatalog({
+          api,
+          scope: storageScope,
+          instanceScope,
+        }),
+        GlobalBookmarkDeviceStorage.open({
+          scope: storageScope,
+          webApp: bridge.webApp,
+        }),
+        TelegramBookmarkStorage.open({
+          scope: storageScope,
+          webApp: bridge.webApp,
+          hydrateLastRead: true,
+          onStatus: (status) => {
+            state.bookmarks.storageStatus = status;
+            updateBookmarkStorageWarning();
+          },
+        }),
+      ]);
+    globalBookmarkCatalog = liveCatalog.catalog;
+    globalBookmarkCatalogChecksum = liveCatalog.checksum;
+    globalBookmarkDeviceStorage = globalBookmarkStorage;
     globalBookmarkPreferences = new GlobalBookmarkPreferences({
-      allowedTopicIds: GLOBAL_BOOKMARK_CATALOG
+      allowedTopicIds: globalBookmarkCatalog
         .topicDefinitions()
         .map((definition) => definition.id),
-      allowedBookmarkIds: GLOBAL_BOOKMARK_CATALOG.bookmarkIds(),
+      allowedBookmarkIds: globalBookmarkCatalog.bookmarkIds(),
       scope: storageScope,
       storage: globalBookmarkStorage,
     });
@@ -400,6 +432,30 @@ async function boot() {
       scope: storageScope,
       storage: bookmarkStorage,
     });
+    const contributionOptions = {
+      scope: storageScope,
+      instanceScope,
+      api,
+      coreTopicIds: globalBookmarkCatalog
+        .topicDefinitions()
+        .map((definition) => definition.id),
+      // Pace background batches below the server's small per-user burst
+      // budget. A Retry-After response remains authoritative below.
+      batchPause: () => new Promise((resolve) =>
+        window.setTimeout(resolve, contributionBatchDelayMs)
+      ),
+    };
+    try {
+      contributionSync = await ContributionSync.open(contributionOptions);
+    } catch {
+      // IndexedDB/Web Locks may be unavailable in an older WebView. Personal
+      // bookmarks still open normally; online contribution retries remain
+      // memory-only and the contributor sees the durability warning.
+      contributionSync = new ContributionSync({
+        ...contributionOptions,
+        storage: null,
+      });
+    }
     const storedLastRead = await bookmarkStorage.readLastRead();
     const synchronizedLastReadWasCleared = Boolean(
       bookmarkStorage.status.lastReadCleared,
@@ -462,6 +518,7 @@ async function boot() {
     if (entrypoint.bookmark_restore_available) {
       await restoreBookmarksFromChat();
     }
+    void initializeContributionSync();
   } catch (error) {
     if (error instanceof ApiError && [401, 409].includes(error.status)) {
       showExpiredAccess();
@@ -475,9 +532,245 @@ async function boot() {
   }
 }
 
+async function initializeContributionSync() {
+  if (!contributionSync) {
+    return;
+  }
+  try {
+    const status = await contributionSync.refreshStatus();
+    updateContributorPresentation();
+    if (status.can_contribute && status.disclosure_required) {
+      await bridge.alert(i18n.t("bookmarks.contribution_disclosure"));
+      await contributionSync.acknowledgeDisclosure();
+      updateContributorPresentation();
+    }
+    scheduleContributionSync();
+  } catch (error) {
+    if (error instanceof ApiError && [401, 409].includes(error.status)) {
+      handleSessionError(error);
+    } else if (
+      (error instanceof ApiError ? error.retryable : navigator.onLine !== false) &&
+      contributionRetryTimer === null
+    ) {
+      const delay = contributionRetryDelay(error);
+      contributionRetryTimer = window.setTimeout(() => {
+        contributionRetryTimer = null;
+        void initializeContributionSync();
+      }, delay);
+    }
+    updateContributorPresentation();
+  }
+}
+
+function updateContributorPresentation() {
+  elements.contributorTopicGuidance.hidden = !contributionSync?.canContribute;
+  const messageKey = contributionSync?.persistenceFailed
+    ? "bookmarks.contribution_storage_attention"
+    : contributionSync?.recovering
+      ? "bookmarks.contribution_sync_attention"
+      : "bookmarks.contribution_english_guidance";
+  elements.contributorTopicGuidance.textContent = i18n.t(
+    messageKey,
+  );
+}
+
+function mutatePersonalBookmarks(operation) {
+  const before = bookmarkStore?.snapshot();
+  const result = operation();
+  const after = bookmarkStore?.snapshot();
+  if (before && after && contributionSync) {
+    try {
+      void Promise.resolve(contributionSync.captureMutation(before, after))
+        .then(() => {
+          updateContributorPresentation();
+          if (
+            contributionSync.pendingCount > 0 ||
+            contributionSync.recovering
+          ) {
+            scheduleContributionSync();
+          }
+        })
+        .catch(() => updateContributorPresentation());
+    } catch {
+      // Contribution mirroring is deliberately subordinate to the completed
+      // local bookmark write. A broken journal must never undo user data.
+    }
+  }
+  return result;
+}
+
+function captureGlobalBookmarkRemoval(bookmark) {
+  if (!contributionSync?.canContribute || !bookmarkStore) {
+    return;
+  }
+  const definition = globalBookmarkCatalog.topicDefinition(
+    bookmark?.catalog_topic_id,
+  );
+  if (!definition) {
+    return;
+  }
+  try {
+    const captured = contributionSync.captureGlobalRemoval(
+      {
+        id: definition.id,
+        name: definition.name,
+        color: definition.color,
+      },
+      {
+        book: bookmark.book,
+        chapter: bookmark.chapter,
+        verse: bookmark.verse,
+      },
+      bookmarkStore.snapshot(),
+    );
+    void Promise.resolve(captured).then(() => {
+      updateContributorPresentation();
+      if (contributionSync.pendingCount > 0 || contributionSync.recovering) {
+        scheduleContributionSync();
+      }
+    }).catch(() => updateContributorPresentation());
+  } catch {
+    // The global hide has already succeeded locally. Contribution recovery is
+    // intentionally independent and may retry without undoing that choice.
+    updateContributorPresentation();
+  }
+}
+
+function captureGlobalBookmarkAdditions(bookmarks) {
+  if (
+    !contributionSync?.canContribute ||
+    !bookmarkStore ||
+    !Array.isArray(bookmarks) ||
+    bookmarks.length === 0
+  ) {
+    return;
+  }
+  const assignments = bookmarks.flatMap((bookmark) => {
+    const definition = globalBookmarkCatalog.topicDefinition(
+      bookmark?.catalog_topic_id,
+    );
+    return definition
+      ? [{
+          topic: {
+            id: definition.id,
+            name: definition.name,
+            color: definition.color,
+          },
+          verse: {
+            book: bookmark.book,
+            chapter: bookmark.chapter,
+            verse: bookmark.verse,
+          },
+        }]
+      : [];
+  });
+  if (assignments.length === 0) {
+    return;
+  }
+  try {
+    const captured = contributionSync.captureGlobalAdditions(
+      assignments,
+      bookmarkStore.snapshot(),
+    );
+    void Promise.resolve(captured).then(() => {
+      updateContributorPresentation();
+      if (contributionSync.pendingCount > 0 || contributionSync.recovering) {
+        scheduleContributionSync();
+      }
+    }).catch(() => updateContributorPresentation());
+  } catch {
+    // The exclusions have already been restored locally. A failed mirror stays
+    // subordinate to that completed preference write and remains visible in
+    // the contributor storage guidance.
+    updateContributorPresentation();
+  }
+}
+
+function scheduleContributionSync() {
+  if (
+    contributionSyncTask ||
+    contributionRetryTimer !== null ||
+    !contributionSync?.canContribute ||
+    !bookmarkStore ||
+    navigator.onLine === false
+  ) {
+    return;
+  }
+  const snapshot = bookmarkStore.snapshot();
+  let completed = false;
+  contributionSyncTask = Promise.resolve()
+    .then(() => contributionSync.synchronize(snapshot))
+    .then(() => {
+      completed = true;
+      contributionRetryDelayMs = 2_000;
+    })
+    .catch((error) => {
+      if (error instanceof ApiError && [401, 409].includes(error.status)) {
+        handleSessionError(error);
+        return;
+      }
+      if (error instanceof ApiError ? error.retryable : navigator.onLine !== false) {
+        const delay = contributionRetryDelay(error);
+        contributionRetryTimer = window.setTimeout(() => {
+          contributionRetryTimer = null;
+          scheduleContributionSync();
+        }, delay);
+      }
+    })
+    .finally(() => {
+      contributionSyncTask = null;
+      updateContributorPresentation();
+      // Close the narrow race where a mutation is durably captured after the
+      // drain observes an empty queue but before this task releases its local
+      // single-flight marker.
+      if (
+        completed &&
+        contributionRetryTimer === null &&
+        (contributionSync?.pendingCount > 0 || contributionSync?.recovering)
+      ) {
+        queueMicrotask(scheduleContributionSync);
+      }
+    });
+}
+
+async function refreshLiveGlobalBookmarkCatalog() {
+  if (!api || !bookmarkStorageScopeValue) {
+    return;
+  }
+  const result = await loadLiveGlobalBookmarkCatalog({
+    api,
+    scope: bookmarkStorageScopeValue,
+    instanceScope,
+  });
+  if (
+    result.checksum === globalBookmarkCatalogChecksum ||
+    (result.checksum === null && globalBookmarkCatalogChecksum === null)
+  ) {
+    return;
+  }
+  globalBookmarkCatalog = result.catalog;
+  globalBookmarkCatalogChecksum = result.checksum;
+  globalBookmarkPreferences = new GlobalBookmarkPreferences({
+    allowedTopicIds: globalBookmarkCatalog
+      .topicDefinitions()
+      .map((definition) => definition.id),
+    allowedBookmarkIds: globalBookmarkCatalog.bookmarkIds(),
+    scope: bookmarkStorageScopeValue,
+    storage: globalBookmarkDeviceStorage,
+  });
+  renderBookmarks();
+  if (state.bible.status === "ready") {
+    renderBible();
+  }
+}
+
 function attachListeners() {
   elements.accessRetry.addEventListener("click", () => accessAction());
-  window.addEventListener("online", updateConnectionState);
+  window.addEventListener("online", () => {
+    updateConnectionState();
+    void refreshLiveGlobalBookmarkCatalog();
+    scheduleContributionSync();
+  });
   window.addEventListener("offline", updateConnectionState);
 
   document.querySelectorAll("[data-route]").forEach((button) => {
@@ -730,6 +1023,20 @@ function attachListeners() {
       applyPopoverBookmark(topicId);
     }
   });
+  elements.clearRecentBookmarkTopics.addEventListener("click", () => {
+    if (!bookmarkStore?.clearRecentTopics()) {
+      return;
+    }
+    const selectionId = state.bookmarks.popoverSelectionId;
+    const verse = findVerse(selectionId);
+    populateBookmarkTopicPicker(new Set(
+      bookmarkAssignmentsForVerse(verse).map((assignment) => assignment.topic_id),
+    ));
+    announce(i18n.t("bookmarks.recent_topics_cleared"));
+    window.requestAnimationFrame(() => {
+      elements.bookmarkTopicPicker.focus({ preventScroll: true });
+    });
+  });
   elements.closeBookmarkPopover.addEventListener("click", closeBookmarkPopover);
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !elements.bookmarkPopover.hidden) {
@@ -746,6 +1053,21 @@ function attachListeners() {
       closeBookmarkPopover({ restoreFocus: false });
     }
   });
+}
+
+function contributionRetryDelay(error) {
+  const announcedDelay = Number.isFinite(error?.retryAfter)
+    ? error.retryAfter * 1_000
+    : contributionRetryDelayMs;
+  const delay = Math.min(300_000, Math.max(250, announcedDelay));
+  if (Number.isFinite(error?.retryAfter)) {
+    contributionBatchDelayMs = Math.min(
+      300_000,
+      Math.max(contributionBatchDelayMs, delay + 250),
+    );
+  }
+  contributionRetryDelayMs = Math.min(300_000, Math.max(2_000, delay * 2));
+  return delay;
 }
 
 function loadHeroAsset() {
@@ -2259,7 +2581,10 @@ async function selectBibleChapter(
   state.bible.focusHighlights = Array.isArray(focusHighlights)
     ? focusHighlights
     : [];
+  elements.bibleHeading.classList.remove("is-hidden");
   elements.bibleView.scrollTop = 0;
+  state.lastScrollTop = 0;
+  state.scrollPositions.set("bible", 0);
   renderBible();
   try {
     const scripture = normalizeScripture(
@@ -2769,8 +3094,17 @@ function scrollReaderToVerse(number) {
     if (!verse) {
       return;
     }
+    elements.bibleHeading.classList.remove("is-hidden");
     verse.scrollIntoView({ block: "start", behavior: "auto" });
-    elements.bibleView.scrollTop = Math.max(0, elements.bibleView.scrollTop - 48);
+    const toolbarHeight = elements.bibleHeading.hidden
+      ? 0
+      : Math.ceil(elements.bibleHeading.getBoundingClientRect().height);
+    const scriptureBreathingRoom = 10;
+    elements.bibleView.scrollTop = Math.max(
+      0,
+      elements.bibleView.scrollTop - toolbarHeight - scriptureBreathingRoom,
+    );
+    state.lastScrollTop = elements.bibleView.scrollTop;
     state.scrollPositions.set("bible", elements.bibleView.scrollTop);
   });
 }
@@ -3179,7 +3513,7 @@ function coreBookmarkTopicDefinition(topicId) {
   if (!topic) {
     return null;
   }
-  return GLOBAL_BOOKMARK_CATALOG.topicDefinitionForLocalTopic(
+  return globalBookmarkCatalog.topicDefinitionForLocalTopic(
     topicId,
     [topic],
     globalBookmarkTopicMappings(),
@@ -3188,15 +3522,26 @@ function coreBookmarkTopicDefinition(topicId) {
 
 function bookmarkTopicPresentation(topic) {
   const definition = coreBookmarkTopicDefinition(topic?.id);
+  const translated = definition ? i18n.t(definition.name_key) : null;
   return {
     core: Boolean(definition),
     definition,
-    name: definition ? i18n.t(definition.name_key) : topic?.name ?? "",
+    name: definition
+      ? translated === definition.name_key ? definition.name : translated
+      : topic?.name ?? "",
   };
 }
 
 function bookmarkTopicDisplayName(topic) {
   return bookmarkTopicPresentation(topic).name;
+}
+
+function sortedBookmarkTopics(topics) {
+  return sortBookmarkTopics(
+    topics,
+    bookmarkTopicDisplayName,
+    i18n.locale,
+  );
 }
 
 function bookmarkAssignmentsForVerse(
@@ -3207,7 +3552,7 @@ function bookmarkAssignmentsForVerse(
     return [];
   }
   const assignments = new Map();
-  for (const bookmark of GLOBAL_BOOKMARK_CATALOG.bookmarksForVerse(
+  for (const bookmark of globalBookmarkCatalog.bookmarksForVerse(
     verse,
     snapshot.topics,
     globalBookmarkTopicMappings(),
@@ -3238,7 +3583,7 @@ function bookmarkAssignmentsForVerse(
 }
 
 function visibleGlobalBookmarksForTopic(topicId, topics) {
-  return GLOBAL_BOOKMARK_CATALOG.bookmarksForTopic(
+  return globalBookmarkCatalog.bookmarksForTopic(
     topicId,
     topics,
     globalBookmarkTopicMappings(),
@@ -3252,7 +3597,7 @@ function bookmarkViewForTopic(topicId, snapshot = bookmarkStore?.snapshot()) {
     return [];
   }
   const personal = bookmarkStore.bookmarksForTopic(topicId);
-  const canonicalTopicId = GLOBAL_BOOKMARK_CATALOG.canonicalTopicId(
+  const canonicalTopicId = globalBookmarkCatalog.canonicalTopicId(
     topicId,
     snapshot.topics,
     globalBookmarkTopicMappings(),
@@ -3273,7 +3618,7 @@ function activeGlobalBookmarkStats(snapshot = bookmarkStore?.snapshot()) {
   if (!snapshot || !globalBookmarkPreferences) {
     return { bookmarks: 0, topics: 0 };
   }
-  const resolved = GLOBAL_BOOKMARK_CATALOG.resolveTopics(
+  const resolved = globalBookmarkCatalog.resolveTopics(
     snapshot.topics,
     globalBookmarkTopicMappings(),
   );
@@ -3391,7 +3736,7 @@ function renderBookmarkGroups() {
     return;
   }
   const query = state.bookmarks.search.trim().toLocaleLowerCase();
-  const topics = snapshot.topics.filter((topic) => {
+  const topics = sortedBookmarkTopics(snapshot.topics.filter((topic) => {
     if (!query) {
       return true;
     }
@@ -3402,7 +3747,7 @@ function renderBookmarkGroups() {
       presentation.definition?.name,
       ...(presentation.definition?.aliases ?? []),
     ].some((name) => name?.toLocaleLowerCase().includes(query));
-  });
+  }));
   const fragment = document.createDocumentFragment();
   for (const topic of topics) {
     const topicName = bookmarkTopicDisplayName(topic);
@@ -3542,13 +3887,13 @@ function renderBookmarkDetail(topicId) {
     return;
   }
   const snapshot = bookmarkStore.snapshot();
-  const canonicalTopicId = GLOBAL_BOOKMARK_CATALOG.canonicalTopicId(
+  const canonicalTopicId = globalBookmarkCatalog.canonicalTopicId(
     topicId,
     snapshot.topics,
     globalBookmarkTopicMappings(),
   );
   const globalBookmarks = canonicalTopicId
-    ? GLOBAL_BOOKMARK_CATALOG.bookmarksForTopic(
+    ? globalBookmarkCatalog.bookmarksForTopic(
       topicId,
       snapshot.topics,
       globalBookmarkTopicMappings(),
@@ -3919,7 +4264,7 @@ async function onBookmarkListAction(event) {
     : null;
   const globalBookmark = personalBookmark
     ? null
-    : GLOBAL_BOOKMARK_CATALOG.bookmarkById(
+    : globalBookmarkCatalog.bookmarkById(
       bookmarkId,
       snapshot?.topics ?? [],
       globalBookmarkTopicMappings(),
@@ -3942,10 +4287,15 @@ async function onBookmarkListAction(event) {
     )];
     const removalIndex = rows.indexOf(remove.closest(".bookmark-list__item"));
     if (bookmark.source === GLOBAL_BOOKMARK_SOURCE) {
-      globalBookmarkPreferences.hideBookmark(bookmark.id);
+      const hidden = globalBookmarkPreferences.hideBookmark(bookmark.id);
       void globalBookmarkPreferences.flush();
+      if (hidden) {
+        captureGlobalBookmarkRemoval(bookmark);
+      }
     } else {
-      bookmarkStore.removeBookmarkTopic(bookmark.id, bookmark.topic_id);
+      mutatePersonalBookmarks(() =>
+        bookmarkStore.removeBookmarkTopic(bookmark.id, bookmark.topic_id)
+      );
     }
     renderBookmarks();
     if (state.bible.status === "ready") {
@@ -3996,7 +4346,7 @@ function renderBookmarkTopicEditor() {
     return;
   }
   const fragment = document.createDocumentFragment();
-  for (const topic of snapshot.topics) {
+  for (const topic of sortedBookmarkTopics(snapshot.topics)) {
     const presentation = bookmarkTopicPresentation(topic);
     const row = document.createElement("div");
     row.className = "bookmark-topic-editor__row";
@@ -4070,17 +4420,26 @@ function onBookmarkTopicCreate(event) {
     return;
   }
   try {
-    const topic = bookmarkStore.addTopic(
-      elements.bookmarkTopicName.value,
+    const requestedName = elements.bookmarkTopicName.value;
+    if (
+      contributionSync?.canContribute &&
+      !isEnglishContributionTopicName(requestedName)
+    ) {
+      throw new ContributorTopicLanguageError();
+    }
+    const topic = mutatePersonalBookmarks(() => bookmarkStore.addTopic(
+      requestedName,
       elements.bookmarkTopicColor.value,
-    );
+    ));
     elements.bookmarkTopicForm.reset();
     setBookmarkColorInput(elements.bookmarkTopicColor, topic.color);
     renderBookmarks();
     announce(i18n.t("bookmarks.topic_added"));
   } catch (error) {
     toast(i18n.t(
-      error instanceof RangeError
+      error instanceof ContributorTopicLanguageError
+        ? "bookmarks.contribution_english_required"
+        : error instanceof RangeError
         ? "bookmarks.topic_limit"
         : "bookmarks.invalid_topic",
     ));
@@ -4093,7 +4452,7 @@ function restoreDefaultBookmarkTopics() {
   }
   try {
     const result = bookmarkStore.ensureTopics(
-      GLOBAL_BOOKMARK_CATALOG.topicDefinitions({ defaultsOnly: true }),
+      globalBookmarkCatalog.topicDefinitions({ defaultsOnly: true }),
       globalBookmarkTopicMappings(),
     );
     globalBookmarkPreferences?.setTopicMappings(
@@ -4144,14 +4503,25 @@ async function onBookmarkTopicEdit(event) {
     const name = row?.querySelector("[data-topic-name]")?.value;
     const color = row?.querySelector("[data-topic-color]")?.value;
     try {
-      bookmarkStore.updateTopic(
+      if (
+        contributionSync?.canContribute &&
+        !coreBookmarkTopicDefinition(topic.id) &&
+        !isEnglishContributionTopicName(name)
+      ) {
+        throw new ContributorTopicLanguageError();
+      }
+      mutatePersonalBookmarks(() => bookmarkStore.updateTopic(
         topic.id,
         coreBookmarkTopicDefinition(topic.id) ? { color } : { name, color },
-      );
+      ));
       renderBookmarks();
       announce(i18n.t("bookmarks.topic_updated"));
-    } catch {
-      toast(i18n.t("bookmarks.invalid_topic"));
+    } catch (error) {
+      toast(i18n.t(
+        error instanceof ContributorTopicLanguageError
+          ? "bookmarks.contribution_english_required"
+          : "bookmarks.invalid_topic",
+      ));
     }
     return;
   }
@@ -4162,14 +4532,14 @@ async function onBookmarkTopicEdit(event) {
   const count = bookmarkStore.topicUsage(topic.id);
   const snapshot = bookmarkStore.snapshot();
   const topicName = bookmarkTopicDisplayName(topic);
-  const canonicalTopicId = GLOBAL_BOOKMARK_CATALOG.canonicalTopicId(
+  const canonicalTopicId = globalBookmarkCatalog.canonicalTopicId(
     topic.id,
     snapshot.topics,
     globalBookmarkTopicMappings(),
   );
   const globalCount = canonicalTopicId &&
     globalBookmarkPreferences?.hasTopic(canonicalTopicId)
-    ? GLOBAL_BOOKMARK_CATALOG.bookmarksForTopic(
+    ? globalBookmarkCatalog.bookmarksForTopic(
       topic.id,
       snapshot.topics,
       globalBookmarkTopicMappings(),
@@ -4193,7 +4563,7 @@ async function onBookmarkTopicEdit(event) {
     globalBookmarkPreferences?.disableTopic(canonicalTopicId);
     await globalBookmarkPreferences?.flush();
   }
-  bookmarkStore.removeTopic(topic.id);
+  mutatePersonalBookmarks(() => bookmarkStore.removeTopic(topic.id));
   renderBookmarks();
   if (state.bible.status === "ready") {
     renderBible();
@@ -4216,7 +4586,7 @@ async function clearBookmarks() {
   if (!confirmed) {
     return;
   }
-  bookmarkStore.clearBookmarks();
+  mutatePersonalBookmarks(() => bookmarkStore.clearBookmarks());
   renderBookmarks();
   if (state.bible.status === "ready") {
     renderBible();
@@ -4236,7 +4606,9 @@ async function loadGlobalBookmarks() {
       "bookmarks.global_loading",
     );
     try {
-      const definitions = GLOBAL_BOOKMARK_CATALOG.topicDefinitions();
+      await refreshLiveGlobalBookmarkCatalog();
+      const hiddenBookmarkIds = globalBookmarkPreferences.hiddenBookmarkIds;
+      const definitions = globalBookmarkCatalog.topicDefinitions();
       const result = bookmarkStore.ensureTopics(
         definitions,
         globalBookmarkTopicMappings(),
@@ -4247,9 +4619,21 @@ async function loadGlobalBookmarks() {
       );
       const preferencesChanged = globalBookmarkPreferences.enableTopics(
         definitions.map((definition) => definition.id),
-        GLOBAL_BOOKMARK_CATALOG_VERSION,
+        globalBookmarkCatalog.version,
       );
       await globalBookmarkPreferences.flush();
+      const restoredSnapshot = bookmarkStore.snapshot();
+      const restoredBookmarks = hiddenBookmarkIds
+        .map((bookmarkId) => globalBookmarkCatalog.bookmarkById(
+          bookmarkId,
+          restoredSnapshot.topics,
+          globalBookmarkTopicMappings(),
+        ))
+        .filter((bookmark) =>
+          bookmark &&
+          !globalBookmarkPreferences.isBookmarkHidden(bookmark.id)
+        );
+      captureGlobalBookmarkAdditions(restoredBookmarks);
       clearBookmarkNavigation();
       renderBookmarks();
       if (state.bible.status === "ready") {
@@ -4261,7 +4645,7 @@ async function loadGlobalBookmarks() {
       if (bookmarkStorage) {
         void bookmarkStorage.flush().catch(() => undefined);
       }
-      const bookmarks = GLOBAL_BOOKMARK_CATALOG.assignmentCountForTopics(
+      const bookmarks = globalBookmarkCatalog.assignmentCountForTopics(
         bookmarkStore.snapshot().topics,
         globalBookmarkTopicMappings(),
       );
@@ -4273,7 +4657,7 @@ async function loadGlobalBookmarks() {
         changed ? "bookmarks.global_loaded" : "bookmarks.global_current",
         {
           bookmarks,
-          topics: GLOBAL_BOOKMARK_CATALOG.topicDefinitions().length,
+          topics: globalBookmarkCatalog.topicDefinitions().length,
         },
       );
       elements.globalBookmarkStatus.textContent = message;
@@ -4343,27 +4727,42 @@ async function loadTopicGlobalBookmarks() {
     return;
   }
   const topicId = state.bookmarks.selectedTopicId;
-  const snapshot = bookmarkStore.snapshot();
-  const canonicalTopicId = GLOBAL_BOOKMARK_CATALOG.canonicalTopicId(
-    topicId,
-    snapshot.topics,
-    globalBookmarkTopicMappings(),
-  );
-  if (!canonicalTopicId) {
-    return;
-  }
   globalBookmarkTask = (async () => {
     // Yield once so the shared task reference is installed before cleanup.
     await Promise.resolve();
     setGlobalBookmarkBusy(true);
     try {
+      // Revalidate the reviewed overlay on an explicit pull so an already-open
+      // Mini App can use an operator publication without a reload.
+      await refreshLiveGlobalBookmarkCatalog();
+      const snapshot = bookmarkStore.snapshot();
+      const hiddenBookmarkIds = globalBookmarkPreferences.hiddenBookmarkIds;
+      const canonicalTopicId = globalBookmarkCatalog.canonicalTopicId(
+        topicId,
+        snapshot.topics,
+        globalBookmarkTopicMappings(),
+      );
+      if (!canonicalTopicId) {
+        throw new TypeError("The global bookmark topic is unavailable.");
+      }
       globalBookmarkPreferences.enableTopic(
         canonicalTopicId,
-        GLOBAL_BOOKMARK_CATALOG_VERSION,
+        globalBookmarkCatalog.version,
       );
       await globalBookmarkPreferences.flush();
+      const restoredBookmarks = hiddenBookmarkIds
+        .map((bookmarkId) => globalBookmarkCatalog.bookmarkById(
+          bookmarkId,
+          snapshot.topics,
+          globalBookmarkTopicMappings(),
+        ))
+        .filter((bookmark) =>
+          bookmark?.catalog_topic_id === canonicalTopicId &&
+          !globalBookmarkPreferences.isBookmarkHidden(bookmark.id)
+        );
+      captureGlobalBookmarkAdditions(restoredBookmarks);
       renderBookmarks();
-      const bookmarks = GLOBAL_BOOKMARK_CATALOG.bookmarksForTopic(
+      const bookmarks = globalBookmarkCatalog.bookmarksForTopic(
         topicId,
         snapshot.topics,
         globalBookmarkTopicMappings(),
@@ -4391,7 +4790,7 @@ async function clearTopicGlobalBookmarks() {
   }
   const topicId = state.bookmarks.selectedTopicId;
   const snapshot = bookmarkStore.snapshot();
-  const canonicalTopicId = GLOBAL_BOOKMARK_CATALOG.canonicalTopicId(
+  const canonicalTopicId = globalBookmarkCatalog.canonicalTopicId(
     topicId,
     snapshot.topics,
     globalBookmarkTopicMappings(),
@@ -4511,9 +4910,8 @@ async function restoreBookmarksFromChat() {
             : "getbible-bookmarks.json",
         }));
       },
-      importBackup: (backup, options) => bookmarkStore.importBackup(
-        backup,
-        options,
+      importBackup: (backup, options) => mutatePersonalBookmarks(() =>
+        bookmarkStore.importBackup(backup, options)
       ),
       flushPersistence: () => bookmarkStorage?.flush(),
       acknowledgeRestore: () => api.acknowledgeBookmarkRestore(),
@@ -4561,9 +4959,10 @@ async function importBookmarkBackup() {
       throw new TypeError("Bookmark backup is too large.");
     }
     const backup = JSON.parse(await file.text());
-    const result = bookmarkStore.importBackup(backup, {
-      byteLength: file.size,
-    });
+    const result = mutatePersonalBookmarks(() => bookmarkStore.importBackup(
+      backup,
+      { byteLength: file.size },
+    ));
     clearBookmarkNavigation();
     renderBookmarks();
     if (state.bible.status === "ready") {
@@ -4759,22 +5158,42 @@ function populateBookmarkTopicPicker(assignedTopicIds) {
   placeholder.disabled = true;
   placeholder.selected = true;
   placeholder.textContent = i18n.t("bookmarks.more_topics");
-  const options = [placeholder];
-  for (const topic of bookmarkStore?.snapshot().topics ?? []) {
-    if (assignedTopicIds.has(topic.id)) {
-      continue;
-    }
+  const topics = bookmarkStore?.snapshot().topics ?? [];
+  const eligible = sortedBookmarkTopics(
+    topics.filter((topic) => !assignedTopicIds.has(topic.id)),
+  );
+  const eligibleById = new Map(eligible.map((topic) => [topic.id, topic]));
+  const recent = (bookmarkStore?.recentTopicIds ?? [])
+    .map((topicId) => eligibleById.get(topicId))
+    .filter(Boolean);
+  const groups = [];
+  if (recent.length > 0) {
+    const recentGroup = document.createElement("optgroup");
+    recentGroup.label = i18n.t("bookmarks.recent_topics");
+    recentGroup.append(...recent.map(bookmarkTopicOption));
+    groups.push(recentGroup);
+  }
+  if (eligible.length > 0) {
+    const allGroup = document.createElement("optgroup");
+    allGroup.label = i18n.t("bookmarks.all_topics");
+    allGroup.append(...eligible.map(bookmarkTopicOption));
+    groups.push(allGroup);
+  }
+  elements.bookmarkTopicPicker.replaceChildren(placeholder, ...groups);
+  elements.bookmarkTopicPicker.disabled = eligible.length === 0;
+  elements.clearRecentBookmarkTopics.hidden =
+    (bookmarkStore?.recentTopicIds.length ?? 0) === 0;
+  if (eligible.length === 0) {
+    placeholder.textContent = i18n.t("bookmarks.all_topics_assigned");
+  }
+}
+
+function bookmarkTopicOption(topic) {
     const option = document.createElement("option");
     option.value = topic.id;
     option.textContent = `● ${bookmarkTopicDisplayName(topic)}`;
     option.style.color = topic.color;
-    options.push(option);
-  }
-  elements.bookmarkTopicPicker.replaceChildren(...options);
-  elements.bookmarkTopicPicker.disabled = options.length === 1;
-  if (options.length === 1) {
-    placeholder.textContent = i18n.t("bookmarks.all_topics_assigned");
-  }
+    return option;
 }
 
 function onBookmarkPopoverTopicAction(event) {
@@ -4844,7 +5263,7 @@ function applyPopoverBookmark(topicId) {
     return;
   }
   try {
-    bookmarkStore.apply(verse, topic.id);
+    mutatePersonalBookmarks(() => bookmarkStore.apply(verse, topic.id));
   } catch (error) {
     const message = error instanceof RangeError
       ? i18n.t("bookmarks.limit_reached")
@@ -4877,12 +5296,23 @@ function removePopoverBookmarkAssignment({ id, topicId, source }) {
   }
   const removed = source === GLOBAL_BOOKMARK_SOURCE
     ? globalBookmarkPreferences?.hideBookmark(id)
-    : bookmarkStore.removeBookmarkTopic(id, topicId);
+    : mutatePersonalBookmarks(() => bookmarkStore.removeBookmarkTopic(
+      id,
+      topicId,
+    ));
   if (!removed) {
     return;
   }
   if (source === GLOBAL_BOOKMARK_SOURCE) {
     void globalBookmarkPreferences.flush();
+    const globalBookmark = globalBookmarkCatalog.bookmarkById(
+      id,
+      bookmarkStore.snapshot().topics,
+      globalBookmarkTopicMappings(),
+    );
+    if (globalBookmark) {
+      captureGlobalBookmarkRemoval(globalBookmark);
+    }
   }
   closeBookmarkPopover({ restoreFocus: false });
   renderBookmarks();

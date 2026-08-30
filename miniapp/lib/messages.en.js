@@ -185,6 +185,9 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "bookmarks.choose_topic": "Add another topic",
   "bookmarks.more_topics": "Add to another topic…",
   "bookmarks.all_topics_assigned": "Added to every topic",
+  "bookmarks.recent_topics": "Recently used",
+  "bookmarks.clear_recent_topics": "Clear recent topics",
+  "bookmarks.recent_topics_cleared": "Recently used topics cleared.",
   "bookmarks.none": "None",
   "bookmarks.close_palette": "Close bookmark menu",
   "bookmarks.palette_label": "Choose a bookmark topic for {reference}",
@@ -215,6 +218,16 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "bookmarks.topic_delete_global_confirm":
     "Remove {name}? Personal verse links removed: {personal}. Global verse links hidden until Global Tags are reloaded: {global}.",
   "bookmarks.topic_added": "Topic added.",
+  "bookmarks.contribution_english_guidance":
+    "Contributor topics must use an English name. Your topic and verse changes are sent securely for review after they are saved locally.",
+  "bookmarks.contribution_english_required":
+    "Use an English topic name before saving this contributor topic.",
+  "bookmarks.contribution_sync_attention":
+    "Your local bookmarks are safe. The contributor queue reached this device's safe limit, so the Mini App is reconciling a compact snapshot with the review server. Keep it open and online; new changes remain local and join the next recovery pass.",
+  "bookmarks.contribution_storage_attention":
+    "Your local bookmarks are safe, but this device could not preserve the contributor review queue. Keep the Mini App open and online while it retries, and do not clear its app data.",
+  "bookmarks.contribution_disclosure":
+    "You are enrolled as a GetBible contributor. Topic names must be in English. New topics and changes to topic verse assignments are saved on your device first and also sent securely to the project administrators for review. Approved changes may become part of the global topic library used by everyone.",
   "bookmarks.topic_updated": "Topic updated.",
   "bookmarks.topic_removed": "Topic removed.",
   "bookmarks.last_topic": "Keep at least one bookmark topic.",

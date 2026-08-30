@@ -82,9 +82,17 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(
             commands,
-            {"start", "get", "getbible", "bible", "search", "help"},
+            {
+                "start",
+                "get",
+                "getbible",
+                "bible",
+                "search",
+                "help",
+                "contributor",
+            },
         )
-        self.assertEqual(application.add_handler.call_count, 10)
+        self.assertEqual(application.add_handler.call_count, 11)
         application.add_error_handler.assert_called_once_with(bot.error_handler)
         services = result.bot_data[bot.APPLICATION_SERVICES_SLOT]
         self.assertIs(services.settings, result.bot_data[bot.SETTINGS_SLOT])
@@ -99,6 +107,7 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             result.bot_data[bot.PREFERENCES_SLOT],
         )
         self.assertIsNone(services.mini_app)
+        self.assertIsNone(services.contributions)
 
     def test_preference_database_failure_falls_back_to_memory(self) -> None:
         application = SimpleNamespace(
@@ -185,6 +194,10 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             "all_private_chats",
         )
         self.assertNotIn("is_ephemeral", private_commands[1].api_kwargs)
+        self.assertNotIn(
+            "contributor",
+            [command.command for command in private_commands],
+        )
         commands = group_call.args[0]
         self.assertEqual(
             group_call.kwargs["scope"].to_dict()["type"],

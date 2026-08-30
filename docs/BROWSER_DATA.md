@@ -16,11 +16,16 @@ The reading and persistence split is:
 - browser memory owns the current ordered selection;
 - scoped browser `localStorage` owns bounded, coordinate-only reading history;
 - scoped `localStorage` plus Telegram `DeviceStorage` and `CloudStorage` reconcile
-  personal bookmark aggregate v2, colored topics, the active topic, and compact
-  last-read coordinates;
+  personal bookmark aggregate v3, colored topics, the full clearable
+  recently-used topic order, the active topic, and compact last-read
+  coordinates;
 - scoped browser `localStorage` plus Telegram `DeviceStorage` reconcile
   device-local global-catalog visibility, per-link exclusions, and legacy
   topic mapping; `CloudStorage` is excluded;
+- per-instance, authenticated-user-scoped IndexedDB stores the approved
+  contributor journal and recovery checkpoints; Web Locks coordinate tabs;
+- Robot authorizes contributors, accepts bounded idempotent review events, and
+  publishes the reviewed live global-catalogue overlay;
 - Robot authenticates Telegram, retains compatible reader preferences, accepts
   the final ordered post request, validates it, and sends authoritative
   Scripture or an explicitly requested bookmark backup document to Telegram.
@@ -42,6 +47,8 @@ The reading and persistence split is:
 | Bookmark/topic editing and local import/export | Yes | No | No |
 | Bookmark and last-read device/cloud sync | Telegram Mini App storage | No | No |
 | Global catalog visibility and exclusions | Scoped localStorage + Telegram DeviceStorage | No | No |
+| Contributor journal and recovery | Per-instance scoped IndexedDB + Web Locks | Authenticated event intake/review | No |
+| Reviewed live global catalogue | Strict instance-scoped browser cache + bundled fallback | Revisioned publication | No |
 | Private-chat bookmark backup/restore transport | Confirm/merge in browser | Yes | No |
 | Telegram authentication | No | Yes | No |
 | Reader preference compatibility | Compact Mini App storage copy | Yes | No |
@@ -63,6 +70,8 @@ flowchart LR
     T --> H[Scoped local ReadingHistoryStore]
     T --> M[BookmarkStore]
     M <-->|newest timestamped aggregate| TS[Telegram DeviceStorage / CloudStorage]
+    T --> C[Contribution journal]
+    C -->|bounded idempotent review events| P
     B -->|final ordered coordinates once| P[Robot protected endpoints]
     M -->|explicit bounded JSON backup| P
     P -->|validated Scripture or private backup document| G[Telegram]
@@ -106,7 +115,8 @@ The hybrid adapter is intentionally limited to compact personal data:
 - at most 100 colored bookmark topics and 800 canonical whole-verse records;
 - multiple topic identifiers per verse record, without consuming another verse
   slot;
-- the active bookmark topic;
+- the active bookmark topic and a most-recently-used list retaining every
+  current topic until explicitly cleared;
 - a last-read record containing only translation, book, chapter, verse,
   version, and update timestamp, or a timestamped cleared marker without a
   coordinate.
@@ -118,9 +128,10 @@ time; the newest candidate becomes active and is mirrored to every available
 store. Later writes update the local copy synchronously and coalesce bounded
 Telegram writes in the background. A client without either Telegram API keeps
 working from local storage and presents sync as degraded instead of blocking
-the feature. Aggregate version 2 stores full topic identifiers locally and in
-DeviceStorage; CloudStorage uses compact topic indexes into the topic manifest
-and reconstructs the identifiers when reading.
+the feature. Aggregate version 3 stores full topic identifiers and the bounded
+recent list locally and in DeviceStorage; CloudStorage uses compact topic
+indexes into the topic manifest and reconstructs assignment and recent-topic
+identifiers when reading.
 
 Bookmark identity is canonical book/chapter/verse, not translation. Assigning
 the same verse from another translation updates its one record. Assigning it to
@@ -134,8 +145,9 @@ and ephemeral, and the public cache remains identity-free.
 
 ### Global catalog overlay
 
-The browser bundle provides 2,155 global verse links across 61 topics. They
-appear in the same topic list as personal records and carry a **G** marker.
+The browser bundle provides the repository's reviewed global topic-to-verse
+links. They appear in the same topic list as personal records and carry a **G**
+marker.
 Their cards hydrate verse text for the currently selected translation from the
 bounded public chapter data plane; that text is not persisted as a bookmark.
 Compact **Add all** and **Remove all** controls precede topic search; per-topic
@@ -148,8 +160,36 @@ WebView discards its browser storage while keeping the state device-local:
 restores its hidden links without duplication. Global links and these
 preferences never enter the personal aggregate or backup documents.
 
-The provider boundary leaves room for a future authorized publishing source,
-but authorized-user global publishing is intentionally not implemented.
+The provider also merges a reviewed, revisioned per-instance overlay from Robot.
+The browser validates canonical English topic IDs/names/aliases, exact fields,
+66-book chapter bounds, topic and assignment caps, checksum, revision, and ETag
+before use. The cache is namespaced by both Robot API path and authenticated
+scope and never contains contributor identity. A validated authenticated `200`
+is authoritative, including a lower or divergent revision after a database
+restore; an unchanged `304` retains the cached bytes. Explicit **Add all** and
+per-topic loads revalidate the overlay, while every malformed or unavailable
+response keeps the last valid cached or bundled catalogue usable.
+
+### Trusted contribution mirror
+
+Only a server-approved Telegram identity can mirror changes. After the
+one-time disclosure is acknowledged, the browser submits a deterministic
+baseline containing custom topics and personal assignments, then records each
+successful local topic/assignment mutation as an explicit idempotent event.
+Global assignment hides are also mirrored as removals. Topic source names use
+the repository's English grammar; missing locale strings continue to fall back
+to that English source.
+
+The journal is transactional IndexedDB state scoped to the Robot instance and
+authenticated user. Short Web Locks protect each cross-tab checkpoint but are
+released before a network request. At most 50 events are submitted per request;
+stable identifiers make retries safe, persisted cursors resume interrupted
+baselines, and compact snapshot reconciliation repairs a bounded outbox
+overflow. Requests are paced for the server refill budget and honor bounded
+`Retry-After` guidance automatically. A valid legacy version-1 localStorage
+journal is removed only after its IndexedDB copy commits. If durable journal
+storage is unavailable, personal bookmarks still succeed and the Mini App
+shows an explicit memory-only warning.
 
 ### Portable recovery
 
@@ -242,6 +282,12 @@ A failed validation never replaces a previously accepted record.
 - Telegram storage failure degrades bookmark/last-read sync to whichever valid
   local or Telegram store remains available; it does not invalidate Scripture
   content, history, or selection.
+- Contribution journal, network, or rate-limit failure never rolls back a local
+  bookmark mutation; durable checkpoints retry automatically, while an
+  unavailable journal is disclosed as memory-only.
+- A malformed, oversized, or unavailable live catalogue never replaces a valid
+  cached or bundled catalogue; a validated authenticated `200` remains
+  authoritative after database recovery.
 - A chat restore transport, validation, or confirmation failure before merge
   leaves current bookmarks unchanged. If persistence or acknowledgement fails
   after merge, the imported merge remains available and the chat document can
@@ -276,11 +322,17 @@ The release gate must prove:
   uses no history or Scripture-content route;
 - bookmark topic operations, canonical cross-translation deduplication,
   multi-topic assignment within the 800-record bound, v4 export with v1/v2/v3
-  import, and aggregate-v2 reconciliation with compact cloud topic indexes
+  import, and aggregate-v3 reconciliation with compact cloud topic and recent
+  indexes
   remain deterministic under partial API failure;
 - the unified global/personal list, **G** marker, per-link hide, and
   per-topic/all-catalog reset remain browser-local and absent from personal
   sync and backup;
+- approved contribution authority/disclosure, per-instance IndexedDB journal,
+  cross-tab checkpoints, baseline resume, bounded overflow reconciliation,
+  paced Retry-After recovery, and explicit global removals remain local-first;
+- strict live-catalog validation, authoritative instance-scoped revalidation,
+  explicit load refresh, English fallback, and bundled offline fallback hold;
 - private-chat backup is owner-bound and bounded, restore uses a fresh
   one-time launch, the confirmed merge persists before acknowledgement, and no
   backup body enters Robot database/session/log storage.

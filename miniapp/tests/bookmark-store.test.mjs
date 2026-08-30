@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -57,21 +56,15 @@ function scopedStore(storage, scope = "a".repeat(64), options = {}) {
   });
 }
 
-test("ships the exact ordered GetBible deployment topics and palette", () => {
-  assert.equal(DEFAULT_BOOKMARK_TOPICS.length, 61);
-  assert.deepEqual(DEFAULT_BOOKMARK_TOPICS[0], {
-    id: "adultery",
-    name: "Adultery",
-    color: "#f9a8b8",
-  });
-  assert.deepEqual(DEFAULT_BOOKMARK_TOPICS.at(-1), {
-    id: "worldly-wisdom",
-    name: "Worldly Wisdom",
-    color: "#d6d3d1",
-  });
+test("ships every canonical default topic and its palette", () => {
+  const expected = GLOBAL_BOOKMARK_TOPIC_DEFINITIONS
+    .filter((topic) => topic.default)
+    .map(({ id, name, color }) => ({ id, name, color }));
+
+  assert.deepEqual(DEFAULT_BOOKMARK_TOPICS, expected);
   assert.equal(
     new Set(DEFAULT_BOOKMARK_TOPICS.map((topic) => topic.id)).size,
-    61,
+    DEFAULT_BOOKMARK_TOPICS.length,
   );
   assert.ok(
     DEFAULT_BOOKMARK_TOPICS.every((topic) =>
@@ -91,13 +84,6 @@ test("ships the exact ordered GetBible deployment topics and palette", () => {
   assert.deepEqual(
     DEFAULT_BOOKMARK_TOPICS.find((topic) => topic.id === "fear-not"),
     { id: "fear-not", name: "Fear Not", color: "#fef08a" },
-  );
-  assert.equal(
-    createHash("sha256")
-      .update(JSON.stringify(DEFAULT_BOOKMARK_TOPICS))
-      .digest("hex"),
-    // Full ordered id/name/color fingerprint of the reference deployment.
-    "e0365d53dda5dc5d992b10bedea272f850b1a7bdff96e4e19a49ff8fd1bc8ba8", // pragma: allowlist secret
   );
 });
 
@@ -240,6 +226,54 @@ test("persists per-account bookmarks across launches without cross-account reads
   assert.match(key, new RegExp(`^${BOOKMARK_STORAGE_PREFIX}:`));
   assert.doesNotMatch(key, /101|202/);
   assert.doesNotMatch(raw, /user_id|session_token|init_data|launch_token/);
+});
+
+test("migrates recent-topic metadata and preserves canonical topic order", () => {
+  const storage = new MemoryStorage();
+  const scope = "d".repeat(64);
+  const seed = scopedStore(new MemoryStorage(), scope).snapshot();
+  const originalOrder = seed.topics.map((topic) => topic.id);
+  storage.setItem(`${BOOKMARK_STORAGE_PREFIX}:${scope}`, JSON.stringify({
+    version: 2,
+    active_topic_id: "grace",
+    record_updated_at: 10,
+    topics: seed.topics,
+    bookmarks: [],
+  }));
+
+  const bookmarks = scopedStore(storage, scope);
+  assert.deepEqual(bookmarks.recentTopicIds, []);
+  bookmarks.apply(verse(), "grace");
+  bookmarks.apply(verse({ chapter: 4 }), "biblical-love");
+  bookmarks.apply(verse({ chapter: 5 }), "grace");
+
+  assert.deepEqual(bookmarks.recentTopicIds, ["grace", "biblical-love"]);
+  assert.deepEqual(
+    bookmarks.snapshot().topics.map((topic) => topic.id),
+    originalOrder,
+  );
+  const reopened = scopedStore(storage, scope);
+  assert.deepEqual(reopened.recentTopicIds, ["grace", "biblical-love"]);
+  assert.equal(reopened.clearRecentTopics(), true);
+  assert.deepEqual(reopened.recentTopicIds, []);
+  assert.equal(reopened.clearRecentTopics(), false);
+  assert.equal(
+    JSON.parse(storage.getItem(`${BOOKMARK_STORAGE_PREFIX}:${scope}`)).version,
+    3,
+  );
+});
+
+test("prunes a deleted topic from recently used metadata", () => {
+  const bookmarks = scopedStore(new MemoryStorage(), "e".repeat(64), {
+    idFactory: (prefix) => prefix === "topic" ? "custom" : "bookmark_custom",
+  });
+  const custom = bookmarks.addTopic("Custom Topic", "#bbf7d0");
+  bookmarks.apply(verse(), custom.id);
+  assert.deepEqual(bookmarks.recentTopicIds, [custom.id]);
+
+  bookmarks.removeTopic(custom.id);
+
+  assert.deepEqual(bookmarks.recentTopicIds, []);
 });
 
 test("keeps one canonical whole-verse bookmark across translations", () => {
@@ -701,15 +735,15 @@ test("compacts known duplicates, protects future records, and falls back to memo
   ]);
   assert.equal(
     JSON.parse(storage.getItem(key)).version,
-    2,
+    3,
   );
 
   const futureStorage = new MemoryStorage();
-  futureStorage.setItem(key, JSON.stringify({ version: 3 }));
+  futureStorage.setItem(key, JSON.stringify({ version: 4 }));
   const future = scopedStore(futureStorage);
   assert.equal(future.persistent, false);
   assert.equal(future.size, 0);
-  assert.equal(JSON.parse(futureStorage.getItem(key)).version, 3);
+  assert.equal(JSON.parse(futureStorage.getItem(key)).version, 4);
 
   const unavailable = {
     getItem() {

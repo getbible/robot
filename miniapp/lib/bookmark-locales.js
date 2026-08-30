@@ -25,7 +25,24 @@ for (const group of localeGroups) {
   }
 }
 
-const extensionKeys = Object.freeze(Object.keys(rawCatalogs.af));
+// These strings intentionally use the English fallback for this iteration.
+// Keeping them in the governed extension gives every locale the same stable
+// constants now, while a later translation pass can replace each value without
+// changing UI code or storage.
+const englishFallbackKeys = Object.freeze([
+  "bookmarks.recent_topics",
+  "bookmarks.clear_recent_topics",
+  "bookmarks.recent_topics_cleared",
+  "bookmarks.contribution_english_guidance",
+  "bookmarks.contribution_english_required",
+  "bookmarks.contribution_sync_attention",
+  "bookmarks.contribution_storage_attention",
+  "bookmarks.contribution_disclosure",
+]);
+const extensionKeys = Object.freeze([
+  ...Object.keys(rawCatalogs.af),
+  ...englishFallbackKeys,
+]);
 const englishExtension = Object.freeze(
   Object.fromEntries(
     extensionKeys.map((key) => {
@@ -132,8 +149,21 @@ const sourceCatalogs = Object.fromEntries(
   Object.entries(rawCatalogs).map(([locale, catalog]) => [
     locale,
     pluralExtensions[locale]
-      ? Object.freeze({ ...catalog, ...pluralExtensions[locale] })
-      : catalog,
+      ? Object.freeze({
+        ...catalog,
+        ...Object.fromEntries(englishFallbackKeys.map((key) => [
+          key,
+          ENGLISH_MESSAGES[key],
+        ])),
+        ...pluralExtensions[locale],
+      })
+      : Object.freeze({
+        ...catalog,
+        ...Object.fromEntries(englishFallbackKeys.map((key) => [
+          key,
+          ENGLISH_MESSAGES[key],
+        ])),
+      }),
   ]),
 );
 

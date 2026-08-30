@@ -3,13 +3,17 @@ import {
   CORE_BOOKMARK_TOPIC_DEFINITIONS,
   isLegacyBookmarkTopicId,
 } from "./bookmark-topic-definitions.js";
+import { BOOK_CHAPTER_COUNTS } from "./bible-canon.js";
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const CANONICAL_TOPIC_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,79}$/;
 const COLOR_PATTERN = /^#[a-f0-9]{6}$/;
 const GLOBAL_SOURCE = "global";
 const GLOBAL_TRANSLATION_FALLBACK = "kjv";
 const SUPPORTED_SCHEMA_VERSION = 1;
 const MAX_GLOBAL_BOOKMARK_ASSIGNMENTS = 10_000;
+const ENGLISH_TOPIC_PATTERN =
+  /^(?=[A-Za-z0-9 &'():?-]{2,80}$)(?=.*[A-Za-z])(?!.* {2})[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]$/;
 
 const BOOK_NAMES = Object.freeze([
   "Genesis",
@@ -79,14 +83,13 @@ const BOOK_NAMES = Object.freeze([
   "Jude",
   "Revelation",
 ]);
-
 /**
  * Immutable, translation-independent topic-to-verse associations.
  *
  * The catalogue deliberately owns no user state. A separate browser-local
- * preference records which topic overlays are visible. A future authenticated
- * publisher can therefore replace the catalogue provider without changing
- * personal bookmark storage, Telegram sync, or backups.
+ * preference records which topic overlays are visible, while the authenticated
+ * live provider can merge reviewed server deltas over this bundled fallback
+ * without changing personal bookmark storage, Telegram sync, or backups.
  */
 export class GlobalBookmarkCatalog {
   #assignmentsById = new Map();
@@ -107,6 +110,13 @@ export class GlobalBookmarkCatalog {
       typeof data !== "object" ||
       Array.isArray(data) ||
       data.schema_version !== SUPPORTED_SCHEMA_VERSION ||
+      (
+        data.catalog_version !== undefined &&
+        (
+          !Number.isSafeInteger(data.catalog_version) ||
+          data.catalog_version < 1
+        )
+      ) ||
       !data.bookmarks_by_topic ||
       typeof data.bookmarks_by_topic !== "object" ||
       Array.isArray(data.bookmarks_by_topic)
@@ -116,7 +126,10 @@ export class GlobalBookmarkCatalog {
     if (!Array.isArray(topics) || !Array.isArray(bookNames)) {
       throw new TypeError("The global bookmark catalogue metadata is invalid.");
     }
-    this.version = data.schema_version;
+    // Older generated catalogues used the schema version as their content
+    // revision. Keep those fixtures/imports readable while allowing accepted
+    // contributions to advance the catalogue independently of its format.
+    this.version = data.catalog_version ?? data.schema_version;
     this.#bookNames = Object.freeze(bookNames.map((name) => boundedText(name, 80)));
     this.#topics = Object.freeze(topics.map((definition) =>
       Object.freeze(normalizeTopicDefinition(definition))
@@ -360,6 +373,158 @@ export const DEFAULT_BOOKMARK_TOPIC_DEFINITIONS = Object.freeze(
     .map(freezeTopicDefinition),
 );
 
+/**
+ * Applies a server-published, cumulative contribution overlay to the bundled
+ * catalogue. The bundled asset remains the authoritative offline fallback;
+ * the overlay contains only reviewed metadata and coordinate deltas.
+ */
+export function globalBookmarkCatalogWithOverlay(value, revision = 0) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !hasExactKeys(value, ["schema_version", "topics", "associations"]) ||
+    value.schema_version !== SUPPORTED_SCHEMA_VERSION ||
+    !Array.isArray(value.topics) ||
+    !value.associations ||
+    typeof value.associations !== "object" ||
+    !hasExactKeys(value.associations, ["add", "remove"]) ||
+    !Array.isArray(value.associations.add) ||
+    !Array.isArray(value.associations.remove) ||
+    value.associations.add.length + value.associations.remove.length >
+      MAX_GLOBAL_BOOKMARK_ASSIGNMENTS ||
+    !Number.isSafeInteger(revision) ||
+    revision < 0
+  ) {
+    throw new TypeError("The global bookmark catalogue overlay is invalid.");
+  }
+  if (value.topics.length > 39) {
+    throw new TypeError("The global bookmark catalogue overlay has too many topics.");
+  }
+
+  const definitions = new Map(
+    CORE_BOOKMARK_TOPIC_DEFINITIONS.map((definition) => [
+      definition.id,
+      normalizeTopicDefinition(definition),
+    ]),
+  );
+  const overlayTopicIds = new Set();
+  const overlayTopicNames = new Set(
+    [...definitions.values()].flatMap((definition) =>
+      [definition.name, ...definition.aliases].map((candidate) =>
+        candidate.toLocaleLowerCase("en").trim().replace(/\s+/gu, " ")
+      )
+    ),
+  );
+  for (const valueTopic of value.topics) {
+    if (
+      !valueTopic ||
+      typeof valueTopic !== "object" ||
+      Array.isArray(valueTopic) ||
+      !hasExactKeys(valueTopic, ["id", "name", "color", "aliases"]) ||
+      typeof valueTopic.name !== "string" ||
+      !ENGLISH_TOPIC_PATTERN.test(valueTopic.name) ||
+      !CANONICAL_TOPIC_ID_PATTERN.test(valueTopic.id ?? "") ||
+      !Array.isArray(valueTopic.aliases) ||
+      valueTopic.aliases.length > 20 ||
+      valueTopic.aliases.some((alias) =>
+        typeof alias !== "string" || !ENGLISH_TOPIC_PATTERN.test(alias)
+      ) ||
+      new Set(valueTopic.aliases.map((alias) => alias.toLocaleLowerCase("en")))
+        .size !== valueTopic.aliases.length
+    ) {
+      throw new TypeError("A global bookmark overlay topic is invalid.");
+    }
+    const normalized = normalizeTopicDefinition({
+      ...valueTopic,
+      name_key: `bookmark_topics.${valueTopic?.id ?? ""}`,
+      default: definitions.get(valueTopic?.id)?.default ?? true,
+    });
+    if (overlayTopicIds.has(normalized.id)) {
+      throw new TypeError("The global bookmark catalogue overlay has duplicate topics.");
+    }
+    overlayTopicIds.add(normalized.id);
+    const bundled = definitions.get(normalized.id);
+    if (bundled) {
+      // A deployed repository update can make an older cumulative overlay
+      // repeat this now-bundled definition, including metadata which the PR
+      // corrected. The repository copy is authoritative; ignore the stale
+      // metadata while retaining its association deltas and later live topics.
+      continue;
+    }
+    for (const candidate of [valueTopic.name, ...valueTopic.aliases]) {
+      const normalizedName = candidate.toLocaleLowerCase("en")
+        .trim()
+        .replace(/\s+/gu, " ");
+      if (overlayTopicNames.has(normalizedName)) {
+        throw new TypeError("The global bookmark overlay reuses a topic name.");
+      }
+      overlayTopicNames.add(normalizedName);
+    }
+    definitions.set(normalized.id, normalized);
+  }
+  if (definitions.size > 100) {
+    throw new TypeError("The global bookmark catalogue overlay has too many topics.");
+  }
+
+  const coordinates = new Map(
+    Object.entries(GLOBAL_BOOKMARK_DATA.bookmarks_by_topic).map(
+      ([topicId, topicCoordinates]) => [
+        topicId,
+        new Set(topicCoordinates.map((coordinate) => coordinate.join("/"))),
+      ],
+    ),
+  );
+  for (const topicId of definitions.keys()) {
+    if (!coordinates.has(topicId)) {
+      coordinates.set(topicId, new Set());
+    }
+  }
+
+  const removed = new Set();
+  for (const association of value.associations.remove) {
+    const normalized = normalizeOverlayAssociation(association, definitions);
+    const key = `${normalized.topic_id}:${normalized.coordinate.join("/")}`;
+    if (removed.has(key)) {
+      throw new TypeError("The global bookmark catalogue overlay has duplicate removals.");
+    }
+    removed.add(key);
+    coordinates.get(normalized.topic_id).delete(normalized.coordinate.join("/"));
+  }
+  const added = new Set();
+  for (const association of value.associations.add) {
+    const normalized = normalizeOverlayAssociation(association, definitions);
+    const key = `${normalized.topic_id}:${normalized.coordinate.join("/")}`;
+    if (added.has(key)) {
+      throw new TypeError("The global bookmark catalogue overlay has duplicate additions.");
+    }
+    if (removed.has(key)) {
+      throw new TypeError("The global bookmark catalogue overlay has conflicting entries.");
+    }
+    added.add(key);
+    coordinates.get(normalized.topic_id).add(normalized.coordinate.join("/"));
+  }
+
+  const data = {
+    schema_version: SUPPORTED_SCHEMA_VERSION,
+    catalog_version: GLOBAL_BOOKMARK_CATALOG_VERSION + revision,
+    bookmarks_by_topic: Object.fromEntries(
+      [...definitions.keys()].sort().map((topicId) => [
+        topicId,
+        [...coordinates.get(topicId)]
+          .map((coordinate) => coordinate.split("/").map(Number))
+          .sort(compareCoordinates),
+      ]),
+    ),
+  };
+  return new GlobalBookmarkCatalog({
+    data,
+    topics: [...definitions.values()].sort((left, right) =>
+      left.id.localeCompare(right.id, "en")
+    ),
+  });
+}
+
 function normalizeTopicDefinition(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("A global bookmark topic is invalid.");
@@ -410,6 +575,43 @@ function normalizeCoordinate(value, bookCount) {
     throw new TypeError("A global bookmark coordinate is invalid.");
   }
   return { book, chapter, verse };
+}
+
+function normalizeOverlayAssociation(value, definitions) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !hasExactKeys(value, ["topic_id", "book", "chapter", "verse"])
+  ) {
+    throw new TypeError("A global bookmark overlay association is invalid.");
+  }
+  const topicId = boundedText(value.topic_id, 80);
+  if (!CANONICAL_TOPIC_ID_PATTERN.test(topicId) || !definitions.has(topicId)) {
+    throw new TypeError("A global bookmark overlay association is invalid.");
+  }
+  const coordinate = normalizeCoordinate(
+    [value.book, value.chapter, value.verse],
+    BOOK_NAMES.length,
+  );
+  if (coordinate.chapter > BOOK_CHAPTER_COUNTS[coordinate.book - 1]) {
+    throw new TypeError("A global bookmark overlay association is invalid.");
+  }
+  return {
+    topic_id: topicId,
+    coordinate: [coordinate.book, coordinate.chapter, coordinate.verse],
+  };
+}
+
+function compareCoordinates(left, right) {
+  return left[0] - right[0] || left[1] - right[1] || left[2] - right[2];
+}
+
+function hasExactKeys(value, expected) {
+  const keys = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return keys.length === wanted.length &&
+    keys.every((key, index) => key === wanted[index]);
 }
 
 function globalBookmarkId(assignment) {

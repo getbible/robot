@@ -529,6 +529,12 @@
                   <span data-i18n="bookmarks.add_topic">Add topic</span>
                 </button>
               </form>
+              <p
+                id="contributor-topic-guidance"
+                class="bookmark-topic-manager__guidance"
+                data-i18n="bookmarks.contribution_english_guidance"
+                hidden
+              >Contributor topics must use an English name. Your topic and verse changes are sent securely for review after they are saved locally.</p>
               <div id="bookmark-topic-editor" class="bookmark-topic-editor"></div>
               <div class="bookmark-topic-defaults">
                 <button
@@ -662,12 +668,21 @@
             data-i18n-aria-label="bookmarks.assigned_topics"
             hidden
           ></div>
-          <label class="bookmark-topic-picker">
-            <span class="sr-only" data-i18n="bookmarks.choose_topic">Add another topic</span>
-            <select id="bookmark-topic-picker" aria-label="Add another topic" data-i18n-aria-label="bookmarks.choose_topic">
-              <option value="" disabled selected data-i18n="bookmarks.more_topics">Add to another topic…</option>
-            </select>
-          </label>
+          <div class="bookmark-topic-picker">
+            <label>
+              <span class="sr-only" data-i18n="bookmarks.choose_topic">Add another topic</span>
+              <select id="bookmark-topic-picker" aria-label="Add another topic" data-i18n-aria-label="bookmarks.choose_topic">
+                <option value="" disabled selected data-i18n="bookmarks.more_topics">Add to another topic…</option>
+              </select>
+            </label>
+            <button
+              id="clear-recent-bookmark-topics"
+              class="bookmark-topic-picker__clear"
+              type="button"
+              data-i18n="bookmarks.clear_recent_topics"
+              hidden
+            >Clear recent topics</button>
+          </div>
           <button
             id="close-bookmark-popover"
             class="bookmark-popover__close"

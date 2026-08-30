@@ -45,6 +45,39 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.telegram_delivery_mode, "polling")
         self.assertFalse(settings.mini_app_enabled)
         self.assertIsNone(settings.mini_app_public_url)
+        self.assertIsNone(settings.contribution_store_file)
+        self.assertEqual(settings.contribution_contributor_limit, 10_000)
+        self.assertEqual(settings.contribution_event_limit, 250_000)
+
+    def test_contribution_store_requires_an_absolute_private_state_path(self) -> None:
+        with patch.dict(
+            os.environ,
+            self.environment(
+                CONTRIBUTION_STORE_FILE=(
+                    "/var/lib/getbible-robot/production/contributions.sqlite3"
+                ),
+                CONTRIBUTION_CONTRIBUTOR_LIMIT="500",
+                CONTRIBUTION_EVENT_LIMIT="5000",
+            ),
+            clear=True,
+        ):
+            settings = Settings.from_env(load_environment_file=False)
+        self.assertEqual(
+            settings.contribution_store_file,
+            "/var/lib/getbible-robot/production/contributions.sqlite3",
+        )
+        self.assertEqual(settings.contribution_contributor_limit, 500)
+        self.assertEqual(settings.contribution_event_limit, 5000)
+
+        with (
+            patch.dict(
+                os.environ,
+                self.environment(CONTRIBUTION_STORE_FILE="relative.sqlite3"),
+                clear=True,
+            ),
+            self.assertRaises(ConfigurationError),
+        ):
+            Settings.from_env(load_environment_file=False)
 
     def test_mini_app_configuration_is_explicit_and_loopback_only(self) -> None:
         with patch.dict(

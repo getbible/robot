@@ -65,6 +65,7 @@ class SetupScriptTestCase(unittest.TestCase):
             "delivery",
             "miniapp",
             "content",
+            "contributions",
             "config",
             "update",
             "upgrade",
@@ -88,6 +89,47 @@ class SetupScriptTestCase(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertIn(command, help_result.stdout)
+
+    def test_contribution_review_is_privilege_separated_and_catalogue_aware(self) -> None:
+        script = SETUP.read_text(encoding="utf-8")
+        for fragment in (
+            "29) Review and publish trusted contributions",
+            'runuser --user "$ACTIVE_USER"',
+            'runuser --user "$git_user"',
+            '"CONTRIBUTION_STORE_FILE"',
+            '"CONTRIBUTION_GIT_CHECKOUT"',
+            '"CONTRIBUTION_GIT_USER"',
+            '--topics-file "$topics_file"',
+            '--associations-file "$associations_file"',
+            "begin-repository-publication",
+            "finish-repository-publication",
+            '--lease-token "$lease_token"',
+            "flock --nonblock",
+            "--lease-seconds 3600",
+            "getbible-robot-contribution-${checkout_lock_key}.lock",
+            '--checksum "$checksum"',
+            '--expected-bundle-checksum "$bundle_checksum"',
+            "copy_verified_contribution_bundle",
+            'mktemp --tmpdir="$export_dir"',
+            "--state failed",
+            "--state pushed",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, script)
+
+        verified_copy = script.index("copy_verified_contribution_bundle")
+        helper_install = script.index(
+            'install -o "$git_user" -g "$publisher_group" -m 0700',
+            verified_copy,
+        )
+        parent_handoff = script.index(
+            'chown "$git_user:$publisher_group" "$CONTRIBUTION_TEMP_DIR"',
+            helper_install,
+        )
+        publisher_run = script.index('runuser --user "$git_user"', parent_handoff)
+        self.assertLess(verified_copy, helper_install)
+        self.assertLess(helper_install, parent_handoff)
+        self.assertLess(parent_handoff, publisher_run)
 
         version_result = subprocess.run(
             ["bash", str(SETUP), "version"],
@@ -126,7 +168,12 @@ class SetupScriptTestCase(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
-            timeout=90,
+            # This exercises two installs, an upgrade, rollback, and failed
+            # upgrade recovery. The contribution asset assertions expand the
+            # exact-checkout fixture, and branch-coverage instrumentation slows
+            # every Python helper it invokes. Leave headroom for slower CI
+            # disks without weakening any lifecycle assertion.
+            timeout=300,
         )
         self.assertIn(
             "Setup manager lifecycle test passed.",
@@ -466,6 +513,12 @@ cat "$dropin_root/alpha.conf"
         self.assertIn("max_size 5MB", script)
         self.assertIn("/api/v1/bookmarks/backup", script)
         self.assertIn("/api/v1/bookmarks/restore", script)
+        self.assertEqual(script.count('"/api/v1/bookmarks/catalog"'), 2)
+        self.assertEqual(script.count('"/api/v1/contributions/status"'), 2)
+        self.assertEqual(script.count('"/api/v1/contributions/events"'), 2)
+        self.assertIn('path + "/api/v1/bookmarks/catalog"', script)
+        self.assertIn('path + "/api/v1/contributions/status"', script)
+        self.assertIn('path + "/api/v1/contributions/events"', script)
         self.assertIn("caddy validate --config", script)
         self.assertIn("rollback_caddy_transaction", script)
         self.assertIn("wait_for_mini_app_url", script)

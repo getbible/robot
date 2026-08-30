@@ -72,6 +72,11 @@ EXPECTED_TEMPLATE_KEYS = {
     "TRANSLATION",
     "USER_PREFERENCES_FILE",
     "USER_PREFERENCE_LIMIT",
+    "CONTRIBUTION_STORE_FILE",
+    "CONTRIBUTION_CONTRIBUTOR_LIMIT",
+    "CONTRIBUTION_EVENT_LIMIT",
+    "CONTRIBUTION_GIT_CHECKOUT",
+    "CONTRIBUTION_GIT_USER",
     "GETBIBLE_API_BASE_URL",
     "GETBIBLE_WEB_BASE_URL",
     "WELCOME_MESSAGE",
@@ -173,6 +178,29 @@ class DocumentationContractTestCase(unittest.TestCase):
     def test_setup_manager_and_template_are_present(self) -> None:
         self.assertTrue((ROOT / "setup.sh").is_file())
         self.assertTrue((ROOT / "deploy" / "getbible-robot@.service").is_file())
+
+    def test_contribution_operations_and_privacy_boundaries_are_documented(self) -> None:
+        configuration = (ROOT / "docs" / "CONFIGURATION.md").read_text(
+            encoding="utf-8"
+        )
+        operations = (ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
+        docker = (ROOT / "docs" / "DOCKER.md").read_text(encoding="utf-8")
+        mini_app = (ROOT / "docs" / "MINI_APP.md").read_text(encoding="utf-8")
+        joined = "\n".join((configuration, operations, docker, mini_app))
+
+        for required in (
+            "/contributor",
+            "CONTRIBUTION_STORE_FILE",
+            "CONTRIBUTION_GIT_CHECKOUT",
+            "CONTRIBUTION_GIT_USER",
+            "contributions.sqlite3",
+            "canonical English",
+            "privacy-safe",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, joined)
+        self.assertIn("never enter the live", operations)
+        self.assertIn("only for native deployments", docker)
 
     def test_published_container_version_matches_project(self) -> None:
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")

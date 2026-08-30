@@ -1,12 +1,12 @@
 # Telegram Mini App
 
-The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, temporary verse selection, and device-local history belong in the browser. Compact personal bookmarks and last-read coordinates additionally use Telegram Mini App storage when available. Global-topic preferences use scoped browser storage plus Telegram DeviceStorage, but deliberately remain outside CloudStorage and personal backup. Robot remains the authenticated Telegram control plane, the Librarian search adapter, and the bounded relay for an explicit private-chat bookmark backup or restore.
+The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, temporary verse selection, and device-local history belong in the browser. Compact personal bookmarks and last-read coordinates additionally use Telegram Mini App storage when available. Global-topic preferences use scoped browser storage plus Telegram DeviceStorage, but deliberately remain outside CloudStorage and personal backup. Robot remains the authenticated Telegram control plane, the Librarian search adapter, the bounded relay for an explicit private-chat bookmark backup or restore, and the review boundary for approved contributor events and live global-catalogue revisions.
 
 ## Active doctrine
 
 Only full-text search and search pagination use Librarian. Robot also owns the
 authenticated control paths for sessions, preference compatibility, final
-Post, and explicit bookmark chat backup/restore.
+Post, explicit bookmark chat backup/restore, and trusted contributions.
 
 | Capability | Owner |
 | --- | --- |
@@ -18,8 +18,10 @@ Post, and explicit bookmark chat backup/restore.
 | Persistent public cache | Browser IndexedDB |
 | Selected verse order and highlighting | Browser memory |
 | Opened chapter and selected verse history | Scoped browser `localStorage` |
-| Personal bookmark aggregate v2, topics, and active topic | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage` |
+| Personal bookmark aggregate v3, topics, recent topics, and active topic | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage` |
 | Global topic visibility, exclusions, and legacy mapping | Scoped `localStorage` + Telegram `DeviceStorage` only |
+| Approved-contributor journal and recovery checkpoints | Per-instance, authenticated-user-scoped browser IndexedDB coordinated with Web Locks |
+| Contributor status, events, and live global-catalogue revision | Robot → private per-instance SQLite |
 | Compact last-read coordinate | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage`, with Robot preference compatibility |
 | Bookmark JSON download/import | Browser |
 | Private-chat bookmark backup/restore | Browser confirmation + Robot/Telegram transport |
@@ -29,6 +31,9 @@ Post, and explicit bookmark chat backup/restore.
 | Final Telegram delivery | Robot |
 
 A normal reader action must never call Robot for translations, books, chapters, chapter text, selecting, unselecting, reordering, clearing, or copying.
+For an approved contributor only, a successful personal topic/bookmark mutation
+may also enqueue an asynchronous review event; that mirror never becomes a
+dependency of the local action.
 
 ## Runtime flow
 
@@ -40,7 +45,8 @@ Telegram WebView
   ├─ temporary ordered selection                     → BrowserSelectionStore
   ├─ unique coordinate history                       → scoped local ReadingHistoryStore
   ├─ personal bookmarks / topics / last-read         → local + Telegram storage adapter
-  └─ global topic visibility / exclusions            → scoped localStorage + DeviceStorage
+  ├─ global topic visibility / exclusions            → scoped localStorage + DeviceStorage
+  └─ approved contribution outbox / live overlay     → authenticated Robot API
 ```
 
 Reader and search results are normalized into one verse descriptor. Coordinate identity is:
@@ -122,6 +128,12 @@ its others. An existing assignment is a no-op, and the same coordinate in
 another translation updates its one personal record instead of duplicating it.
 The menu links directly to each assigned topic. Topic detail offers navigation
 back to all topics and, when opened from the reader, back to the source verse.
+The assignment picker places a clearable **Recently used** group in most-recent
+order above the complete locale-aware alphabetical topic list. It retains every
+topic used until the user clears it (within the 100-topic product limit), and a
+recent topic also remains in the complete list intentionally. Manage Topics
+uses only the alphabetical presentation and never rewrites persisted topic
+order merely to sort the screen.
 
 The Bookmarks surface lists personal and global verse links together in one
 topic list; global rows carry a **G** marker and progressively hydrate visible
@@ -130,8 +142,9 @@ Compact **Add all** and **Remove all** controls appear before search with a
 disclosure explaining that global topics are curated verse sets. One global
 link may be hidden, or all global links may be removed for one topic. Loading
 that topic or the full catalog resets its exclusions without duplication. The
-built-in catalog contains 2,155 links across 61 topics. Scoped visibility,
-exclusions, and the legacy numeric-topic mapping reconcile through localStorage
+built-in catalogue contains the repository's reviewed topic-to-verse links.
+Scoped visibility, exclusions, and the legacy numeric-topic mapping reconcile
+through localStorage
 and Telegram `DeviceStorage`, surviving a discarded Desktop WebView store.
 They never consume personal records, enter `CloudStorage`, or enter backups.
 
@@ -141,11 +154,12 @@ localized constants and cannot be renamed, though their colors can be changed
 and they can be removed. Custom topics remain user-named and support add,
 rename, recolor, and removal. Topic removal warns that its personal assignments
 will also be removed. **Restore default tags** adds only missing defaults and
-preserves recolors, custom topics, and personal bookmarks. The global catalog/provider boundary supports a future
-authorized publishing source, but authorized-user publishing is not
-implemented.
+preserves recolors, custom topics, and personal bookmarks. The global catalogue
+provider merges a validated, reviewed per-instance overlay over the bundled
+catalogue. The bundled source remains available when the overlay request,
+validation, or local cache fails.
 
-`BookmarkStore` writes personal aggregate version 2 immediately to scoped
+`BookmarkStore` writes personal aggregate version 3 immediately to scoped
 `localStorage`. `TelegramBookmarkStorage` compares timestamped candidates from
 local storage and Telegram `DeviceStorage` and `CloudStorage`, selects the
 newest valid copy, then mirrors it to available stores. Cloud bookmark values
@@ -174,6 +188,48 @@ original document remains in chat. Robot sessions and persistence keep only
 delivery/file metadata and never a backup body; structured logs exclude the
 document.
 
+### Trusted contribution mirror
+
+The hidden private Telegram `/contributor` command is the only application
+entry point. It submits the signed numeric Telegram ID for operator review;
+the Mini App never treats a username, client flag, or hidden control as
+authorization. After approval, the next authenticated Mini App launch shows a
+one-time disclosure that topic and verse-tag changes are shared for review.
+Synchronization starts only after that disclosure is acknowledged.
+
+The first synchronization emits a deterministic baseline containing existing
+personal assignments, every topic they reference, and genuinely custom topics.
+Later successful `BookmarkStore` mutations produce explicit, idempotent
+`topic_upsert`, `topic_delete`, `verse_add`, or `verse_remove` events. The
+browser stores a bounded per-instance, authenticated-user-scoped IndexedDB
+journal and submits at most 50 events per request. Short Web Locks protect each
+read/modify/write checkpoint across tabs, but are released before network I/O;
+idempotent identifiers make a repeated in-flight request safe. A valid legacy
+version-1 `localStorage` journal is removed only after its transactional
+IndexedDB copy commits. Network failure and rate limiting leave the local
+bookmark mutation intact, preserve the journal, and schedule a paced retry
+using bounded `Retry-After` guidance. Journal overflow switches to compact,
+checkpointed snapshot reconciliation instead of discarding a mutation. When
+IndexedDB or Web Locks are unavailable, bookmarks remain usable with an
+explicit memory-only durability warning. Revoked/rejected status stops future
+submission without deleting the user's personal topics or markings.
+
+Contribution source topic names must be English. The UI explains that rule,
+the browser omits invalid topic-name proposals, the server validates them
+again, and the operator can still reject or correct a proposal. Accepted
+repository topics receive the stable key `bookmark_topics.<english-slug>` plus
+their canonical English source. A locale with no new translation resolves to
+that English name; no foreign-language catalogue is synthesized in this flow.
+
+The reviewed catalogue endpoint returns only canonical topic metadata,
+coordinate additions/removals, a server revision, checksum, and ETag. It
+contains no contributor identity. A bounded per-instance,
+authenticated-scope cache may retain that envelope. An authenticated valid
+`200` replaces it even after a database restore, `304` retains it unchanged,
+and failed or malformed loading uses the bundled catalogue. Publishing a
+live revision changes the current instance immediately and survives restart,
+while repository branch publication remains a separate operator step.
+
 ## Cache integrity
 
 Public content is stored under a versioned `public:v2:` IndexedDB namespace. The cache has bounded record count, bounded total estimated size, bounded per-record size, least-recently-used eviction, and in-flight request coalescing. An in-memory adapter is used when IndexedDB is unavailable.
@@ -199,6 +255,13 @@ No ordinary click may create server basket state. Legacy per-click basket and Ro
 The public HTML shell is not an authentication boundary. Robot action routes require fresh Telegram-signed `initData`, an owner-bound launch, and an active opaque session. The bot token remains server-side.
 
 The browser is untrusted for final output. It may control display state, but it cannot determine the authoritative text delivered to Telegram. Final output remains bounded, escaped, idempotent, and tied to the originating user, chat, and topic.
+
+The browser is also untrusted for contributor authority and global catalogue
+publication. Every status or event request revalidates the Telegram-bound
+session and current approved numeric user ID. Client-supplied verse text is
+never a review authority; the terminal reviewer fetches and validates the
+configured translation directly from `query.getbible.net` and defers when it
+is unavailable.
 
 Do not trust `Referer`, `User-Agent`, an obscure URL, or client IP as authentication. Do not expose the bot token, session token, or Telegram init data to GetBible API origins or browser persistent caches.
 
@@ -236,6 +299,9 @@ sudo getbible-robot doctor production
 | `MINI_APP_MAX_SEARCHES_PER_SESSION` | Bounded Librarian result snapshots |
 | `MINI_APP_MAX_SELECTIONS` | Browser and final-post selection limit |
 | `MINI_APP_TRUSTED_PROXY_CIDRS` | Optional advanced restriction for forwarded client addresses |
+| `CONTRIBUTION_STORE_FILE` | Absolute private SQLite path; blank disables contribution endpoints and `/contributor` applications |
+| `CONTRIBUTION_CONTRIBUTOR_LIMIT` | Bounded application population |
+| `CONTRIBUTION_EVENT_LIMIT` | Bounded retained event journal |
 
 The public browser cache is identity-free. Robot retains only the compatible
 reader preference containing translation and reader coordinates. Device-local
@@ -291,8 +357,16 @@ After deployment, verify:
 17. the unified topic list marks global links with **G**, supports per-link hide
     and per-topic/all-catalog reset, and excludes global links from personal
     sync and backup;
-18. Post failure preserves selection and successful Post clears it.
+18. topic management is alphabetical, while verse assignment shows a clearable
+    recent group followed by the full alphabetical list;
+19. an unapproved user never creates server contribution events, while an
+    approved user receives the disclosure, submits a bounded baseline, retries
+    offline events, and keeps every local mutation on server failure;
+20. a newly published live topic appears on the same instance, uses its English
+    source when the active locale lacks a translation, and falls back to the
+    bundled catalogue when overlay validation fails;
+21. Post failure preserves selection and successful Post clears it.
 
 ## Verification gate
 
-A release is not ready unless permanent CI proves Python 3.10–3.14, the production container, lint, strict typing, branch coverage, dependency and secret scans, CodeQL, public API routing, CSP parity, hash verification, bounded caches, bounded selections, durable local history, bookmark-domain and hybrid-storage invariants, private-chat backup/restore ownership and bounds, real Chromium navigation, graphical select/unselect, cross-source identity, no pre-Post Robot mutation, and authoritative idempotent posting.
+A release is not ready unless permanent CI proves Python 3.10–3.14, the production container, lint, strict typing, branch coverage, dependency and secret scans, CodeQL, public API routing, CSP parity, hash verification, bounded caches, bounded selections, durable local history, bookmark-domain and hybrid-storage invariants, private-chat backup/restore ownership and bounds, contributor authorization/idempotency/privacy, live-catalogue fallback, English topic fallback, real Chromium navigation, graphical select/unselect, cross-source identity, no pre-Post Robot mutation, and authoritative idempotent posting.

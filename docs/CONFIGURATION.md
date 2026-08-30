@@ -172,6 +172,52 @@ Production setup creates restricted per-instance content files. Edit them with
 `sudo EDITOR=nano getbible-robot content <instance> welcome|help`; do not move
 their manager-owned paths in the environment file.
 
+## Trusted topic contributions
+
+| Variable | Default | Validation | Purpose |
+|---|---:|---|---|
+| `CONTRIBUTION_STORE_FILE` | empty | Empty or an absolute path | Private SQLite application, event, decision, notification, audit, and live-catalogue store; an empty value disables contribution enrolment and synchronization |
+| `CONTRIBUTION_CONTRIBUTOR_LIMIT` | `10000` | `100`–`1000000` | Maximum contributor application records accepted by one instance |
+| `CONTRIBUTION_EVENT_LIMIT` | `250000` | `1000`–`5000000` | Maximum immutable contribution events retained by one instance |
+| `CONTRIBUTION_GIT_CHECKOUT` | empty | Empty or an absolute, clean checkout of `getbible/robot` owned by the publisher | Setup-manager-only repository publication checkout |
+| `CONTRIBUTION_GIT_USER` | empty | Existing dedicated non-root operating-system user; must differ from the bot service account | Setup-manager-only identity used for Git import, commit, and push |
+
+Native setup assigns
+`CONTRIBUTION_STORE_FILE=/var/lib/getbible-robot/<instance>/contributions.sqlite3`.
+The container supervisor always assigns
+`/data/<instance>/state/contributions.sqlite3`, ignoring an externally supplied
+store path so instances cannot accidentally share private identities or review
+state. The contributor and event limits remain configurable per instance.
+
+The hidden private `/contributor` command submits the signed numeric Telegram
+user ID for review. It is intentionally absent from Telegram's command menu.
+Usernames and profile names help a moderator recognize an application, but
+never grant authority; every Mini App event is authorized again against the
+current numeric-ID application state. Leaving `CONTRIBUTION_STORE_FILE` empty
+keeps the ordinary personal bookmark experience available while making the
+command report that applications are unavailable.
+
+Contributed source topic names and moderator-created aliases must be English.
+The stable repository key is `bookmark_topics.<english-slug>`, and the canonical
+English name is added to the generated English source. This review flow does
+not generate translations. Until a later translation update supplies a locale
+entry, the Mini App intentionally displays the canonical English name; existing
+translated topics continue to use their locale strings unchanged.
+
+`CONTRIBUTION_GIT_CHECKOUT` and `CONTRIBUTION_GIT_USER` are read by
+`getbible-robot contributions`, not by the running Robot. Keep Git credentials
+in the dedicated publisher user's normal credential mechanism, never in an
+instance environment file. Live publication does not require either Git
+setting and is not rolled back when a later export or branch push fails.
+
+Configure the commit identity in that checkout's local Git config. Global
+configuration, including root's identity, is intentionally ignored:
+
+```bash
+sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/robot config --local user.name "GetBible Contribution Publisher"
+sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/robot config --local user.email "publisher@getbible.net"
+```
+
 ## Repository and worker timeouts
 
 | Variable | Default | Allowed range | Purpose |
@@ -368,6 +414,11 @@ ABUSE_BLOCK_SECONDS="300"
 TRANSLATION="kjv"
 USER_PREFERENCES_FILE="/var/lib/getbible-robot/production/preferences.sqlite3"
 USER_PREFERENCE_LIMIT="10000"
+CONTRIBUTION_STORE_FILE="/var/lib/getbible-robot/production/contributions.sqlite3"
+CONTRIBUTION_CONTRIBUTOR_LIMIT="10000"
+CONTRIBUTION_EVENT_LIMIT="250000"
+CONTRIBUTION_GIT_CHECKOUT="/srv/getbible-robot-publisher/robot"
+CONTRIBUTION_GIT_USER="getbible-publisher"
 GETBIBLE_API_BASE_URL="https://api.getbible.net"
 GETBIBLE_WEB_BASE_URL="https://getbible.life"
 GETBIBLE_MAX_RESPONSE_BYTES="41943040"

@@ -28,6 +28,7 @@ export class ApiError extends Error {
     status = 0,
     retryable = false,
     requestId = null,
+    retryAfter = null,
   } = {}) {
     super(message);
     this.name = "ApiError";
@@ -35,6 +36,7 @@ export class ApiError extends Error {
     this.status = status;
     this.retryable = retryable;
     this.requestId = requestId;
+    this.retryAfter = normalizeRetryAfterSeconds(retryAfter);
   }
 }
 
@@ -243,6 +245,51 @@ export class MiniAppApi {
     });
   }
 
+  contributionStatus() {
+    return this.#request("contributions/status");
+  }
+
+  acknowledgeContributionDisclosure() {
+    return this.#request("contributions/status", {
+      method: "PATCH",
+      body: { disclosure_acknowledged: true },
+    });
+  }
+
+  submitContributionEvents(events) {
+    if (!Array.isArray(events) || events.length < 1 || events.length > 50) {
+      throw new TypeError("A bounded contribution event batch is required.");
+    }
+    return this.#request("contributions/events", {
+      method: "POST",
+      body: { events },
+      timeoutMs: 30_000,
+    }).then((payload) => normalizeContributionEventReceipt(payload, events));
+  }
+
+  bookmarkCatalog(etag = null) {
+    const headers = {};
+    if (etag !== null) {
+      if (
+        typeof etag !== "string" ||
+        etag.length < 1 ||
+        etag.length > 160 ||
+        /[\u0000-\u001f\u007f]/.test(etag)
+      ) {
+        throw new TypeError("The bookmark catalogue ETag is invalid.");
+      }
+      headers["If-None-Match"] = etag;
+    }
+    return this.#request("bookmarks/catalog", {
+      headers,
+      allowNotModified: true,
+      includeEtag: true,
+      // The reviewed overlay improves fresh launches but the bundled catalog
+      // is always usable, so an unreachable publisher must not hold the gate.
+      timeoutMs: 4_000,
+    });
+  }
+
   registerSelections(selections) {
     return this.#selections.registerMany(selections);
   }
@@ -371,6 +418,9 @@ export class MiniAppApi {
     authenticated = true,
     keepalive = false,
     timeoutMs = this.#timeoutMs,
+    headers: requestHeaders = {},
+    allowNotModified = false,
+    includeEtag = false,
   } = {}) {
     if (authenticated && !this.#sessionToken) {
       throw new ApiError("Your secure session is not ready.", {
@@ -382,6 +432,7 @@ export class MiniAppApi {
     const headers = {
       Accept: "application/json",
       "Cache-Control": "no-store",
+      ...requestHeaders,
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     if (authenticated) {
@@ -415,6 +466,12 @@ export class MiniAppApi {
     } finally {
       this.#clearTimeout(timeout);
     }
+    if (allowNotModified && response.status === 304) {
+      return {
+        not_modified: true,
+        etag: response.headers.get("etag"),
+      };
+    }
     if (response.status === 204) return null;
     const contentType = response.headers.get("content-type") || "";
     const payload = contentType.includes("application/json")
@@ -436,11 +493,16 @@ export class MiniAppApi {
               : "request_failed",
           status: response.status,
           retryable:
-            Boolean(error?.retryable) ||
+            Boolean(payload?.retryable ?? error?.retryable) ||
             response.status === 429 ||
             response.status >= 500,
           requestId:
-            typeof error?.request_id === "string" ? error.request_id : null,
+            typeof payload?.request_id === "string"
+              ? payload.request_id
+              : typeof error?.request_id === "string"
+                ? error.request_id
+                : null,
+          retryAfter: retryAfterSeconds(response, payload),
         },
       );
     }
@@ -451,8 +513,37 @@ export class MiniAppApi {
         retryable: true,
       });
     }
-    return payload;
+    return includeEtag
+      ? { ...payload, etag: response.headers.get("etag") }
+      : payload;
   }
+}
+
+function retryAfterSeconds(response, payload) {
+  const payloadValue = payload?.retry_after;
+  if (payloadValue !== undefined && payloadValue !== null) {
+    return normalizeRetryAfterSeconds(payloadValue);
+  }
+  const header = response?.headers?.get?.("retry-after");
+  if (typeof header !== "string" || header.trim() === "") {
+    return null;
+  }
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) {
+    return normalizeRetryAfterSeconds(seconds);
+  }
+  const timestamp = Date.parse(header);
+  return Number.isFinite(timestamp)
+    ? normalizeRetryAfterSeconds((timestamp - Date.now()) / 1_000)
+    : null;
+}
+
+function normalizeRetryAfterSeconds(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return null;
+  }
+  return Math.min(3_600, Math.max(0, seconds));
 }
 
 function publicApiError(error) {
@@ -472,6 +563,46 @@ function publicApiError(error) {
     status: error.status,
     retryable: error.retryable,
   });
+}
+
+function normalizeContributionEventReceipt(value, events) {
+  const keys = value && typeof value === "object" && !Array.isArray(value)
+    ? Object.keys(value).sort()
+    : [];
+  const expectedKeys = ["accepted", "event_ids", "replayed"];
+  const eventIds = value?.event_ids;
+  const submittedIds = events.map((event) => event?.client_event_id);
+  if (
+    keys.length !== expectedKeys.length ||
+    keys.some((key, index) => key !== expectedKeys[index]) ||
+    !Number.isInteger(value.accepted) ||
+    value.accepted < 0 ||
+    !Number.isInteger(value.replayed) ||
+    value.replayed < 0 ||
+    value.accepted + value.replayed !== events.length ||
+    !eventIds ||
+    typeof eventIds !== "object" ||
+    Array.isArray(eventIds) ||
+    new Set(submittedIds).size !== submittedIds.length ||
+    Object.keys(eventIds).length !== submittedIds.length ||
+    submittedIds.some((id) =>
+      typeof id !== "string" ||
+      !Object.hasOwn(eventIds, id) ||
+      !Number.isSafeInteger(eventIds[id]) ||
+      eventIds[id] < 1
+    ) ||
+    Object.keys(eventIds).some((id) => !submittedIds.includes(id))
+  ) {
+    throw new ApiError("getBible.Life returned an unexpected contribution receipt.", {
+      code: "invalid_response",
+      retryable: true,
+    });
+  }
+  return {
+    accepted: value.accepted,
+    replayed: value.replayed,
+    event_ids: { ...eventIds },
+  };
 }
 
 function params(values) {

@@ -65,6 +65,11 @@ from modules.commands import (
     start_command,
     unknown_command,
 )
+from modules.contributions import ContributionStore
+from modules.contributor_command import (
+    CONTRIBUTION_STORE_SLOT,
+    contributor_command,
+)
 from modules.dependencies import ApplicationServices
 from modules.ephemeral import delete_ephemeral_text, send_ephemeral_text
 from modules.errors import ScriptureUnavailable
@@ -82,6 +87,7 @@ HEALTH_SLOT = "health_server"
 CACHE_JANITOR_SLOT = "cache_janitor"
 NOTIFIER_SLOT = "runtime_notifier"
 PREWARM_SLOT = "prewarm_task"
+CONTRIBUTION_NOTIFICATION_TASK_SLOT = "contribution_notification_task"
 LOGGER = logging.getLogger(__name__)
 ALLOWED_UPDATES = ("message", "callback_query")
 
@@ -199,6 +205,31 @@ def _build_preference_store(settings: Settings) -> UserPreferenceStore:
         )
 
 
+def _build_contribution_store(settings: Settings) -> ContributionStore | None:
+    """Open the private moderation database only when durable storage is configured."""
+    path = getattr(settings, "contribution_store_file", None)
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        return ContributionStore(
+            path=path,
+            max_contributors=getattr(
+                settings,
+                "contribution_contributor_limit",
+                10_000,
+            ),
+            max_events=getattr(settings, "contribution_event_limit", 250_000),
+        )
+    except (OSError, sqlite3.Error) as error:
+        LOGGER.error(
+            "Contributor storage is unavailable; contribution enrolment and "
+            "synchronization are disabled for this process (%s)",
+            type(error).__name__,
+            exc_info=True,
+        )
+        return None
+
+
 def build_application(settings: Settings) -> Application:
     service = ScriptureService(settings)
     limiter = InboundRateLimiter(
@@ -219,6 +250,7 @@ def build_application(settings: Settings) -> Application:
         ttl_seconds=settings.interaction_ttl_seconds,
     )
     preferences = _build_preference_store(settings)
+    contributions = _build_contribution_store(settings)
     health = HealthServer(
         host=settings.health_host,
         port=settings.health_port,
@@ -240,6 +272,8 @@ def build_application(settings: Settings) -> Application:
     application.bot_data[LIMITER_SLOT] = limiter
     application.bot_data[INTERACTIONS_SLOT] = interactions
     application.bot_data[PREFERENCES_SLOT] = preferences
+    if contributions is not None:
+        application.bot_data[CONTRIBUTION_STORE_SLOT] = contributions
     application.bot_data[HEALTH_SLOT] = health
     application.bot_data[CACHE_JANITOR_SLOT] = CacheJanitor(
         max_bytes=settings.cache_max_bytes,
@@ -380,6 +414,7 @@ def build_application(settings: Settings) -> Application:
             load_bookmark_backup=load_bookmark_backup,
             cleanup_launch=cleanup_mini_app_launch,
             abuse_warning=send_abuse_warning,
+            contributions=contributions,
         )
         application.bot_data[MINI_APP_SLOT] = mini_app
         health.set_mini_app_snapshot(mini_app.snapshot)
@@ -391,6 +426,7 @@ def build_application(settings: Settings) -> Application:
         interactions=interactions,
         preferences=preferences,
         mini_app=mini_app,
+        contributions=contributions,
     )
 
     application.add_handler(CommandHandler("start", start_command))
@@ -399,6 +435,9 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("bible", bible_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("help", help_command))
+    # Intentionally absent from BotCommand metadata: enrolment is a private,
+    # operator-directed workflow, not a public menu action.
+    application.add_handler(CommandHandler("contributor", contributor_command))
     application.add_handler(
         CallbackQueryHandler(
             bookmark_restore_callback,
@@ -565,12 +604,22 @@ async def _post_init(application: Application) -> None:
     service: ScriptureService = application.bot_data[SERVICE_SLOT]
     settings: Settings = application.bot_data[SETTINGS_SLOT]
     mini_app: MiniAppServer | None = application.bot_data.get(MINI_APP_SLOT)
+    contributions: ContributionStore | None = application.bot_data.get(
+        CONTRIBUTION_STORE_SLOT
+    )
     # Liveness starts before network synchronization and corpus warming. The
     # readiness bit remains false until every required startup stage completes.
     await health.start()
     janitor.start()
     if mini_app is not None:
         await mini_app.start()
+    if contributions is not None:
+        application.bot_data[CONTRIBUTION_NOTIFICATION_TASK_SLOT] = (
+            asyncio.create_task(
+                _deliver_contribution_notifications(application, contributions),
+                name="deliver-contribution-notifications",
+            )
+        )
     await _synchronize_telegram_profile(application, settings)
     # Readiness is not gated on the corpus. An index build is bounded by
     # SEARCH_INDEX_BUILD_SECONDS, which can exceed the unit's TimeoutStartSec,
@@ -587,6 +636,68 @@ async def _post_init(application: Application) -> None:
             name="prewarm-default-translation",
         )
     LOGGER.info("GetBible Robot initialized")
+
+
+async def _deliver_contribution_notifications(
+    application: Application,
+    store: ContributionStore,
+) -> None:
+    """Drain decision notices with leases so CLI transactions never depend on Telegram."""
+    while True:
+        try:
+            notifications = store.claim_notifications(limit=10, lease_seconds=60)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            LOGGER.warning(
+                "Contributor notification outbox could not be read (%s)",
+                type(error).__name__,
+            )
+            await asyncio.sleep(10)
+            continue
+        if not notifications:
+            await asyncio.sleep(10)
+            continue
+        for notification in notifications:
+            try:
+                # Plain text only: moderator notes are deliberately absent and
+                # no parse mode can turn stored text into Telegram markup.
+                await application.bot.send_message(
+                    chat_id=notification.contributor_id,
+                    text=notification.message,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                try:
+                    store.mark_notification_failed(
+                        notification.id,
+                        notification.claim_token,
+                        type(error).__name__,
+                    )
+                except Exception as persistence_error:
+                    LOGGER.warning(
+                        "Contributor notification failure state could not be saved (%s)",
+                        type(persistence_error).__name__,
+                    )
+                LOGGER.warning(
+                    "Contributor decision notification delivery failed (%s)",
+                    type(error).__name__,
+                )
+            else:
+                try:
+                    store.mark_notification_sent(
+                        notification.id,
+                        notification.claim_token,
+                    )
+                except Exception as error:
+                    # The sending lease expires and safely retries. Duplicate
+                    # decision notices are preferable to silently losing one.
+                    LOGGER.warning(
+                        "Contributor notification receipt could not be saved (%s)",
+                        type(error).__name__,
+                    )
+        await asyncio.sleep(1)
 
 
 async def _prewarm_default_translation(
@@ -624,6 +735,12 @@ async def _post_shutdown(application: Application) -> None:
     service: ScriptureService = application.bot_data[SERVICE_SLOT]
     preferences: UserPreferenceStore = application.bot_data[PREFERENCES_SLOT]
     mini_app: MiniAppServer | None = application.bot_data.get(MINI_APP_SLOT)
+    contributions: ContributionStore | None = application.bot_data.get(
+        CONTRIBUTION_STORE_SLOT
+    )
+    contribution_notifications: asyncio.Task[None] | None = application.bot_data.get(
+        CONTRIBUTION_NOTIFICATION_TASK_SLOT
+    )
     prewarm: asyncio.Task[None] | None = application.bot_data.get(PREWARM_SLOT)
     health.mark_not_ready()
     await notifier.stopping()
@@ -633,12 +750,18 @@ async def _post_shutdown(application: Application) -> None:
         prewarm.cancel()
         with suppress(asyncio.CancelledError):
             await prewarm
+    if contribution_notifications is not None and not contribution_notifications.done():
+        contribution_notifications.cancel()
+        with suppress(asyncio.CancelledError):
+            await contribution_notifications
     if mini_app is not None:
         await mini_app.close()
     await health.close()
     await janitor.close()
     await service.close()
     preferences.close()
+    if contributions is not None:
+        contributions.close()
     LOGGER.info("GetBible Robot shut down cleanly")
 
 

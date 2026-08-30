@@ -378,13 +378,29 @@ systemctl() {
 }
 
 create_source_fixture() {
-    mkdir -p "$SOURCE_DIR/deploy"
+    mkdir -p \
+        "$SOURCE_DIR/deploy" \
+        "$SOURCE_DIR/scripts/lib" \
+        "$SOURCE_DIR/data/global-bookmarks" \
+        "$SOURCE_DIR/miniapp/lib"
     cp -- "$ROOT/setup.sh" "$SOURCE_DIR/setup.sh"
     cp -- "$ROOT/deploy/getbible-robot@.service" \
         "$SOURCE_DIR/deploy/getbible-robot@.service"
     cp -- "$ROOT/deploy/welcome.txt" "$SOURCE_DIR/deploy/welcome.txt"
     cp -- "$ROOT/deploy/help.txt" "$SOURCE_DIR/deploy/help.txt"
     cp -- "$ROOT/.env.template" "$SOURCE_DIR/.env.template"
+    cp -- "$ROOT/scripts/contribution_review.py" \
+        "$SOURCE_DIR/scripts/contribution_review.py"
+    cp -- "$ROOT/scripts/import_contribution_bundle.mjs" \
+        "$SOURCE_DIR/scripts/import_contribution_bundle.mjs"
+    cp -- "$ROOT/scripts/lib/global_bookmark_sources.mjs" \
+        "$SOURCE_DIR/scripts/lib/global_bookmark_sources.mjs"
+    cp -- "$ROOT/data/global-bookmarks/topics.json" \
+        "$SOURCE_DIR/data/global-bookmarks/topics.json"
+    cp -- "$ROOT/data/global-bookmarks/tag-verse.csv" \
+        "$SOURCE_DIR/data/global-bookmarks/tag-verse.csv"
+    cp -- "$ROOT/miniapp/lib/bible-canon.js" \
+        "$SOURCE_DIR/miniapp/lib/bible-canon.js"
     printf 'print("fixture")\n' >"$SOURCE_DIR/bot.py"
     printf 'class Settings:\n    pass\n' >"$SOURCE_DIR/config.py"
     : >"$SOURCE_DIR/requirements.txt"
@@ -393,6 +409,16 @@ create_source_fixture() {
     git -C "$SOURCE_DIR" config user.email "setup-test@getbible.local"
     git -C "$SOURCE_DIR" add .
     git -C "$SOURCE_DIR" commit --quiet -m "fixture v1"
+}
+
+assert_contribution_assets() {
+    local app_dir=$1
+    assert_file "$app_dir/scripts/contribution_review.py"
+    assert_file "$app_dir/scripts/import_contribution_bundle.mjs"
+    assert_file "$app_dir/scripts/lib/global_bookmark_sources.mjs"
+    assert_file "$app_dir/data/global-bookmarks/topics.json"
+    assert_file "$app_dir/data/global-bookmarks/tag-verse.csv"
+    assert_file "$app_dir/miniapp/lib/bible-canon.js"
 }
 
 install_instance() {
@@ -455,8 +481,12 @@ assert_contains "$(resource_dropin_for alpha)" "CPUQuota=200%"
 assert_file "$LOGROTATE_PATH"
 assert_dir "$(application_dir_for alpha)"
 assert_dir "$(application_dir_for beta)"
+assert_contribution_assets "$(application_dir_for alpha)"
+assert_contribution_assets "$(application_dir_for beta)"
 assert_mode "$(application_dir_for alpha)" "750"
 assert_mode "$(application_dir_for alpha)/bot.py" "640"
+assert_mode "$(application_dir_for alpha)/scripts/contribution_review.py" "640"
+assert_mode "$(application_dir_for alpha)/data/global-bookmarks/topics.json" "640"
 assert_mode "$(application_dir_for alpha)/venv" "750"
 assert_contains "$RUNUSER_LOG" "gb-alpha"
 assert_contains "$RUNUSER_LOG" "gb-beta"
@@ -676,6 +706,9 @@ assert_contains "$CADDY_ROUTES" "/getbible/alpha/api/v1/session"
 assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/post'
 assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/bookmarks/backup'
 assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/bookmarks/restore'
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/bookmarks/catalog'
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/status'
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/events'
 assert_contains "$CADDY_ROUTES" 'max_size 5MB'
 assert_contains "$CADDY_ROUTES" 'respond "" 404'
 assert_contains "$CADDY_ROUTES" "reverse_proxy 127.0.0.1:9201"
@@ -870,9 +903,11 @@ EOF
 load_instance alpha
 assert_equal "$ACTIVE_SHA" "$SECOND_SHA"
 assert_equal "$(git -C "$(application_dir_for alpha)" rev-parse HEAD)" "$SECOND_SHA"
+assert_contribution_assets "$(application_dir_for alpha)"
 assert_equal \
     "$(git -C "${INSTANCE_ROOT}/alpha/app.previous" rev-parse HEAD)" \
     "$FIRST_SHA"
+assert_contribution_assets "${INSTANCE_ROOT}/alpha/app.previous"
 
 cmd_rollback alpha <<EOF
 y
@@ -880,9 +915,11 @@ EOF
 load_instance alpha
 assert_equal "$ACTIVE_SHA" "$FIRST_SHA"
 assert_equal "$(git -C "$(application_dir_for alpha)" rev-parse HEAD)" "$FIRST_SHA"
+assert_contribution_assets "$(application_dir_for alpha)"
 assert_equal \
     "$(git -C "${INSTANCE_ROOT}/alpha/app.previous" rev-parse HEAD)" \
     "$SECOND_SHA"
+assert_contribution_assets "${INSTANCE_ROOT}/alpha/app.previous"
 
 THIRD_SHA=$(commit_fixture_version v3)
 export FAIL_NEXT_START

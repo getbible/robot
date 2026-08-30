@@ -6,6 +6,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { chromium } from "playwright";
+import { CORE_BOOKMARK_TOPIC_DEFINITIONS } from "../../lib/bookmark-topic-definitions.js";
+import { GLOBAL_BOOKMARK_DATA } from "../../lib/global-bookmark-data.js";
 
 const miniappRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const corsHeaders = { "access-control-allow-origin": "*" };
@@ -18,6 +20,12 @@ const globalBookmarkPreferencesMirrorKey =
   `getbible.miniapp.global-device.v1:${bookmarkScope}:preferences`;
 const readingHistoryStorageKey =
   `getbible.miniapp.reading-history.v1:${bookmarkScope}`;
+const globalTopicCount = CORE_BOOKMARK_TOPIC_DEFINITIONS.length;
+const globalAssignmentCount = Object.values(GLOBAL_BOOKMARK_DATA.bookmarks_by_topic)
+  .reduce((total, coordinates) => total + coordinates.length, 0);
+const graceGlobalCount = GLOBAL_BOOKMARK_DATA.bookmarks_by_topic.grace.length;
+const spiritualRebirthGlobalCount =
+  GLOBAL_BOOKMARK_DATA.bookmarks_by_topic["spiritual-rebirth"].length;
 const bookNames = [
   "Genesis", "Exodus", "Leviticus", "Numbers", "Deuteronomy", "Joshua",
   "Judges", "Ruth", "1 Samuel", "2 Samuel", "1 Kings", "2 Kings",
@@ -243,6 +251,32 @@ async function assertBookmarkPopoverControlsDoNotOverlap(page) {
   assert.equal(layout.overlapCount, 0);
 }
 
+async function assertReaderStartsBelowToolbar(page) {
+  await page.evaluate(() => new Promise((resolvePromise) => {
+    window.requestAnimationFrame(() => window.requestAnimationFrame(resolvePromise));
+  }));
+  const layout = await page.evaluate(() => {
+    const chip = document.querySelector("#translation-shortcut")
+      .getBoundingClientRect();
+    const toolbarElement = document.querySelector("#bible-heading");
+    const toolbar = toolbarElement.getBoundingClientRect();
+    const firstVerse = document.querySelector('[data-reader-verse="1"]')
+      .getBoundingClientRect();
+    const background = getComputedStyle(toolbarElement).backgroundColor;
+    return {
+      chipBottom: chip.bottom,
+      firstVerseTop: firstVerse.top,
+      toolbarBackground: background,
+      toolbarBottom: toolbar.bottom,
+      toolbarTop: toolbar.top,
+    };
+  });
+  assert.ok(Math.abs(layout.toolbarTop - layout.chipBottom) <= 1);
+  assert.ok(layout.firstVerseTop >= layout.toolbarBottom + 8);
+  assert.doesNotMatch(layout.toolbarBackground, /rgba\([^)]*,\s*0\s*\)$/u);
+  assert.notEqual(layout.toolbarBackground, "transparent");
+}
+
 test("reader navigation uses direct GetBible API calls in a real browser", async (context) => {
   const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
   const browser = await chromium.launch({
@@ -402,6 +436,14 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     reader_location: { translation: "kjv", book: 43, chapter: 3, verse: 1 },
   };
   let bookmarkBackupRequest = null;
+  const contributionBatches = [];
+  let contributionAttempts = 0;
+  const contributionStatus = {
+    enabled: true,
+    state: "approved",
+    can_contribute: true,
+    disclosure_required: false,
+  };
 
   await page.route("https://app.local/**", async (route) => {
     const request = route.request();
@@ -421,9 +463,44 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
         preferences,
         entrypoint: { route: "bible", query: "" },
         basket: { items: [], count: 0, maximum: 100 },
+        contributions: contributionStatus,
       }, 201);
     }
     if (apiPath === "cleanup") return fulfillJson(route, {});
+    if (apiPath === "contributions/status") {
+      return fulfillJson(route, contributionStatus);
+    }
+    if (apiPath === "contributions/events") {
+      const events = request.postDataJSON().events;
+      contributionAttempts += 1;
+      if (contributionAttempts === 1) {
+        return fulfillJson(route, {
+          error: "rate_limited",
+          message: "Please wait.",
+          retryable: true,
+          retry_after: 0.01,
+        }, 429);
+      }
+      contributionBatches.push(events);
+      return fulfillJson(route, {
+        accepted: events.length,
+        replayed: 0,
+        event_ids: Object.fromEntries(
+          events.map((event, index) => [event.client_event_id, index + 1]),
+        ),
+      });
+    }
+    if (apiPath === "bookmarks/catalog") {
+      return fulfillJson(route, {
+        revision: 0,
+        checksum: "0".repeat(64),
+        catalog: {
+          schema_version: 1,
+          topics: [],
+          associations: { add: [], remove: [] },
+        },
+      });
+    }
     if (apiPath === "preferences") {
       const update = request.postDataJSON();
       preferences = {
@@ -476,6 +553,22 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     await page.locator("#bottom-nav #bible-history").isVisible(),
     true,
   );
+  await assertReaderStartsBelowToolbar(page);
+  await page.locator("#bible-view").evaluate((view) => {
+    view.scrollTop = 420;
+    view.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForFunction(() => (
+    document.querySelector("#bible-heading")?.classList.contains("is-hidden")
+  ));
+  await page.locator("#bible-view").evaluate((view) => {
+    view.scrollTop = 0;
+    view.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForFunction(() => (
+    !document.querySelector("#bible-heading")?.classList.contains("is-hidden")
+  ));
+  await assertReaderStartsBelowToolbar(page);
   await assertBottomNavigationIconsMatch(page);
 
   // Selecting in the reader reveals a compact menu trigger without opening it.
@@ -532,6 +625,56 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   assert.deepEqual(storedBookmark?.topic_ids, ["grace", "biblical-love"]);
   assert.equal(storedBookmark?.chapter, 3);
   assert.equal(storedBookmark?.verse, 2);
+  await waitForCondition(
+    () => contributionBatches.flat().filter((event) => (
+      event.type === "verse_add" && event.verse.verse === 2
+    )).length === 2,
+    "contribution queue did not resume after Retry-After",
+    15_000,
+  );
+  assert.ok(contributionAttempts >= 2);
+
+  await page.locator("#close-bookmark-popover").click();
+  await page.locator('[data-reader-verse="3"]').click();
+  await page.locator(
+    '[data-bookmark-trigger="gbd_kjv_043_0003_0003"]',
+  ).click();
+  const pickerGroups = await page.locator("#bookmark-topic-picker").evaluate(
+    (select) => [...select.querySelectorAll("optgroup")].map((group) => ({
+      label: group.label,
+      values: [...group.querySelectorAll("option")].map((option) => option.value),
+      labels: [...group.querySelectorAll("option")].map((option) => option.textContent),
+    })),
+  );
+  assert.deepEqual(pickerGroups.map((group) => group.label), [
+    "Recently used",
+    "All topics",
+  ]);
+  assert.deepEqual(pickerGroups[0].values.slice(0, 2), [
+    "biblical-love",
+    "grace",
+  ]);
+  assert.equal(pickerGroups[1].values.includes("biblical-love"), true);
+  assert.equal(pickerGroups[1].values.includes("grace"), true);
+  assert.deepEqual(
+    pickerGroups[1].labels,
+    [...pickerGroups[1].labels].sort((left, right) =>
+      left.localeCompare(right, "en", { sensitivity: "base" })
+    ),
+  );
+  assert.equal(await page.locator("#clear-recent-bookmark-topics").isVisible(), true);
+  await page.locator("#clear-recent-bookmark-topics").click();
+  assert.deepEqual(
+    await page.locator("#bookmark-topic-picker optgroup").evaluateAll(
+      (groups) => groups.map((group) => group.label),
+    ),
+    ["All topics"],
+  );
+  await page.locator("#close-bookmark-popover").click();
+  await page.locator('[data-reader-verse="3"]').click();
+  await page.locator(
+    '[data-bookmark-trigger="gbd_kjv_043_0003_0002"]',
+  ).click();
 
   await page.locator('[data-bookmark-topic-open="grace"]').click();
   await page.waitForFunction(() => (
@@ -598,10 +741,10 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   assert.ok(Math.abs(wideHomeActions[0].width - wideHomeActions[1].width) < 1);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('#home-bookmarks [data-home-route="bookmarks"]').click();
-  await page.waitForFunction(() => (
+  await page.waitForFunction((expectedTopicCount) => (
     document.querySelector("#app")?.dataset.activeRoute === "bookmarks" &&
-    document.querySelectorAll(".bookmark-group-card").length === 61
-  ));
+    document.querySelectorAll(".bookmark-group-card").length === expectedTopicCount
+  ), globalTopicCount);
   assert.equal(await page.locator("#bottom-nav").isVisible(), true);
   assert.equal(
     await page.locator("#translation-shortcut").evaluate(
@@ -609,7 +752,26 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     ),
     "none",
   );
-  assert.equal(await page.locator(".bookmark-group-card").count(), 61);
+  assert.equal(await page.locator(".bookmark-group-card").count(), globalTopicCount);
+  const topicGroupNames = await page.locator(".bookmark-group-card strong")
+    .allInnerTexts();
+  assert.deepEqual(
+    topicGroupNames,
+    [...topicGroupNames].sort((left, right) =>
+      left.localeCompare(right, "en", { sensitivity: "base" })
+    ),
+  );
+  await page.locator("#bookmark-topic-manager summary").click();
+  const managedTopicNames = await page.locator(
+    "#bookmark-topic-editor .bookmark-topic-editor__name",
+  ).evaluateAll((items) => items.map((item) => item.value || item.textContent));
+  assert.deepEqual(
+    managedTopicNames,
+    [...managedTopicNames].sort((left, right) =>
+      left.localeCompare(right, "en", { sensitivity: "base" })
+    ),
+  );
+  await page.locator("#bookmark-topic-manager summary").click();
   const globalControlsLayout = await page.evaluate(() => {
     const section = document.querySelector(".bookmark-global").getBoundingClientRect();
     const search = document.querySelector(".bookmark-search").getBoundingClientRect();
@@ -644,18 +806,27 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   ));
   assert.match(await page.locator("#bookmark-list").innerText(), /John 3:2/);
   assert.equal(await page.locator("#load-topic-global-bookmarks").isVisible(), true);
+  const catalogsBeforeExplicitTopicLoad = robotRequests.filter(
+    (path) => path === "bookmarks/catalog",
+  ).length;
   await page.locator("#load-topic-global-bookmarks").click();
-  await page.waitForFunction(() => (
-    document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 53 &&
-    document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length === 52
-  ));
+  await page.waitForFunction(({ globalCount }) => (
+    document.querySelectorAll("#bookmark-list .bookmark-list__item").length ===
+      globalCount + 1 &&
+    document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length ===
+      globalCount
+  ), { globalCount: graceGlobalCount });
+  assert.ok(
+    robotRequests.filter((path) => path === "bookmarks/catalog").length >
+      catalogsBeforeExplicitTopicLoad,
+  );
   assert.equal(
     await page.locator("#bookmark-list [data-bookmark-remove]").count(),
-    53,
+    graceGlobalCount + 1,
   );
   assert.equal(
     await page.locator('#bookmark-list [data-bookmark-open^="global_grace_"]').count(),
-    52,
+    graceGlobalCount,
   );
   const hiddenGlobalId = await page.locator(
     '#bookmark-list [data-bookmark-open^="global_grace_"]',
@@ -663,29 +834,63 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   await page.locator(
     `#bookmark-list [data-bookmark-open="${hiddenGlobalId}"] + [data-bookmark-remove]`,
   ).click();
-  await page.waitForFunction(({ bookmarkId, storageKey }) => {
+  await page.waitForFunction(({ bookmarkId, storageKey, expectedCount }) => {
     const envelope = JSON.parse(window.localStorage.getItem(storageKey));
     const record = JSON.parse(envelope.value);
     return document.querySelectorAll("#bookmark-list .bookmark-list__global-badge")
-      .length === 51 && record.hidden_bookmark_ids.includes(bookmarkId);
+      .length === expectedCount && record.hidden_bookmark_ids.includes(bookmarkId);
   }, {
     bookmarkId: hiddenGlobalId,
     storageKey: globalBookmarkPreferencesMirrorKey,
+    expectedCount: graceGlobalCount - 1,
   });
+  const hiddenCoordinate = hiddenGlobalId.split("_").slice(-3).map(Number);
+  await waitForCondition(
+    () => contributionBatches.flat().some((event) => (
+      event.type === "verse_remove" &&
+      event.topic.local_topic_id === "grace" &&
+      event.verse.book === hiddenCoordinate[0] &&
+      event.verse.chapter === hiddenCoordinate[1] &&
+      event.verse.verse === hiddenCoordinate[2]
+    )),
+    "global list removal was not mirrored for review",
+    15_000,
+  );
   assert.match(
     await page.locator("#load-topic-global-bookmarks-label").innerText(),
     /Reload global verses/,
   );
+  const matchingGlobalAddsBeforeRestore = contributionBatches.flat().filter(
+    (event) => (
+      event.type === "verse_add" &&
+      event.topic.local_topic_id === "grace" &&
+      event.verse.book === hiddenCoordinate[0] &&
+      event.verse.chapter === hiddenCoordinate[1] &&
+      event.verse.verse === hiddenCoordinate[2]
+    ),
+  ).length;
   await page.locator("#load-topic-global-bookmarks").click();
-  await page.waitForFunction(({ bookmarkId, storageKey }) => {
+  await page.waitForFunction(({ bookmarkId, storageKey, expectedCount }) => {
     const envelope = JSON.parse(window.localStorage.getItem(storageKey));
     const record = JSON.parse(envelope.value);
     return document.querySelectorAll("#bookmark-list .bookmark-list__global-badge")
-      .length === 52 && !record.hidden_bookmark_ids.includes(bookmarkId);
+      .length === expectedCount && !record.hidden_bookmark_ids.includes(bookmarkId);
   }, {
     bookmarkId: hiddenGlobalId,
     storageKey: globalBookmarkPreferencesMirrorKey,
+    expectedCount: graceGlobalCount,
   });
+  await waitForCondition(
+    () => contributionBatches.flat().filter((event) => (
+      event.type === "verse_add" &&
+      event.topic.local_topic_id === "grace" &&
+      event.verse.book === hiddenCoordinate[0] &&
+      event.verse.chapter === hiddenCoordinate[1] &&
+      event.verse.verse === hiddenCoordinate[2]
+    )).length > matchingGlobalAddsBeforeRestore,
+    "restored global list assignment was not mirrored for review",
+    15_000,
+  );
   assert.equal(await page.locator("#clear-topic-global-bookmarks").isVisible(), true);
   await page.locator("#clear-topic-global-bookmarks").click();
   await page.waitForFunction(() => (
@@ -704,12 +909,12 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   );
   await page.locator("#bookmark-all-topics").click();
   await page.locator("#load-global-bookmarks").click();
-  await page.waitForFunction(() => (
+  await page.waitForFunction((expected) => (
     document.querySelector("#global-bookmark-status")?.textContent
-      ?.includes("2155 global verse links") &&
+      ?.includes(`${expected.assignments} global verse links`) &&
     document.querySelector("#global-bookmark-status")?.textContent
-      ?.includes("61 topics")
-  ));
+      ?.includes(`${expected.topics} topics`)
+  ), { assignments: globalAssignmentCount, topics: globalTopicCount });
   assert.equal(await page.locator("#clear-global-bookmarks").isEnabled(), true);
   await page.locator("#clear-global-bookmarks").click();
   await page.waitForFunction((storageKey) => {
@@ -729,18 +934,20 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   ));
   await page.locator("#bookmark-all-topics").click();
   await page.locator("#load-global-bookmarks").click();
-  await page.waitForFunction(() => (
+  await page.waitForFunction((expectedAssignments) => (
     document.querySelector("#global-bookmark-status")?.textContent
-      ?.includes("2155 global verse links") &&
+      ?.includes(`${expectedAssignments} global verse links`) &&
     !document.querySelector("#clear-global-bookmarks")?.disabled
-  ));
+  ), globalAssignmentCount);
   await page.locator(
     '.bookmark-group-card[data-bookmark-topic="grace"]',
   ).click();
-  await page.waitForFunction(() => (
-    document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 53 &&
-    document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length === 52
-  ));
+  await page.waitForFunction((globalCount) => (
+    document.querySelectorAll("#bookmark-list .bookmark-list__item").length ===
+      globalCount + 1 &&
+    document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length ===
+      globalCount
+  ), graceGlobalCount);
   await page.locator("#bookmark-all-topics").click();
   await page.locator("#backup-bookmarks").click();
   await page.waitForFunction(() => (
@@ -758,9 +965,10 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   await page.locator(
     '.bookmark-group-card[data-bookmark-topic="spiritual-rebirth"]',
   ).click();
-  await page.waitForFunction(() => (
-    document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length === 44
-  ));
+  await page.waitForFunction((globalCount) => (
+    document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length ===
+      globalCount
+  ), spiritualRebirthGlobalCount);
   assert.equal(
     await page.locator(
       '[data-bookmark-open="global_spiritual-rebirth_43_3_3"]',
@@ -816,6 +1024,26 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       document.querySelector('[data-bookmark-topic-open="grace"]');
   });
   await page.locator("#close-bookmark-popover").click();
+  await page.locator(
+    '[data-bookmark-trigger="gbd_kjv_043_0003_0003"]',
+  ).click();
+  const globalPopoverRemove = page.locator(
+    '[data-bookmark-source="global"][data-bookmark-assignment-remove]',
+  ).first();
+  assert.equal(await globalPopoverRemove.isVisible(), true);
+  await globalPopoverRemove.click();
+  await waitForCondition(
+    () => contributionBatches.flat().some((event) => (
+      event.type === "verse_remove" &&
+      event.topic.local_topic_id === "spiritual-rebirth" &&
+      event.verse.book === 43 &&
+      event.verse.chapter === 3 &&
+      event.verse.verse === 3
+    )),
+    "global popover removal was not mirrored for review",
+    15_000,
+  );
+  await page.locator("#close-bookmark-popover").click();
 
   const historyCountBeforeNextChapter = Number(
     await page.locator("#bible-history-count").innerText(),
@@ -829,6 +1057,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     await page.locator('[data-reader-verse="1"]').innerText(),
     /KJV John 4 text 1/,
   );
+  await assertReaderStartsBelowToolbar(page);
   const historyCountAfterNextChapter = historyCountBeforeNextChapter;
   await page.waitForFunction((expectedCount) => (
     document.querySelector("#bible-history-count")?.textContent ===
@@ -869,6 +1098,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     () => preferences.reader_location.chapter === 3,
     "reader preference did not return to John 3",
   );
+  await assertReaderStartsBelowToolbar(page);
 
   const bottomNavigation = page.locator("#bottom-nav");
   if (!await bottomNavigation.evaluate((nav) => nav.classList.contains("is-collapsed"))) {

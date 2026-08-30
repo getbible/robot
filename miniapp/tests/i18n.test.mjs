@@ -69,6 +69,34 @@ test("resolves exact, regional, historical, and unknown translation locales", ()
   assert.equal(resolveLocale("not a locale", available), "en");
 });
 
+test("falls back to the canonical English name for a newly accepted topic", () => {
+  const originalDocument = globalThis.document;
+  try {
+    globalThis.document = {
+      documentElement: { lang: "en", dir: "ltr" },
+    };
+    const catalogs = {
+      en: Object.freeze({
+        "bookmark_topics.prayer-and-fasting": "Prayer and Fasting",
+      }),
+      af: Object.freeze({}),
+    };
+    const i18n = new I18n(catalogs);
+
+    i18n.setLocale("af");
+    assert.equal(
+      i18n.t("bookmark_topics.prayer-and-fasting"),
+      "Prayer and Fasting",
+    );
+    assert.equal(
+      Object.hasOwn(catalogs.af, "bookmark_topics.prayer-and-fasting"),
+      false,
+    );
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
 test("uses governed few forms for integer bookmark counts", () => {
   const originalDocument = globalThis.document;
   const expected = {

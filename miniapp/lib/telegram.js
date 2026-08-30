@@ -187,6 +187,14 @@ export class TelegramBridge {
     return Promise.resolve(window.confirm(message));
   }
 
+  alert(message) {
+    if (typeof this.#webApp?.showAlert === "function") {
+      return new Promise((resolve) => this.#webApp.showAlert(message, resolve));
+    }
+    window.alert(message);
+    return Promise.resolve();
+  }
+
   dismissKeyboard() {
     const activeElement = document.activeElement;
     if (

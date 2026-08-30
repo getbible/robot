@@ -29,6 +29,7 @@ class ContainerRuntimeTestCase(unittest.TestCase):
                         'MINI_APP_PUBLIC_URL="https://bot.example.com/app"',
                         'MINI_APP_PORT="9201"',
                         'HEALTH_PORT="8081"',
+                        'CONTRIBUTION_STORE_FILE="/tmp/shared.sqlite3"',
                     )
                 ),
                 encoding="utf-8",
@@ -49,6 +50,10 @@ class ContainerRuntimeTestCase(unittest.TestCase):
                 spec.environment["USER_PREFERENCES_FILE"].endswith(
                     "/production/state/preferences.sqlite3"
                 )
+            )
+            self.assertEqual(
+                spec.environment["CONTRIBUTION_STORE_FILE"],
+                str(data / "production" / "state" / "contributions.sqlite3"),
             )
             self.assertEqual(spec.memory_limit_bytes, 1792 * 1024 * 1024)
             self.assertEqual(spec.memory_warning_percent, 80)
@@ -185,10 +190,15 @@ class ContainerRuntimeTestCase(unittest.TestCase):
                 self.assertIn("MAX_CONCURRENT_SEARCHES:-4", single)
                 self.assertIn("MAX_CONCURRENT_UPDATES:-16", single)
                 self.assertIn("MINI_APP_SESSION_TTL_SECONDS:-900", single)
+                self.assertIn("CONTRIBUTION_CONTRIBUTOR_LIMIT:-10000", single)
+                self.assertIn("CONTRIBUTION_EVENT_LIMIT:-250000", single)
         self.assertIn("./docker/instances:/config/instances:ro", multi_compose)
         self.assertNotIn("build:", multi_compose)
         self.assertIn('ROBOT_MODE: "single"', single_compose)
         self.assertNotIn("build:", single_compose)
+        self.assertIn("scripts/contribution_review.py", dockerfile)
+        self.assertIn("data/global-bookmarks/topics.json", dockerfile)
+        self.assertIn("data/global-bookmarks/tag-verse.csv", dockerfile)
         self.assertIn("environment: TELEGRAM_API_TOKEN", secret_compose)
         self.assertTrue(container_setup.stat().st_mode & stat.S_IXUSR)
 
