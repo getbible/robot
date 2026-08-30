@@ -32,8 +32,9 @@ test("uses authenticated contribution routes and revalidates the live catalog", 
       async chapter() { return {}; },
     },
     fetchImplementation: async (url, options) => {
-      const path = new URL(url).pathname;
-      requests.push({ path, options });
+      const parsed = new URL(url);
+      const path = parsed.pathname;
+      requests.push({ path, search: parsed.search, options });
       if (path.endsWith("/session")) return json(SESSION, 201);
       if (path.endsWith("/cleanup")) return new Response(null, { status: 204 });
       if (path.endsWith("/contributions/status")) return json(STATUS);
@@ -98,6 +99,11 @@ test("uses authenticated contribution routes and revalidates the live catalog", 
     assert.equal(options.headers.Authorization, `Bearer ${SESSION.session_token}`);
     assert.equal(options.headers["X-Telegram-Init-Data"], "signed-init-data");
   }
+  const statusRequests = authenticated.filter(({ path }) =>
+    path.endsWith("/contributions/status")
+  );
+  assert.equal(statusRequests.length, 2);
+  assert.ok(statusRequests.every(({ search }) => search === "?details=1"));
   const patch = authenticated.find(({ path, options }) =>
     path.endsWith("/contributions/status") && options.method === "PATCH"
   );

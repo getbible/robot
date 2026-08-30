@@ -4,9 +4,15 @@ import {
   isMiniAppInstanceScope,
   miniAppInstanceScope,
 } from "./instance-scope.js";
+import {
+  contributionReviewDetailsAvailable,
+  normalizeContributionStatus,
+} from "./model.js";
 
 const STORAGE_PREFIX = "getbible.miniapp.contributions.v1";
 const STORAGE_VERSION = 1;
+const GLOBAL_EVENT_ORIGIN = "g";
+const PERSONAL_EVENT_ORIGIN = "p";
 const MAX_BATCH_SIZE = 50;
 // Keep ordinary offline churn small enough to coexist with the bookmark record
 // and live catalogue under a shared-origin quota. If this journal fills, the
@@ -41,12 +47,17 @@ export class ContributionSync {
   #key;
   #lockManager;
   #lockName;
+  #statusLockName;
   #syncLockName;
   #maximumOutboxEvents;
+  #manualSyncPromise = null;
   #persistenceFailed = false;
+  #status;
+  #statusTail = Promise.resolve();
   #state;
   #storage;
   #syncPromise = null;
+  #validateStoredBaseline = false;
 
   static async open(options = {}) {
     const instanceScope = options.instanceScope ?? defaultInstanceScope();
@@ -95,14 +106,19 @@ export class ContributionSync {
         break;
       }
     }
-    return new ContributionSync({
+    const sync = new ContributionSync({
       ...options,
+      initialStatus: undefined,
       instanceScope,
       storage: null,
       journal,
       lockManager,
       initialRaw,
     });
+    if (options.initialStatus !== undefined) {
+      await sync.seedStatus(options.initialStatus);
+    }
+    return sync;
   }
 
   constructor({
@@ -117,6 +133,7 @@ export class ContributionSync {
     journal = null,
     lockManager = null,
     initialRaw = undefined,
+    initialStatus = undefined,
     batchPause = null,
   } = {}) {
     if (typeof scope !== "string" || !SCOPE_PATTERN.test(scope)) {
@@ -147,6 +164,7 @@ export class ContributionSync {
     }
     this.#key = contributionStorageKey(scope, instanceScope);
     this.#lockName = `${this.#key}:lock`;
+    this.#statusLockName = `${this.#key}:status`;
     this.#syncLockName = `${this.#key}:sync`;
     this.#api = api;
     this.#batchPause = batchPause;
@@ -161,6 +179,18 @@ export class ContributionSync {
     this.#maximumOutboxEvents = maximumOutboxEvents;
     this.#state = this.#read();
     this.#persistenceFailed = !journal && this.#storage === null;
+    this.#status = statusFromState(this.#state);
+    if (initialStatus !== undefined) {
+      const status = normalizeContributionStatus(initialStatus);
+      this.#applyStatus(status);
+      this.#status = cloneContributionStatus(status);
+      if (!journal) {
+        this.#write();
+      }
+    }
+    // Only a baseline that was already complete when this client opened can
+    // hide personal changes made while no contribution journal was running.
+    this.#validateStoredBaseline = this.#state.baseline_complete;
   }
 
   get canContribute() {
@@ -169,6 +199,34 @@ export class ContributionSync {
 
   get disclosureRequired() {
     return this.#state.disclosure_required;
+  }
+
+  get contributorState() {
+    return this.#state.contributor_state;
+  }
+
+  get status() {
+    const status = cloneContributionStatus(this.#status);
+    status.state = this.#state.contributor_state;
+    status.can_contribute = this.#state.approved;
+    status.disclosure_required = this.#state.disclosure_required;
+    return status;
+  }
+
+  get reviewDetailsAvailable() {
+    return contributionReviewDetailsAvailable(this.#status);
+  }
+
+  get topicOutcomes() {
+    return this.status.topics;
+  }
+
+  get reviewSummary() {
+    return this.status.summary;
+  }
+
+  get baselineComplete() {
+    return this.#state.baseline_complete;
   }
 
   get pendingCount() {
@@ -187,42 +245,108 @@ export class ContributionSync {
     return this.#persistenceFailed;
   }
 
-  async refreshStatus() {
-    const status = normalizeStatus(await this.#api.contributionStatus());
-    return this.#withLock(async () => {
-      const approved = status.enabled && status.can_contribute;
-      this.#state.approved = approved;
-      this.#state.contributor_state = status.state;
-      this.#state.disclosure_required = approved && status.disclosure_required;
-      if (!approved && ["rejected", "revoked"].includes(status.state)) {
-        this.#state.outbox = [];
-        this.#state.baseline_complete = false;
-        this.#state.baseline_cursor = 0;
-        this.#state.baseline_fingerprint = null;
-        this.#state.overflowed = false;
-        this.#state.recovery_base = null;
-        this.#state.recovery_target = null;
-        this.#state.recovery_latest = null;
-        this.#state.recovery_cursor = 0;
-        this.#state.recovery_fingerprint = null;
-        this.#state.recovery_external = null;
-        this.#state.recovery_external_latest = null;
+  refreshStatus() {
+    return this.#withStatusLock(async () => {
+      try {
+        const status = normalizeContributionStatus(
+          await this.#api.contributionStatus(),
+        );
+        return this.#seedStatusLocked(status);
+      } catch (error) {
+        if (isContributionDenied(error)) {
+          await this.#suspendContributionsLocked();
+        }
+        throw error;
       }
-      await this.#write();
-      return { ...status };
     });
   }
 
-  async acknowledgeDisclosure() {
-    if (!this.#state.approved || !this.#state.disclosure_required) {
-      return false;
-    }
-    await this.#api.acknowledgeContributionDisclosure();
+  /**
+   * Accepts the authenticated status bundled into the session bootstrap.
+   * Seeding is deliberately transport-free: callers can decide whether this
+   * user should open a journal or make any later contribution request.
+   */
+  seedStatus(value) {
+    const status = normalizeContributionStatus(value);
+    return this.#withStatusLock(() => this.#seedStatusLocked(status));
+  }
+
+  #seedStatusLocked(status) {
     return this.#withLock(async () => {
-      this.#state.disclosure_required = false;
+      this.#applyStatus(status);
+      this.#status = cloneContributionStatus(status);
       await this.#write();
-      return true;
+      return this.status;
     });
+  }
+
+  #applyStatus(status) {
+    const wasApproved = this.#state.approved;
+    const approved = status.enabled && status.can_contribute;
+    this.#state.approved = approved;
+    this.#state.contributor_state = status.state;
+    this.#state.disclosure_required = approved && status.disclosure_required;
+    if (approved && !wasApproved) {
+      // Capturing is intentionally paused while authority is absent. Start a
+      // fresh additive baseline when it returns, then drain every preserved
+      // inverse/outbox event from before the authority transition.
+      this.#state.baseline_complete = false;
+      this.#state.baseline_cursor = 0;
+      this.#state.baseline_fingerprint = null;
+      this.#validateStoredBaseline = false;
+    }
+  }
+
+  acknowledgeDisclosure() {
+    return this.#withStatusLock(async () => {
+      const required = await this.#withLock(() =>
+        this.#state.approved && this.#state.disclosure_required
+      );
+      if (!required) {
+        return false;
+      }
+      try {
+        const status = normalizeContributionStatus(
+          await this.#api.acknowledgeContributionDisclosure(),
+        );
+        await this.#seedStatusLocked(status);
+        return true;
+      } catch (error) {
+        if (isContributionDenied(error)) {
+          await this.#suspendContributionsLocked();
+        }
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * User-requested full synchronization. Unlike the quiet background drain,
+   * this operation always revalidates approval first and returns the newest
+   * review outcomes. A stale local `canContribute` value can therefore never
+   * prevent an approved contributor from starting their first baseline.
+   */
+  synchronizeNow(snapshot) {
+    if (this.#manualSyncPromise) {
+      return this.#manualSyncPromise;
+    }
+    this.#manualSyncPromise = this.#synchronizeNow(snapshot).finally(() => {
+      this.#manualSyncPromise = null;
+    });
+    return this.#manualSyncPromise;
+  }
+
+  async #synchronizeNow(snapshot) {
+    const initialStatus = await this.refreshStatus();
+    if (!initialStatus.can_contribute || initialStatus.disclosure_required) {
+      return synchronizationReport(
+        { sent: 0, pending: this.pendingCount },
+        initialStatus,
+      );
+    }
+    const result = await this.synchronize(snapshot);
+    const finalStatus = await this.refreshStatus();
+    return synchronizationReport(result, finalStatus);
   }
 
   /** Records only the mutations that successfully reached BookmarkStore. */
@@ -286,7 +410,7 @@ export class ContributionSync {
       const index = indexes.get(key) ?? -1;
       const queued = {
         ...event,
-        client_event_id: this.#nextEventId(),
+        client_event_id: this.#nextEventId(PERSONAL_EVENT_ORIGIN),
       };
       if (index >= 0) {
         this.#state.outbox[index] = queued;
@@ -384,7 +508,10 @@ export class ContributionSync {
       for (const event of events) {
         const key = semanticEventKey(event);
         const index = indexes.get(key) ?? -1;
-        const queued = { ...event, client_event_id: this.#nextEventId() };
+        const queued = {
+          ...event,
+          client_event_id: this.#nextEventId(GLOBAL_EVENT_ORIGIN),
+        };
         if (index >= 0) {
           // A fresh id prevents an acknowledgement for a possibly in-flight
           // inverse event from erasing this later intent.
@@ -484,6 +611,9 @@ export class ContributionSync {
           this.#prepareRecoveryBatch()
         );
         if (prepared === null) break;
+        if (prepared.blocked) {
+          return { sent, pending: prepared.pending };
+        }
         await this.#api.submitContributionEvents(prepared.batch);
         sent += prepared.batch.length;
         await this.#withLock(() => this.#acknowledgeRecoveryBatch(prepared));
@@ -493,26 +623,12 @@ export class ContributionSync {
       const pending = await this.#withLock(() => this.#state.outbox.length);
       return { sent, pending };
     } catch (error) {
-      if (
-        error?.status === 403 ||
-        error?.code === "contribution_not_allowed"
-      ) {
-        await this.#withLock(async () => {
-          this.#state.approved = false;
-          this.#state.outbox = [];
-          this.#state.baseline_complete = false;
-          this.#state.baseline_cursor = 0;
-          this.#state.baseline_fingerprint = null;
-          this.#state.overflowed = false;
-          this.#state.recovery_base = null;
-          this.#state.recovery_target = null;
-          this.#state.recovery_latest = null;
-          this.#state.recovery_cursor = 0;
-          this.#state.recovery_fingerprint = null;
-          this.#state.recovery_external = null;
-          this.#state.recovery_external_latest = null;
-          await this.#write();
-        });
+      if (isContributionDenied(error)) {
+        // The authority failure stops capture/upload immediately, but the
+        // journal remains the user's only durable record of unsent intent.
+        // Serialize this transition with status GET/PATCH so an older response
+        // cannot re-enable contribution after the denial was observed.
+        await this.#withStatusLock(() => this.#suspendContributionsLocked());
       }
       throw error;
     }
@@ -522,10 +638,26 @@ export class ContributionSync {
     if (!this.#state.approved || this.#state.disclosure_required) {
       return { blocked: true, pending: this.#state.outbox.length };
     }
+    let fingerprint = null;
+    if (this.#validateStoredBaseline) {
+      this.#validateStoredBaseline = false;
+      fingerprint = baselineFingerprint(baseline);
+      const reconciled = reconcilePersonalOutbox(this.#state.outbox, baseline);
+      if (
+        this.#state.baseline_complete &&
+        this.#state.baseline_fingerprint !== fingerprint
+      ) {
+        this.#state.baseline_complete = false;
+        this.#state.baseline_cursor = 0;
+        this.#state.baseline_fingerprint = null;
+      } else if (reconciled) {
+        await this.#write();
+      }
+    }
     if (this.#state.baseline_complete) {
       return null;
     }
-    const fingerprint = baselineFingerprint(baseline);
+    fingerprint ??= baselineFingerprint(baseline);
     if (this.#state.baseline_fingerprint !== fingerprint) {
       this.#state.baseline_fingerprint = fingerprint;
       this.#state.baseline_cursor = 0;
@@ -561,6 +693,9 @@ export class ContributionSync {
   }
 
   async #prepareRecoveryBatch() {
+    if (!this.#state.approved || this.#state.disclosure_required) {
+      return { blocked: true, pending: this.#state.outbox.length };
+    }
     while (
       this.#state.recovery_base !== null &&
       this.#state.recovery_target !== null
@@ -632,14 +767,19 @@ export class ContributionSync {
     }
   }
 
-  #nextEventId() {
+  #nextEventId(origin) {
+    if (![PERSONAL_EVENT_ORIGIN, GLOBAL_EVENT_ORIGIN].includes(origin)) {
+      throw new TypeError("A contribution event origin is invalid.");
+    }
     this.#state.next_sequence += 1;
     const timestamp = Math.max(0, Math.floor(Number(this.#clock()) || 0))
       .toString(36);
     const token = String(this.#idFactory())
       .replace(/[^A-Za-z0-9._:-]/g, "")
       .slice(0, 64);
-    const id = `event:${timestamp}:${this.#state.next_sequence.toString(36)}:${
+    const id = `event:${origin}:${timestamp}:${
+      this.#state.next_sequence.toString(36)
+    }:${
       token || "local"
     }`;
     if (!SAFE_ID_PATTERN.test(id)) {
@@ -673,6 +813,26 @@ export class ContributionSync {
         this.#state = this.#read();
       }
       return operation();
+    });
+  }
+
+  #withStatusLock(operation) {
+    if (this.#journal) {
+      return this.#lockManager.request(this.#statusLockName, operation);
+    }
+    // localStorage has no cross-document transaction primitive, but one open
+    // client still needs request-order authority: hold this lane across both
+    // the network response and its state commit.
+    const run = () => Promise.resolve().then(operation);
+    const result = this.#statusTail.then(run, run);
+    this.#statusTail = result.catch(() => undefined);
+    return result;
+  }
+
+  #suspendContributionsLocked() {
+    return this.#withLock(async () => {
+      this.#state.approved = false;
+      await this.#write();
     });
   }
 
@@ -899,6 +1059,30 @@ function semanticEventKey(event) {
   }:${event.verse.verse}`;
 }
 
+function reconcilePersonalOutbox(outbox, baseline) {
+  const currentKeys = new Set(baseline.map(semanticEventKey));
+  const retained = outbox.filter((event) => {
+    if (!event.client_event_id.startsWith(`event:${PERSONAL_EVENT_ORIGIN}:`)) {
+      // Legacy and explicit global-preference events have no authoritative
+      // representation in BookmarkStore, so preserve them without guessing.
+      return true;
+    }
+    if (["topic_upsert", "verse_add"].includes(event.type)) {
+      // A fresh baseline will send a still-current positive; otherwise this
+      // queued positive was undone while the Mini App journal was closed.
+      return false;
+    }
+    // Keep a negative only while the current personal snapshot still lacks
+    // that topic/assignment. A restored item supersedes the stale inverse.
+    return !currentKeys.has(semanticEventKey(event));
+  });
+  if (retained.length === outbox.length) {
+    return false;
+  }
+  outbox.splice(0, outbox.length, ...retained);
+  return true;
+}
+
 function pruneBaselineOutcomes(outbox, baseline) {
   const represented = new Map(
     baseline
@@ -1016,39 +1200,43 @@ function normalizeSnapshot(value) {
   return { topics, bookmarks };
 }
 
-function normalizeStatus(value) {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    !hasExactKeys(value, [
-      "enabled",
-      "state",
-      "can_contribute",
-      "disclosure_required",
-    ]) ||
-    typeof value.enabled !== "boolean" ||
-    typeof value.can_contribute !== "boolean" ||
-    typeof value.disclosure_required !== "boolean" ||
-    typeof value.state !== "string" ||
-    ![
-      "not_applied",
-      "pending",
-      "approved",
-      "deferred",
-      "rejected",
-      "revoked",
-      "unavailable",
-    ].includes(value.state)
-  ) {
-    throw new TypeError("The contributor status response is invalid.");
-  }
+function statusFromState(state) {
+  return normalizeContributionStatus({
+    enabled: state.contributor_state !== "unavailable",
+    state: state.contributor_state,
+    can_contribute: state.approved,
+    disclosure_required: state.disclosure_required,
+  });
+}
+
+function cloneContributionStatus(status) {
+  return normalizeContributionStatus(status);
+}
+
+function synchronizationReport(result, status) {
+  const normalizedStatus = cloneContributionStatus(status);
   return {
-    enabled: value.enabled,
-    state: value.state,
-    can_contribute: value.can_contribute,
-    disclosure_required: value.disclosure_required,
+    sent: result.sent,
+    pending: result.pending,
+    review_details_available:
+      contributionReviewDetailsAvailable(normalizedStatus),
+    status: normalizedStatus,
+    topic_outcomes: normalizedStatus.topics.map((topic) => ({
+      ...topic,
+      ...(topic.canonical_topic
+        ? {
+            canonical_topic: {
+              ...topic.canonical_topic,
+              aliases: [...topic.canonical_topic.aliases],
+            },
+          }
+        : {}),
+    })),
   };
+}
+
+function isContributionDenied(error) {
+  return error?.code === "contribution_not_allowed";
 }
 
 function validState(value) {

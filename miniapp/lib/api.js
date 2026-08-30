@@ -246,11 +246,11 @@ export class MiniAppApi {
   }
 
   contributionStatus() {
-    return this.#request("contributions/status");
+    return this.#request("contributions/status?details=1");
   }
 
   acknowledgeContributionDisclosure() {
-    return this.#request("contributions/status", {
+    return this.#request("contributions/status?details=1", {
       method: "PATCH",
       body: { disclosure_acknowledged: true },
     });

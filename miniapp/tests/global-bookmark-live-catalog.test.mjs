@@ -66,7 +66,7 @@ test("uses a valid live catalogue immediately and revalidates its cache by ETag"
       return { not_modified: true, etag };
     } },
   });
-  assert.equal(second.source, "cache");
+  assert.equal(second.source, "network");
   assert.equal(second.checksum, CHECKSUM);
 });
 
@@ -132,6 +132,88 @@ test("an invalid refresh preserves the last valid cached catalogue", async () =>
   });
   assert.equal(result.source, "cache");
   assert.equal(result.checksum, CHECKSUM);
+});
+
+test("strict refresh requires a valid network response while preserving cache", async () => {
+  const storage = new MemoryStorage();
+  await loadLiveGlobalBookmarkCatalog({
+    scope: SCOPE,
+    instanceScope: INSTANCE_SCOPE,
+    storage,
+    api: { async bookmarkCatalog() { return envelope(); } },
+  });
+
+  await assert.rejects(
+    loadLiveGlobalBookmarkCatalog({
+      scope: SCOPE,
+      instanceScope: INSTANCE_SCOPE,
+      storage,
+      requireNetwork: true,
+      api: { async bookmarkCatalog(etag) {
+        assert.equal(etag, '"catalog-2"');
+        throw new Error("offline");
+      } },
+    }),
+    /offline/,
+  );
+
+  const validated = await loadLiveGlobalBookmarkCatalog({
+    scope: SCOPE,
+    instanceScope: INSTANCE_SCOPE,
+    storage,
+    requireNetwork: true,
+    api: { async bookmarkCatalog(etag) {
+      assert.equal(etag, '"catalog-2"');
+      return { not_modified: true, etag };
+    } },
+  });
+  assert.equal(validated.source, "network");
+  assert.equal(validated.checksum, CHECKSUM);
+});
+
+test("distinguishes a validated 304 from an error fallback to the same cache", async () => {
+  const storage = new MemoryStorage();
+  await loadLiveGlobalBookmarkCatalog({
+    scope: SCOPE,
+    instanceScope: INSTANCE_SCOPE,
+    storage,
+    api: { async bookmarkCatalog() { return envelope(); } },
+  });
+
+  const validated = await loadLiveGlobalBookmarkCatalog({
+    scope: SCOPE,
+    instanceScope: INSTANCE_SCOPE,
+    storage,
+    api: { async bookmarkCatalog(etag) {
+      return { not_modified: true, etag };
+    } },
+  });
+  const fallback = await loadLiveGlobalBookmarkCatalog({
+    scope: SCOPE,
+    instanceScope: INSTANCE_SCOPE,
+    storage,
+    api: { async bookmarkCatalog() { throw new Error("offline"); } },
+  });
+
+  assert.equal(validated.source, "network");
+  assert.equal(fallback.source, "cache");
+  assert.equal(validated.checksum, fallback.checksum);
+});
+
+test("strict refresh rejects a cacheless not-modified response", async () => {
+  await assert.rejects(
+    loadLiveGlobalBookmarkCatalog({
+      scope: SCOPE,
+      instanceScope: INSTANCE_SCOPE,
+      storage: new MemoryStorage(),
+      requireNetwork: true,
+      api: { async bookmarkCatalog(etag) {
+        assert.equal(etag, null);
+        return { not_modified: true, etag: '"missing"' };
+      } },
+    }),
+    /cannot be not-modified/,
+  );
 });
 
 test("an authenticated lower revision replaces cache after a database restore", async () => {

@@ -1,8 +1,10 @@
+import http.server
 import os
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -501,15 +503,125 @@ cat "$dropin_root/alpha.conf"
         end = script.index("\ncmd_rollback() {", start)
         upgrade = script[start:end]
 
-        begin = upgrade.index("begin_caddy_transaction")
+        full_upgrade = upgrade.index("prepare_application")
+        begin = upgrade.index("begin_caddy_transaction", full_upgrade)
         cutover = upgrade.index('systemctl stop "$service"')
-        verify = upgrade.index("verify_mini_app_instance")
+        verify = upgrade.index("verify_mini_app_instance", cutover)
         commit = upgrade.index("commit_caddy_transaction", verify)
         rollback = upgrade.index("rollback_caddy_transaction", commit)
         self.assertLess(begin, cutover)
         self.assertLess(cutover, verify)
         self.assertLess(verify, commit)
         self.assertLess(commit, rollback)
+
+        refresh = upgrade[:full_upgrade]
+        self.assertIn('[[ "$target_sha" == "$ACTIVE_SHA" ]]', refresh)
+        snapshot = refresh.index("begin_upgrade_refresh_transaction")
+        migrate = refresh.index("migrate_instance_configuration")
+        refresh_verify = refresh.index("verify_mini_app_instance")
+        state_commit = refresh.index(
+            "commit_upgrade_refresh_transaction",
+            refresh_verify,
+        )
+        state_rollback = refresh.index(
+            "rollback_upgrade_refresh_transaction",
+            state_commit,
+        )
+        self.assertLess(snapshot, migrate)
+        self.assertLess(migrate, refresh_verify)
+        self.assertLess(refresh_verify, state_commit)
+        self.assertLess(state_commit, state_rollback)
+        self.assertIn("migrate_instance_configuration", refresh)
+        self.assertIn("begin_caddy_transaction", refresh)
+        self.assertIn("verify_mini_app_instance", refresh)
+        self.assertIn("commit_caddy_transaction", refresh)
+
+    def test_upgrade_hands_off_to_changed_target_manager(self) -> None:
+        script = SETUP.read_text(encoding="utf-8")
+        handoff = script.index("handoff_upgrade_to_target_manager() {")
+        upgrade = script.index("cmd_upgrade() {", handoff)
+        handoff_body = script[handoff:upgrade]
+        upgrade_body = script[upgrade:script.index("\ncmd_rollback() {", upgrade)]
+        self.assertIn('[[ "$SCRIPT_PATH" == "$target_manager" ]]', handoff_body)
+        self.assertIn('exec "$target_manager" "${arguments[@]}"', handoff_body)
+        self.assertLess(
+            upgrade_body.index("handoff_upgrade_to_target_manager"),
+            upgrade_body.index("migrate_instance_configuration"),
+        )
+
+    def test_mini_app_postflight_requires_robot_json_from_sync_routes(self) -> None:
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _respond(self) -> None:
+                allowed_origin = (
+                    self.command == "GET"
+                    or self.headers.get("Origin") == "https://bot.example.com"
+                )
+                if self.path == "/robot" and allowed_origin:
+                    status = 401
+                    content_type = "application/json; charset=utf-8"
+                    body = b'{"error":"unauthorized","message":"fixture"}'
+                elif self.path == "/robot":
+                    status = 403
+                    content_type = "application/json; charset=utf-8"
+                    body = b'{"error":"forbidden","message":"fixture"}'
+                else:
+                    status = 200
+                    content_type = "text/html; charset=utf-8"
+                    body = b"<html><title>getBible.Life</title></html>"
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_GET = _respond
+            do_POST = _respond
+
+            def log_message(self, _format: str, *args: object) -> None:
+                del args
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            for method in ("GET", "POST"):
+                accepted = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; probe_mini_app_api_url "$2" "$3" "$4" "$5"',
+                        "setup-api-postflight-test",
+                        str(SETUP),
+                        sys.executable,
+                        f"{base_url}/robot",
+                        method,
+                        "https://bot.example.com",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(accepted.returncode, 0, msg=accepted.stderr)
+            html_fallback = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; probe_mini_app_api_url "$2" "$3" GET',
+                    "setup-api-postflight-test",
+                    str(SETUP),
+                    sys.executable,
+                    f"{base_url}/html",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(html_fallback.returncode, 0)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
     def test_mini_app_manager_enforces_https_and_loopback(self) -> None:
         script = SETUP.read_text(encoding="utf-8")
@@ -529,15 +641,24 @@ cat "$dropin_root/alpha.conf"
         self.assertIn("max_size 5MB", script)
         self.assertIn("/api/v1/bookmarks/backup", script)
         self.assertIn("/api/v1/bookmarks/restore", script)
-        self.assertEqual(script.count('"/api/v1/bookmarks/catalog"'), 2)
-        self.assertEqual(script.count('"/api/v1/contributions/status"'), 2)
-        self.assertEqual(script.count('"/api/v1/contributions/events"'), 2)
+        render_start = script.index("render_caddy_routes() {")
+        render_end = script.index("\nmanaged_caddy_routes_required() {", render_start)
+        caddy_renderer = script[render_start:render_end]
+        self.assertEqual(caddy_renderer.count('"/api/v1/bookmarks/catalog"'), 2)
+        self.assertEqual(caddy_renderer.count('"/api/v1/contributions/status"'), 2)
+        self.assertEqual(caddy_renderer.count('"/api/v1/contributions/events"'), 2)
         self.assertIn('path + "/api/v1/bookmarks/catalog"', script)
         self.assertIn('path + "/api/v1/contributions/status"', script)
         self.assertIn('path + "/api/v1/contributions/events"', script)
         self.assertIn("caddy validate --config", script)
         self.assertIn("rollback_caddy_transaction", script)
-        self.assertIn("wait_for_mini_app_url", script)
+        self.assertIn("wait_for_mini_app_surface", script)
+        surface_start = script.index("probe_mini_app_surface() {")
+        surface_end = script.index("\nwait_for_mini_app_surface() {", surface_start)
+        surface = script[surface_start:surface_end]
+        self.assertIn('"${base_url}/api/v1/bookmarks/catalog" GET', surface)
+        self.assertIn('"${base_url}/api/v1/contributions/status" GET', surface)
+        self.assertIn('"${base_url}/api/v1/contributions/events" POST', surface)
         self.assertIn("verify_mini_app_public", script)
         self.assertIn('systemctl enable --now "$service"', script)
         self.assertNotIn("Traefik", (ROOT / "docs" / "MINI_APP.md").read_text())

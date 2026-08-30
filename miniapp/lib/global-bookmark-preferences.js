@@ -1,8 +1,11 @@
+import { isMiniAppInstanceScope } from "./instance-scope.js";
+
 const STORAGE_KEY = "getbible.miniapp.global-bookmarks.v2";
-const STORAGE_VERSION = 2;
+const STORAGE_VERSION = 3;
 const TOPIC_MAPPING_PREFIX = "getbible.miniapp.global-topic-map.v1";
-const TOPIC_MAPPING_VERSION = 1;
+const TOPIC_MAPPING_VERSION = 2;
 const MAX_ENABLED_TOPICS = 100;
+const MAX_MAPPING_PATCH_TOPIC_IDS = 1_000;
 const FALLBACK_MAX_HIDDEN_BOOKMARKS = 10_000;
 const TOPIC_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const SCOPE_PATTERN = /^[a-f0-9]{64}$/;
@@ -21,21 +24,32 @@ export class GlobalBookmarkPreferences {
   #allowedBookmarkIds;
   #allowedTopicIds;
   #catalogVersion = 0;
+  #contributionTopicMappings = new Map();
+  #disabledTopicIds = new Set();
   #enabledTopicIds = new Set();
   #hiddenBookmarkIds = new Set();
+  #lockManager;
   #mappingKey = null;
+  #mappingLockName = null;
   #mappingPersistent = false;
   #maxHiddenBookmarks;
   #persistent;
+  #promotedTopicIds = new Set();
+  #promotionCatalogVersion = 0;
   #storage;
   #topicMappings = new Map();
 
   constructor({
     allowedBookmarkIds = null,
     allowedTopicIds = null,
+    instanceScope,
+    lockManager = browserLockManager(),
     scope = null,
     storage = browserLocalStorage(),
   } = {}) {
+    if (!isMiniAppInstanceScope(instanceScope)) {
+      throw new TypeError("A Mini App instance scope is required.");
+    }
     this.#allowedTopicIds = allowedTopicIds === null
       ? null
       : new Set(normalizeTopicIds(allowedTopicIds));
@@ -53,8 +67,12 @@ export class GlobalBookmarkPreferences {
       FALLBACK_MAX_HIDDEN_BOOKMARKS;
     this.#storage = storageLike(storage) ? storage : null;
     this.#persistent = Boolean(this.#storage);
+    this.#lockManager = lockManagerLike(lockManager) ? lockManager : null;
     this.#mappingKey = typeof scope === "string" && SCOPE_PATTERN.test(scope)
-      ? `${TOPIC_MAPPING_PREFIX}:${scope}`
+      ? `${TOPIC_MAPPING_PREFIX}:${instanceScope}:${scope}`
+      : null;
+    this.#mappingLockName = this.#mappingKey
+      ? `${this.#mappingKey}:write`
       : null;
     this.#mappingPersistent = Boolean(this.#storage && this.#mappingKey);
     this.#readPreferences();
@@ -66,11 +84,24 @@ export class GlobalBookmarkPreferences {
   }
 
   get enabled() {
-    return this.#enabledTopicIds.size > 0;
+    return this.enabledTopicIds.length > 0;
   }
 
   get enabledTopicIds() {
-    return [...this.#enabledTopicIds].sort();
+    const enabledTopicIds = new Set(
+      [...this.#enabledTopicIds].filter((topicId) =>
+        !this.#disabledTopicIds.has(topicId)
+      ),
+    );
+    for (const topicId of this.#promotedTopicIds) {
+      if (
+        !this.#disabledTopicIds.has(topicId) &&
+        (!this.#allowedTopicIds || this.#allowedTopicIds.has(topicId))
+      ) {
+        enabledTopicIds.add(topicId);
+      }
+    }
+    return [...enabledTopicIds].sort();
   }
 
   get hiddenBookmarkIds() {
@@ -82,9 +113,30 @@ export class GlobalBookmarkPreferences {
   }
 
   get topicMappings() {
-    return Object.fromEntries([...this.#topicMappings].sort(([left], [right]) =>
+    const mappings = new Map(this.#topicMappings);
+    for (const [canonicalTopicId, localTopicId] of this.#contributionTopicMappings) {
+      for (const [ordinaryCanonicalTopicId, ordinaryLocalTopicId] of mappings) {
+        if (ordinaryLocalTopicId === localTopicId) {
+          mappings.delete(ordinaryCanonicalTopicId);
+        }
+      }
+      mappings.set(canonicalTopicId, localTopicId);
+    }
+    return Object.fromEntries([...mappings].sort(([left], [right]) =>
       left.localeCompare(right)
     ));
+  }
+
+  get contributionTopicMappings() {
+    return Object.fromEntries(
+      [...this.#contributionTopicMappings].sort(([left], [right]) =>
+        left.localeCompare(right)
+      ),
+    );
+  }
+
+  get promotedTopicIds() {
+    return [...this.#promotedTopicIds].sort();
   }
 
   async flush() {
@@ -93,42 +145,187 @@ export class GlobalBookmarkPreferences {
     }
   }
 
-  setTopicMappings(value, localTopics) {
+  async setTopicMappings(value, localTopics) {
     const localTopicIds = normalizeLocalTopicIds(localTopics);
     const mappings = normalizeTopicMappings(value, this.#allowedTopicIds);
-    let changed = false;
-    for (const [canonicalTopicId, localTopicId] of mappings) {
-      if (!localTopicIds.has(localTopicId)) {
-        continue;
+    return this.#withFreshMappingLock(() => {
+      let changed = false;
+      for (const [canonicalTopicId, localTopicId] of mappings) {
+        if (!localTopicIds.has(localTopicId)) {
+          continue;
+        }
+        if (this.#topicMappings.get(canonicalTopicId) !== localTopicId) {
+          this.#topicMappings.set(canonicalTopicId, localTopicId);
+          changed = true;
+        }
       }
-      if (this.#topicMappings.get(canonicalTopicId) !== localTopicId) {
-        this.#topicMappings.set(canonicalTopicId, localTopicId);
+      if (this.#pruneTopicMappings(localTopicIds)) {
         changed = true;
       }
-    }
-    if (this.#pruneTopicMappings(localTopicIds)) {
-      changed = true;
-    }
-    if (changed) {
-      this.#writeTopicMappings();
-    }
-    return changed;
+      if (changed) {
+        this.#writeTopicMappings();
+      }
+      return changed;
+    });
   }
 
-  pruneTopicMappings(localTopics) {
-    const changed = this.#pruneTopicMappings(normalizeLocalTopicIds(localTopics));
-    if (changed) {
-      this.#writeTopicMappings();
+  async replaceTopicMappings(value, localTopics) {
+    const localTopicIds = normalizeLocalTopicIds(localTopics);
+    const mappings = normalizeTopicMappings(value, this.#allowedTopicIds);
+    if ([...mappings.values()].some((localTopicId) =>
+      !localTopicIds.has(localTopicId)
+    )) {
+      throw new TypeError("A global topic mapping references a missing topic.");
     }
-    return changed;
+    return this.#withFreshMappingLock(() => {
+      if (mapsEqual(mappings, this.#topicMappings)) {
+        return false;
+      }
+      this.#topicMappings = mappings;
+      this.#writeTopicMappings();
+      return true;
+    });
+  }
+
+  /**
+   * Applies one authoritative contributor-review patch without replacing
+   * ordinary catalogue mappings or contribution mappings written by another
+   * same-origin client for unrelated local topics.
+   */
+  async reconcileContributionTopicMappings({
+    clear = false,
+    mappings: value = {},
+    promotedTopicIds = [],
+    replacedLocalTopicIds = [],
+    catalogVersion,
+    guard = null,
+  } = {}, localTopics) {
+    if (guard !== null && typeof guard !== "function") {
+      throw new TypeError("A global topic mapping guard is invalid.");
+    }
+    const localTopicIds = normalizeLocalTopicIds(localTopics);
+    const mappings = normalizeTopicMappings(value, this.#allowedTopicIds);
+    if ([...mappings.values()].some((localTopicId) =>
+      !localTopicIds.has(localTopicId)
+    )) {
+      throw new TypeError("A global topic mapping references a missing topic.");
+    }
+    const replacedIds = new Set(
+      normalizeMappingPatchTopicIds(replacedLocalTopicIds),
+    );
+    const promotionIds = normalizeTopicIds(promotedTopicIds).map((topicId) =>
+      normalizeAllowedTopicId(topicId, this.#allowedTopicIds)
+    );
+    const normalizedCatalogVersion = promotionIds.length > 0
+      ? normalizeCatalogVersion(catalogVersion)
+      : null;
+    const operation = async () => {
+      if (guard && !guard()) {
+        return {
+          changed: false,
+          enabled: 0,
+          mappingChanged: false,
+          newlyPromotedTopicIds: [],
+          stale: true,
+        };
+      }
+      const nextMappings = clear
+        ? new Map()
+        : new Map(this.#contributionTopicMappings);
+      if (!clear) {
+        for (const [canonicalTopicId, localTopicId] of nextMappings) {
+          if (
+            replacedIds.has(localTopicId) ||
+            mappings.has(canonicalTopicId)
+          ) {
+            nextMappings.delete(canonicalTopicId);
+          }
+        }
+        for (const [canonicalTopicId, localTopicId] of mappings) {
+          nextMappings.set(canonicalTopicId, localTopicId);
+        }
+      }
+      const mappingChanged = !mapsEqual(
+        this.#contributionTopicMappings,
+        nextMappings,
+      );
+      const newlyPromotedTopicIds = promotionIds.filter((topicId) =>
+        !this.#promotedTopicIds.has(topicId)
+      );
+      const enabled = newlyPromotedTopicIds.filter((topicId) =>
+        !this.#disabledTopicIds.has(topicId) &&
+        !this.#enabledTopicIds.has(topicId)
+      ).length;
+      const previousMappings = this.#contributionTopicMappings;
+      const previousPromotedTopicIds = this.#promotedTopicIds;
+      const previousPromotionCatalogVersion = this.#promotionCatalogVersion;
+      const previousCatalogVersion = this.#catalogVersion;
+      this.#contributionTopicMappings = nextMappings;
+      this.#promotedTopicIds = new Set(this.#promotedTopicIds);
+      for (const topicId of newlyPromotedTopicIds) {
+        this.#promotedTopicIds.add(topicId);
+      }
+      const promotionChanged = newlyPromotedTopicIds.length > 0;
+      try {
+        if (promotionChanged) {
+          this.#promotionCatalogVersion = normalizedCatalogVersion;
+          this.#catalogVersion = Math.max(
+            this.#catalogVersion,
+            normalizedCatalogVersion,
+          );
+        }
+        if (mappingChanged || promotionChanged) {
+          this.#writeTopicMappings();
+        }
+        if (mappingChanged || promotionChanged) {
+          await this.#ensureContributionMappingDurable({
+            requirePreferences: newlyPromotedTopicIds.some((topicId) =>
+              this.#disabledTopicIds.has(topicId)
+            ),
+          });
+        }
+      } catch (error) {
+        this.#contributionTopicMappings = previousMappings;
+        this.#promotedTopicIds = previousPromotedTopicIds;
+        this.#promotionCatalogVersion = previousPromotionCatalogVersion;
+        this.#catalogVersion = previousCatalogVersion;
+        throw error;
+      }
+      return {
+        changed: mappingChanged || promotionChanged || enabled > 0,
+        enabled,
+        mappingChanged,
+        newlyPromotedTopicIds,
+      };
+    };
+    return this.#withFreshMappingLock(operation);
+  }
+
+  async pruneTopicMappings(localTopics) {
+    const localTopicIds = normalizeLocalTopicIds(localTopics);
+    return this.#withFreshMappingLock(() => {
+      const changed = this.#pruneTopicMappings(localTopicIds);
+      if (changed) {
+        this.#writeTopicMappings();
+      }
+      return changed;
+    });
   }
 
   hasTopic(topicId) {
     const normalized = normalizeTopicId(topicId);
     return (
       (!this.#allowedTopicIds || this.#allowedTopicIds.has(normalized)) &&
-      this.#enabledTopicIds.has(normalized)
+      !this.#disabledTopicIds.has(normalized) &&
+      (
+        this.#enabledTopicIds.has(normalized) ||
+        this.#promotedTopicIds.has(normalized)
+      )
     );
+  }
+
+  hasPromotedTopic(topicId) {
+    return this.#promotedTopicIds.has(normalizeTopicId(topicId));
   }
 
   isBookmarkHidden(bookmarkId) {
@@ -181,6 +378,9 @@ export class GlobalBookmarkPreferences {
     }
     let changed = this.#catalogVersion !== normalizedVersion;
     for (const topicId of normalizedIds) {
+      if (this.#disabledTopicIds.delete(topicId)) {
+        changed = true;
+      }
       if (!this.#enabledTopicIds.has(topicId)) {
         this.#enabledTopicIds.add(topicId);
         changed = true;
@@ -195,15 +395,23 @@ export class GlobalBookmarkPreferences {
   }
 
   disableTopic(topicId) {
-    const changed = this.#enabledTopicIds.delete(normalizeTopicId(topicId));
+    const normalized = normalizeAllowedTopicId(topicId, this.#allowedTopicIds);
+    const wasEnabled = this.hasTopic(normalized);
+    const changed = this.#enabledTopicIds.delete(normalized) ||
+      !this.#disabledTopicIds.has(normalized);
+    this.#disabledTopicIds.add(normalized);
     if (changed) {
       this.#write();
     }
-    return changed;
+    return wasEnabled;
   }
 
   clear() {
-    const changed = this.#enabledTopicIds.size > 0;
+    const effectiveTopicIds = this.enabledTopicIds;
+    const changed = effectiveTopicIds.length > 0;
+    for (const topicId of effectiveTopicIds) {
+      this.#disabledTopicIds.add(topicId);
+    }
     this.#enabledTopicIds.clear();
     if (changed) {
       this.#write();
@@ -211,7 +419,7 @@ export class GlobalBookmarkPreferences {
     return changed;
   }
 
-  #readPreferences() {
+  #readPreferences({ replaceCurrent = false } = {}) {
     if (!this.#storage) {
       return;
     }
@@ -223,6 +431,12 @@ export class GlobalBookmarkPreferences {
       return;
     }
     if (!raw) {
+      if (replaceCurrent) {
+        this.#catalogVersion = 0;
+        this.#enabledTopicIds = new Set();
+        this.#disabledTopicIds = new Set();
+        this.#hiddenBookmarkIds = new Set();
+      }
       return;
     }
     try {
@@ -241,13 +455,16 @@ export class GlobalBookmarkPreferences {
         !value ||
         typeof value !== "object" ||
         Array.isArray(value) ||
-        value.version !== STORAGE_VERSION ||
+        ![2, STORAGE_VERSION].includes(value.version) ||
         !Number.isSafeInteger(value.catalog_version) ||
-        value.catalog_version < 1
+        value.catalog_version < 0
       ) {
         throw new TypeError("Global bookmark preferences are invalid.");
       }
       const enabledTopicIds = normalizeTopicIds(value.enabled_topic_ids);
+      const disabledTopicIds = value.version === STORAGE_VERSION
+        ? normalizeTopicIds(value.disabled_topic_ids ?? [])
+        : [];
       const hiddenBookmarks = normalizeBookmarkIds(
         value.hidden_bookmark_ids ?? [],
         null,
@@ -256,20 +473,27 @@ export class GlobalBookmarkPreferences {
       const retainedTopicIds = this.#allowedTopicIds
         ? enabledTopicIds.filter((topicId) => this.#allowedTopicIds.has(topicId))
         : enabledTopicIds;
+      const retainedDisabledTopicIds = this.#allowedTopicIds
+        ? disabledTopicIds.filter((topicId) => this.#allowedTopicIds.has(topicId))
+        : disabledTopicIds;
       const retainedHiddenBookmarks = hiddenBookmarks.filter((bookmark) =>
         (!this.#allowedTopicIds || this.#allowedTopicIds.has(bookmark.topicId)) &&
         (!this.#allowedBookmarkIds || this.#allowedBookmarkIds.has(bookmark.id))
       );
       this.#catalogVersion = value.catalog_version;
       this.#enabledTopicIds = new Set(retainedTopicIds);
+      this.#disabledTopicIds = new Set(retainedDisabledTopicIds);
       this.#hiddenBookmarkIds = new Set(
         retainedHiddenBookmarks.map((bookmark) => bookmark.id),
       );
       if (
         retainedTopicIds.length !== enabledTopicIds.length ||
+        retainedDisabledTopicIds.length !== disabledTopicIds.length ||
         retainedHiddenBookmarks.length !== hiddenBookmarks.length
       ) {
-        this.#write();
+        if (!replaceCurrent) {
+          this.#write();
+        }
       }
     } catch {
       try {
@@ -280,7 +504,7 @@ export class GlobalBookmarkPreferences {
     }
   }
 
-  #readTopicMappings() {
+  #readTopicMappings({ replaceCurrent = false } = {}) {
     if (!this.#storage || !this.#mappingKey) {
       return;
     }
@@ -292,6 +516,12 @@ export class GlobalBookmarkPreferences {
       return;
     }
     if (!raw) {
+      if (replaceCurrent) {
+        this.#topicMappings = new Map();
+        this.#contributionTopicMappings = new Map();
+        this.#promotedTopicIds = new Set();
+        this.#promotionCatalogVersion = 0;
+      }
       return;
     }
     try {
@@ -310,19 +540,44 @@ export class GlobalBookmarkPreferences {
         !value ||
         typeof value !== "object" ||
         Array.isArray(value) ||
-        value.version !== TOPIC_MAPPING_VERSION
+        ![1, TOPIC_MAPPING_VERSION].includes(value.version)
       ) {
         throw new TypeError("Global topic mappings are invalid.");
       }
-      this.#topicMappings = normalizeTopicMappings(
-        value.topic_ids,
-        this.#allowedTopicIds,
+      const mappings = normalizeTopicMappings(value.topic_ids);
+      const contributionMappings = value.version === TOPIC_MAPPING_VERSION
+        ? normalizeTopicMappings(value.contribution_topic_ids)
+        : new Map();
+      const promotedTopicIds = value.version === TOPIC_MAPPING_VERSION
+        ? new Set(normalizeTopicIds(value.promoted_topic_ids))
+        : new Set();
+      const promotionCatalogVersion = value.version === TOPIC_MAPPING_VERSION
+        ? normalizeStoredCatalogVersion(value.catalog_version ?? 0)
+        : 0;
+      this.#topicMappings = this.#allowedTopicIds
+        ? new Map([...mappings].filter(([canonicalTopicId]) =>
+          this.#allowedTopicIds.has(canonicalTopicId)
+        ))
+        : mappings;
+      // Contributor mappings and first-promotion provenance are retained even
+      // while a validated catalogue temporarily omits their canonical topic.
+      // They are inert until that canonical definition is present again.
+      this.#contributionTopicMappings = contributionMappings;
+      this.#promotedTopicIds = promotedTopicIds;
+      this.#promotionCatalogVersion = promotionCatalogVersion;
+      this.#catalogVersion = Math.max(
+        this.#catalogVersion,
+        promotionCatalogVersion,
       );
+      // Migration/filtering is persisted by the next lock-protected mapping
+      // mutation. Constructors remain read-only so another WebView cannot be
+      // overwritten between its own fresh read and write.
     } catch {
-      try {
-        this.#storage.removeItem(this.#mappingKey);
-      } catch {
-        this.#mappingPersistent = false;
+      if (replaceCurrent) {
+        this.#topicMappings = new Map();
+        this.#contributionTopicMappings = new Map();
+        this.#promotedTopicIds = new Set();
+        this.#promotionCatalogVersion = 0;
       }
     }
   }
@@ -335,7 +590,8 @@ export class GlobalBookmarkPreferences {
       this.#storage.setItem(STORAGE_KEY, JSON.stringify({
         version: STORAGE_VERSION,
         catalog_version: this.#catalogVersion,
-        enabled_topic_ids: this.enabledTopicIds,
+        enabled_topic_ids: [...this.#enabledTopicIds].sort(),
+        disabled_topic_ids: [...this.#disabledTopicIds].sort(),
         hidden_bookmark_ids: this.hiddenBookmarkIds,
       }));
     } catch {
@@ -351,16 +607,48 @@ export class GlobalBookmarkPreferences {
 
   #writeTopicMappings() {
     if (!this.#storage || !this.#mappingKey || !this.#mappingPersistent) {
-      return;
+      throw new TypeError("Global topic mappings are not persistent.");
     }
-    try {
-      this.#storage.setItem(this.#mappingKey, JSON.stringify({
-        version: TOPIC_MAPPING_VERSION,
-        topic_ids: this.topicMappings,
-      }));
-    } catch {
-      this.#mappingPersistent = false;
-    }
+    this.#storage.setItem(this.#mappingKey, JSON.stringify({
+      version: TOPIC_MAPPING_VERSION,
+      catalog_version: this.#promotionCatalogVersion,
+      topic_ids: Object.fromEntries(
+        [...this.#topicMappings].sort(([left], [right]) =>
+          left.localeCompare(right)
+        ),
+      ),
+      contribution_topic_ids: this.contributionTopicMappings,
+      promoted_topic_ids: this.promotedTopicIds,
+    }));
+  }
+
+  #withFreshMappingLock(operation) {
+    const run = async () => {
+      if (this.#storage && this.#mappingKey) {
+        await this.#storage.refreshItem?.(STORAGE_KEY);
+        await this.#storage.refreshItem?.(this.#mappingKey);
+        await this.#requireDurableStorageItem(STORAGE_KEY);
+        await this.#requireDurableStorageItem(this.#mappingKey);
+        this.#readPreferences({ replaceCurrent: true });
+        this.#readTopicMappings({ replaceCurrent: true });
+        if (!this.#mappingPersistent) {
+          throw new TypeError(
+            "Global topic mappings require a newer application.",
+          );
+        }
+      }
+      if (this.#mappingKey && !this.#mappingPersistent) {
+        throw new TypeError("Global topic mappings are not persistent.");
+      }
+      return operation();
+    };
+    return this.#lockManager && this.#mappingLockName
+      ? this.#lockManager.request(
+        this.#mappingLockName,
+        { mode: "exclusive" },
+        run,
+      )
+      : run();
   }
 
   #pruneTopicMappings(localTopicIds) {
@@ -387,6 +675,53 @@ export class GlobalBookmarkPreferences {
     }
     return changed;
   }
+
+  async #ensureContributionMappingDurable({ requirePreferences = false } = {}) {
+    if (!this.#storage || !this.#mappingKey || !this.#mappingPersistent) {
+      throw new TypeError("Global topic mappings are not persistent.");
+    }
+    if (typeof this.#storage.flush !== "function") {
+      return;
+    }
+    const keys = [
+      this.#mappingKey,
+      ...(requirePreferences ? [STORAGE_KEY] : []),
+    ];
+    await this.#storage.flush();
+    if (typeof this.#storage.isItemDurable !== "function") {
+      return;
+    }
+    let missingKeys = keys.filter((key) => !this.#storage.isItemDurable(key));
+    for (const key of missingKeys) {
+      this.#storage.retryItem?.(key);
+    }
+    if (missingKeys.length > 0) {
+      await this.#storage.flush();
+      missingKeys = keys.filter((key) => !this.#storage.isItemDurable(key));
+    }
+    if (missingKeys.length > 0) {
+      for (const key of missingKeys) {
+        this.#storage.restoreDurableItem?.(key);
+      }
+      throw new Error("Global bookmark preferences could not be persisted.");
+    }
+  }
+
+  async #requireDurableStorageItem(key) {
+    if (
+      typeof this.#storage?.isItemDurable !== "function" ||
+      this.#storage.getItem(key) === null ||
+      this.#storage.isItemDurable(key)
+    ) {
+      return;
+    }
+    this.#storage.retryItem?.(key);
+    await this.#storage.flush?.();
+    if (!this.#storage.isItemDurable(key)) {
+      this.#storage.restoreDurableItem?.(key);
+      throw new Error("Global bookmark preferences could not be persisted.");
+    }
+  }
 }
 
 export const GLOBAL_BOOKMARK_PREFERENCES_KEY = STORAGE_KEY;
@@ -399,9 +734,23 @@ function normalizeCatalogVersion(value) {
   return value;
 }
 
+function normalizeStoredCatalogVersion(value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError("The global bookmark catalogue version is invalid.");
+  }
+  return value;
+}
+
 function normalizeTopicIds(value) {
   if (!Array.isArray(value) || value.length > MAX_ENABLED_TOPICS) {
     throw new TypeError("Global bookmark topic preferences are invalid.");
+  }
+  return [...new Set(value.map(normalizeTopicId))].sort();
+}
+
+function normalizeMappingPatchTopicIds(value) {
+  if (!Array.isArray(value) || value.length > MAX_MAPPING_PATCH_TOPIC_IDS) {
+    throw new TypeError("Global topic mapping patch ids are invalid.");
   }
   return [...new Set(value.map(normalizeTopicId))].sort();
 }
@@ -516,6 +865,26 @@ function storageLike(value) {
     typeof value.getItem === "function" &&
     typeof value.setItem === "function" &&
     typeof value.removeItem === "function",
+  );
+}
+
+function lockManagerLike(value) {
+  return Boolean(value && typeof value.request === "function");
+}
+
+function browserLockManager() {
+  try {
+    return lockManagerLike(globalThis.navigator?.locks)
+      ? globalThis.navigator.locks
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function mapsEqual(left, right) {
+  return left.size === right.size && [...left].every(
+    ([key, value]) => right.get(key) === value,
   );
 }
 

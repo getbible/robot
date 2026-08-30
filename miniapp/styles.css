@@ -2190,6 +2190,19 @@ select:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+.bookmark-group-card__name {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.bookmark-group-card__name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .bookmark-group-card > span:last-child {
   color: var(--hint);
   font-size: 1.25rem;
@@ -2292,6 +2305,79 @@ select:focus-visible {
   line-height: 1.45;
 }
 
+.contributor-sync {
+  display: grid;
+  margin: 10px 14px 14px;
+  padding: 11px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid color-mix(in srgb, var(--brand) 24%, var(--separator));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--brand-soft) 62%, var(--surface));
+}
+
+.contributor-sync[hidden] {
+  display: none;
+}
+
+.contributor-sync[data-state="success"] {
+  border-color: color-mix(in srgb, #16a34a 38%, var(--separator));
+}
+
+.contributor-sync[data-state="error"] {
+  border-color: color-mix(in srgb, var(--destructive) 42%, var(--separator));
+}
+
+.contributor-sync__copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.contributor-sync__copy h3,
+.contributor-sync__copy p {
+  margin: 0;
+}
+
+.contributor-sync__copy h3 {
+  color: var(--text);
+  font-size: 0.74rem;
+  font-weight: 760;
+}
+
+.contributor-sync__copy p {
+  color: var(--muted);
+  font-size: 0.69rem;
+  line-height: 1.42;
+}
+
+.contributor-sync__copy .contributor-sync__details {
+  color: var(--text);
+  font-size: 0.65rem;
+  font-weight: 690;
+}
+
+.contributor-sync__button {
+  min-height: 44px;
+  white-space: nowrap;
+}
+
+.bookmark-contribution-badge {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--bookmark-topic-color) 38%, transparent);
+  border-radius: 7px;
+  color: color-mix(in srgb, var(--bookmark-topic-color) 72%, var(--text));
+  background: color-mix(in srgb, var(--bookmark-topic-color) 14%, transparent);
+  font-size: 0.64rem;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+}
+
 .bookmark-topic-editor__name--core {
   align-items: center;
   display: flex;
@@ -2329,7 +2415,7 @@ select:focus-visible {
 .bookmark-topic-editor__identity {
   display: grid;
   min-width: 0;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
 }
@@ -3558,6 +3644,14 @@ select:focus-visible {
   }
 
   .bookmark-topic-form .button {
+    width: 100%;
+  }
+
+  .contributor-sync {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .contributor-sync__button {
     width: 100%;
   }
 

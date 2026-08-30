@@ -89,6 +89,136 @@ class ContributionStoreTestCase(unittest.TestCase):
         self.store.decide_application(user_id, "approved", actor="admin")
         self.store.acknowledge_disclosure(user_id)
 
+    def test_ordinary_reader_status_has_no_private_work_or_identity(self) -> None:
+        statements: list[str] = []
+        connection = self.store._connection_required()
+        connection.set_trace_callback(statements.append)
+        try:
+            status = self.store.contribution_status(999)
+        finally:
+            connection.set_trace_callback(None)
+
+        self.assertEqual(
+            status,
+            {
+                "enabled": True,
+                "state": "not_applied",
+                "can_contribute": False,
+                "disclosure_required": False,
+                "topics": [],
+                "summary": {
+                    "topics": {
+                        "pending": 0,
+                        "mapped": 0,
+                        "published": 0,
+                        "rejected": 0,
+                        "deferred": 0,
+                    },
+                    "events": {
+                        "pending": 0,
+                        "approved": 0,
+                        "rejected": 0,
+                        "deferred": 0,
+                        "applied": 0,
+                    },
+                },
+            },
+        )
+        selects = [
+            statement
+            for statement in statements
+            if statement.lstrip().startswith("SELECT")
+        ]
+        self.assertEqual(len(selects), 1)
+        self.assertIn("FROM contributor_applications", selects[0])
+
+    def test_identity_observation_does_not_lock_writer_for_ordinary_reader(self) -> None:
+        statements: list[str] = []
+        connection = self.store._connection_required()
+        connection.set_trace_callback(statements.append)
+        try:
+            self.store.observe_identity(999, first_name="Ordinary")
+        finally:
+            connection.set_trace_callback(None)
+
+        self.assertEqual(len(statements), 1)
+        self.assertIn("FROM contributor_applications", statements[0])
+        self.assertFalse(
+            any(
+                statement.lstrip().startswith(
+                    ("BEGIN", "COMMIT", "UPDATE", "INSERT")
+                )
+                for statement in statements
+            )
+        )
+
+    def test_identity_observation_skips_unchanged_contributor_profile(self) -> None:
+        self.store.submit_application(42, first_name="Grace")
+        statements: list[str] = []
+        connection = self.store._connection_required()
+        connection.set_trace_callback(statements.append)
+        try:
+            self.store.observe_identity(42, first_name="Grace")
+        finally:
+            connection.set_trace_callback(None)
+
+        self.assertEqual(len(statements), 1)
+        self.assertIn("FROM contributor_applications", statements[0])
+        self.assertFalse(
+            any(
+                statement.lstrip().startswith(
+                    ("BEGIN", "COMMIT", "UPDATE", "INSERT")
+                )
+                for statement in statements
+            )
+        )
+
+    def test_disclosure_acknowledgement_is_write_and_audit_idempotent(self) -> None:
+        self.store.submit_application(42, first_name="Grace")
+        self.store.decide_application(42, "approved", actor="admin")
+
+        first_status = self.store.acknowledge_disclosure(42)
+        first_application = self.store.application_for(42)
+        assert first_application is not None
+        first_audit = [
+            item
+            for item in self.store.list_audit()
+            if item["action"] == "disclosure_acknowledged"
+        ]
+
+        statements: list[str] = []
+        connection = self.store._connection_required()
+        connection.set_trace_callback(statements.append)
+        try:
+            repeated_status = self.store.acknowledge_disclosure(42)
+        finally:
+            connection.set_trace_callback(None)
+        repeated_application = self.store.application_for(42)
+        assert repeated_application is not None
+        repeated_audit = [
+            item
+            for item in self.store.list_audit()
+            if item["action"] == "disclosure_acknowledged"
+        ]
+
+        self.assertFalse(first_status["disclosure_required"])
+        self.assertEqual(repeated_status, first_status)
+        self.assertEqual(repeated_application.updated_at, first_application.updated_at)
+        self.assertEqual(
+            repeated_application.disclosure_acknowledged_at,
+            first_application.disclosure_acknowledged_at,
+        )
+        self.assertEqual(len(first_audit), 1)
+        self.assertEqual(repeated_audit, first_audit)
+        self.assertFalse(
+            any(
+                statement.lstrip().startswith(
+                    ("BEGIN", "COMMIT", "UPDATE", "INSERT")
+                )
+                for statement in statements
+            )
+        )
+
     def test_database_is_durable_wal_versioned_and_reopens(self) -> None:
         self.approve()
         self.store.close()
@@ -394,6 +524,180 @@ class ContributionStoreTestCase(unittest.TestCase):
                 [_verse_event(verse=17)],
             )
         self.assertEqual(len(self.store.list_events()), 2)
+
+    def test_private_sync_status_tracks_publication_without_leaking_contributors(
+        self,
+    ) -> None:
+        self.approve(42)
+        self.approve(84)
+        result = self.store.record_events(42, [_topic_event()])
+        self.store.record_events(
+            84,
+            [
+                {
+                    "client_event_id": "topic.mercy.v1",
+                    "type": "topic_upsert",
+                    "topic": {
+                        "local_topic_id": "private.mercy",
+                        "name": "Mercy",
+                        "color": "#123456",
+                    },
+                }
+            ],
+        )
+        self.store.set_topic_mapping(
+            42,
+            "local.grace",
+            "grace",
+            state="mapped",
+            actor="admin",
+            canonical_definition={
+                "id": "grace",
+                "name": "Grace",
+                "color": "#bbf7d0",
+                "aliases": ["God's grace"],
+            },
+        )
+        upsert_id = result.event_ids["topic.grace.v1"]
+        self.store.decide_event(upsert_id, "approved", actor="admin")
+
+        awaiting_publication = self.store.contribution_status(42)
+        self.assertFalse(awaiting_publication["topics"][0]["published"])
+        self.assertEqual(awaiting_publication["summary"]["topics"]["mapped"], 1)
+        self.assertEqual(awaiting_publication["summary"]["topics"]["published"], 0)
+        self.assertEqual(awaiting_publication["summary"]["events"]["approved"], 1)
+        self.assertNotIn("private.mercy", json.dumps(awaiting_publication))
+
+        self.store.publish_approved_events_atomically(
+            _catalog(),
+            [upsert_id],
+            actor="admin",
+        )
+        published = self.store.contribution_status(42)
+        self.assertEqual(
+            published["topics"],
+            [
+                {
+                    "local_topic_id": "local.grace",
+                    "state": "mapped",
+                    "published": True,
+                    "canonical_topic_id": "grace",
+                    "canonical_topic": {
+                        "id": "grace",
+                        "name": "Grace",
+                        "color": "#bbf7d0",
+                        "aliases": ["God's grace"],
+                    },
+                }
+            ],
+        )
+        self.assertEqual(published["summary"]["topics"]["published"], 1)
+        self.assertEqual(published["summary"]["events"]["applied"], 1)
+
+        # A later edit is a new proposal, but it does not make the already-live
+        # canonical topic personal again while that proposal awaits review.
+        self.store.record_events(
+            42,
+            [_topic_event("topic.grace.v2", name="Amazing Grace", color="#123456")],
+        )
+        reopened = self.store.contribution_status(42)
+        self.assertEqual(reopened["topics"][0]["state"], "pending")
+        self.assertTrue(reopened["topics"][0]["published"])
+        self.assertEqual(reopened["summary"]["topics"]["mapped"], 1)
+        self.assertEqual(reopened["summary"]["topics"]["published"], 1)
+        self.assertEqual(reopened["topics"][0]["canonical_topic_id"], "grace")
+        self.assertEqual(reopened["topics"][0]["canonical_topic"]["name"], "Grace")
+
+    def test_private_sync_status_marks_an_applied_delete_as_not_published(self) -> None:
+        self.approve()
+        result = self.store.record_events(
+            42,
+            [
+                _topic_event(),
+                {
+                    "client_event_id": "topic.grace.delete",
+                    "type": "topic_delete",
+                    "topic": {"local_topic_id": "local.grace"},
+                },
+            ],
+        )
+        self.store.set_topic_mapping(
+            42,
+            "local.grace",
+            "grace",
+            state="mapped",
+            actor="admin",
+            canonical_definition={
+                "id": "grace",
+                "name": "Grace",
+                "color": "#bbf7d0",
+                "aliases": [],
+            },
+        )
+        for event in self.store.list_events():
+            self.store.decide_event(
+                event.id,
+                "approved",
+                actor="admin",
+                canonical_topic_id="grace",
+            )
+        self.store.publish_approved_events_atomically(
+            _empty_catalog(),
+            list(result.event_ids.values()),
+            actor="admin",
+        )
+
+        status = self.store.contribution_status(42)
+        self.assertFalse(status["topics"][0]["published"])
+        self.assertEqual(status["summary"]["topics"]["published"], 0)
+
+    def test_private_sync_status_publishes_bundled_mapping_from_applied_verse(
+        self,
+    ) -> None:
+        self.approve()
+        verse = _verse_event("verse.existing.grace")
+        verse["topic"] = {
+            "local_topic_id": "local.grace",
+            "name": "Grace",
+            "color": "#bbf7d0",
+        }
+        result = self.store.record_events(42, [verse])
+        self.store.set_topic_mapping(
+            42,
+            "local.grace",
+            "grace",
+            state="mapped",
+            actor="admin",
+            name="Grace",
+            color="#bbf7d0",
+            aliases=["God's grace"],
+        )
+        event_id = result.event_ids["verse.existing.grace"]
+        self.store.decide_event(event_id, "approved", actor="admin")
+        self.store.publish_approved_events_atomically(
+            {
+                "schema_version": 1,
+                "topics": [],
+                "associations": {
+                    "add": [
+                        {
+                            "topic_id": "grace",
+                            "book": 43,
+                            "chapter": 3,
+                            "verse": 16,
+                        }
+                    ],
+                    "remove": [],
+                },
+            },
+            [event_id],
+            actor="admin",
+        )
+
+        status = self.store.contribution_status(42)
+        self.assertTrue(status["topics"][0]["published"])
+        self.assertEqual(status["topics"][0]["canonical_topic_id"], "grace")
+        self.assertEqual(status["topics"][0]["canonical_topic"]["name"], "Grace")
 
     def test_canonical_definition_is_separate_and_topic_edits_reopen_review(self) -> None:
         self.approve()

@@ -286,7 +286,25 @@ export class GlobalBookmarkCatalog {
     if (!canonicalId) {
       return [];
     }
-    return this.#assignmentsByTopic.get(canonicalId).map((assignment) =>
+    return this.bookmarksForCanonicalTopic(canonicalId, localTopicId);
+  }
+
+  /**
+   * Returns one already-resolved canonical topic without repeating the
+   * canonical-to-local matching pass. Renderers that resolve the whole topic
+   * map once can therefore classify every global coordinate in linear time.
+   */
+  bookmarksForCanonicalTopic(canonicalTopicId, localTopicId) {
+    if (
+      typeof canonicalTopicId !== "string" ||
+      !CANONICAL_TOPIC_ID_PATTERN.test(canonicalTopicId) ||
+      !this.#topicsById.has(canonicalTopicId) ||
+      typeof localTopicId !== "string" ||
+      !ID_PATTERN.test(localTopicId)
+    ) {
+      throw new TypeError("Global bookmark topic identifiers are invalid.");
+    }
+    return this.#assignmentsByTopic.get(canonicalTopicId).map((assignment) =>
       this.#bookmark(assignment, localTopicId)
     );
   }

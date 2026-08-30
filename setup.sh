@@ -4,7 +4,7 @@ IFS=$'\n\t'
 umask 077
 
 PROGRAM="getbible-robot"
-VERSION="6"
+VERSION="7"
 SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}")
 SCRIPT_DIR=$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)
 
@@ -47,6 +47,12 @@ UPGRADE_NEXT=""
 CADDY_TRANSACTION_DIR=""
 CADDY_WAS_ACTIVE=""
 CADDY_WAS_ENABLED=""
+UPGRADE_REFRESH_TRANSACTION_DIR=""
+UPGRADE_REFRESH_INSTANCE=""
+UPGRADE_REFRESH_SERVICE=""
+UPGRADE_REFRESH_WAS_ACTIVE=""
+UPGRADE_REFRESH_WAS_ENABLED=""
+UPGRADE_REFRESH_SERVICE_TOUCHED=0
 CONTRIBUTION_TEMP_DIR=""
 CONTRIBUTION_APP_DIR=""
 CONTRIBUTION_ENV_FILE=""
@@ -108,6 +114,9 @@ cleanup() {
     fi
     if [[ -n "$CADDY_TRANSACTION_DIR" ]]; then
         rollback_caddy_transaction || true
+    fi
+    if [[ -n "$UPGRADE_REFRESH_TRANSACTION_DIR" ]]; then
+        rollback_upgrade_refresh_transaction || true
     fi
     if [[ -n "$CONTRIBUTION_TEMP_DIR" &&
         "$CONTRIBUTION_TEMP_DIR" == /tmp/getbible-contribution.* &&
@@ -1442,6 +1451,26 @@ PY
     rm -f -- "$input"
 }
 
+managed_caddy_routes_required() {
+    local instance
+    local app_dir
+    local env_file
+    local enabled
+    local proxy_mode
+    while IFS= read -r instance; do
+        app_dir=$(application_dir_for "$instance")
+        env_file=$(environment_file_for "$instance")
+        [[ -x "$app_dir/venv/bin/python" && -f "$env_file" ]] || continue
+        enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
+        [[ "$enabled" == "true" ]] || continue
+        proxy_mode=$(dotenv_value "$app_dir" "$env_file" "REVERSE_PROXY_MODE")
+        if [[ "${proxy_mode:-caddy}" == "caddy" ]]; then
+            return 0
+        fi
+    done < <(instance_names)
+    return 1
+}
+
 rollback_caddy_transaction() {
     local transaction=${CADDY_TRANSACTION_DIR:-}
     if [[ -z "$transaction" || ! -d "$transaction" ]]; then
@@ -1512,6 +1541,149 @@ commit_caddy_transaction() {
     CADDY_WAS_ENABLED=""
 }
 
+snapshot_upgrade_refresh_file() {
+    local path=$1
+    local label=$2
+    local destination=$3
+    if [[ -e "$path" || -L "$path" ]]; then
+        [[ ! -d "$path" ]] || return 1
+        cp -a -- "$path" "${destination}/${label}"
+        : >"${destination}/${label}.exists"
+    fi
+}
+
+restore_upgrade_refresh_file() {
+    local path=$1
+    local label=$2
+    local source=$3
+    if [[ -f "${source}/${label}.exists" ]]; then
+        rm -f -- "$path"
+        cp -a -- "${source}/${label}" "$path"
+    else
+        rm -f -- "$path"
+    fi
+}
+
+begin_upgrade_refresh_transaction() {
+    local instance=$1
+    local service=$2
+    local transaction
+    local dropin_dir
+    local was_active
+    local was_enabled
+    validate_instance_name "$instance" || return 1
+    [[ -z "$UPGRADE_REFRESH_TRANSACTION_DIR" ]] ||
+        die "An upgrade refresh transaction is already active."
+    transaction=$(mktemp -d "${ETC_ROOT}/.upgrade-${instance}.XXXXXXXX") || return 1
+    dropin_dir=$(resource_dropin_dir_for "$instance")
+    was_active=$(systemctl is-active "$service" 2>/dev/null || true)
+    was_enabled=$(systemctl is-enabled "$service" 2>/dev/null || true)
+    if ! snapshot_upgrade_refresh_file \
+        "$(environment_file_for "$instance")" environment "$transaction" ||
+        ! snapshot_upgrade_refresh_file \
+            "$(welcome_file_for "$instance")" welcome "$transaction" ||
+        ! snapshot_upgrade_refresh_file \
+            "$(help_file_for "$instance")" help "$transaction" ||
+        ! snapshot_upgrade_refresh_file \
+            "$(resource_dropin_for "$instance")" resources "$transaction" ||
+        ! snapshot_upgrade_refresh_file \
+            "$MANAGER_PATH" manager "$transaction" ||
+        ! snapshot_upgrade_refresh_file \
+            "$UNIT_PATH" unit "$transaction" ||
+        ! snapshot_upgrade_refresh_file \
+            "$LOGROTATE_PATH" logrotate "$transaction"; then
+        rm -rf --one-file-system -- "$transaction"
+        return 1
+    fi
+    [[ ! -d "$dropin_dir" ]] || : >"${transaction}/resources-directory.exists"
+    UPGRADE_REFRESH_TRANSACTION_DIR=$transaction
+    UPGRADE_REFRESH_INSTANCE=$instance
+    UPGRADE_REFRESH_SERVICE=$service
+    UPGRADE_REFRESH_WAS_ACTIVE=$was_active
+    UPGRADE_REFRESH_WAS_ENABLED=$was_enabled
+    UPGRADE_REFRESH_SERVICE_TOUCHED=0
+}
+
+clear_upgrade_refresh_transaction() {
+    UPGRADE_REFRESH_TRANSACTION_DIR=""
+    UPGRADE_REFRESH_INSTANCE=""
+    UPGRADE_REFRESH_SERVICE=""
+    UPGRADE_REFRESH_WAS_ACTIVE=""
+    UPGRADE_REFRESH_WAS_ENABLED=""
+    UPGRADE_REFRESH_SERVICE_TOUCHED=0
+}
+
+rollback_upgrade_refresh_transaction() {
+    local transaction=${UPGRADE_REFRESH_TRANSACTION_DIR:-}
+    local instance=${UPGRADE_REFRESH_INSTANCE:-}
+    local service=${UPGRADE_REFRESH_SERVICE:-}
+    local dropin_dir
+    local failed=0
+    if [[ -z "$transaction" ]]; then
+        return 0
+    fi
+    if ! validate_instance_name "$instance" ||
+        [[ "$service" != "$(service_name_for "$instance")" ]] ||
+        [[ "$transaction" != "${ETC_ROOT}/.upgrade-${instance}."* ]] ||
+        [[ ! -d "$transaction" || -L "$transaction" ]]; then
+        warn "The upgrade refresh snapshot path is invalid; manual recovery is required."
+        return 1
+    fi
+    warn "Upgrade refresh failed; restoring the previous managed files and service state."
+    dropin_dir=$(resource_dropin_dir_for "$instance")
+    restore_upgrade_refresh_file \
+        "$(environment_file_for "$instance")" environment "$transaction" || failed=1
+    restore_upgrade_refresh_file \
+        "$(welcome_file_for "$instance")" welcome "$transaction" || failed=1
+    restore_upgrade_refresh_file \
+        "$(help_file_for "$instance")" help "$transaction" || failed=1
+    restore_upgrade_refresh_file \
+        "$(resource_dropin_for "$instance")" resources "$transaction" || failed=1
+    if [[ ! -f "${transaction}/resources-directory.exists" ]]; then
+        rmdir -- "$dropin_dir" 2>/dev/null || true
+    fi
+    restore_upgrade_refresh_file "$MANAGER_PATH" manager "$transaction" || failed=1
+    restore_upgrade_refresh_file "$UNIT_PATH" unit "$transaction" || failed=1
+    restore_upgrade_refresh_file "$LOGROTATE_PATH" logrotate "$transaction" || failed=1
+    systemctl daemon-reload || failed=1
+    if [[ "$UPGRADE_REFRESH_WAS_ENABLED" == "enabled" ]]; then
+        systemctl enable "$service" >/dev/null 2>&1 || failed=1
+    else
+        systemctl disable "$service" >/dev/null 2>&1 || failed=1
+    fi
+    if [[ "$UPGRADE_REFRESH_WAS_ACTIVE" == "active" ]]; then
+        if ((UPGRADE_REFRESH_SERVICE_TOUCHED == 1)); then
+            systemctl restart "$service" || failed=1
+            wait_for_readiness "$ACTIVE_PORT" || failed=1
+        elif ! systemctl is-active --quiet "$service"; then
+            systemctl start "$service" || failed=1
+            wait_for_readiness "$ACTIVE_PORT" || failed=1
+        fi
+    else
+        systemctl stop "$service" >/dev/null 2>&1 || failed=1
+    fi
+    if ((failed != 0)); then
+        warn "Automatic refresh rollback was incomplete; the root-only snapshot remains at ${transaction}."
+        return 1
+    fi
+    rm -rf --one-file-system -- "$transaction"
+    clear_upgrade_refresh_transaction
+}
+
+commit_upgrade_refresh_transaction() {
+    local transaction=${UPGRADE_REFRESH_TRANSACTION_DIR:-}
+    local instance=${UPGRADE_REFRESH_INSTANCE:-}
+    if [[ -z "$transaction" ]]; then
+        return 0
+    fi
+    validate_instance_name "$instance" &&
+        [[ "$transaction" == "${ETC_ROOT}/.upgrade-${instance}."* ]] &&
+        [[ -d "$transaction" && ! -L "$transaction" ]] ||
+        die "The upgrade refresh snapshot path is invalid."
+    rm -rf --one-file-system -- "$transaction"
+    clear_upgrade_refresh_transaction
+}
+
 mini_app_local_url() {
     local app_dir=$1
     local env_file=$2
@@ -1543,15 +1715,92 @@ probe_mini_app_url() {
     grep -Fq '<title>getBible.Life</title>' <<<"$body"
 }
 
-wait_for_mini_app_url() {
-    local url=$1
-    local attempts=${2:-45}
-    local delay_seconds=${3:-2}
+probe_mini_app_api_url() {
+    local python_bin=$1
+    local url=$2
+    local method=$3
+    local origin=${4:-}
+    "$python_bin" - "$url" "$method" "$origin" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+url = sys.argv[1]
+method = sys.argv[2]
+origin = sys.argv[3]
+headers = {
+    "Accept": "application/json",
+    "Cache-Control": "no-cache",
+    "User-Agent": "getbible-robot-setup/1",
+}
+if origin:
+    headers["Origin"] = origin
+request = Request(
+    url,
+    data=b"" if method == "POST" else None,
+    headers=headers,
+    method=method,
+)
+try:
+    response = urlopen(request, timeout=10)
+except HTTPError as error:
+    response = error
+except (OSError, URLError) as error:
+    raise SystemExit(f"Mini App API request failed: {error}") from None
+
+try:
+    status = response.status
+    content_type = response.headers.get("Content-Type", "")
+    body = response.read(65_537)
+finally:
+    response.close()
+
+if status != 401:
+    raise SystemExit(f"Mini App API returned HTTP {status}, expected 401")
+if content_type.split(";", 1)[0].strip().casefold() != "application/json":
+    raise SystemExit("Mini App API did not return JSON")
+if len(body) > 65_536:
+    raise SystemExit("Mini App API response exceeded 64 KiB")
+try:
+    payload = json.loads(body)
+except (UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit("Mini App API response was not valid JSON") from None
+if not isinstance(payload, dict) or payload.get("error") != "unauthorized":
+    raise SystemExit("Mini App API did not return Robot's unauthorized response")
+PY
+}
+
+probe_mini_app_surface() {
+    local app_dir=$1
+    local base_url=${2%/}
+    local public_origin=$3
+    probe_mini_app_url "${base_url}/" &&
+        probe_mini_app_api_url \
+            "$app_dir/venv/bin/python" \
+            "${base_url}/api/v1/bookmarks/catalog" GET "$public_origin" &&
+        probe_mini_app_api_url \
+            "$app_dir/venv/bin/python" \
+            "${base_url}/api/v1/contributions/status" GET "$public_origin" &&
+        probe_mini_app_api_url \
+            "$app_dir/venv/bin/python" \
+            "${base_url}/api/v1/contributions/events" POST "$public_origin"
+}
+
+wait_for_mini_app_surface() {
+    local app_dir=$1
+    local base_url=$2
+    local public_origin=$3
+    local attempts=${4:-45}
+    local delay_seconds=${5:-2}
     local index
     for ((index = 1; index <= attempts; index++)); do
         if ((index == attempts)); then
-            probe_mini_app_url "$url" && return
-        elif probe_mini_app_url "$url" 2>/dev/null; then
+            probe_mini_app_surface "$app_dir" "$base_url" "$public_origin" && return
+        elif probe_mini_app_surface \
+            "$app_dir" "$base_url" "$public_origin" 2>/dev/null; then
             return
         fi
         ((index == attempts)) || sleep "$delay_seconds"
@@ -1563,8 +1812,14 @@ verify_mini_app_local() {
     local app_dir=$1
     local env_file=$2
     local attempts=${3:-45}
-    wait_for_mini_app_url \
-        "$(mini_app_local_url "$app_dir" "$env_file")" "$attempts" 1
+    local public_url
+    local public_origin
+    public_url=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")
+    public_origin=${public_url#https://}
+    public_origin="https://${public_origin%%/*}"
+    wait_for_mini_app_surface \
+        "$app_dir" "$(mini_app_local_url "$app_dir" "$env_file")" \
+        "$public_origin" "$attempts" 1
 }
 
 verify_mini_app_public() {
@@ -1572,9 +1827,12 @@ verify_mini_app_public() {
     local env_file=$2
     local attempts=${3:-45}
     local public_url
+    local public_origin
     public_url=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")
-    public_url="${public_url%/}/"
-    wait_for_mini_app_url "$public_url" "$attempts" 2
+    public_origin=${public_url#https://}
+    public_origin="https://${public_origin%%/*}"
+    wait_for_mini_app_surface \
+        "$app_dir" "${public_url%/}/" "$public_origin" "$attempts" 2
 }
 
 verify_mini_app_instance() {
@@ -2561,14 +2819,25 @@ cmd_restart() {
     local service
     local app_dir
     local env_file
+    local mini_app_enabled
+    local reverse_proxy_mode
     service=$(service_name_for "$ACTIVE_INSTANCE")
     app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
     env_file=$(environment_file_for "$ACTIVE_INSTANCE")
-    systemctl restart "$service"
-    wait_for_readiness "$ACTIVE_PORT" ||
-        die "Service restarted but readiness did not succeed."
-    verify_mini_app_instance "$app_dir" "$env_file" ||
-        die "Service restarted, but Mini App HTTPS verification failed."
+    mini_app_enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
+    reverse_proxy_mode=$(dotenv_value "$app_dir" "$env_file" "REVERSE_PROXY_MODE")
+    reverse_proxy_mode=${reverse_proxy_mode:-caddy}
+    if [[ "$mini_app_enabled" == "true" && "$reverse_proxy_mode" == "caddy" ]]; then
+        begin_caddy_transaction ||
+            die "The managed Caddy routes could not be refreshed before restart."
+    fi
+    if ! systemctl restart "$service" ||
+        ! wait_for_readiness "$ACTIVE_PORT" ||
+        ! verify_mini_app_instance "$app_dir" "$env_file"; then
+        rollback_caddy_transaction
+        die "Service restart, readiness, or Mini App route verification failed."
+    fi
+    commit_caddy_transaction
     record_operation restart "$ACTIVE_INSTANCE" ok
     cmd_status "$ACTIVE_INSTANCE"
 }
@@ -2818,11 +3087,11 @@ cmd_doctor() {
                 }
             fi
             verify_mini_app_local "$app_dir" "$env_file" 1 || {
-                warn "The local Mini App shell did not pass its content check."
+                warn "The local Mini App shell or contribution API did not pass its route check."
                 ((failures += 1))
             }
             verify_mini_app_public "$app_dir" "$env_file" 1 || {
-                warn "The public Mini App HTTPS route, certificate, or content check failed."
+                warn "The public Mini App shell or contribution API route failed HTTPS verification."
                 ((failures += 1))
             }
         fi
@@ -3312,6 +3581,24 @@ cmd_config() {
     fi
 }
 
+handoff_upgrade_to_target_manager() {
+    local source_dir=$1
+    local requested_instance=$2
+    local target_manager
+    local arguments=(upgrade)
+    target_manager=$(readlink -f "${source_dir}/setup.sh")
+    if [[ "$SCRIPT_PATH" == "$target_manager" ]]; then
+        return 0
+    fi
+    [[ -x "$target_manager" ]] ||
+        die "The target checkout's setup.sh is not executable."
+    [[ -n "$requested_instance" ]] && arguments+=("$requested_instance")
+    arguments+=(--source "$source_dir")
+    info "Continuing with the reviewed target checkout's upgrade manager."
+    exec "$target_manager" "${arguments[@]}"
+    die "Could not start the target checkout's upgrade manager."
+}
+
 cmd_upgrade() {
     require_root
     require_tty
@@ -3335,6 +3622,7 @@ cmd_upgrade() {
         esac
     done
     select_instance "$requested"
+    requested=$ACTIVE_INSTANCE
     local source_dir
     local source_url
     local target_sha
@@ -3344,9 +3632,8 @@ cmd_upgrade() {
     local previous_dir
     local env_file
     local service
-    local mini_app_enabled
-    local reverse_proxy_mode
     source_dir=$(resolve_source_dir "$source_request")
+    handoff_upgrade_to_target_manager "$source_dir" "$requested"
     source_url=$(source_url_for "$source_dir")
     target_sha=$(git_source_read "$source_dir" rev-parse HEAD)
     python_bin=$(select_python)
@@ -3356,8 +3643,47 @@ cmd_upgrade() {
     env_file=$(environment_file_for "$ACTIVE_INSTANCE")
     service=$(service_name_for "$ACTIVE_INSTANCE")
 
-    [[ "$target_sha" != "$ACTIVE_SHA" ]] ||
-        die "Instance ${ACTIVE_INSTANCE} already runs commit ${target_sha}."
+    if [[ "$target_sha" == "$ACTIVE_SHA" ]]; then
+        printf 'Refresh %s at deployed commit %s\n' \
+            "$ACTIVE_INSTANCE" "$target_sha"
+        confirm "Refresh configuration, manager, routes, and postflight checks?" yes ||
+            die "Deployment refresh cancelled."
+
+        begin_upgrade_refresh_transaction "$ACTIVE_INSTANCE" "$service" ||
+            die "The current deployment state could not be snapshotted safely."
+        migrate_instance_configuration \
+            "$source_dir" "$python_bin" "$env_file" "$ACTIVE_USER" "$ACTIVE_INSTANCE"
+        sync_resource_dropin_from_env "$app_dir" "$env_file" "$ACTIVE_INSTANCE"
+        validate_environment "$app_dir" "$env_file"
+        install_shared_manager "$source_dir"
+        install_log_rotation
+        systemctl daemon-reload
+        systemd-analyze verify "$service"
+
+        if managed_caddy_routes_required; then
+            begin_caddy_transaction ||
+                die "The managed Caddy routes could not be refreshed."
+        fi
+        UPGRADE_REFRESH_SERVICE_TOUCHED=1
+        if systemctl restart "$service" &&
+            wait_for_readiness "$ACTIVE_PORT" &&
+            verify_mini_app_instance "$app_dir" "$env_file"; then
+            commit_caddy_transaction
+            commit_upgrade_refresh_transaction
+            record_operation upgrade "$ACTIVE_INSTANCE" refreshed
+            printf 'Deployment refresh succeeded at commit %s.\n' "$target_sha"
+            printf 'Configuration, manager files, proxy routes, and Mini App API checks are current.\n'
+            cmd_status "$ACTIVE_INSTANCE"
+            return
+        fi
+
+        rollback_caddy_transaction
+        rollback_upgrade_refresh_transaction ||
+            warn "The failed deployment refresh requires manual recovery from its retained snapshot."
+        record_operation upgrade "$ACTIVE_INSTANCE" refresh-failed
+        die "Deployment refresh failed and the previous managed state was restored."
+    fi
+
     printf 'Upgrade %s\n  from %s\n  to   %s\n' \
         "$ACTIVE_INSTANCE" "$ACTIVE_SHA" "$target_sha"
     confirm "Build and deploy this exact reviewed commit?" yes ||
@@ -3376,10 +3702,7 @@ cmd_upgrade() {
     systemctl daemon-reload
     systemd-analyze verify "$service"
 
-    mini_app_enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
-    reverse_proxy_mode=$(dotenv_value "$app_dir" "$env_file" "REVERSE_PROXY_MODE")
-    reverse_proxy_mode=${reverse_proxy_mode:-caddy}
-    if [[ "$mini_app_enabled" == "true" && "$reverse_proxy_mode" == "caddy" ]]; then
+    if managed_caddy_routes_required; then
         begin_caddy_transaction ||
             die "The managed Caddy routes could not be refreshed for this upgrade."
     fi

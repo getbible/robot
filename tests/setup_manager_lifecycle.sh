@@ -32,6 +32,7 @@ FOLLOW_MARKER="${TEST_ROOT}/follow"
 RUNUSER_LOG="${TEST_ROOT}/runuser"
 CADDY_LOG="${TEST_ROOT}/caddy.log"
 DNS_LOG="${TEST_ROOT}/dns.log"
+MINI_APP_VERIFY_LOG="${TEST_ROOT}/mini-app-verify.log"
 SYSTEM_PYTHON=$(command -v python3)
 mkdir -p \
     "$METADATA_ROOT" \
@@ -43,6 +44,7 @@ mkdir -p \
 : >"$USERS_FILE"
 : >"$CADDY_LOG"
 : >"$DNS_LOG"
+: >"$MINI_APP_VERIFY_LOG"
 
 fail() {
     printf 'lifecycle assertion failed: %s\n' "$*" >&2
@@ -97,6 +99,13 @@ require_tty() {
     :
 }
 
+# The lifecycle sources the manager so it can replace host primitives with
+# fixtures. A real installed manager execs the reviewed checkout here; keep the
+# in-process harness on the same function definitions instead.
+handoff_upgrade_to_target_manager() {
+    :
+}
+
 install_host_prerequisites() {
     :
 }
@@ -111,10 +120,45 @@ ensure_caddy_available() {
 }
 
 verify_mini_app_local() {
+    local app_dir=$1
+    local env_file=$2
+    local base_url
+    local public_url
+    local public_path
+    local listen
+    local port
+    public_url=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")
+    public_path=${public_url#https://}
+    if [[ "$public_path" == */* ]]; then
+        public_path=/${public_path#*/}
+    else
+        public_path=""
+    fi
+    listen=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_LISTEN")
+    [[ "$listen" != "0.0.0.0" ]] || listen="127.0.0.1"
+    port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
+    base_url="http://${listen}:${port}${public_path%/}/"
+    printf 'local GET %sapi/v1/bookmarks/catalog\n' \
+        "$base_url" >>"$MINI_APP_VERIFY_LOG"
+    printf 'local GET %sapi/v1/contributions/status\n' \
+        "$base_url" >>"$MINI_APP_VERIFY_LOG"
+    printf 'local POST %sapi/v1/contributions/events\n' \
+        "$base_url" >>"$MINI_APP_VERIFY_LOG"
     [[ ${FAIL_MINI_APP_LOCAL:-0} != "1" ]]
 }
 
 verify_mini_app_public() {
+    local app_dir=$1
+    local env_file=$2
+    local base_url
+    base_url=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")
+    base_url="${base_url%/}/"
+    printf 'public GET %sapi/v1/bookmarks/catalog\n' \
+        "$base_url" >>"$MINI_APP_VERIFY_LOG"
+    printf 'public GET %sapi/v1/contributions/status\n' \
+        "$base_url" >>"$MINI_APP_VERIFY_LOG"
+    printf 'public POST %sapi/v1/contributions/events\n' \
+        "$base_url" >>"$MINI_APP_VERIFY_LOG"
     [[ ${FAIL_MINI_APP_PUBLIC:-0} != "1" ]]
 }
 
@@ -902,6 +946,22 @@ y
 https://bot.example.com/getbible/alpha
 9201
 EOF
+
+# Routine restart is also a repair boundary for generated managed routes.
+sed -i \
+    -e 's# /getbible/alpha/api/v1/contributions/status##' \
+    -e 's# /getbible/alpha/api/v1/contributions/events##' \
+    "$CADDY_ROUTES"
+RESTART_CADDY_RELOADS=$(
+    grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true
+)
+cmd_restart alpha
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/status'
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/events'
+assert_equal \
+    "$(grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true)" \
+    "$((RESTART_CADDY_RELOADS + 1))"
+
 # Model the generated allow-list left by the previous release. Its catch-all
 # remains valid, but it does not know the new live-catalogue API paths.
 sed -i \
@@ -935,6 +995,128 @@ verify_managed_caddy_routes ||
 assert_equal \
     "$(grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true)" \
     "$((SUCCESS_UPGRADE_CADDY_RELOADS + 1))"
+
+# Re-running update at the deployed commit is a repair operation. It must use
+# the target manager's migration/route logic without rotating app.previous.
+sed -i \
+    -e 's# /getbible/alpha/api/v1/contributions/status##' \
+    -e 's# /getbible/alpha/api/v1/contributions/events##' \
+    "$CADDY_ROUTES"
+SAME_SHA_PREVIOUS=$(
+    git -C "${INSTANCE_ROOT}/alpha/app.previous" rev-parse HEAD
+)
+SAME_SHA_CADDY_RELOADS=$(
+    grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true
+)
+: >"$MINI_APP_VERIFY_LOG"
+REFRESH_OUTPUT=$(cmd_upgrade alpha --source "$SOURCE_DIR" <<EOF
+
+EOF
+)
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/status'
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/events'
+assert_equal \
+    "$(git -C "${INSTANCE_ROOT}/alpha/app.previous" rev-parse HEAD)" \
+    "$SAME_SHA_PREVIOUS"
+assert_equal \
+    "$(grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true)" \
+    "$((SAME_SHA_CADDY_RELOADS + 1))"
+[[ "$REFRESH_OUTPUT" == *"Deployment refresh succeeded"* ]] ||
+    fail "same-commit update did not report a deployment refresh"
+assert_contains "$MINI_APP_VERIFY_LOG" \
+    'local GET http://127.0.0.1:9201/getbible/alpha/api/v1/bookmarks/catalog'
+assert_contains "$MINI_APP_VERIFY_LOG" \
+    'local GET http://127.0.0.1:9201/getbible/alpha/api/v1/contributions/status'
+assert_contains "$MINI_APP_VERIFY_LOG" \
+    'local POST http://127.0.0.1:9201/getbible/alpha/api/v1/contributions/events'
+assert_contains "$MINI_APP_VERIFY_LOG" \
+    'public GET https://bot.example.com/getbible/alpha/api/v1/bookmarks/catalog'
+assert_contains "$MINI_APP_VERIFY_LOG" \
+    'public GET https://bot.example.com/getbible/alpha/api/v1/contributions/status'
+assert_contains "$MINI_APP_VERIFY_LOG" \
+    'public POST https://bot.example.com/getbible/alpha/api/v1/contributions/events'
+
+# A same-commit repair is an artifact transaction, not merely a Caddy
+# transaction. Force the candidate restart to fail after every managed file has
+# been refreshed, then require the exact pre-attempt bytes and service state.
+sed -i '/^PREWARM_DEFAULT_TRANSLATION=/d' "$(environment_file_for alpha)"
+printf '# installed manager sentinel\n' >>"$MANAGER_PATH"
+printf '# installed unit sentinel\n' >>"$UNIT_PATH"
+printf '# installed logrotate sentinel\n' >>"$LOGROTATE_PATH"
+printf '# installed resource sentinel\n' >>"$(resource_dropin_for alpha)"
+sed -i \
+    -e 's# /getbible/alpha/api/v1/bookmarks/catalog##' \
+    -e 's# /getbible/alpha/api/v1/contributions/status##' \
+    -e 's# /getbible/alpha/api/v1/contributions/events##' \
+    "$CADDY_ROUTES"
+FAILED_REFRESH_ENV_HASH=$(sha256sum "$(environment_file_for alpha)" | awk '{print $1}')
+FAILED_REFRESH_MANAGER_HASH=$(sha256sum "$MANAGER_PATH" | awk '{print $1}')
+FAILED_REFRESH_UNIT_HASH=$(sha256sum "$UNIT_PATH" | awk '{print $1}')
+FAILED_REFRESH_LOGROTATE_HASH=$(sha256sum "$LOGROTATE_PATH" | awk '{print $1}')
+FAILED_REFRESH_RESOURCE_HASH=$(sha256sum "$(resource_dropin_for alpha)" | awk '{print $1}')
+FAILED_REFRESH_CADDYFILE_HASH=$(sha256sum "$CADDYFILE" | awk '{print $1}')
+FAILED_REFRESH_ROUTES_HASH=$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')
+FAILED_REFRESH_APP_SHA=$(git -C "$(application_dir_for alpha)" rev-parse HEAD)
+FAILED_REFRESH_PREVIOUS_SHA=$(
+    git -C "${INSTANCE_ROOT}/alpha/app.previous" rev-parse HEAD
+)
+export FAIL_NEXT_START
+FAIL_NEXT_START=$(service_name_for alpha)
+if (
+    cmd_upgrade alpha --source "$SOURCE_DIR" <<EOF
+
+EOF
+)
+then
+    fail "failed same-commit refresh was reported as successful"
+fi
+unset FAIL_NEXT_START
+assert_equal "$(sha256sum "$(environment_file_for alpha)" | awk '{print $1}')" \
+    "$FAILED_REFRESH_ENV_HASH"
+assert_equal "$(sha256sum "$MANAGER_PATH" | awk '{print $1}')" \
+    "$FAILED_REFRESH_MANAGER_HASH"
+assert_equal "$(sha256sum "$UNIT_PATH" | awk '{print $1}')" \
+    "$FAILED_REFRESH_UNIT_HASH"
+assert_equal "$(sha256sum "$LOGROTATE_PATH" | awk '{print $1}')" \
+    "$FAILED_REFRESH_LOGROTATE_HASH"
+assert_equal "$(sha256sum "$(resource_dropin_for alpha)" | awk '{print $1}')" \
+    "$FAILED_REFRESH_RESOURCE_HASH"
+assert_equal "$(sha256sum "$CADDYFILE" | awk '{print $1}')" \
+    "$FAILED_REFRESH_CADDYFILE_HASH"
+assert_equal "$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')" \
+    "$FAILED_REFRESH_ROUTES_HASH"
+assert_equal "$(git -C "$(application_dir_for alpha)" rev-parse HEAD)" \
+    "$FAILED_REFRESH_APP_SHA"
+assert_equal "$(git -C "${INSTANCE_ROOT}/alpha/app.previous" rev-parse HEAD)" \
+    "$FAILED_REFRESH_PREVIOUS_SHA"
+assert_equal "$(systemctl is-active "$(service_name_for alpha)")" "active"
+assert_equal "$(systemctl is-enabled "$(service_name_for alpha)")" "enabled"
+if compgen -G "${ETC_ROOT}/.upgrade-alpha.*" >/dev/null; then
+    fail "failed same-commit refresh retained a completed transaction snapshot"
+fi
+
+export FAIL_MINI_APP_PUBLIC
+FAIL_MINI_APP_PUBLIC=1
+if (
+    cmd_upgrade alpha --source "$SOURCE_DIR" <<EOF
+
+EOF
+)
+then
+    fail "same-commit refresh ignored a failed public API postflight"
+fi
+unset FAIL_MINI_APP_PUBLIC
+assert_equal "$(sha256sum "$(environment_file_for alpha)" | awk '{print $1}')" \
+    "$FAILED_REFRESH_ENV_HASH"
+assert_equal "$(sha256sum "$MANAGER_PATH" | awk '{print $1}')" \
+    "$FAILED_REFRESH_MANAGER_HASH"
+assert_equal "$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')" \
+    "$FAILED_REFRESH_ROUTES_HASH"
+assert_equal "$(systemctl is-active "$(service_name_for alpha)")" "active"
+assert_equal "$(systemctl is-enabled "$(service_name_for alpha)")" "enabled"
+if compgen -G "${ETC_ROOT}/.upgrade-alpha.*" >/dev/null; then
+    fail "failed API postflight retained a completed transaction snapshot"
+fi
 
 cmd_rollback alpha <<EOF
 y

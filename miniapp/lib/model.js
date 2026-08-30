@@ -16,6 +16,40 @@ export const DEFAULT_FILTERS = Object.freeze({
 const TRANSLATION_PATTERN = /^[a-z0-9][a-z0-9_-]{0,29}$/;
 const SEARCH_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const SELECTION_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+const CONTRIBUTION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const CONTRIBUTION_CANONICAL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,79}$/;
+const CONTRIBUTION_REVIEW_DETAILS = Symbol("contributionReviewDetails");
+const CONTRIBUTION_COLOR_PATTERN = /^#[a-f0-9]{6}$/;
+const CONTRIBUTION_APPLICATION_STATES = new Set([
+  "not_applied",
+  "pending",
+  "approved",
+  "deferred",
+  "rejected",
+  "revoked",
+  "unavailable",
+]);
+const CONTRIBUTION_TOPIC_STATES = new Set([
+  "pending",
+  "mapped",
+  "rejected",
+  "deferred",
+]);
+const CONTRIBUTION_TOPIC_SUMMARY_KEYS = Object.freeze([
+  "pending",
+  "mapped",
+  "published",
+  "rejected",
+  "deferred",
+]);
+const CONTRIBUTION_EVENT_SUMMARY_KEYS = Object.freeze([
+  "pending",
+  "approved",
+  "rejected",
+  "deferred",
+  "applied",
+]);
+const MAX_CONTRIBUTION_TOPICS = 1_000;
 const ROUTES = new Set([
   "home",
   "search",
@@ -67,8 +101,74 @@ export function normalizeSession(payload) {
         readerLocation?.translation === preferred ? readerLocation : null,
     },
     basket: normalizeBasket(payload.basket),
+    contributions: normalizeContributionStatus(payload.contributions),
     entrypoint: normalizeEntrypoint(payload.entrypoint),
   };
+}
+
+/**
+ * Normalizes both the legacy four-field contributor status and the richer
+ * per-user review outcome returned by current servers. Keeping the legacy
+ * shape readable lets a newly upgraded Mini App connect while an older Robot
+ * process is completing its own atomic upgrade.
+ */
+export function normalizeContributionStatus(value) {
+  if (value === undefined || value === null) {
+    return markContributionReviewDetails(
+      unavailableContributionStatus(),
+      false,
+    );
+  }
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid contributor status response.");
+  }
+  const keys = Object.keys(value).sort();
+  const legacyKeys = [
+    "can_contribute",
+    "disclosure_required",
+    "enabled",
+    "state",
+  ];
+  const currentKeys = [...legacyKeys, "summary", "topics"].sort();
+  const reviewDetailsAvailable = Object.hasOwn(
+    value,
+    CONTRIBUTION_REVIEW_DETAILS,
+  )
+    ? value[CONTRIBUTION_REVIEW_DETAILS] === true
+    : sameStringArray(keys, currentKeys);
+  if (
+    !sameStringArray(keys, legacyKeys) &&
+    !sameStringArray(keys, currentKeys)
+  ) {
+    throw new TypeError("Invalid contributor status response.");
+  }
+  if (
+    typeof value.enabled !== "boolean" ||
+    typeof value.can_contribute !== "boolean" ||
+    typeof value.disclosure_required !== "boolean" ||
+    !CONTRIBUTION_APPLICATION_STATES.has(value.state)
+  ) {
+    throw new TypeError("Invalid contributor status response.");
+  }
+  const topics = Object.hasOwn(value, "topics")
+    ? normalizeContributionTopics(value.topics)
+    : [];
+  const summary = Object.hasOwn(value, "summary")
+    ? normalizeContributionSummary(value.summary)
+    : emptyContributionSummary();
+  return markContributionReviewDetails({
+    enabled: value.enabled,
+    state: value.state,
+    can_contribute: value.can_contribute,
+    disclosure_required: value.disclosure_required,
+    topics,
+    summary,
+  }, reviewDetailsAvailable);
+}
+
+/** Internal provenance for distinguishing rich empty review data from defaults. */
+export function contributionReviewDetailsAvailable(value) {
+  return Boolean(value?.[CONTRIBUTION_REVIEW_DETAILS]);
 }
 
 export function normalizeTranslations(value) {
@@ -932,6 +1032,177 @@ function normalizeWords(value) {
     }
   }
   return words;
+}
+
+function normalizeContributionTopics(value) {
+  if (!Array.isArray(value) || value.length > MAX_CONTRIBUTION_TOPICS) {
+    throw new TypeError("Invalid contributor topic outcomes.");
+  }
+  const topics = [];
+  const localIds = new Set();
+  for (const item of value) {
+    if (!isRecord(item)) {
+      throw new TypeError("Invalid contributor topic outcome.");
+    }
+    const allowedKeys = new Set([
+      "local_topic_id",
+      "state",
+      "published",
+      "canonical_topic_id",
+      "canonical_topic",
+    ]);
+    const keys = Object.keys(item);
+    if (
+      !["local_topic_id", "state", "published"].every((key) =>
+        Object.hasOwn(item, key)
+      ) ||
+      keys.some((key) => !allowedKeys.has(key)) ||
+      !CONTRIBUTION_ID_PATTERN.test(item.local_topic_id) ||
+      !CONTRIBUTION_TOPIC_STATES.has(item.state) ||
+      typeof item.published !== "boolean" ||
+      localIds.has(item.local_topic_id)
+    ) {
+      throw new TypeError("Invalid contributor topic outcome.");
+    }
+    localIds.add(item.local_topic_id);
+    const canonicalTopicId = Object.hasOwn(item, "canonical_topic_id")
+      ? item.canonical_topic_id
+      : null;
+    if (
+      canonicalTopicId !== null &&
+      !CONTRIBUTION_CANONICAL_ID_PATTERN.test(canonicalTopicId)
+    ) {
+      throw new TypeError("Invalid contributor topic outcome.");
+    }
+    const canonicalTopic = Object.hasOwn(item, "canonical_topic")
+      ? normalizeContributionCanonicalTopic(item.canonical_topic)
+      : null;
+    if (
+      (canonicalTopic && canonicalTopic.id !== canonicalTopicId) ||
+      (item.published && canonicalTopicId === null)
+    ) {
+      throw new TypeError("Invalid contributor topic outcome.");
+    }
+    topics.push({
+      local_topic_id: item.local_topic_id,
+      state: item.state,
+      published: item.published,
+      ...(canonicalTopicId === null
+        ? {}
+        : { canonical_topic_id: canonicalTopicId }),
+      ...(canonicalTopic === null ? {} : { canonical_topic: canonicalTopic }),
+    });
+  }
+  return topics;
+}
+
+function normalizeContributionCanonicalTopic(value) {
+  const expectedKeys = ["aliases", "color", "id", "name"];
+  if (
+    !isRecord(value) ||
+    !sameStringArray(Object.keys(value).sort(), expectedKeys) ||
+    !CONTRIBUTION_CANONICAL_ID_PATTERN.test(value.id) ||
+    typeof value.name !== "string" ||
+    value.name !== value.name.trim() ||
+    value.name.length < 1 ||
+    value.name.length > 80 ||
+    typeof value.color !== "string" ||
+    !CONTRIBUTION_COLOR_PATTERN.test(value.color) ||
+    !Array.isArray(value.aliases) ||
+    value.aliases.length > 20
+  ) {
+    throw new TypeError("Invalid canonical contributor topic.");
+  }
+  const aliases = [];
+  const seen = new Set();
+  for (const alias of value.aliases) {
+    if (
+      typeof alias !== "string" ||
+      alias !== alias.trim() ||
+      alias.length < 1 ||
+      alias.length > 80 ||
+      seen.has(alias.toLocaleLowerCase("en"))
+    ) {
+      throw new TypeError("Invalid canonical contributor topic.");
+    }
+    seen.add(alias.toLocaleLowerCase("en"));
+    aliases.push(alias);
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    color: value.color,
+    aliases,
+  };
+}
+
+function normalizeContributionSummary(value) {
+  if (
+    !isRecord(value) ||
+    !sameStringArray(Object.keys(value).sort(), ["events", "topics"]) ||
+    !isRecord(value.topics) ||
+    !sameStringArray(
+      Object.keys(value.topics).sort(),
+      [...CONTRIBUTION_TOPIC_SUMMARY_KEYS].sort(),
+    ) ||
+    !isRecord(value.events) ||
+    !sameStringArray(
+      Object.keys(value.events).sort(),
+      [...CONTRIBUTION_EVENT_SUMMARY_KEYS].sort(),
+    ) ||
+    [...CONTRIBUTION_TOPIC_SUMMARY_KEYS, ...CONTRIBUTION_EVENT_SUMMARY_KEYS]
+      .some((key, index) => {
+        const group = index < CONTRIBUTION_TOPIC_SUMMARY_KEYS.length
+          ? value.topics
+          : value.events;
+        return !Number.isSafeInteger(group[key]) || group[key] < 0;
+      })
+  ) {
+    throw new TypeError("Invalid contributor review summary.");
+  }
+  return {
+    topics: Object.fromEntries(
+      CONTRIBUTION_TOPIC_SUMMARY_KEYS.map((key) => [key, value.topics[key]]),
+    ),
+    events: Object.fromEntries(
+      CONTRIBUTION_EVENT_SUMMARY_KEYS.map((key) => [key, value.events[key]]),
+    ),
+  };
+}
+
+function emptyContributionSummary() {
+  return {
+    topics: Object.fromEntries(
+      CONTRIBUTION_TOPIC_SUMMARY_KEYS.map((key) => [key, 0]),
+    ),
+    events: Object.fromEntries(
+      CONTRIBUTION_EVENT_SUMMARY_KEYS.map((key) => [key, 0]),
+    ),
+  };
+}
+
+function markContributionReviewDetails(status, available) {
+  Object.defineProperty(status, CONTRIBUTION_REVIEW_DETAILS, {
+    value: available === true,
+    enumerable: false,
+  });
+  return status;
+}
+
+function unavailableContributionStatus() {
+  return {
+    enabled: false,
+    state: "unavailable",
+    can_contribute: false,
+    disclosure_required: false,
+    topics: [],
+    summary: emptyContributionSummary(),
+  };
+}
+
+function sameStringArray(left, right) {
+  return left.length === right.length &&
+    left.every((item, index) => item === right[index]);
 }
 
 function translationCode(value, fallback) {

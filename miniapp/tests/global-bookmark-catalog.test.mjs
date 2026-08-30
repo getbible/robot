@@ -252,6 +252,37 @@ test("does not promote a custom topic that reuses a built-in English name", () =
   );
 });
 
+test("reads an already-resolved canonical topic without repeating name matching", () => {
+  const direct = GLOBAL_BOOKMARK_CATALOG.bookmarksForCanonicalTopic(
+    "grace",
+    "private-grace",
+  );
+  const mapped = GLOBAL_BOOKMARK_CATALOG.bookmarksForTopic(
+    "private-grace",
+    [{ id: "private-grace", name: "My renamed topic" }],
+    { grace: "private-grace" },
+  );
+
+  assert.deepEqual(direct, mapped);
+  assert.ok(direct.length > 0);
+  assert.equal(direct.every((bookmark) => (
+    bookmark.topic_id === "private-grace" &&
+    bookmark.catalog_topic_id === "grace" &&
+    bookmark.source === GLOBAL_BOOKMARK_SOURCE
+  )), true);
+  assert.throws(
+    () => GLOBAL_BOOKMARK_CATALOG.bookmarksForCanonicalTopic(
+      "missing-topic",
+      "private-grace",
+    ),
+    /identifiers/i,
+  );
+  assert.throws(
+    () => GLOBAL_BOOKMARK_CATALOG.bookmarksForCanonicalTopic("grace", "bad.id"),
+    /identifiers/i,
+  );
+});
+
 test("presents an unmapped numeric legacy topic as its built-in definition", () => {
   const topics = [{ id: "21", name: "Grace" }];
 

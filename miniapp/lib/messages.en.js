@@ -228,6 +228,49 @@ export const ENGLISH_MESSAGES = Object.freeze({
     "Your local bookmarks are safe, but this device could not preserve the contributor review queue. Keep the Mini App open and online while it retries, and do not clear its app data.",
   "bookmarks.contribution_disclosure":
     "You are enrolled as a GetBible contributor. Topic names must be in English. New topics and changes to topic verse assignments are saved on your device first and also sent securely to the project administrators for review. Approved changes may become part of the global topic library used by everyone.",
+  "bookmarks.contribution_sync_title": "Contributor sync",
+  "bookmarks.contribution_sync_now": "Sync now",
+  "bookmarks.contribution_check_status": "Check status",
+  "bookmarks.contribution_syncing": "Syncing…",
+  "bookmarks.contribution_sync_idle":
+    "Ready to sync your topics and verse links.",
+  "bookmarks.contribution_sync_pending":
+    "Your contributor application is waiting for approval. The bot will notify you, and this app checks periodically. Use Check status to check now.",
+  "bookmarks.contribution_application_deferred":
+    "Your contributor application needs further review. Use Check status to see whether an administrator has updated it.",
+  "bookmarks.contribution_application_rejected":
+    "Your contributor application was not accepted. Your personal topics and verse links remain safely on this device.",
+  "bookmarks.contribution_access_revoked":
+    "Contributor access is no longer active. Your personal topics and verse links remain safely on this device.",
+  "bookmarks.contribution_sync_complete":
+    "Everything is in sync. Topics still under review remain personal; published topics are marked G.",
+  "bookmarks.contribution_sync_sent_one":
+    "Sync complete. One update was sent for review.",
+  "bookmarks.contribution_sync_sent_other":
+    "Sync complete. {count} updates were sent for review.",
+  "bookmarks.contribution_sync_waiting_one":
+    "One local update is still waiting to be sent. We will retry automatically.",
+  "bookmarks.contribution_sync_waiting_other":
+    "{count} local updates are still waiting to be sent. We will retry automatically.",
+  "bookmarks.contribution_sync_retry_wait":
+    "The server asked us to wait before syncing again. We will retry automatically.",
+  "bookmarks.contribution_sync_unavailable":
+    "Contributor sync is temporarily unavailable. Your bookmarks remain safe on this device.",
+  "bookmarks.contribution_sync_error":
+    "Sync could not finish. Your bookmarks are safe; try again when you are online.",
+  "bookmarks.contribution_sync_catalog_error":
+    "Your updates reached the review server, but the global topic library could not be refreshed. Try Sync again.",
+  "bookmarks.contribution_pending_marker": "Personal contributor topic or verse link",
+  "bookmarks.contribution_topic_outcomes": "Topics",
+  "bookmarks.contribution_event_outcomes": "Updates",
+  "bookmarks.contribution_outcome_published": "global {count}",
+  "bookmarks.contribution_outcome_mapped":
+    "accepted, awaiting publication {count}",
+  "bookmarks.contribution_outcome_applied": "applied {count}",
+  "bookmarks.contribution_outcome_approved": "accepted {count}",
+  "bookmarks.contribution_outcome_pending": "awaiting review {count}",
+  "bookmarks.contribution_outcome_deferred": "deferred {count}",
+  "bookmarks.contribution_outcome_rejected": "rejected {count}",
   "bookmarks.topic_updated": "Topic updated.",
   "bookmarks.topic_removed": "Topic removed.",
   "bookmarks.last_topic": "Keep at least one bookmark topic.",

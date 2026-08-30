@@ -2,6 +2,7 @@ import {
   GLOBAL_BOOKMARK_PREFERENCES_KEY,
   GLOBAL_BOOKMARK_TOPIC_MAPPING_PREFIX,
 } from "./global-bookmark-preferences.js";
+import { isMiniAppInstanceScope } from "./instance-scope.js";
 
 const SCOPE_PATTERN = /^[a-f0-9]{64}$/;
 const DEVICE_API_VERSION = "9.0";
@@ -51,6 +52,7 @@ export class GlobalBookmarkDeviceStorage {
   #values = new Map();
 
   static async open({
+    instanceScope,
     scope,
     webApp = globalThis.Telegram?.WebApp ?? null,
     localStorage = browserLocalStorage(),
@@ -59,6 +61,7 @@ export class GlobalBookmarkDeviceStorage {
     onStatus = null,
   } = {}) {
     const storage = new GlobalBookmarkDeviceStorage({
+      instanceScope,
       scope,
       webApp,
       localStorage,
@@ -70,7 +73,18 @@ export class GlobalBookmarkDeviceStorage {
     return storage;
   }
 
-  constructor({ scope, webApp, localStorage, timeoutMs, clock, onStatus }) {
+  constructor({
+    instanceScope,
+    scope,
+    webApp,
+    localStorage,
+    timeoutMs,
+    clock,
+    onStatus,
+  }) {
+    if (!isMiniAppInstanceScope(instanceScope)) {
+      throw new TypeError("A Mini App instance scope is required.");
+    }
     if (typeof scope !== "string" || !SCOPE_PATTERN.test(scope)) {
       throw new TypeError(
         "An authenticated global bookmark storage scope is required.",
@@ -92,7 +106,8 @@ export class GlobalBookmarkDeviceStorage {
       );
     }
 
-    this.#mappingKey = `${GLOBAL_BOOKMARK_TOPIC_MAPPING_PREFIX}:${scope}`;
+    this.#mappingKey =
+      `${GLOBAL_BOOKMARK_TOPIC_MAPPING_PREFIX}:${instanceScope}:${scope}`;
     this.#allowedKeys = new Set([
       GLOBAL_BOOKMARK_PREFERENCES_KEY,
       this.#mappingKey,
@@ -104,7 +119,7 @@ export class GlobalBookmarkDeviceStorage {
       ],
       [
         this.#mappingKey,
-        `${GLOBAL_BOOKMARK_LOCAL_MIRROR_PREFIX}:${scope}:mapping`,
+        `${GLOBAL_BOOKMARK_LOCAL_MIRROR_PREFIX}:${instanceScope}:${scope}:mapping`,
       ],
     ]);
     this.#deviceKeys = new Map([
@@ -114,7 +129,7 @@ export class GlobalBookmarkDeviceStorage {
       ],
       [
         this.#mappingKey,
-        `${GLOBAL_BOOKMARK_DEVICE_KEY_PREFIX}_${scope}_mapping`,
+        `${GLOBAL_BOOKMARK_DEVICE_KEY_PREFIX}_${instanceScope}_${scope}_mapping`,
       ],
     ]);
     if ([...this.#deviceKeys.values()].some((key) =>
@@ -152,6 +167,93 @@ export class GlobalBookmarkDeviceStorage {
   getItem(key) {
     this.#requireKey(key);
     return this.#values.get(key) ?? null;
+  }
+
+  isItemDurable(key) {
+    this.#requireKey(key);
+    const record = this.#records.get(key);
+    if (!record) {
+      return false;
+    }
+    const raw = serializeEnvelope(record);
+    const localRecord = this.#readLocalRecord(key)?.record;
+    return (
+      (localRecord && serializeEnvelope(localRecord) === raw) ||
+      this.#deviceRaw.get(key) === raw
+    );
+  }
+
+  /**
+   * Refreshes one already-scoped value from the shared browser mirror.
+   *
+   * This is intentionally narrower than reopening DeviceStorage: callers use
+   * it while holding a same-origin Web Lock immediately before an atomic
+   * read/modify/write. A future envelope blocks subsequent writes and an older
+   * mirror can never roll this hydrated replica backwards.
+   */
+  refreshItem(key) {
+    this.#requireKey(key);
+    const candidate = this.#readLocalRecord(key);
+    if (candidate?.future) {
+      this.#blockedKeys.add(key);
+      this.#setStatus({
+        sources: Object.freeze({
+          ...this.#status.sources,
+          [sourceName(key, this.#mappingKey)]: "future",
+        }),
+      });
+      return false;
+    }
+    if (!candidate?.record) {
+      return false;
+    }
+    const current = this.#records.get(key);
+    if (
+      current &&
+      current.record_updated_at >= candidate.record.record_updated_at
+    ) {
+      return false;
+    }
+    this.#installRecord(key, candidate.record);
+    this.#setStatus({
+      local: "ready",
+      sources: Object.freeze({
+        ...this.#status.sources,
+        [sourceName(key, this.#mappingKey)]: "local",
+      }),
+    });
+    return true;
+  }
+
+  /** Requeues the current scoped envelope after a failed device write. */
+  retryItem(key) {
+    this.#requireWritableKey(key);
+    const record = this.#records.get(key);
+    if (!record || !this.#device) {
+      return false;
+    }
+    this.#queueDeviceWrite(key, record, { force: true });
+    return true;
+  }
+
+  /** Restores the newest envelope known to have reached local or device storage. */
+  restoreDurableItem(key) {
+    this.#requireKey(key);
+    this.#desired.delete(key);
+    const localCandidate = this.#readLocalRecord(key);
+    const deviceCandidate = parseEnvelope(this.#deviceRaw.get(key) ?? null);
+    const winner = newestCandidate([
+      candidate(localCandidate, "local", 2),
+      candidate(deviceCandidate, "device", 3),
+    ]);
+    if (winner?.record) {
+      this.#installRecord(key, winner.record);
+    } else {
+      this.#records.delete(key);
+      this.#values.delete(key);
+    }
+    this.#setStatus({ pending: Boolean(this.#nextDesiredWrite()) });
+    return Boolean(winner?.record);
   }
 
   setItem(key, value) {
@@ -359,12 +461,12 @@ export class GlobalBookmarkDeviceStorage {
     });
   }
 
-  #queueDeviceWrite(key, record) {
+  #queueDeviceWrite(key, record, { force = false } = {}) {
     if (!this.#device || this.#blockedKeys.has(key)) {
       return;
     }
     const envelopeRaw = serializeEnvelope(record);
-    if (this.#deviceRaw.get(key) === envelopeRaw) {
+    if (!force && this.#deviceRaw.get(key) === envelopeRaw) {
       return;
     }
     this.#desired.set(key, {

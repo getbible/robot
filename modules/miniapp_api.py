@@ -55,6 +55,7 @@ from .miniapp_auth import (
     MiniAppReplayError,
     TelegramInitDataReplayGuard,
     TelegramInitDataValidator,
+    TelegramMiniAppPrincipal,
 )
 from .miniapp_sessions import (
     MAX_MINIAPP_SELECTION_TEXT_BYTES,
@@ -81,6 +82,7 @@ _DIRECT_SELECTION_RE = re.compile(
     r"gbd_([a-z0-9][a-z0-9._-]{0,63})_([0-9]{3})_([0-9]{4})_([0-9]{4})\Z"
 )
 MAX_MINIAPP_CHAPTER_VERSES = 250
+_MAX_JAVASCRIPT_SAFE_INTEGER = (1 << 53) - 1
 _PREFERENCE_UNCHANGED = object()
 _SEARCH_ENUMS: dict[str, frozenset[str]] = {
     "words": frozenset({"all", "any", "phrase"}),
@@ -104,6 +106,66 @@ _EMPTY_CONTRIBUTION_CHECKSUM = hashlib.sha256(
         sort_keys=True,
     ).encode("utf-8")
 ).hexdigest()
+
+
+def _unavailable_contribution_status() -> dict[str, object]:
+    """Return a fresh fail-closed contribution status payload."""
+    return {
+        "enabled": False,
+        "state": "unavailable",
+        "can_contribute": False,
+        "disclosure_required": False,
+        "topics": [],
+        "summary": {
+            "topics": {
+                "pending": 0,
+                "mapped": 0,
+                "published": 0,
+                "rejected": 0,
+                "deferred": 0,
+            },
+            "events": {
+                "pending": 0,
+                "approved": 0,
+                "rejected": 0,
+                "deferred": 0,
+                "applied": 0,
+            },
+        },
+    }
+
+
+def _legacy_contribution_status(status: Mapping[str, object]) -> dict[str, object]:
+    """Keep pre-details Mini Apps compatible with the original exact shape."""
+    return {
+        "enabled": status["enabled"],
+        "state": status["state"],
+        "can_contribute": status["can_contribute"],
+        "disclosure_required": status["disclosure_required"],
+    }
+
+
+def _contribution_details_requested(query: str) -> bool:
+    values = _query(query)
+    if not values:
+        return False
+    if values != {"details": "1"}:
+        raise MiniAppApiInputError(
+            "Contribution status accepts only details=1."
+        )
+    return True
+
+
+def _contribution_receipt_id(user_id: int, client_event_id: str) -> int:
+    """Return an opaque, stable, browser-safe receipt for one contributor event."""
+    material = (
+        b"getbible-contribution-receipt-v1\0"
+        + str(user_id).encode("ascii")
+        + b"\0"
+        + client_event_id.encode("utf-8")
+    )
+    digest = hashlib.sha256(material).digest()
+    return int.from_bytes(digest[:8], "big") % _MAX_JAVASCRIPT_SAFE_INTEGER + 1
 
 
 class MiniAppApiInputError(ValueError):
@@ -402,9 +464,13 @@ class MiniAppApi:
                 return await self._update_preferences(session, request)
             if parts.path == f"{self._api_prefix}/contributions/status":
                 if method == "GET":
-                    return self._contribution_status(session)
+                    return self._contribution_status(session, parts.query)
                 if method == "PATCH":
-                    return self._acknowledge_contribution_disclosure(session, request)
+                    return self._acknowledge_contribution_disclosure(
+                        session,
+                        request,
+                        parts.query,
+                    )
                 return self._method_not_allowed("GET, PATCH, OPTIONS")
             if parts.path == f"{self._api_prefix}/contributions/events":
                 if method != "POST":
@@ -566,22 +632,6 @@ class MiniAppApi:
             raise MiniAppApiInputError("Session request contains unsupported fields.")
         init_data = _required_text(payload, "init_data", 8 * 1024)
         principal = self._validator.validate(init_data)
-        if self._contributions is not None:
-            try:
-                self._contributions.observe_identity(
-                    principal.user_id,
-                    first_name=principal.first_name,
-                    last_name=principal.last_name,
-                    username=principal.username,
-                    language_code=principal.language_code,
-                )
-            except (OSError, sqlite3.Error, RuntimeError):
-                # Contributor metadata is optional audit context. A busy or
-                # damaged moderation database must not prevent Bible reading.
-                LOGGER.warning(
-                    "Contributor identity metadata could not be refreshed",
-                    exc_info=True,
-                )
         supplied_launch = payload.get("launch_token")
         if supplied_launch is not None and not isinstance(supplied_launch, str):
             raise MiniAppApiInputError("launch_token must be text.")
@@ -643,6 +693,7 @@ class MiniAppApi:
                     recovery_session,
                     status=200,
                     translations=translations,
+                    principal=principal,
                 )
             except BaseException:
                 self._replay_guard.release(init_data)
@@ -685,6 +736,7 @@ class MiniAppApi:
                 session,
                 status=201,
                 translations=translations,
+                principal=principal,
             )
         except BaseException:
             if session is not None:
@@ -712,6 +764,7 @@ class MiniAppApi:
         *,
         status: int = 200,
         translations: Sequence[TranslationOption] | None = None,
+        principal: TelegramMiniAppPrincipal | None = None,
     ) -> MiniAppHttpResponse:
         options = (
             tuple(translations)
@@ -729,13 +782,14 @@ class MiniAppApi:
             session.user_id,
             preferences.translation,
         )
-        return self._response(
+        contribution_status = self._bootstrap_contribution_status_payload(session.user_id)
+        response = self._response(
             status,
             {
                 "session_token": session.token,
                 "expires_in": int(self._sessions.snapshot()["ttl_seconds"]),
                 "user": {"id": session.user_id},
-                "contributions": self._contribution_status_payload(session.user_id),
+                "contributions": contribution_status,
                 "preferences": preferences.as_dict(),
                 "entrypoint": {
                     "route": session.launch.initial_route,
@@ -758,6 +812,36 @@ class MiniAppApi:
                 },
             },
         )
+        if (
+            principal is not None
+            and contribution_status["state"] not in {"not_applied", "unavailable"}
+        ):
+            self._observe_contributor_identity(principal)
+        return response
+
+    def _observe_contributor_identity(
+        self,
+        principal: TelegramMiniAppPrincipal,
+    ) -> None:
+        """Refresh optional audit metadata only after a successful exchange."""
+        store = self._contributions
+        if store is None:
+            return
+        try:
+            store.observe_identity(
+                principal.user_id,
+                first_name=principal.first_name,
+                last_name=principal.last_name,
+                username=principal.username,
+                language_code=principal.language_code,
+            )
+        except (OSError, sqlite3.Error, RuntimeError):
+            # Contributor metadata is optional audit context. A busy or damaged
+            # moderation database must not prevent Bible reading.
+            LOGGER.warning(
+                "Contributor identity metadata could not be refreshed",
+                exc_info=True,
+            )
 
     async def _authenticated(self, request: MiniAppHttpRequest) -> MiniAppSession:
         authorization = _header(request.headers, "authorization") or ""
@@ -1258,15 +1342,14 @@ class MiniAppApi:
             self._sessions.clear_basket(session)
             return self._response(204, None)
 
-    def _contribution_status_payload(self, user_id: int) -> dict[str, object]:
+    def _bootstrap_contribution_status_payload(
+        self,
+        user_id: int,
+    ) -> dict[str, object]:
+        """Fail open during session bootstrap so Scripture remains available."""
         store = self._contributions
         if store is None:
-            return {
-                "enabled": False,
-                "state": "unavailable",
-                "can_contribute": False,
-                "disclosure_required": False,
-            }
+            return _unavailable_contribution_status()
         try:
             return store.contribution_status(user_id)
         except (OSError, sqlite3.Error, RuntimeError):
@@ -1274,27 +1357,37 @@ class MiniAppApi:
                 "Contributor status is temporarily unavailable",
                 exc_info=True,
             )
-            return {
-                "enabled": False,
-                "state": "unavailable",
-                "can_contribute": False,
-                "disclosure_required": False,
-            }
+            return _unavailable_contribution_status()
 
     def _contribution_status(
         self,
         session: MiniAppSession,
+        query: str,
     ) -> MiniAppHttpResponse:
+        details = _contribution_details_requested(query)
+        store = self._contributions
+        if store is None:
+            return self._contributions_unavailable_response()
+        try:
+            status = store.contribution_status(session.user_id)
+        except (OSError, sqlite3.Error, RuntimeError):
+            LOGGER.warning(
+                "Explicit contributor status is temporarily unavailable",
+                exc_info=True,
+            )
+            return self._contributions_unavailable_response()
         return self._response(
             200,
-            self._contribution_status_payload(session.user_id),
+            status if details else _legacy_contribution_status(status),
         )
 
     def _acknowledge_contribution_disclosure(
         self,
         session: MiniAppSession,
         request: MiniAppHttpRequest,
+        query: str,
     ) -> MiniAppHttpResponse:
+        details = _contribution_details_requested(query)
         payload = self._json_body(request)
         if payload != {"disclosure_acknowledged": True}:
             raise MiniAppApiInputError(
@@ -1302,13 +1395,27 @@ class MiniAppApi:
             )
         store = self._contributions
         if store is None:
-            return self._error_response(
-                503,
-                "contributions_unavailable",
-                "Contributor synchronization is not configured on this instance.",
-                details={"retryable": True},
+            return self._contributions_unavailable_response()
+        try:
+            status = store.acknowledge_disclosure(session.user_id)
+        except (OSError, sqlite3.Error, RuntimeError):
+            LOGGER.warning(
+                "Contributor disclosure acknowledgement is temporarily unavailable",
+                exc_info=True,
             )
-        return self._response(200, store.acknowledge_disclosure(session.user_id))
+            return self._contributions_unavailable_response()
+        return self._response(
+            200,
+            status if details else _legacy_contribution_status(status),
+        )
+
+    def _contributions_unavailable_response(self) -> MiniAppHttpResponse:
+        return self._error_response(
+            503,
+            "contributions_unavailable",
+            "Contributor synchronization is temporarily unavailable.",
+            details={"retryable": True},
+        )
 
     def _submit_contribution_events(
         self,
@@ -1339,7 +1446,17 @@ class MiniAppApi:
             {
                 "accepted": result.accepted,
                 "replayed": result.replayed,
-                "event_ids": result.event_ids,
+                # Store row IDs are moderation-internal.  Deterministic,
+                # contributor-scoped receipts preserve the legacy response
+                # shape without exposing global submission volume through
+                # AUTOINCREMENT gaps.
+                "event_ids": {
+                    client_event_id: _contribution_receipt_id(
+                        session.user_id,
+                        client_event_id,
+                    )
+                    for client_event_id in result.event_ids
+                },
             },
         )
 

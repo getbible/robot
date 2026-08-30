@@ -240,10 +240,13 @@ test("persists only scoped user data and keeps Telegram credentials session-only
   assert.doesNotMatch(globalBookmarkStorage, /\.CloudStorage/);
   assert.match(globalBookmarkStorage, /SCOPE_PATTERN/);
   assert.match(globalBookmarkStorage, /GLOBAL_BOOKMARK_LOCAL_MIRROR_PREFIX/);
-  assert.match(app, /GlobalBookmarkDeviceStorage\.open\(\{[\s\S]*?scope: storageScope/);
   assert.match(
     app,
-    /new GlobalBookmarkPreferences\(\{[\s\S]*?storage: globalBookmarkStorage/,
+    /GlobalBookmarkDeviceStorage\.open\(\{[\s\S]*?scope: storageScope,[\s\S]*?instanceScope/,
+  );
+  assert.match(
+    app,
+    /new GlobalBookmarkPreferences\(\{[\s\S]*?instanceScope,[\s\S]*?storage: globalBookmarkStorage/,
   );
   assert.doesNotMatch(durableData, /session_token|init_data|bearer_token/i);
   assert.doesNotMatch(source, /setItem\([^,]+,\s*(?:bridge\.)?initData/);
@@ -372,6 +375,167 @@ test("keeps global and personal bookmarks in one controllable topic list", async
   assert.match(css, /bookmark-detail__actions \.button[\s\S]*?min-height: 44px/);
   assert.equal(UI_CATALOGS.en["bookmarks.clear"], "Clear personal");
   assert.match(UI_CATALOGS.en["bookmarks.imported"], /skipped ranges/);
+});
+
+test("offers one-click contributor sync with lossless personal-to-global presentation", async () => {
+  const html = await readFile(new URL("index.html", root), "utf8");
+  const app = await readFile(new URL("app.js", root), "utf8");
+  const css = await readFile(new URL("styles.css", root), "utf8");
+
+  const manager = html.indexOf('id="bookmark-topic-manager"');
+  const sync = html.indexOf('id="contributor-sync"');
+  const editor = html.indexOf('id="bookmark-topic-editor"');
+  assert.ok(manager >= 0 && manager < sync && sync < editor);
+  assert.match(html, /id="contributor-sync-button"/);
+  assert.match(html, /id="contributor-sync-status"[\s\S]*?aria-live="polite"/);
+  assert.match(html, /id="contributor-sync-details"/);
+  assert.match(css, /\.contributor-sync\[data-state="success"\]/);
+  assert.match(css, /\.bookmark-contribution-badge/);
+
+  assert.match(app, /contributionSync\.synchronizeNow\([\s\S]*?bookmarkStore\.snapshot\(\)/);
+  assert.match(app, /refreshLiveGlobalBookmarkCatalog\(\{ requireNetwork: true \}\)/);
+  assert.match(
+    app,
+    /initializeContributionSync\(\)[\s\S]*?scheduleContributionSync\(\);[\s\S]*?stageContributionTopicOutcomes[\s\S]*?refreshLiveGlobalBookmarkCatalog\(\{ requireNetwork: true \}\)/,
+  );
+  assert.match(
+    app,
+    /synchronizeWhenApproved: false,\s*refreshCatalog: false/,
+  );
+  assert.match(
+    app,
+    /if \(!unchanged && result\.source !== "network"\)[\s\S]*?return \{ changed: false, source: result\.source \}/,
+  );
+  assert.match(app, /window\.addEventListener\("focus"[\s\S]*?refreshContributionStatus/);
+  assert.match(app, /document\.addEventListener\("visibilitychange"[\s\S]*?refreshContributionStatus/);
+  assert.match(
+    app.match(/function contributionStatusShouldPoll[\s\S]*?\n\}/)?.[0] ?? "",
+    /status\.can_contribute[\s\S]*?status\.state === "pending"[\s\S]*?contributionAuthorityUnknown\(status\)/,
+  );
+  assert.doesNotMatch(
+    app.match(/function contributionStatusShouldPoll[\s\S]*?\n\}/)?.[0] ?? "",
+    /deferred|rejected|revoked|not_applied/,
+  );
+  assert.match(
+    app,
+    /scheduleContributionStatusPoll[\s\S]*?allowPendingPoll: true,[\s\S]*?allowAuthorityRecovery: true/,
+  );
+  assert.match(app, /let contributionStatusPollTimerDueAt = 0/);
+  assert.match(
+    app.match(/function scheduleContributionStatusPoll[\s\S]*?\n\}/)?.[0] ?? "",
+    /authorityRecovery \? 1_000 : CONTRIBUTION_STATUS_POLL_MS[\s\S]*?contributionStatusPollTimerDueAt <= dueAt/,
+  );
+  assert.match(
+    app,
+    /if \(contributionOpenTask\) \{[\s\S]*?await contributionOpenTask\.catch/,
+  );
+  assert.match(
+    app,
+    /contributionStatus\?\.state === "pending"[\s\S]*?!allowPendingPoll[\s\S]*?!allowApplicantCheck/,
+  );
+  assert.match(
+    app,
+    /contributionAuthorityUnknown\(\) && !allowAuthorityRecovery/,
+  );
+  assert.doesNotMatch(
+    app.match(/window\.addEventListener\("online"[\s\S]*?\n  \}\);/)?.[0] ?? "",
+    /allowPendingPoll/,
+  );
+  assert.doesNotMatch(
+    app.match(/window\.addEventListener\("focus"[\s\S]*?\n  \}\);/)?.[0] ?? "",
+    /allowPendingPoll/,
+  );
+  assert.match(
+    app.match(/function contributionApplicantCanCheck[\s\S]*?\n\}/)?.[0] ?? "",
+    /\["pending", "deferred"\]\.includes\(status\.state\)/,
+  );
+  assert.match(
+    app,
+    /elements\.contributorSyncButton\.hidden = passiveApplication/,
+  );
+  assert.match(
+    app,
+    /if \(contributionDisclosureTask\)[\s\S]*?return contributionDisclosureTask/,
+  );
+  assert.match(
+    app,
+    /globalBookmarkCatalogRefreshQueue\.then\([\s\S]*?performLiveGlobalBookmarkCatalogRefresh/,
+  );
+  assert.match(
+    app,
+    /pendingContributionOutcomeRefresh\?\.version === stagedOutcomes\.version/,
+  );
+  assert.match(app, /scheduleContributionRetry\(error\)/);
+  assert.match(app, /scheduleContributionRetry\(error, \{ mode: "manual" \}\)/);
+  assert.match(
+    app.match(/function scheduleContributionRetry[\s\S]*?\n\}/)?.[0] ?? "",
+    /retryMode === "manual"[\s\S]*?synchronizeContributionsNow\(\)/,
+  );
+  assert.match(app, /let globalBookmarkCatalogRetryNotBefore = 0/);
+  assert.match(
+    app,
+    /function scheduleGlobalBookmarkCatalogRetry[\s\S]*?recordGlobalBookmarkCatalogRetryDeadline/,
+  );
+  assert.doesNotMatch(
+    app.match(/function scheduleGlobalBookmarkCatalogRetry[\s\S]*?\n\}/)?.[0] ?? "",
+    /recordContributionRetryDeadline|contributionRetryDelayMs/,
+  );
+  assert.match(
+    app,
+    /if \(!pendingContributionOutcomeRefresh\) \{[\s\S]*?cancelGlobalBookmarkCatalogRetry\(\)[\s\S]*?else \{[\s\S]*?scheduleGlobalBookmarkCatalogRetry/,
+  );
+  assert.match(
+    app.match(/function scheduleGlobalBookmarkCatalogRetry[\s\S]*?\n\}/)?.[0] ?? "",
+    /contribution_sync_catalog_error[\s\S]*?contributionStatus\?\.can_contribute[\s\S]*?contribution_sync_complete/,
+  );
+  assert.match(app, /summary\.topics[\s\S]*?"deferred"[\s\S]*?"rejected"/);
+  assert.match(app, /summary\.events[\s\S]*?"deferred"[\s\S]*?"rejected"/);
+  assert.match(app, /reconcileContributionTopicMappings\(\{/);
+  assert.match(app, /promotedTopicIds: canonicalTopicIds/);
+  assert.match(app, /detailsAvailable: result\.review_details_available === true/);
+  assert.match(app, /classified\.get\(topicId\)\?\.coordinates\.has\(coordinateKey\)/);
+  assert.match(app, /globalTopic\.coordinates\.has\(bookmarkCoordinateKey\(bookmark\)\)/);
+  assert.match(app, /const personalCount = personalBookmarkCount\(snapshot, classifiedTopics\)/);
+  assert.match(app, /localTopicIdsByCanonical\.get\(outcome\.canonical_topic_id\)/);
+  assert.match(app, /\.\.\.new Set\(localIds\)\]\.sort\(\)\[0\]/);
+  assert.match(app, /renderGlobal: false/);
+  assert.match(
+    app,
+    /verifiedPublishedContributionTopics = nextVerifiedTopics/,
+  );
+  assert.match(
+    app,
+    /if \(unresolved > 0\) \{[\s\S]*?changed: false/,
+  );
+  assert.match(
+    app,
+    /clear: clearContributionMappings[\s\S]*?replacedLocalTopicIds: \[\.\.\.currentOutcomeLocalTopicIds\]/,
+  );
+  assert.match(app, /guard: \(\) => \([\s\S]*?generation === sessionGeneration/);
+  assert.match(
+    app,
+    /summary\.topics\?\.mapped[\s\S]*?summary\.topics\?\.published/,
+  );
+  assert.match(
+    app,
+    /const publishedCanonicalByLocal = verifiedPublishedContributionTopics/,
+  );
+  assert.doesNotMatch(
+    app.match(/function globallyClassifiedTopics[\s\S]*?\n\}/)?.[0] ?? "",
+    /contributionStatus\?\.topics/,
+  );
+  assert.match(
+    app,
+    /if \(!enabled && !published\) \{\s*continue;/,
+  );
+  assert.match(
+    app.match(/function globallyClassifiedTopics[\s\S]*?\n\}/)?.[0] ?? "",
+    /coordinates: enabled\s*\? new Set\(bookmarks\.map\(bookmarkCoordinateKey\)\)\s*:\s*new Set\(\)/,
+  );
+  assert.match(
+    app,
+    /const classifiedBookmarkTopics = bookmarkSnapshot[\s\S]*?createReaderVerse\([\s\S]*?classifiedBookmarkTopics/,
+  );
 });
 
 test("derives generated bookmark tags from the canonical topic definitions", async () => {
