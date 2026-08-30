@@ -29,7 +29,9 @@ the transactional `upgrade` operation and is also available as **Update /
 upgrade deployment** in the interactive maintenance menu. It replaces the
 entire installed application tree, including `miniapp/`, its interface
 catalogs, styles, and images. It then restarts the instance and verifies both
-Robot readiness and the configured Mini App HTTPS route.
+Robot readiness and the configured Mini App HTTPS route. The route postflight
+checks the shell and both contribution endpoints; an empty proxy 404 or an HTML
+fallback cannot pass as a healthy API.
 
 The repository owns `setup.sh` as an executable file. Run it directly; a fresh
 checkout must not require `chmod`. Although the manager itself runs through
@@ -52,14 +54,18 @@ git status --short
 sudo ./setup.sh upgrade production --source .
 ```
 
-For this release, existing instances that use setup-managed Caddy must invoke
-`setup.sh` from the reviewed target checkout exactly as shown above. Do **not**
-start this upgrade through the previously installed `getbible-robot` manager:
-that already-running older script cannot execute the target release's new
-transactional API-route regeneration, even though it replaces the installed
-manager later in the upgrade. Running the target checkout's script regenerates,
-validates, installs, and reloads the managed allow-list before the upgrade is
-accepted, and restores the prior Caddy files if the new application fails.
+The previously installed manager compares its upgrade logic with the reviewed
+target. If the target checkout manager is newer, it hands the operation to that
+exact checkout before configuration migration or route generation begins. This
+prevents an already-running older process from applying an obsolete Caddy
+allow-list while deploying newer application code.
+
+An update to the commit that is already deployed is a supported repair path.
+It does not rotate the application trees. It reapplies backwards-compatible
+configuration migrations, manager and unit files, service limits, and all
+setup-managed Caddy routes, restarts the instance, and runs the same postflight.
+This makes a normal repeated `update` sufficient to repair stale generated
+routes.
 
 The manager:
 
@@ -77,8 +83,10 @@ The manager:
 10. stops only the selected instance;
 11. atomically replaces `app` and retains `app.previous`;
 12. starts the service and waits for readiness;
-13. verifies the configured Mini App listener and public HTTPS route;
-14. automatically restores both the prior Caddy files and application if
+13. verifies the configured Mini App shell and both contribution API routes on
+    the local listener and public HTTPS URL, requiring Robot's JSON `401`
+    response rather than accepting an HTML fallback;
+14. automatically restores the prior Caddy files and application if
     readiness fails.
 
 Source, virtual environment, and lock are always moved as one application tree. The service never combines code from one commit with a lock from another.

@@ -124,17 +124,20 @@ service transactionally and removes the public route when the Mini App is
 disabled. See [Mini App deployment](MINI_APP.md) for DNS, Caddy, BotFather,
 authentication, and verification requirements.
 
-For this release's upgrade of an existing setup-managed Caddy instance, run
-the target checkout's manager so its expanded API allow-list is applied:
+Run routine upgrades through either the installed manager or the reviewed
+target checkout:
 
 ```bash
-sudo /path/to/robot-target/setup.sh upgrade production \
-  --source /path/to/robot-target
+sudo getbible-robot update production --source /path/to/robot-target
 ```
 
-Do not initiate that one-time upgrade through the previously installed
-`getbible-robot` manager. The old process cannot execute route-generation logic
-introduced by the target release merely by copying the new manager over itself.
+When the target contains newer manager logic, the previously installed manager
+hands the transaction to that reviewed target checkout's `setup.sh` before
+changing the deployment. The target logic migrates configuration and
+regenerates all setup-managed Caddy routes. Repeating the command at the
+already deployed commit is supported: it
+refreshes the manager, service limits, generated routes, and postflight checks
+without replacing `app` or `app.previous`.
 
 ## Contributor enrolment and moderation
 
@@ -183,10 +186,13 @@ Use its stages in order:
 Application decisions queue a private Telegram notification. Approval also
 causes the Mini App to show a one-time disclosure before any baseline is sent.
 After acknowledgement, the user's existing assigned topics/coordinates are
-submitted once and later successful local changes are journalled
-automatically. There is no Push button. Personal bookmark writes remain
-local-first: a network or moderation-server failure cannot undo them, and the
-bounded outbox retries on a later synchronization.
+submitted once and later successful local changes are journalled automatically.
+The contributor-only Topic Manager control pushes the durable journal, checks
+review outcomes, and pulls the current global catalogue in one Sync action;
+pending and deferred applicants can use the same control to check status.
+Personal bookmark writes remain local-first: a network or moderation-server
+failure cannot undo them, and the bounded outbox retries on a later
+synchronization.
 
 Topic proposals must use an English source name. The topic stage is where an
 operator resolves spelling, aliases, colors, and overlapping proposals into
@@ -302,7 +308,9 @@ The non-destructive diagnostic checks:
 - enabled Mini App listener presence on its exact IPv4 loopback address;
 - generated Caddy route equality, full Caddyfile validation, and Caddy service
   enablement/activity;
-- local Mini App shell plus public TLS, routing, and response-content checks;
+- local Mini App shell plus public TLS and response-content checks;
+- local and public contribution status/event routes reaching Robot and
+  returning its expected unauthenticated JSON response;
 - health and readiness when running.
 
 Use `runtime` for operational counters and `doctor` for an evidence-backed pass/fail deployment check.
