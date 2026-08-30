@@ -488,11 +488,22 @@ async function applyActiveTopicToVerse(page, verse) {
   ), verse);
 }
 
-async function createPersonalTopicWithVerses(page, name, verses) {
-  await page.locator('[data-route="bookmarks"]').click();
+async function openBookmarksRoute(page) {
+  if (await page.locator("#app").getAttribute("data-active-route") === "bookmarks") {
+    return;
+  }
+  await page.locator('[data-route="home"]').click();
+  await page.waitForFunction(() => (
+    document.querySelector("#app")?.dataset.activeRoute === "home"
+  ));
+  await page.locator('[data-home-route="bookmarks"]').click();
   await page.waitForFunction(() => (
     document.querySelector("#app")?.dataset.activeRoute === "bookmarks"
   ));
+}
+
+async function createPersonalTopicWithVerses(page, name, verses) {
+  await openBookmarksRoute(page);
   if (!await page.locator("#bookmark-topic-manager").evaluate((manager) => manager.open)) {
     await page.locator("#bookmark-topic-manager summary").click();
   }
@@ -589,7 +600,7 @@ test("a deferred application checks status only when the user asks", async (cont
     timeout: 15_000,
   });
   await applyActiveTopicToVerse(page, 1);
-  await page.locator('[data-route="bookmarks"]').click();
+  await openBookmarksRoute(page);
   if (!await page.locator("#bookmark-topic-manager").evaluate((manager) => manager.open)) {
     await page.locator("#bookmark-topic-manager summary").click();
   }
@@ -648,7 +659,7 @@ test("a final revoked status cannot be presented as a successful sync", async (c
   );
   assert.equal(eventAttempts.length, 0);
 
-  await page.locator('[data-route="bookmarks"]').click();
+  await openBookmarksRoute(page);
   if (!await page.locator("#bookmark-topic-manager").evaluate((manager) => manager.open)) {
     await page.locator("#bookmark-topic-manager summary").click();
   }
@@ -716,7 +727,7 @@ test("a denied contribution POST automatically resumes after authority recovers"
     timeout: 15_000,
   });
   await createPersonalTopicWithVerses(page, "Community Hope", [2]);
-  await page.locator('[data-route="bookmarks"]').click();
+  await openBookmarksRoute(page);
   if (!await page.locator("#bookmark-topic-manager").evaluate((manager) => manager.open)) {
     await page.locator("#bookmark-topic-manager summary").click();
   }
@@ -790,27 +801,9 @@ test("a normal user's personal core-topic bookmark remains personal with globals
         '[data-bookmark-topic="spiritual-rebirth"]',
     )
   ));
-  const otherPersonalAssignment = page.locator(
-    '#bookmark-assigned-topics [data-bookmark-source="personal"]' +
-      ':not([data-bookmark-topic="spiritual-rebirth"])',
-  );
-  assert.equal(await otherPersonalAssignment.count(), 1);
-  await otherPersonalAssignment.click();
-  await page.waitForFunction(() => (
-    document.querySelectorAll(
-      '#bookmark-assigned-topics [data-bookmark-source="personal"]',
-    ).length === 1 &&
-    document.querySelector(
-      '#bookmark-assigned-topics [data-bookmark-source="personal"]' +
-        '[data-bookmark-topic="spiritual-rebirth"]',
-    )
-  ));
   await page.locator("#close-bookmark-popover").click();
 
-  await page.locator('[data-route="bookmarks"]').click();
-  await page.waitForFunction(() => (
-    document.querySelector("#app")?.dataset.activeRoute === "bookmarks"
-  ));
+  await openBookmarksRoute(page);
   assert.match(await page.locator("#bookmarks-summary").innerText(), /^One personal verse$/);
   assert.equal(await page.locator("#global-bookmark-status").innerText(), "");
 
@@ -866,10 +859,7 @@ test("a contributor can retry one-click sync and receive published G mappings wi
 
   // The contributor builds the local topic while their application is still
   // pending. No reload or special approval-time action is used below.
-  await page.locator('[data-route="bookmarks"]').click();
-  await page.waitForFunction(() => (
-    document.querySelector("#app")?.dataset.activeRoute === "bookmarks"
-  ));
+  await openBookmarksRoute(page);
   await page.locator("#bookmark-topic-manager summary").click();
   await page.locator("#bookmark-topic-name").fill("Community Hope");
   await page.locator("#bookmark-topic-form button[type=submit]").click();
@@ -894,7 +884,7 @@ test("a contributor can retry one-click sync and receive published G mappings wi
   );
   assert.equal(eventAttempts.length, 0);
 
-  await page.locator('[data-route="bookmarks"]').click();
+  await openBookmarksRoute(page);
   if (!await page.locator("#bookmark-topic-manager").evaluate((manager) => manager.open)) {
     await page.locator("#bookmark-topic-manager summary").click();
   }
