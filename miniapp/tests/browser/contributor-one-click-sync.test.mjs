@@ -443,9 +443,10 @@ async function createBrowserFixture(
         }, 503);
       }
       const currentEtag = catalogPublished ? '"catalog-1"' : '"catalog-0"';
-      if (requestEtag === currentEtag) {
-        return route.fulfill({ status: 304, headers: { ETag: currentEtag } });
-      }
+      // Chromium reports Playwright-intercepted 304 revalidation responses as
+      // requestfailed/net::ERR_ABORTED. The API and live-catalog unit suites
+      // cover conditional 304 handling; keep this real-browser workflow on a
+      // full 200 response so any request failure remains an actual failure.
       return fulfillJson(route, catalogEnvelope(catalogPublished), 200, {
         ETag: currentEtag,
       });
