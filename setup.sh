@@ -47,6 +47,12 @@ UPGRADE_NEXT=""
 CADDY_TRANSACTION_DIR=""
 CADDY_WAS_ACTIVE=""
 CADDY_WAS_ENABLED=""
+CONTRIBUTION_TEMP_DIR=""
+CONTRIBUTION_APP_DIR=""
+CONTRIBUTION_ENV_FILE=""
+CONTRIBUTION_STORE_FILE=""
+CONTRIBUTION_SCRIPT=""
+CONTRIBUTION_ACTOR=""
 
 DEFAULT_SYSTEMD_MEMORY_HIGH_MB=1536
 DEFAULT_SYSTEMD_MEMORY_MAX_MB=2048
@@ -103,6 +109,11 @@ cleanup() {
     if [[ -n "$CADDY_TRANSACTION_DIR" ]]; then
         rollback_caddy_transaction || true
     fi
+    if [[ -n "$CONTRIBUTION_TEMP_DIR" &&
+        "$CONTRIBUTION_TEMP_DIR" == /tmp/getbible-contribution.* &&
+        -d "$CONTRIBUTION_TEMP_DIR" && ! -L "$CONTRIBUTION_TEMP_DIR" ]]; then
+        rm -rf --one-file-system -- "$CONTRIBUTION_TEMP_DIR"
+    fi
 }
 trap cleanup EXIT
 
@@ -130,6 +141,8 @@ Commands:
   delivery    Switch safely between polling and HTTPS webhook delivery
   miniapp     Configure the authenticated Telegram Mini App HTTPS route
   content     Edit the welcome or detailed help text
+  contributions
+              Review trusted topic/verse contributions and publish them
   update      Deploy the current reviewed checkout (alias for upgrade)
   upgrade     Deploy the exact commit from a reviewed source checkout
   rollback    Return to the immediately previous deployed application
@@ -426,7 +439,7 @@ record_operation() {
 install_host_prerequisites() {
     local missing=()
     local command
-    for command in git curl tar systemctl systemd-analyze logrotate runuser ss useradd nologin; do
+    for command in git curl tar systemctl systemd-analyze logrotate runuser flock ss useradd nologin; do
         command -v "$command" >/dev/null 2>&1 || missing+=("$command")
     done
     if ((${#missing[@]} == 0)); then
@@ -862,6 +875,10 @@ migrate_instance_configuration() {
     ensure_env_value "$python_bin" "$env_file" "PREWARM_DEFAULT_TRANSLATION" "true"
     ensure_env_value "$python_bin" "$env_file" \
         "USER_PREFERENCES_FILE" "${STATE_ROOT}/${instance}/preferences.sqlite3"
+    ensure_env_value "$python_bin" "$env_file" \
+        "CONTRIBUTION_STORE_FILE" "${STATE_ROOT}/${instance}/contributions.sqlite3"
+    ensure_env_value "$python_bin" "$env_file" "CONTRIBUTION_GIT_CHECKOUT" ""
+    ensure_env_value "$python_bin" "$env_file" "CONTRIBUTION_GIT_USER" ""
     migrate_env_default \
         "$python_bin" "$env_file" "USER_PREFERENCE_LIMIT" "100000" "10000"
     ensure_env_value "$python_bin" "$env_file" "TELEGRAM_DELIVERY_MODE" "polling"
@@ -1320,6 +1337,9 @@ for host in sorted(routes):
                 path + "/api/v1/basket/order",
                 path + "/api/v1/preferences",
                 path + "/api/v1/bookmarks/restore",
+                path + "/api/v1/bookmarks/catalog",
+                path + "/api/v1/contributions/status",
+                path + "/api/v1/contributions/events",
                 path + "/api/v1/post",
                 path + "/api/v1/cleanup",
             )
@@ -1373,6 +1393,9 @@ for host in sorted(routes):
                 "/api/v1/basket/items",
                 "/api/v1/basket/order", "/api/v1/preferences",
                 "/api/v1/bookmarks/restore",
+                "/api/v1/bookmarks/catalog",
+                "/api/v1/contributions/status",
+                "/api/v1/contributions/events",
                 "/api/v1/post", "/api/v1/cleanup",
             )
             lines.extend(
@@ -2384,6 +2407,10 @@ cmd_install() {
     replace_env_value "$python_bin" "$env_file" "TRANSLATION" "$translation"
     replace_env_value "$python_bin" "$env_file" \
         "USER_PREFERENCES_FILE" "${state_dir}/preferences.sqlite3"
+    replace_env_value "$python_bin" "$env_file" \
+        "CONTRIBUTION_STORE_FILE" "${state_dir}/contributions.sqlite3"
+    replace_env_value "$python_bin" "$env_file" "CONTRIBUTION_GIT_CHECKOUT" ""
+    replace_env_value "$python_bin" "$env_file" "CONTRIBUTION_GIT_USER" ""
     replace_env_value "$python_bin" "$env_file" "USER_PREFERENCE_LIMIT" "10000"
     replace_env_value "$python_bin" "$env_file" "WELCOME_MESSAGE_FILE" "$welcome_file"
     replace_env_value "$python_bin" "$env_file" "HELP_MESSAGE_FILE" "$help_file"
@@ -3900,6 +3927,488 @@ cmd_self_test() {
     printf 'Manager self-test passed.\n'
 }
 
+validate_contribution_store_path() {
+    local python_bin=$1
+    local path=$2
+    local service_user=$3
+    local service_uid
+    service_uid=$(id -u "$service_user")
+    "$python_bin" - "$path" "$service_uid" <<'PY'
+from pathlib import Path
+import os
+import stat
+import sys
+
+path = Path(sys.argv[1])
+expected_uid = int(sys.argv[2])
+if not path.is_absolute():
+    raise SystemExit("Contribution store path must be absolute.")
+
+# Refuse every symbolic-link component. The manager is root and must never be
+# tricked into handing a service account a database outside its state tree.
+current = Path(path.anchor)
+for component in path.parts[1:]:
+    current /= component
+    try:
+        metadata = os.lstat(current)
+    except FileNotFoundError:
+        break
+    if stat.S_ISLNK(metadata.st_mode):
+        raise SystemExit(f"Contribution store path contains a symlink: {current}")
+
+parent = path.parent
+try:
+    parent_metadata = os.stat(parent)
+except OSError as error:
+    raise SystemExit(f"Contribution store parent is unavailable: {error}") from error
+if not stat.S_ISDIR(parent_metadata.st_mode):
+    raise SystemExit("Contribution store parent is not a directory.")
+if parent_metadata.st_uid != expected_uid:
+    raise SystemExit("Contribution store parent is not owned by the instance service user.")
+try:
+    metadata = os.lstat(path)
+except FileNotFoundError:
+    pass
+else:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit("Contribution store is not a regular file.")
+    if metadata.st_uid != expected_uid:
+        raise SystemExit("Contribution store is not owned by the instance service user.")
+PY
+}
+
+load_contribution_context() {
+    local app_dir
+    local env_file
+    local store_file
+    app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
+    env_file=$(environment_file_for "$ACTIVE_INSTANCE")
+    [[ -x "$app_dir/venv/bin/python" ]] ||
+        die "The selected instance has no usable application environment."
+    [[ -f "$env_file" && ! -L "$env_file" ]] ||
+        die "The selected instance environment is unavailable or unsafe."
+    CONTRIBUTION_SCRIPT="$app_dir/scripts/contribution_review.py"
+    [[ -f "$CONTRIBUTION_SCRIPT" && ! -L "$CONTRIBUTION_SCRIPT" ]] ||
+        die "Update this instance before using contribution review."
+    store_file=$(dotenv_value "$app_dir" "$env_file" "CONTRIBUTION_STORE_FILE")
+    [[ -n "$store_file" ]] ||
+        store_file="${STATE_ROOT}/${ACTIVE_INSTANCE}/contributions.sqlite3"
+    validate_contribution_store_path \
+        "$app_dir/venv/bin/python" "$store_file" "$ACTIVE_USER" ||
+        die "The contribution store path failed its ownership or type check."
+    CONTRIBUTION_APP_DIR=$app_dir
+    CONTRIBUTION_ENV_FILE=$env_file
+    CONTRIBUTION_STORE_FILE=$store_file
+    CONTRIBUTION_ACTOR="setup:${SUDO_USER:-root}"
+}
+
+run_contribution_cli() {
+    local command=$1
+    shift
+    runuser --user "$ACTIVE_USER" -- \
+        env PYTHONPATH="$CONTRIBUTION_APP_DIR" \
+        "$CONTRIBUTION_APP_DIR/venv/bin/python" \
+        "$CONTRIBUTION_SCRIPT" "$command" \
+        --store "$CONTRIBUTION_STORE_FILE" \
+        --actor "$CONTRIBUTION_ACTOR" "$@"
+}
+
+json_result_field() {
+    local python_bin=$1
+    local payload=$2
+    local field=$3
+    "$python_bin" -c '
+import json
+import sys
+value = json.loads(sys.argv[1]).get(sys.argv[2])
+if value is None or isinstance(value, (dict, list, bool)):
+    raise SystemExit("missing or invalid publication result")
+print(value)
+' "$payload" "$field"
+}
+
+validate_publisher_checkout() {
+    local python_bin=$1
+    local path=$2
+    local publisher=$3
+    local publisher_uid
+    publisher_uid=$(id -u "$publisher")
+    "$python_bin" - "$path" "$publisher_uid" <<'PY'
+from pathlib import Path
+import os
+import stat
+import sys
+
+path = Path(sys.argv[1])
+expected_uid = int(sys.argv[2])
+if not path.is_absolute():
+    raise SystemExit("Publisher checkout must be absolute.")
+current = Path(path.anchor)
+for component in path.parts[1:]:
+    current /= component
+    try:
+        metadata = os.lstat(current)
+    except OSError as error:
+        raise SystemExit(f"Publisher checkout is unavailable: {error}") from error
+    if stat.S_ISLNK(metadata.st_mode):
+        raise SystemExit(f"Publisher checkout contains a symlink: {current}")
+metadata = os.stat(path)
+if not stat.S_ISDIR(metadata.st_mode):
+    raise SystemExit("Publisher checkout is not a directory.")
+if metadata.st_uid != expected_uid:
+    raise SystemExit("Publisher checkout is not owned by its dedicated publisher user.")
+PY
+}
+
+copy_verified_contribution_bundle() {
+    local python_bin=$1
+    local source=$2
+    local destination=$3
+    local expected_checksum=$4
+    local source_uid=$5
+    local destination_uid=$6
+    local destination_gid=$7
+    "$python_bin" - "$source" "$destination" "$expected_checksum" \
+        "$source_uid" "$destination_uid" "$destination_gid" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import stat
+import sys
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+expected_checksum = sys.argv[3]
+source_uid = int(sys.argv[4])
+destination_uid = int(sys.argv[5])
+destination_gid = int(sys.argv[6])
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+descriptor = os.open(source, flags)
+try:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != source_uid:
+        raise SystemExit("Reviewed export ownership or type changed before publication.")
+    if metadata.st_nlink != 1 or metadata.st_size > 2 * 1024 * 1024:
+        raise SystemExit("Reviewed export link count or size is unsafe.")
+    chunks = []
+    remaining = 2 * 1024 * 1024 + 1
+    while remaining:
+        chunk = os.read(descriptor, min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    payload = b"".join(chunks)
+finally:
+    os.close(descriptor)
+if len(payload) > 2 * 1024 * 1024:
+    raise SystemExit("Reviewed export exceeds 2 MiB.")
+if hashlib.sha256(payload).hexdigest() != expected_checksum:
+    raise SystemExit("Reviewed export checksum changed before publication.")
+destination_flags = (
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+)
+output = os.open(destination, destination_flags, 0o600)
+try:
+    offset = 0
+    while offset < len(payload):
+        offset += os.write(output, payload[offset:])
+    os.fchmod(output, 0o600)
+    os.fchown(output, destination_uid, destination_gid)
+    os.fsync(output)
+finally:
+    os.close(output)
+directory = os.open(destination.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
+
+clear_contribution_temp() {
+    if [[ -n "$CONTRIBUTION_TEMP_DIR" &&
+        "$CONTRIBUTION_TEMP_DIR" == /tmp/getbible-contribution.* &&
+        -d "$CONTRIBUTION_TEMP_DIR" && ! -L "$CONTRIBUTION_TEMP_DIR" ]]; then
+        rm -rf --one-file-system -- "$CONTRIBUTION_TEMP_DIR"
+    fi
+    CONTRIBUTION_TEMP_DIR=""
+}
+
+publish_contributions_to_repository() (
+    local checkout
+    local git_user
+    local publisher_group
+    local publisher_home
+    local python_bin
+    local export_dir
+    local export_file
+    local export_output
+    local export_result
+    local revision
+    local checksum
+    local bundle_checksum
+    local lease_output
+    local lease_result
+    local lease_token
+    local publisher_output
+    local publisher_result
+    local branch
+    local commit
+    local stamp
+    local service_uid
+    local publisher_uid
+    local publisher_gid
+    local checkout_lock_key
+    local checkout_lock_file
+    local checkout_lock_fd
+
+    trap clear_contribution_temp EXIT
+
+    checkout=$(dotenv_value \
+        "$CONTRIBUTION_APP_DIR" "$CONTRIBUTION_ENV_FILE" \
+        "CONTRIBUTION_GIT_CHECKOUT")
+    git_user=$(dotenv_value \
+        "$CONTRIBUTION_APP_DIR" "$CONTRIBUTION_ENV_FILE" \
+        "CONTRIBUTION_GIT_USER")
+    [[ -n "$checkout" && -n "$git_user" ]] || {
+        warn "Set CONTRIBUTION_GIT_CHECKOUT and CONTRIBUTION_GIT_USER in this instance configuration first."
+        return 1
+    }
+    [[ "$git_user" != "root" && "$git_user" != "$ACTIVE_USER" ]] || {
+        warn "The Git publisher must be a dedicated user, never root or the bot service account."
+        return 1
+    }
+    [[ "$git_user" =~ ^[a-z_][a-z0-9_-]*\$?$ ]] && id "$git_user" >/dev/null 2>&1 || {
+        warn "The configured Git publisher user does not exist or is invalid."
+        return 1
+    }
+    python_bin=$(select_python)
+    validate_publisher_checkout "$python_bin" "$checkout" "$git_user" || {
+        warn "The configured publisher checkout failed its ownership or symlink check."
+        return 1
+    }
+    checkout_lock_key=$("$python_bin" -c '
+from pathlib import Path
+import hashlib
+import sys
+print(hashlib.sha256(str(Path(sys.argv[1]).resolve()).encode()).hexdigest()[:24])
+' "$checkout")
+    [[ "$checkout_lock_key" =~ ^[0-9a-f]{24}$ ]] || {
+        warn "The publisher checkout lock identity could not be derived."
+        return 1
+    }
+    install -d -o root -g root -m 0755 /run/lock
+    checkout_lock_file="/run/lock/getbible-robot-contribution-${checkout_lock_key}.lock"
+    [[ ! -L "$checkout_lock_file" ]] || {
+        warn "The publisher checkout lock path is unsafe."
+        return 1
+    }
+    if [[ ! -e "$checkout_lock_file" ]]; then
+        install -o root -g root -m 0600 /dev/null "$checkout_lock_file"
+    fi
+    [[ -f "$checkout_lock_file" && ! -L "$checkout_lock_file" &&
+        $(stat -c '%u:%g:%a' "$checkout_lock_file") == "0:0:600" ]] || {
+        warn "The publisher checkout lock file has unsafe ownership or mode."
+        return 1
+    }
+    exec {checkout_lock_fd}<>"$checkout_lock_file"
+    if ! flock --nonblock "$checkout_lock_fd"; then
+        warn "Another contribution publication is using this Git checkout."
+        return 1
+    fi
+
+    stamp=$(date --utc +'%Y%m%d-%H%M%S')
+    export_dir="${STATE_ROOT}/${ACTIVE_INSTANCE}/contribution-exports"
+    runuser --user "$ACTIVE_USER" -- mkdir -p -- "$export_dir"
+    runuser --user "$ACTIVE_USER" -- chmod 0700 "$export_dir"
+    export_file=$(runuser --user "$ACTIVE_USER" -- \
+        mktemp --tmpdir="$export_dir" "reviewed-catalog-${stamp}.XXXXXXXX.json")
+    if ! export_output=$(run_contribution_cli export --output "$export_file"); then
+        warn "The live catalogue export failed; no Git operation was attempted."
+        return 1
+    fi
+    printf '%s\n' "$export_output"
+    export_result=${export_output##*$'\n'}
+    revision=$(json_result_field "$python_bin" "$export_result" revision) || {
+        warn "The catalogue export did not report a valid live revision."
+        return 1
+    }
+    [[ "$revision" =~ ^[1-9][0-9]*$ ]] || {
+        warn "The catalogue export revision is invalid."
+        return 1
+    }
+    checksum=$(json_result_field "$python_bin" "$export_result" checksum) || {
+        warn "The catalogue export did not report a valid live checksum."
+        return 1
+    }
+    [[ "$checksum" =~ ^[0-9a-f]{64}$ ]] || {
+        warn "The catalogue export checksum is invalid."
+        return 1
+    }
+    bundle_checksum=$(json_result_field "$python_bin" "$export_result" bundle_checksum) || {
+        warn "The catalogue export did not report a valid bundle checksum."
+        return 1
+    }
+    [[ "$bundle_checksum" =~ ^[0-9a-f]{64}$ ]] || {
+        warn "The catalogue export bundle checksum is invalid."
+        return 1
+    }
+    if ! lease_output=$(run_contribution_cli begin-repository-publication \
+        --revision "$revision" --checksum "$checksum" --lease-seconds 3600); then
+        warn "This live revision is already publishing, already pushed, or no longer current."
+        return 1
+    fi
+    lease_result=${lease_output##*$'\n'}
+    lease_token=$(json_result_field "$python_bin" "$lease_result" token) || {
+        warn "The repository-publication lease did not return a valid token."
+        return 1
+    }
+    [[ "$lease_token" =~ ^[0-9a-f]{48}$ ]] || {
+        warn "The repository-publication lease token is invalid."
+        return 1
+    }
+
+    CONTRIBUTION_TEMP_DIR=$(mktemp -d /tmp/getbible-contribution.XXXXXXXX)
+    chmod 0700 "$CONTRIBUTION_TEMP_DIR"
+    publisher_group=$(id -gn "$git_user")
+    publisher_home=$(getent passwd "$git_user" | cut -d: -f6)
+    [[ -n "$publisher_home" && -d "$publisher_home" ]] || {
+        warn "The Git publisher has no usable home directory."
+        run_contribution_cli finish-repository-publication \
+            --lease-token "$lease_token" --revision "$revision" --state failed \
+            --error "The configured Git publisher has no usable home directory." || true
+        clear_contribution_temp
+        return 1
+    }
+    service_uid=$(id -u "$ACTIVE_USER")
+    publisher_uid=$(id -u "$git_user")
+    publisher_gid=$(id -g "$git_user")
+    if ! copy_verified_contribution_bundle \
+        "$python_bin" "$export_file" "$CONTRIBUTION_TEMP_DIR/catalogue.json" \
+        "$bundle_checksum" "$service_uid" "$publisher_uid" "$publisher_gid"; then
+        run_contribution_cli finish-repository-publication \
+            --lease-token "$lease_token" --revision "$revision" --state failed \
+            --error "The reviewed export changed or failed validation before Git publication." || true
+        warn "The reviewed export failed its no-follow checksum validation."
+        clear_contribution_temp
+        return 1
+    fi
+    install -o "$git_user" -g "$publisher_group" -m 0700 \
+        "$CONTRIBUTION_SCRIPT" "$CONTRIBUTION_TEMP_DIR/contribution_review.py"
+    # Keep the parent root-only until both child files are fully written,
+    # verified, fsynced, and owned by the publisher.  This closes the parent
+    # replacement race before crossing the privilege boundary.
+    chown "$git_user:$publisher_group" "$CONTRIBUTION_TEMP_DIR"
+
+    if ! publisher_output=$(runuser --user "$git_user" -- \
+        env -i HOME="$publisher_home" LANG=C.UTF-8 \
+        PATH=/usr/local/bin:/usr/bin:/bin GIT_TERMINAL_PROMPT=0 \
+        "$python_bin" "$CONTRIBUTION_TEMP_DIR/contribution_review.py" \
+        publish-repository \
+        --bundle "$CONTRIBUTION_TEMP_DIR/catalogue.json" \
+        --checkout "$checkout" --expected-user "$git_user" \
+        --expected-bundle-checksum "$bundle_checksum"); then
+        run_contribution_cli finish-repository-publication \
+            --lease-token "$lease_token" --revision "$revision" --state failed \
+            --error "Git publisher command failed; reviewed export retained." || true
+        warn "Git publication failed. The reviewed export remains at ${export_file}."
+        clear_contribution_temp
+        return 1
+    fi
+    printf '%s\n' "$publisher_output"
+    publisher_result=${publisher_output##*$'\n'}
+    branch=$(json_result_field "$python_bin" "$publisher_result" branch) || {
+        run_contribution_cli finish-repository-publication \
+            --lease-token "$lease_token" --revision "$revision" --state failed \
+            --error "The Git publisher returned an invalid branch result." || true
+        warn "The Git publisher did not report its branch. Export retained at ${export_file}."
+        clear_contribution_temp
+        return 1
+    }
+    commit=$(json_result_field "$python_bin" "$publisher_result" commit) || {
+        run_contribution_cli finish-repository-publication \
+            --lease-token "$lease_token" --revision "$revision" --state failed \
+            --error "The Git publisher returned an invalid commit result." || true
+        warn "The Git publisher did not report its commit. Export retained at ${export_file}."
+        clear_contribution_temp
+        return 1
+    }
+    if ! run_contribution_cli finish-repository-publication \
+        --lease-token "$lease_token" --revision "$revision" --state pushed \
+        --branch "$branch" --commit "$commit"; then
+        warn "The branch was pushed, but recording its publication failed. Branch: ${branch}"
+        clear_contribution_temp
+        return 1
+    fi
+    clear_contribution_temp
+    record_operation contribution-repository-publish "$ACTIVE_INSTANCE" ok
+    printf 'Repository branch published: %s (%s)\n' "$branch" "$commit"
+    printf 'The privacy-safe source export remains at: %s\n' "$export_file"
+)
+
+cmd_contributions() {
+    require_root
+    require_tty
+    select_instance "${1:-}"
+    load_contribution_context
+    local selection
+    local topics_file="${CONTRIBUTION_APP_DIR}/data/global-bookmarks/topics.json"
+    local associations_file="${CONTRIBUTION_APP_DIR}/data/global-bookmarks/tag-verse.csv"
+    local translation
+    translation=$(dotenv_value \
+        "$CONTRIBUTION_APP_DIR" "$CONTRIBUTION_ENV_FILE" "TRANSLATION")
+    translation=${translation:-kjv}
+    while true; do
+        cat <<'EOF'
+
+Contribution review
+  1) Show review status
+  2) Review contributor applications / revoke access
+  3) Resolve and merge contributor topics
+  4) Review verse additions and removals
+  5) Publish approved changes to this live instance
+  6) Export live changes and push a repository branch
+  0) Return
+EOF
+        read -r -p "Selection: " selection
+        case "$selection" in
+            1) run_contribution_cli status || true ;;
+            2) run_contribution_cli applications || true ;;
+            3)
+                if [[ -f "$topics_file" && ! -L "$topics_file" ]]; then
+                    run_contribution_cli topics --topics-file "$topics_file" || true
+                else
+                    warn "Canonical topic definitions are unavailable; update this instance first."
+                fi
+                ;;
+            4)
+                if [[ -f "$topics_file" && ! -L "$topics_file" &&
+                    -f "$associations_file" && ! -L "$associations_file" ]]; then
+                    run_contribution_cli verses --translation "$translation" \
+                        --topics-file "$topics_file" \
+                        --associations-file "$associations_file" || true
+                else
+                    warn "Bundled catalogue sources are unavailable or unsafe; update this instance first."
+                fi
+                ;;
+            5)
+                if [[ ! -f "$topics_file" || -L "$topics_file" ||
+                    ! -f "$associations_file" || -L "$associations_file" ]]; then
+                    warn "Bundled catalogue sources are unavailable or unsafe; update this instance first."
+                elif run_contribution_cli publish-live \
+                    --topics-file "$topics_file" \
+                    --associations-file "$associations_file"; then
+                    record_operation contribution-live-publish "$ACTIVE_INSTANCE" ok
+                fi
+                ;;
+            6) publish_contributions_to_repository || true ;;
+            0) return ;;
+            *) warn "Unknown selection." ;;
+        esac
+    done
+}
+
 cmd_menu() {
     require_root
     require_tty
@@ -3936,6 +4445,7 @@ GetBible Robot operations
  26) Edit, validate, and apply Docker configuration
  27) Validate Docker configuration
  28) Recreate Docker workload after direct edits
+ 29) Review and publish trusted contributions
   0) Exit
 EOF
         read -r -p "Selection: " selection
@@ -3968,6 +4478,7 @@ EOF
             26) cmd_docker_config ;;
             27) cmd_docker_validate ;;
             28) cmd_docker_restart ;;
+            29) cmd_contributions ;;
             0) return ;;
             *) warn "Unknown selection." ;;
         esac
@@ -3993,6 +4504,7 @@ main() {
         delivery) cmd_delivery "$@" ;;
         miniapp) cmd_miniapp "$@" ;;
         content) cmd_content "$@" ;;
+        contributions) cmd_contributions "$@" ;;
         update|upgrade) cmd_upgrade "$@" ;;
         rollback) cmd_rollback "$@" ;;
         uninstall) cmd_uninstall "$@" ;;

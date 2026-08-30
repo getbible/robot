@@ -135,7 +135,7 @@ test("enables all topics, disables one topic, and can clear the overlay", () => 
     preferences.enableTopics(allTopicIds, GLOBAL_BOOKMARK_CATALOG_VERSION),
     true,
   );
-  assert.equal(preferences.enabledTopicIds.length, 61);
+  assert.equal(preferences.enabledTopicIds.length, allTopicIds.length);
   assert.equal(preferences.hasTopic("fear-not"), true);
   assert.equal(
     preferences.enableTopics(allTopicIds, GLOBAL_BOOKMARK_CATALOG_VERSION),
@@ -145,7 +145,7 @@ test("enables all topics, disables one topic, and can clear the overlay", () => 
   assert.equal(preferences.disableTopic("fear-not"), true);
   assert.equal(preferences.disableTopic("fear-not"), false);
   assert.equal(preferences.hasTopic("fear-not"), false);
-  assert.equal(preferences.enabledTopicIds.length, 60);
+  assert.equal(preferences.enabledTopicIds.length, allTopicIds.length - 1);
 
   assert.equal(preferences.clear(), true);
   assert.equal(preferences.clear(), false);

@@ -13,6 +13,7 @@ from .rate_limit import InboundRateLimiter
 from .service import ScriptureService
 
 if TYPE_CHECKING:
+    from .contributions import ContributionStore
     from .miniapp_tornado import MiniAppServer
 
 
@@ -32,3 +33,4 @@ class ApplicationServices:
     interactions: InteractionStore
     preferences: UserPreferenceStore
     mini_app: MiniAppServer | None = None
+    contributions: ContributionStore | None = None

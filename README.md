@@ -76,8 +76,9 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   while each topic retains its own add/remove controls. Global links carry a
   **G** marker and may also be hidden individually. Adding a topic or the
   complete catalog restores its hidden links without duplicating them. The
-  built-in catalog contains 2,155 links across 61 topics. Its scoped visibility,
-  exclusions, and legacy numeric-topic mapping are mirrored through Telegram
+  built-in catalogue contains the repository's reviewed topic-to-verse links.
+  Its scoped visibility, exclusions, and legacy numeric-topic mapping are
+  mirrored through Telegram
   `DeviceStorage` when supported, so a Telegram Desktop WebView can restore
   them after its browser storage is discarded. They never enter CloudStorage,
   personal synchronization, or backups. Global rows resolve their verse text
@@ -89,8 +90,9 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   verse assignments will also be removed. **Restore default tags** recreates
   only missing defaults while preserving colors, custom topics, and personal
   bookmarks.
-- Personal bookmark aggregate version 2, topics, the active topic, and the
-  compact last-read coordinate reconcile by timestamp across scoped
+- Personal bookmark aggregate version 3, topics, the clearable recently-used
+  topic order, the active topic, and the compact last-read coordinate reconcile
+  by timestamp across scoped
   `localStorage`, Telegram `DeviceStorage`, and Telegram `CloudStorage`;
   CloudStorage uses compact topic indexes for each bookmark. Unsupported or
   temporarily unavailable Telegram storage degrades to the local copy without
@@ -245,8 +247,10 @@ venv/bin/python -m unittest discover -s tests -v
 (cd miniapp && npm run test:browser)
 ```
 
-After reviewing an updated global source CSV, regenerate its deterministic
-browser catalog with `(cd miniapp && npm run generate:global-bookmarks)`.
+After reviewing updated global topic metadata or verse associations, regenerate
+the deterministic browser catalogue with
+`(cd miniapp && npm run generate:global-bookmarks)`. Accepted moderation exports
+use the documented importer in `data/global-bookmarks/README.md`.
 
 The permanent release gate requires:
 

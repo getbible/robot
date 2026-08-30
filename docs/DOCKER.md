@@ -157,6 +157,21 @@ For example, a missing token produces an
 `TELEGRAM_API_TOKEN is required`. The supervisor remains available for status
 and diagnostics instead of repeatedly crash-looping the application.
 
+The supervisor owns both SQLite paths and will not accept shared overrides:
+
+```text
+/data/<instance>/state/preferences.sqlite3
+/data/<instance>/state/contributions.sqlite3
+```
+
+The second file contains contributor applications, Telegram profile metadata,
+immutable events, review decisions, notification state, private audit history,
+and live catalogue revisions. It is therefore more sensitive than recoverable
+cache data. Keep the `robot-data` volume private, include it in encrypted
+backups when contributions are enabled, and never mount it into another bot
+instance. `CONTRIBUTION_CONTRIBUTOR_LIMIT` and `CONTRIBUTION_EVENT_LIMIT` pass
+through Compose with defaults of `10000` and `250000` respectively.
+
 ## Token handling
 
 The default Compose model accepts `TELEGRAM_API_TOKEN` from `.env` because it
@@ -235,13 +250,16 @@ selector. A known container name may be supplied directly:
 
 `docker-manage` opens `/app/setup.sh` inside the selected container. Its menu
 supports listing, status, diagnostics, start, stop, restart, configuration
-reload, and a non-root Bash shell. Direct equivalents are:
+reload, contribution review/export, and a non-root Bash shell. Direct
+equivalents are:
 
 ```bash
 docker exec getbible-robot-production /app/setup.sh list
 docker exec getbible-robot-production /app/setup.sh status production
 docker exec getbible-robot-production /app/setup.sh doctor production
 docker exec getbible-robot-production /app/setup.sh restart production
+docker exec -it getbible-robot-production /app/setup.sh contributions production
+docker exec getbible-robot-production /app/setup.sh contributions production status
 docker exec -it getbible-robot-production /app/setup.sh
 docker exec -it getbible-robot-production /bin/bash
 docker logs --since 30m getbible-robot-production
@@ -250,6 +268,27 @@ docker logs --since 30m getbible-robot-production
 The shell runs as the image's unprivileged UID/GID 10001. The root filesystem
 remains read-only; only the instance data volume and bounded `/tmp` tmpfs are
 writable.
+
+The contribution submenu reviews applications, resolves topics, reviews verses
+with authoritative text, publishes a live instance revision, and writes a
+privacy-safe repository export. `status` and `export` also work
+non-interactively. Exports are mode `0600` below:
+
+```text
+/data/<instance>/state/contribution-exports/reviewed-catalog-<UTC>.json
+```
+
+The image does not contain Node, Git, or a repository credential. Automated
+branch publication from a container export is not supported in this release;
+retain the JSON only for a separately reviewed manual repository import.
+
+Do not add a Git credential or publisher checkout to the application
+container. The guarded one-command repository publication workflow is
+available only for native deployments through the dedicated non-root publisher
+account described in
+[Operations](OPERATIONS.md#contributor-enrolment-and-moderation); it is not a
+runtime-container permission. Container-to-host publication needs a separate
+privilege-boundary and lease design and is deliberately outside this release.
 
 ## User experience under load
 
@@ -376,7 +415,9 @@ docker exec getbible-robot getbible-robot-container reload
 ```
 
 The supervisor rejects port collisions before starting a second bot and
-isolates cache and SQLite state under `/data/<instance>`.
+isolates cache and SQLite state under `/data/<instance>`. In particular, each
+bot receives its own `state/contributions.sqlite3` even if an instance file
+attempts to configure another path.
 
 The supplied multi-bot file starts with the same one-bot aggregate profile:
 1536 MiB reserved, 2 GiB hard limit, and two CPUs. Before adding another bot,
@@ -393,7 +434,7 @@ one-bot-per-workload cluster example. It includes:
 
 - one replica per Telegram bot token;
 - a mounted token Secret;
-- persistent bounded cache and preference state;
+- persistent bounded cache, preference, and private contribution state;
 - startup, liveness, and readiness probes;
 - CPU, memory, and ephemeral-storage controls;
 - a Service exposing the Mini App and optional Telegram webhook backends.

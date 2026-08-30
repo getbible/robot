@@ -4,6 +4,30 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Trusted topic contributions and reader polish
+
+- Added private, numeric-Telegram-ID contributor applications through the
+  hidden `/contributor` command, one-time sharing disclosure, durable local-first
+  Mini App event synchronization, and an auditable per-instance moderation
+  queue for English topic proposals and verse-association changes.
+- Added the setup-manager review workflow for applications, topic
+  merge/correction, and verse decisions with authoritative Query API text.
+  Approved work publishes to the running instance immediately; native
+  deployments can then generate a privacy-safe export and use a dedicated
+  non-root Git account to create, commit, and push a review branch.
+- Made canonical topics permanent after their first live publication, while
+  folding pre-publication upsert/delete chains chronologically so superseded
+  review events cannot remain stranded.
+- Made repository topic metadata a deterministic English source with generated
+  localization keys. Newly accepted topics fall back to English in locales
+  awaiting a later translation pass, without changing existing translations.
+- Kept the reader toolbar flush beneath the translation header, reset chapter
+  navigation to unobscured verse one, and retained scroll-down hiding and
+  scroll-up restoration.
+- Sorted topic-management views alphabetically and added a clearable,
+  most-recently-used group above the complete alphabetical verse-assignment
+  list.
+
 ### Durable global topics and consistent navigation icons
 
 - Mirrored authenticated-scope global-topic visibility, exclusions, and legacy

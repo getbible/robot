@@ -68,6 +68,7 @@ class TelegramInitDataValidatorTestCase(unittest.TestCase):
         principal = self.validator.validate(raw)
 
         self.assertEqual(principal.user_id, 42)
+        self.assertEqual(principal.first_name, "Grace")
         self.assertEqual(principal.chat_id, -100123)
         self.assertEqual(principal.rate_limit_chat_id, -100123)
         self.assertEqual(principal.start_param, "abcdefghijklmnop")
@@ -120,6 +121,39 @@ class TelegramInitDataValidatorTestCase(unittest.TestCase):
                 raw = _init_data(extra={"user": json.dumps(user, separators=(",", ":"))})
                 with self.assertRaises(MiniAppAuthenticationError):
                     self.validator.validate(raw)
+
+    def test_signed_display_metadata_is_bounded_but_never_replaces_numeric_id(self) -> None:
+        raw = _init_data(
+            extra={
+                "user": json.dumps(
+                    {
+                        "id": 42,
+                        "first_name": "Grace",
+                        "last_name": "Reader",
+                        "username": "grace_reader",
+                        "language_code": "en",
+                    },
+                    separators=(",", ":"),
+                )
+            }
+        )
+        principal = self.validator.validate(raw)
+        self.assertEqual(principal.user_id, 42)
+        self.assertEqual(principal.username, "grace_reader")
+        self.assertEqual(principal.language_code, "en")
+
+        for value in ("x" * 65, "Grace\nAdmin", 42):
+            with self.subTest(value=value), self.assertRaises(MiniAppAuthenticationError):
+                self.validator.validate(
+                    _init_data(
+                        extra={
+                            "user": json.dumps(
+                                {"id": 42, "first_name": value},
+                                separators=(",", ":"),
+                            )
+                        }
+                    )
+                )
 
 
 if __name__ == "__main__":

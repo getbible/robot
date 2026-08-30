@@ -16,6 +16,7 @@ from modules.catalog import (
     ChapterVerse,
     TranslationOption,
 )
+from modules.contributions import ContributionStore
 from modules.errors import RobotRateLimited, ScriptureUnavailable
 from modules.interactions import SearchOptions, SearchResult
 from modules.miniapp_api import MiniAppApi, MiniAppHttpRequest
@@ -321,6 +322,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             ttl_seconds=300,
             clock=self.clock,
         )
+        self.contributions = ContributionStore(path=None)
         self.posted: list[tuple[object, tuple[ScriptureQuery, ...]]] = []
         self.cleaned_launches: list[object] = []
         self.warnings: list[tuple[int, int, str]] = []
@@ -389,8 +391,12 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             load_bookmark_backup=load_bookmark_backup,
             cleanup_launch=cleanup_launch,
             abuse_warning=abuse_warning,
+            contributions=self.contributions,
         )
         self.active_init_data = _init_data()
+
+    async def asyncTearDown(self) -> None:
+        self.contributions.close()
 
     async def test_navigation_has_fractional_cost_but_expensive_work_does_not(
         self,
@@ -746,6 +752,254 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("paused", self.warnings[0][2])
         self.assertEqual(self.api.snapshot()["api_abuse_blocks"], 1)
 
+    async def test_contributor_status_is_ux_only_and_disclosure_is_one_time(self) -> None:
+        self.contributions.submit_application(42, first_name="Old name")
+        self.contributions.decide_application(42, "approved", actor="admin")
+        token = await self.exchange()
+
+        resumed = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/contributions/status",
+                token=token,
+            )
+        )
+        self.assertEqual(resumed.status, 200)
+        self.assertEqual(
+            json.loads(resumed.body),
+            {
+                "enabled": True,
+                "state": "approved",
+                "can_contribute": True,
+                "disclosure_required": True,
+            },
+        )
+        # Signed display metadata may be retained for private audit display,
+        # but only the numeric ID controls this approved record.
+        self.assertEqual(self.contributions.application_for(42).first_name, "Grace")
+
+        acknowledged = await self.api.handle(
+            self.request(
+                "PATCH",
+                "/getbible/api/v1/contributions/status",
+                token=token,
+                body={"disclosure_acknowledged": True},
+            )
+        )
+        self.assertEqual(acknowledged.status, 200)
+        self.assertFalse(json.loads(acknowledged.body)["disclosure_required"])
+
+        repeated = await self.api.handle(
+            self.request(
+                "PATCH",
+                "/getbible/api/v1/contributions/status",
+                token=token,
+                body={"disclosure_acknowledged": True},
+            )
+        )
+        self.assertEqual(repeated.status, 200)
+
+    async def test_contributor_store_failure_never_blocks_scripture_session(self) -> None:
+        self.contributions.close()
+        self.active_init_data = _init_data()
+        response = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": self.active_init_data},
+            )
+        )
+        self.assertEqual(response.status, 201)
+        payload = json.loads(response.body)
+        self.assertEqual(
+            payload["contributions"],
+            {
+                "enabled": False,
+                "state": "unavailable",
+                "can_contribute": False,
+                "disclosure_required": False,
+            },
+        )
+
+    async def test_contribution_events_are_approval_gated_and_idempotent(self) -> None:
+        self.contributions.submit_application(42, first_name="Grace")
+        token = await self.exchange()
+        payload = {
+            "events": [
+                {
+                    "client_event_id": "topic.grace.v1",
+                    "type": "topic_upsert",
+                    "topic": {
+                        "local_topic_id": "local.grace",
+                        "name": "Grace",
+                        "color": "#bbf7d0",
+                    },
+                },
+                {
+                    "client_event_id": "verse.grace.43.3.16.add",
+                    "type": "verse_add",
+                    "topic": {"local_topic_id": "local.grace"},
+                    "verse": {"book": 43, "chapter": 3, "verse": 16},
+                },
+            ]
+        }
+        denied = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                body=payload,
+            )
+        )
+        self.assertEqual(denied.status, 403)
+        self.assertEqual(json.loads(denied.body)["error"], "contribution_not_allowed")
+
+        self.contributions.decide_application(42, "approved", actor="admin")
+        awaiting_disclosure = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                body=payload,
+            )
+        )
+        self.assertEqual(awaiting_disclosure.status, 403)
+        self.assertEqual(
+            json.loads(awaiting_disclosure.body)["error"],
+            "contribution_not_allowed",
+        )
+        acknowledged = await self.api.handle(
+            self.request(
+                "PATCH",
+                "/getbible/api/v1/contributions/status",
+                token=token,
+                body={"disclosure_acknowledged": True},
+            )
+        )
+        self.assertEqual(acknowledged.status, 200)
+        accepted = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                body=payload,
+            )
+        )
+        self.assertEqual(accepted.status, 200)
+        self.assertEqual(json.loads(accepted.body)["accepted"], 2)
+
+        replayed = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                body=payload,
+            )
+        )
+        self.assertEqual(replayed.status, 200)
+        self.assertEqual(json.loads(replayed.body)["replayed"], 2)
+
+        conflicting = json.loads(json.dumps(payload))
+        conflicting["events"][1]["verse"]["verse"] = 17
+        conflict = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                body=conflicting,
+            )
+        )
+        self.assertEqual(conflict.status, 409)
+        self.assertEqual(json.loads(conflict.body)["error"], "idempotency_conflict")
+
+        unsupported = {
+            "events": [
+                {
+                    "client_event_id": "verse.grace.67.1.1.add",
+                    "type": "verse_add",
+                    "topic": {"local_topic_id": "local.grace"},
+                    "verse": {"book": 67, "chapter": 1, "verse": 1},
+                }
+            ]
+        }
+        rejected = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                body=unsupported,
+            )
+        )
+        self.assertEqual(rejected.status, 400)
+        self.assertEqual(json.loads(rejected.body)["error"], "invalid_contribution")
+        self.assertEqual(len(self.contributions.list_events()), 2)
+
+    async def test_live_catalog_is_authenticated_revisioned_and_revalidates_by_etag(
+        self,
+    ) -> None:
+        unauthenticated = await self.api.handle(
+            self.request("GET", "/getbible/api/v1/bookmarks/catalog")
+        )
+        self.assertEqual(unauthenticated.status, 401)
+
+        token = await self.exchange()
+        catalog = {
+            "schema_version": 1,
+            "topics": [
+                {
+                    "id": "grace",
+                    "name": "Grace",
+                    "color": "#bbf7d0",
+                    "aliases": [],
+                }
+            ],
+            "associations": {
+                "add": [
+                    {"topic_id": "grace", "book": 43, "chapter": 3, "verse": 16}
+                ],
+                "remove": [],
+            },
+        }
+        published = self.contributions.publish_catalog(catalog, actor="admin")
+        response = await self.api.handle(
+            self.request("GET", "/getbible/api/v1/bookmarks/catalog", token=token)
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.body)["revision"], 1)
+        self.assertEqual(json.loads(response.body)["checksum"], published.checksum)
+        self.assertEqual(response.headers["ETag"], published.etag)
+        self.assertEqual(
+            response.headers["Cache-Control"],
+            "private, no-cache, max-age=0, must-revalidate",
+        )
+
+        unchanged = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/bookmarks/catalog",
+                token=token,
+                extra_headers={"If-None-Match": published.etag},
+            )
+        )
+        self.assertEqual(unchanged.status, 304)
+        self.assertEqual(unchanged.body, b"")
+
+    async def test_contribution_preflight_and_wrong_methods_use_declared_contract(self) -> None:
+        preflight = await self.api.handle(
+            self.request(
+                "OPTIONS",
+                "/getbible/api/v1/contributions/status",
+            )
+        )
+        self.assertEqual(preflight.status, 204)
+        self.assertIn("PATCH", preflight.headers["Access-Control-Allow-Methods"])
+
+        wrong = await self.api.handle(
+            self.request("DELETE", "/getbible/api/v1/contributions/events")
+        )
+        self.assertEqual(wrong.status, 405)
+        self.assertEqual(wrong.headers["Allow"], "POST, OPTIONS")
+
     def request(
         self,
         method: str,
@@ -755,6 +1009,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         token: str | None = None,
         origin: str | None = ORIGIN,
         init_data: str | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> MiniAppHttpRequest:
         headers = {"Content-Type": "application/json"}
         if origin is not None:
@@ -764,6 +1019,8 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             headers["X-Telegram-Init-Data"] = (
                 self.active_init_data if init_data is None else init_data
             )
+        if extra_headers is not None:
+            headers.update(extra_headers)
         return MiniAppHttpRequest(
             method=method,
             target=path,

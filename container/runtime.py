@@ -128,6 +128,12 @@ class InstanceSpec:
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "XDG_CACHE_HOME": str(cache_root),
                 "USER_PREFERENCES_FILE": str(state_root / "preferences.sqlite3"),
+                # Contributor identities, moderation history, and live catalogue
+                # revisions are private per-instance state. Never accept a
+                # configured path that could make two container bots share it.
+                "CONTRIBUTION_STORE_FILE": str(
+                    state_root / "contributions.sqlite3"
+                ),
                 # Container stdout is the single bounded-by-runtime log stream.
                 "LOG_FILE": "",
             }

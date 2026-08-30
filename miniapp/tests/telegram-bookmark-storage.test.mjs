@@ -7,6 +7,7 @@ import {
   BookmarkStore,
   MAX_BOOKMARKS,
   MAX_BOOKMARK_TOPICS,
+  MAX_RECENT_BOOKMARK_TOPICS,
 } from "../lib/bookmark-store.js";
 import {
   TELEGRAM_BOOKMARK_CLOUD_MAX_KEYS,
@@ -277,13 +278,13 @@ test("hydrates the newest account record and repairs local and device caches", a
 
   assert.equal(storage.status.source, "cloud");
   const hydrated = JSON.parse(storage.getItem(aggregateKey()));
-  assert.equal(hydrated.version, 2);
+  assert.equal(hydrated.version, 3);
   assert.equal(hydrated.record_updated_at, 30);
   assert.deepEqual(hydrated.bookmarks[0].topic_ids, ["grace"]);
   assert.equal(JSON.parse(local.getItem(aggregateKey())).bookmarks[0].text, "Cloud winner");
   await storage.flush();
   assert.equal(JSON.parse(device.values.get(`${ROOT}_cache`)).record_updated_at, 30);
-  assert.equal(JSON.parse(cloud.values.get(`${ROOT}_meta`)).version, 2);
+  assert.equal(JSON.parse(cloud.values.get(`${ROOT}_meta`)).version, 3);
   const cloudBookmark = JSON.parse(
     cloud.values.get(`${ROOT}_verse_043_0003_0016`),
   ).bookmark;
@@ -388,7 +389,7 @@ test("ignores a corrupt newer cloud commit instead of masking valid local data",
 
 test("preserves a future local aggregate for a newer app version", async () => {
   const local = new MemoryStorage();
-  const future = JSON.stringify({ version: 3, opaque: "keep me" });
+  const future = JSON.stringify({ version: 4, opaque: "keep me" });
   local.setItem(aggregateKey(), future);
 
   const storage = await TelegramBookmarkStorage.open({
@@ -408,7 +409,7 @@ test("preserves a future cloud aggregate instead of overwriting it", async () =>
   const cloud = new TelegramStorageMock();
   setAggregate(local, aggregate(10));
   cloud.values.set(`${ROOT}_meta`, JSON.stringify({
-    version: 3,
+    version: 4,
     record_updated_at: 90,
   }));
 
@@ -419,9 +420,9 @@ test("preserves a future cloud aggregate instead of overwriting it", async () =>
   });
 
   assert.equal(storage.status.source, "cloud");
-  assert.equal(JSON.parse(storage.getItem(aggregateKey())).version, 3);
+  assert.equal(JSON.parse(storage.getItem(aggregateKey())).version, 4);
   await storage.flush();
-  assert.equal(JSON.parse(cloud.values.get(`${ROOT}_meta`)).version, 3);
+  assert.equal(JSON.parse(cloud.values.get(`${ROOT}_meta`)).version, 4);
   assert.equal(new BookmarkStore({ scope: SCOPE, storage }).persistent, false);
 });
 
@@ -467,7 +468,7 @@ test("round-trips multi-topic verses through compact cloud topic indexes", async
     webApp: webApp({ cloud, version: "6.9" }),
   });
   const reopened = JSON.parse(reader.getItem(aggregateKey()));
-  assert.equal(reopened.version, 2);
+  assert.equal(reopened.version, 3);
   assert.deepEqual(reopened.bookmarks[0].topic_ids, [
     "grace",
     "biblical-love",
@@ -895,6 +896,72 @@ test("fits the maximum topics, bookmarks, and last-read record in Telegram stora
   assert.ok(cloud.values.size < 1_024);
   assert.ok(device.values.get(`${ROOT}_cache`).length < 5 * 1024 * 1024);
   assert.equal(JSON.parse(device.values.get(`${ROOT}_cache`)).bookmarks.length, 800);
+});
+
+test("bounds compact recent-topic metadata and clears it without rewriting verses", async () => {
+  assert.equal(MAX_RECENT_BOOKMARK_TOPICS, MAX_BOOKMARK_TOPICS);
+  const local = new MemoryStorage();
+  const cloud = new TelegramStorageMock();
+  const storage = await TelegramBookmarkStorage.open({
+    scope: SCOPE,
+    localStorage: local,
+    webApp: webApp({ cloud, version: "6.9" }),
+  });
+  const topics = Array.from({ length: MAX_BOOKMARK_TOPICS }, (_, index) => ({
+    id: `t${String(index).padStart(3, "0")}${"x".repeat(124)}`,
+    name: `Topic ${index}`,
+    color: BOOKMARK_TOPIC_COLORS[index % BOOKMARK_TOPIC_COLORS.length],
+  }));
+  const record = aggregate(72, {
+    version: 3,
+    active_topic_id: topics[0].id,
+    recent_topic_ids: topics.map((topic) => topic.id),
+    topics,
+    bookmarks: [bookmark({
+      topic_id: topics[0].id,
+      topic_ids: [topics[0].id],
+    })],
+  });
+
+  storage.setItem(aggregateKey(), JSON.stringify(record));
+  await storage.flush();
+
+  const rawMeta = cloud.values.get(`${ROOT}_meta`);
+  const meta = JSON.parse(rawMeta);
+  assert.ok(rawMeta.length <= TELEGRAM_CLOUD_VALUE_MAX_CHARS);
+  assert.equal(meta.recent_topic_indexes.length, MAX_RECENT_BOOKMARK_TOPICS);
+  // The active topic id is intentionally present, but MRU entries themselves
+  // are represented only by compact indexes.
+  assert.equal(rawMeta.includes(topics[1].id), false);
+  const persisted = JSON.parse(storage.getItem(aggregateKey()));
+  assert.deepEqual(
+    persisted.recent_topic_ids,
+    topics.slice(0, MAX_RECENT_BOOKMARK_TOPICS).map((topic) => topic.id),
+  );
+
+  const reopened = await TelegramBookmarkStorage.open({
+    scope: SCOPE,
+    localStorage: new MemoryStorage(),
+    webApp: webApp({ cloud, version: "6.9" }),
+  });
+  assert.deepEqual(
+    JSON.parse(reopened.getItem(aggregateKey())).recent_topic_ids,
+    persisted.recent_topic_ids,
+  );
+
+  cloud.calls.length = 0;
+  storage.setItem(aggregateKey(), JSON.stringify({
+    ...persisted,
+    recent_topic_ids: [],
+    record_updated_at: 73,
+  }));
+  await storage.flush();
+  assert.deepEqual(
+    cloud.calls
+      .filter(([method]) => method === "setItem")
+      .map(([, key]) => key),
+    [`${ROOT}_meta`],
+  );
 });
 
 test("serializes increasing last-read writes with reversed callback timing", async () => {

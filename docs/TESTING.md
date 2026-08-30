@@ -119,20 +119,23 @@ Tests must prove:
 - the shipped default topic definitions and localized core-name keys, read-only
   built-in names, bounded custom add/rename, recolor/removal warnings, and
   restoration of missing defaults without overwriting user changes;
-- complete Home-summary, History, Bookmark, and 61-topic locale-key coverage,
-  with each governed alias/fallback reusing the established whole-application
+- complete Home-summary, History, and Bookmark locale-key coverage, including
+  canonical English fallback for newly published topic keys, with each governed
+  alias/fallback reusing the established whole-application
   language source, policy catalogs excluded from native-translation claims,
   and integer `few` forms exercised for Czech, Polish, Russian, and Ukrainian;
 - at most 800 personal records, each unique by canonical
   book/chapter/verse across translations and assignable to multiple topics
   without consuming another verse slot;
-- aggregate version 2, maximum topic/bookmark counts, and compact CloudStorage
-  topic indexes that fit Telegram per-value limits;
+- aggregate version 3, the full clearable recently-used topic order, maximum
+  topic/bookmark counts, and compact CloudStorage topic and recent-topic
+  indexes that fit Telegram per-value limits;
 - compact backup version 4 `colorIndexes`, version 1, 2, and 3 import,
   compatible-format merge, worst-case UTF-8 pretty-JSON size,
   cross-translation deduplication, malformed input rejection, and no partial
   mutation on failure;
-- the 2,155-link/61-topic global catalog, unified personal/global ordering,
+- the source-derived global catalogue topic and link totals, generated-file
+  freshness, unified personal/global ordering,
   **G** marker, compact add-all/remove-all controls before search, and
   idempotent per-link, per-topic, and all-catalog reset without personal sync
   or backup, including renamed numeric-topic remapping and display-only

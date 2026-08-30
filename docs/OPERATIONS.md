@@ -124,6 +124,118 @@ service transactionally and removes the public route when the Mini App is
 disabled. See [Mini App deployment](MINI_APP.md) for DNS, Caddy, BotFather,
 authentication, and verification requirements.
 
+## Contributor enrolment and moderation
+
+Contributor enrolment is intentionally private and operator-directed. Give a
+candidate the hidden `/contributor` command; it does not appear in the bot
+command menu and refuses applications outside a private chat. Repeating the
+command is idempotent: pending applicants see that review is in progress, and
+approved users see that they are enrolled and that approved changes can become
+part of the shared core catalogue.
+
+Open the native review workflow with:
+
+```bash
+sudo getbible-robot contributions production
+```
+
+For a container instance, the same live stages and a privacy-safe export are
+available without granting Git access to the runtime image:
+
+```bash
+docker exec -it getbible-robot-production \
+  /app/setup.sh contributions production
+docker exec getbible-robot-production \
+  /app/setup.sh contributions production status
+docker exec getbible-robot-production \
+  /app/setup.sh contributions production export
+```
+
+The export command prints its exact mode-`0600` path below
+`/data/<instance>/state/contribution-exports/`. Automated Git publication from
+a container export is not supported in this release; retain it only for a
+separately reviewed manual repository import. Run a native deployment when the
+guarded one-command branch workflow is required.
+
+Use its stages in order:
+
+1. review pending applications and optionally revoke an enrolled contributor;
+2. map each contributor-local topic to an existing canonical topic, merge it
+   with another pending proposal, create/correct an English canonical topic, or
+   reject/defer it;
+3. review verse additions and removals only after topic mappings are resolved;
+4. publish approved changes to the running instance;
+5. optionally export the privacy-safe live revision and push a repository
+   branch.
+
+Application decisions queue a private Telegram notification. Approval also
+causes the Mini App to show a one-time disclosure before any baseline is sent.
+After acknowledgement, the user's existing assigned topics/coordinates are
+submitted once and later successful local changes are journalled
+automatically. There is no Push button. Personal bookmark writes remain
+local-first: a network or moderation-server failure cannot undo them, and the
+bounded outbox retries on a later synchronization.
+
+Topic proposals must use an English source name. The topic stage is where an
+operator resolves spelling, aliases, colors, and overlapping proposals into
+one stable canonical ID. Contributor deletion/recolor/rename events are review
+requests, never authority to mutate the core directly. Verse review shows the
+operation, canonical topic, contributor, reference, and authoritative text
+from the configured GetBible Query API translation. If that text cannot be
+retrieved or validated, the CLI defers the affected work instead of displaying
+client text or silently approving it.
+
+A canonical topic becomes permanent when it first appears in a live catalogue
+revision. From that point its ID, English definition, and existence are locked:
+a repository branch may already contain it, and the version-1 contribution
+bundle has no topic-deletion tombstone that could prevent a later branch merge
+from resurrecting it. A `topic_delete` can therefore cancel only a contributed
+topic that has never been live. Operators may still review individual verse
+removals from a permanent topic, but the CLI defers the removal that would
+leave it with no effective verse association. True published-topic deletion
+requires a future, versioned bundle schema with explicit provenance-aware
+tombstones.
+
+One live publication revision accepts at most 10,000 approved events. This is
+an intentional dependency-safety ceiling: publish reviewed work in smaller
+cycles before the queue reaches that size, because the CLI does not split an
+approved topic-and-verse dependency chain automatically.
+
+**Publish to this live instance** creates a cumulative, checksummed catalogue
+revision in the same private SQLite store, so the instance serves it
+immediately. Mini Apps revalidate on their next open, reconnect, or explicit
+global-topic pull; an already-open idle reader is not interrupted. The bundled
+catalogue remains the offline/error fallback. This step is independent of Git
+and survives restarts and application upgrades.
+
+Repository publication is deliberately separate. Configure
+`CONTRIBUTION_GIT_CHECKOUT` and `CONTRIBUTION_GIT_USER` through
+`getbible-robot config`. The user must be a dedicated non-root account, must own
+a clean checkout whose `origin` is `getbible/robot`, and must already have a
+non-interactive Git credential with branch-push permission. The publisher
+fetches `origin/master`, creates a unique `contributions/...` branch, imports
+the deterministic JSON export, regenerates English topic constants and global
+catalogue assets, runs the Mini App checks, commits, and pushes. Install
+Node.js 22 or newer and npm for that publisher account before using this step.
+
+Set the publisher's commit identity in the checkout-local Git config; global
+configuration, including root's identity, is not used:
+
+```bash
+sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/robot config --local user.name "GetBible Contribution Publisher"
+sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/robot config --local user.email "publisher@getbible.net"
+```
+
+It does not
+open or merge a pull request. A failed export or Git operation cannot roll back
+the live revision; the restricted export is retained for diagnosis and retry.
+
+Telegram IDs, usernames, profile names, application decisions, and reviewer
+notes remain in the private per-instance database and never enter the live
+catalogue response, JSON export, Git diff, commit message, or branch name.
+Protect and retain that database as personal moderation data. Audit-log
+identity mode does not weaken this database boundary.
+
 ## Logs
 
 Show a bounded recent window:
@@ -231,6 +343,9 @@ Alert on:
 - a duplicate-poller exit or webhook pending/error growth;
 - Mini App listener loss, authorization failures, expired-launch growth, or
   unexpected public API access without Telegram authorization;
+- contribution-store failures, pending notification retries, sustained event
+  growth near `CONTRIBUTION_EVENT_LIMIT`, or approved work awaiting live
+  publication;
 - interactive session evictions or saturation;
 - `instance_memory_pressure`, memory approaching `MemoryMax`, or a child RSS
   guard restart;
@@ -284,6 +399,9 @@ The code and exact dependency locks are recoverable from Git. Cache data is reco
 - an encrypted copy of `/etc/getbible-robot/<instance>.env` when policy requires it;
 - durable preference data when required by policy; Mini App launch/session
   state is intentionally short-lived and should not be restored;
+- the private per-instance contribution database and any unpushed reviewed
+  exports, encrypted with access and retention controls appropriate for raw
+  Telegram profile data;
 - deployment and smoke-test records;
 - content logs only for the minimum approved retention period.
 

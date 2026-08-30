@@ -56,8 +56,14 @@ No reader navigation, catalog load, chapter load, select, unselect, reorder, cle
 | `miniapp/lib/global-bookmark-catalog.js` | Built-in global topic/verse provider, default-topic definitions, and local-topic remapping |
 | `miniapp/lib/global-bookmark-preferences.js` | Device-local global-topic visibility, per-link exclusions, and canonical-to-local mapping |
 | `miniapp/lib/global-bookmark-device-storage.js` | Scoped timestamp reconciliation for global-topic preferences across localStorage and Telegram DeviceStorage, explicitly excluding CloudStorage |
-| `miniapp/lib/telegram-bookmark-storage.js` | Aggregate-v2 timestamp reconciliation across localStorage, Telegram DeviceStorage, and Telegram CloudStorage, with compact cloud topic indexes |
-| `miniapp/lib/api.js` | Robot session/search/preferences/Post and bookmark backup/restore transport facade plus public API composition |
+| `miniapp/lib/telegram-bookmark-storage.js` | Aggregate-v3 timestamp reconciliation across localStorage, Telegram DeviceStorage, and Telegram CloudStorage, with compact cloud topic and recent-topic indexes |
+| `miniapp/lib/bookmark-topic-sort.js` | Presentation-only alphabetical topic ordering without rewriting canonical storage order |
+| `miniapp/lib/bible-canon.js` | Shared 66-book and per-book chapter bounds for contribution and live-catalog coordinates |
+| `miniapp/lib/contribution-journal.js` | Per-instance, authenticated-user-scoped transactional IndexedDB journal |
+| `miniapp/lib/contribution-sync.js` | Local-first contributor baseline, explicit idempotent mutation events, paced retry, and checkpointed overflow recovery |
+| `miniapp/lib/global-bookmark-live-catalog.js` | Strict ETag/revision overlay validation, instance-scoped cache, and bundled fallback |
+| `miniapp/lib/instance-scope.js` | Deterministic non-secret namespace for state bound to one Robot API path |
+| `miniapp/lib/api.js` | Robot session/search/preferences/Post, bookmark backup/restore, contribution, and live-catalog transport facade plus public API composition |
 | `miniapp/app.js` | UI orchestration and rendering only |
 
 `BrowserSelectionStore` is the sole owner of temporary selected state. It enforces bounded capacity, coordinate deduplication, source-independent removal, explicit ordering, defensive snapshots, and final coordinate projection.
@@ -227,12 +233,13 @@ bookmarks. Bookmarks represent the complete verse; text
 ranges and notes from a compatible imported document are not made active
 bookmark state.
 
-Personal aggregate version 2 is written immediately to scoped browser
+Personal aggregate version 3 is written immediately to scoped browser
 `localStorage`. `TelegramBookmarkStorage` reconciles the newest valid
 timestamped aggregate with Telegram `DeviceStorage` and `CloudStorage` and
 mirrors the winner back to available stores. Cloud bookmark records replace
 topic identifiers with compact indexes into the synchronized topic manifest;
-the full identifiers are reconstructed during reconciliation. Stable item
+the full identifiers and the clearable recently-used order for every current
+topic are reconstructed during reconciliation. Stable item
 wrappers and a metadata fingerprint avoid rewriting unchanged values, preserve
 metadata-last atomicity, and allow bounded automatic retry after a partial
 write. A compact
@@ -242,8 +249,9 @@ Existing Robot reader preferences remain a compatibility and availability
 fallback. No history entry, selection, chapter body, global catalog, global
 exclusion, or public-cache record is sent through the personal adapter.
 
-The browser-bundled global provider contains 2,155 verse links across 61
-topics. Personal and global rows share one topic list, with global rows marked
+The browser-bundled global provider contains the repository's reviewed
+topic-to-verse links. Personal and global rows share one topic list, with global
+rows marked
 **G**. Global rows hydrate display-only verse text for the active translation
 through the bounded public chapter data plane. Compact all-catalog add/remove
 controls appear before topic search; per-topic add/remove and per-link hiding
@@ -254,9 +262,19 @@ when its WebView storage is discarded. `CloudStorage` is deliberately excluded,
 so this state remains device-local. Loading one topic or the complete catalog
 also resets the relevant exclusions without creating duplicates. Global links
 never become personal records and never enter CloudStorage or backup documents.
-The catalog/provider boundary can later accept an
-authorized publishing source; user-authorized global publishing is intentionally
-not implemented.
+The authenticated live provider fetches a reviewed, revisioned per-instance
+overlay and merges it over the bundled catalogue. It accepts only strict
+English canonical topic metadata and bounded 66-book coordinate deltas, caches
+by instance plus authenticated scope, and falls back to the bundled provider on
+offline, malformed, or oversized data. A validated authenticated `200` replaces
+the cache after database recovery even when its revision moves backward or
+diverges; `304` retains the cached envelope. Approved contributors mirror
+successful local topic and assignment changes through a separate IndexedDB
+journal. Short Web Locks serialize browser checkpoints without covering
+network I/O, while a distinct cross-tab sync-owner lock serializes the complete
+network drain; 50-event idempotent batches are paced and resume from persisted
+baseline or recovery cursors. Contributor state never enters Telegram storage,
+and a failed mirror never rolls back the personal bookmark mutation.
 
 The user may download or import the same bounded personal JSON locally. New
 backup documents are version 4 and carry each record's topic assignments as
@@ -377,11 +395,15 @@ A release is production-ready only when permanent CI and CodeQL pass on the exac
 - failed Post preserves selection and successful Post clears it;
 - durable scoped history remains local, unique, bounded, and coordinate-only;
 - the 800-record bookmark bound, canonical deduplication, multi-topic
-  assignments, default-topic restoration, aggregate-v2 reconciliation, and
-  compact CloudStorage topic indexes;
+  assignments, default-topic restoration, aggregate-v3 reconciliation, bounded
+  recent-topic metadata, and compact CloudStorage topic indexes;
 - the unified global/personal list, **G** marker, compact all-catalog controls,
   scoped local/DeviceStorage restoration of global visibility and exclusions,
   and per-link/per-topic/all-catalog reset without CloudStorage or personal sync;
+- approved-contributor disclosure and authority, transactional per-instance
+  IndexedDB journaling, cross-tab checkpoints, bounded idempotent batches,
+  offline/rate-limit retry, global-removal capture, and strict live-catalog
+  revision/fallback behavior;
 - bounded JSON download/import plus owner-bound private-chat backup, fresh
   one-time restore launch, compact v4 `colorIndexes` plus v1/v2/v3 import,
   persistence-before-acknowledgement, and absence of global links or backup

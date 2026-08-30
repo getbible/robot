@@ -318,7 +318,7 @@ def _save_preferred_translation(
         store.set_translation(user_id, translation)
 
 
-async def _allow_command(
+async def allow_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     limiter: InboundRateLimiter,
@@ -417,7 +417,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     settings, _, limiter, _ = _components(context)
     try:
-        if not await _allow_command(update, context, limiter):
+        if not await allow_command(update, context, limiter):
             return
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -436,7 +436,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     settings, _, limiter, _ = _components(context)
     try:
-        if not await _allow_command(update, context, limiter):
+        if not await allow_command(update, context, limiter):
             return
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -505,7 +505,7 @@ async def bookmark_restore_callback(
         await callback.answer(str(error), show_alert=True)
         return
 
-    if not await _allow_command(update, context, limiter):
+    if not await allow_command(update, context, limiter):
         await callback.answer("Please try again shortly.", show_alert=True)
         return
     mini_app = _mini_app(context)
@@ -577,7 +577,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         application_default=settings.default_translation,
     )
     try:
-        if not await _allow_command(
+        if not await allow_command(
             update,
             context,
             limiter,
@@ -667,7 +667,7 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
     try:
-        if not await _allow_command(
+        if not await allow_command(
             update,
             context,
             limiter,
@@ -972,7 +972,7 @@ async def interaction_reply(
     text = update.effective_message.text.strip()
     request_id = secrets.token_hex(4)
     try:
-        if not await _allow_command(
+        if not await allow_command(
             update,
             context,
             limiter,
@@ -1670,7 +1670,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     settings, _, limiter, _ = _components(context)
     try:
-        if not await _allow_command(update, context, limiter):
+        if not await allow_command(update, context, limiter):
             return
         await context.bot.send_message(
             chat_id=update.effective_chat.id,

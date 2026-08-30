@@ -29,6 +29,7 @@ from .bookmark_backup import (
     BookmarkBackupDocument,
     BookmarkRestoreFile,
 )
+from .contributions import ContributionStore
 from .miniapp_api import MiniAppApi, MiniAppHttpRequest, MiniAppIngressLimiter
 from .miniapp_auth import TelegramInitDataReplayGuard, TelegramInitDataValidator
 from .miniapp_cleanup import MiniAppLaunchCleanup
@@ -291,6 +292,7 @@ class MiniAppServer:
         | None = None,
         cleanup_launch: Callable[[MiniAppLaunch], Awaitable[None]] | None = None,
         abuse_warning: Callable[[int, int, str], Awaitable[None]] | None = None,
+        contributions: ContributionStore | None = None,
         static_root: Path | None = None,
     ) -> None:
         if not settings.mini_app_enabled or settings.mini_app_public_url is None:
@@ -344,6 +346,7 @@ class MiniAppServer:
             send_bookmark_backup=send_bookmark_backup,
             load_bookmark_backup=load_bookmark_backup,
             cleanup_launch=self._cleanup.cleanup_now,
+            contributions=contributions,
             ingress_limiter=MiniAppIngressLimiter(
                 capacity=settings.mini_app_session_exchange_rate_capacity,
                 refill_per_second=(

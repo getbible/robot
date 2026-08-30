@@ -653,6 +653,214 @@
         }
       }
     },
+    "/bookmarks/catalog": {
+      "get": {
+        "summary": "Load the reviewed global bookmark catalogue overlay",
+        "description": "Returns a privacy-safe cumulative overlay for the bundled catalogue. The Mini App validates and caches it, while retaining the bundled catalogue as its offline fallback.",
+        "parameters": [
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current reviewed contribution overlay",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveBookmarkCatalog"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "The cached overlay is current",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/contributions/status": {
+      "get": {
+        "summary": "Read the authenticated user's contributor status",
+        "responses": {
+          "200": {
+            "description": "Contributor application and enrolment state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContributionStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      },
+      "patch": {
+        "summary": "Acknowledge the one-time contributor disclosure",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["disclosure_acknowledged"],
+                "properties": {
+                  "disclosure_acknowledged": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Disclosure acknowledgement recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContributionStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/InvalidRequest"
+          }
+        }
+      }
+    },
+    "/contributions/events": {
+      "post": {
+        "summary": "Submit a bounded idempotent contributor event batch",
+        "description": "Accepts English topic metadata and translation-independent verse coordinates only. Scripture text and Telegram identity fields are never accepted from the browser.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["events"],
+                "properties": {
+                  "events": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 50,
+                    "items": {
+                      "$ref": "#/components/schemas/ContributionEvent"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Events accepted or replayed idempotently",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["accepted", "replayed", "event_ids"],
+                  "properties": {
+                    "accepted": { "type": "integer", "minimum": 0, "maximum": 50 },
+                    "replayed": { "type": "integer", "minimum": 0, "maximum": 50 },
+                    "event_ids": {
+                      "type": "object",
+                      "maxProperties": 50,
+                      "additionalProperties": { "type": "integer", "minimum": 1 }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "409": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/InvalidRequest"
+          }
+        }
+      }
+    },
     "/post": {
       "post": {
         "summary": "Atomically validate and post the browser selection through the bot",
@@ -803,6 +1011,16 @@
             }
           }
         },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "An unexpected server failure prevented the request from completing",
         "content": {
           "application/json": {
             "schema": {
@@ -1458,6 +1676,208 @@
           }
         }
       },
+      "ContributionStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["enabled", "state", "can_contribute", "disclosure_required"],
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "state": {
+            "type": "string",
+            "enum": ["not_applied", "pending", "approved", "deferred", "rejected", "revoked", "unavailable"]
+          },
+          "can_contribute": { "type": "boolean" },
+          "disclosure_required": { "type": "boolean" }
+        }
+      },
+      "ContributionTopicIdentity": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["local_topic_id"],
+        "properties": {
+          "local_topic_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          }
+        }
+      },
+      "ContributionTopicMetadata": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["local_topic_id", "name", "color"],
+        "properties": {
+          "local_topic_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 80,
+            "pattern": "^(?=[A-Za-z0-9 &'():?-]{2,80}$)(?=.*[A-Za-z])(?!.* {2})[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]$",
+            "description": "English base topic name; translations are added in a later repository iteration."
+          },
+          "color": {
+            "type": "string",
+            "pattern": "^#[a-f0-9]{6}$"
+          }
+        }
+      },
+      "ContributionVerseCoordinate": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["book", "chapter", "verse"],
+        "properties": {
+          "book": { "type": "integer", "minimum": 1, "maximum": 66 },
+          "chapter": { "type": "integer", "minimum": 1, "maximum": 1000 },
+          "verse": { "type": "integer", "minimum": 1, "maximum": 2000 }
+        }
+      },
+      "ContributionEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["client_event_id", "type", "topic"],
+        "properties": {
+          "client_event_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "type": {
+            "enum": ["topic_upsert", "topic_delete", "verse_add", "verse_remove"]
+          },
+          "topic": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/ContributionTopicIdentity" },
+              { "$ref": "#/components/schemas/ContributionTopicMetadata" }
+            ]
+          },
+          "verse": {
+            "$ref": "#/components/schemas/ContributionVerseCoordinate"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "type": { "const": "topic_upsert" },
+              "topic": { "$ref": "#/components/schemas/ContributionTopicMetadata" }
+            },
+            "not": { "required": ["verse"] }
+          },
+          {
+            "properties": {
+              "type": { "const": "topic_delete" },
+              "topic": { "$ref": "#/components/schemas/ContributionTopicIdentity" }
+            },
+            "not": { "required": ["verse"] }
+          },
+          {
+            "required": ["verse"],
+            "properties": {
+              "type": { "enum": ["verse_add", "verse_remove"] },
+              "topic": {
+                "oneOf": [
+                  { "$ref": "#/components/schemas/ContributionTopicIdentity" },
+                  { "$ref": "#/components/schemas/ContributionTopicMetadata" }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "LiveBookmarkCatalog": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["revision", "checksum", "catalog"],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "checksum": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "catalog": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["schema_version", "topics", "associations"],
+            "properties": {
+              "schema_version": { "const": 1 },
+              "topics": {
+                "type": "array",
+                "maxItems": 39,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["id", "name", "color", "aliases"],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 80,
+                      "pattern": "^[a-z0-9][a-z0-9-]{0,79}$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 2,
+                      "maxLength": 80,
+                      "pattern": "^(?=[A-Za-z0-9 &'():?-]{2,80}$)(?=.*[A-Za-z])(?!.* {2})[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]$"
+                    },
+                    "color": { "type": "string", "pattern": "^#[a-f0-9]{6}$" },
+                    "aliases": {
+                      "type": "array",
+                      "maxItems": 20,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "minLength": 2,
+                        "maxLength": 80,
+                        "pattern": "^(?=[A-Za-z0-9 &'():?-]{2,80}$)(?=.*[A-Za-z])(?!.* {2})[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]$"
+                      }
+                    }
+                  }
+                }
+              },
+              "associations": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["add", "remove"],
+                "properties": {
+                  "add": { "$ref": "#/components/schemas/LiveBookmarkAssociations" },
+                  "remove": { "$ref": "#/components/schemas/LiveBookmarkAssociations" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "LiveBookmarkAssociations": {
+        "type": "array",
+        "maxItems": 10000,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["topic_id", "book", "chapter", "verse"],
+          "properties": {
+            "topic_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80,
+              "pattern": "^[a-z0-9][a-z0-9-]{0,79}$"
+            },
+            "book": { "type": "integer", "minimum": 1, "maximum": 66 },
+            "chapter": { "type": "integer", "minimum": 1, "maximum": 1000 },
+            "verse": { "type": "integer", "minimum": 1, "maximum": 2000 }
+          }
+        }
+      },
       "ReaderLocation": {
         "type": ["object", "null"],
         "additionalProperties": false,
@@ -1559,14 +1979,14 @@
       },
       "SessionState": {
         "type": "object",
-        "additionalProperties": false,
         "required": [
           "user",
           "preferences",
           "entrypoint",
           "translations",
           "basket",
-          "limits"
+          "limits",
+          "contributions"
         ],
         "properties": {
           "user": {
@@ -1598,6 +2018,9 @@
           },
           "limits": {
             "$ref": "#/components/schemas/Limits"
+          },
+          "contributions": {
+            "$ref": "#/components/schemas/ContributionStatus"
           }
         }
       },
@@ -1616,6 +2039,7 @@
         }
       },
       "NewSession": {
+        "unevaluatedProperties": false,
         "allOf": [
           {
             "$ref": "#/components/schemas/SessionState"
@@ -1715,6 +2139,14 @@
           "retry_after": {
             "type": "number",
             "exclusiveMinimum": 0
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "request_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
           }
         }
       }

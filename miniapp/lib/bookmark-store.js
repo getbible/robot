@@ -4,9 +4,12 @@ import {
 } from "./bookmark-topic-definitions.js";
 
 const STORAGE_PREFIX = "getbible.miniapp.bookmarks.v1";
-const STORAGE_VERSION = 2;
+const STORAGE_VERSION = 3;
 const BACKUP_VERSION = 4;
 const MAX_TOPICS = 100;
+// Compact CloudStorage topic indexes let the clearable MRU retain every topic
+// without repeating long identifiers in Telegram's 4,096-character metadata.
+const MAX_RECENT_TOPICS = MAX_TOPICS;
 // Telegram CloudStorage is limited to 1,024 keys per bot/user. Reserving one
 // record per verse, up to 100 topic keys, and a manifest leaves useful room for
 // future user settings without risking a quota-edge write.
@@ -51,6 +54,7 @@ export class BookmarkStore {
   #idFactory;
   #key;
   #persistent;
+  #recentTopicIds;
   #recordUpdatedAt;
   #storage;
   #topics;
@@ -76,6 +80,7 @@ export class BookmarkStore {
     this.#topics = record.topics;
     this.#bookmarks = record.bookmarks;
     this.#activeTopicId = record.active_topic_id;
+    this.#recentTopicIds = record.recent_topic_ids;
     this.#recordUpdatedAt = record.record_updated_at;
   }
 
@@ -85,6 +90,10 @@ export class BookmarkStore {
 
   get persistent() {
     return this.#persistent;
+  }
+
+  get recentTopicIds() {
+    return [...this.#recentTopicIds];
   }
 
   get size() {
@@ -98,6 +107,7 @@ export class BookmarkStore {
   snapshot() {
     return {
       active_topic_id: this.#activeTopicId,
+      recent_topic_ids: [...this.#recentTopicIds],
       topics: this.#topics.map(cloneTopic),
       bookmarks: this.#bookmarks.map(cloneBookmark),
     };
@@ -179,6 +189,7 @@ export class BookmarkStore {
     );
     this.#bookmarks.push(normalized);
     this.#activeTopicId = topicId;
+    this.#markTopicRecent(topicId);
     this.#persist(now);
     return cloneBookmark(normalized);
   }
@@ -247,6 +258,15 @@ export class BookmarkStore {
       return false;
     }
     this.#bookmarks = [];
+    this.#persist();
+    return true;
+  }
+
+  clearRecentTopics() {
+    if (this.#recentTopicIds.length === 0) {
+      return false;
+    }
+    this.#recentTopicIds = [];
     this.#persist();
     return true;
   }
@@ -393,6 +413,9 @@ export class BookmarkStore {
     if (this.#activeTopicId === id) {
       this.#activeTopicId = this.#topics[0].id;
     }
+    this.#recentTopicIds = this.#recentTopicIds.filter(
+      (topicId) => topicId !== id,
+    );
     this.#persist();
     return { removed_bookmarks: removedBookmarks };
   }
@@ -540,7 +563,7 @@ export class BookmarkStore {
         !value ||
         typeof value !== "object" ||
         Array.isArray(value) ||
-        (value.version !== 1 && value.version !== STORAGE_VERSION) ||
+        ![1, 2, STORAGE_VERSION].includes(value.version) ||
         !Array.isArray(value.topics) ||
         !Array.isArray(value.bookmarks) ||
         value.topics.length < 1 ||
@@ -569,12 +592,20 @@ export class BookmarkStore {
       const activeTopicId = topicIds.has(value.active_topic_id)
         ? value.active_topic_id
         : topics[0].id;
+      const recentTopicIds = value.version >= 3
+        ? uniqueTopicIds(
+          Array.isArray(value.recent_topic_ids)
+            ? value.recent_topic_ids.filter((topicId) => topicIds.has(topicId))
+            : [],
+        ).slice(0, MAX_RECENT_TOPICS)
+        : [];
       const recordUpdatedAt = Object.hasOwn(value, "record_updated_at")
         ? validTimestamp(value.record_updated_at)
         : 0;
       const record = {
         version: STORAGE_VERSION,
         active_topic_id: activeTopicId,
+        recent_topic_ids: recentTopicIds,
         record_updated_at: recordUpdatedAt,
         topics,
         bookmarks,
@@ -589,7 +620,8 @@ export class BookmarkStore {
         bookmarks.some((bookmark, index) =>
           !sameBookmark(bookmark, value.bookmarks[index])
         ) ||
-        activeTopicId !== value.active_topic_id
+        activeTopicId !== value.active_topic_id ||
+        !sameStringArray(recentTopicIds, value.recent_topic_ids)
       ) {
         this.#write(record);
       }
@@ -615,6 +647,7 @@ export class BookmarkStore {
     this.#write({
       version: STORAGE_VERSION,
       active_topic_id: this.#activeTopicId,
+      recent_topic_ids: this.#recentTopicIds,
       record_updated_at: this.#recordUpdatedAt,
       topics: this.#topics,
       bookmarks: this.#bookmarks,
@@ -641,6 +674,13 @@ export class BookmarkStore {
     if (!this.#topics.some((topic) => topic.id === topicId)) {
       throw new TypeError("Bookmark topic was not found.");
     }
+  }
+
+  #markTopicRecent(topicId) {
+    this.#recentTopicIds = [
+      topicId,
+      ...this.#recentTopicIds.filter((candidate) => candidate !== topicId),
+    ].slice(0, MAX_RECENT_TOPICS);
   }
 }
 
@@ -817,6 +857,7 @@ export function parseBookmarkBackup(value, { byteLength = null } = {}) {
 export const BOOKMARK_STORAGE_PREFIX = STORAGE_PREFIX;
 export const BOOKMARK_BACKUP_MAX_BYTES = MAX_BACKUP_BYTES;
 export const MAX_BOOKMARK_TOPICS = MAX_TOPICS;
+export const MAX_RECENT_BOOKMARK_TOPICS = MAX_RECENT_TOPICS;
 export const MAX_BOOKMARKS = MAX_BOOKMARK_ENTRIES;
 export const BOOKMARK_TEXT_MAX_CHARS = MAX_BOOKMARK_TEXT;
 
@@ -825,6 +866,7 @@ function freshRecord() {
   return {
     version: STORAGE_VERSION,
     active_topic_id: topics[0].id,
+    recent_topic_ids: [],
     record_updated_at: 0,
     topics,
     bookmarks: [],
@@ -1181,6 +1223,13 @@ function compactBookmarks(bookmarks) {
 
 function uniqueTopicIds(topicIds) {
   return [...new Set(topicIds)];
+}
+
+function sameStringArray(left, right) {
+  return Array.isArray(left) &&
+    Array.isArray(right) &&
+    left.length === right.length &&
+    left.every((value, index) => value === right[index]);
 }
 
 function bookmarkWithTopics(bookmark, topicIds) {
