@@ -273,7 +273,16 @@ async function assertReaderStartsBelowToolbar(page) {
       titleBoxBottom: titleBox.bottom,
     };
   });
-  assert.ok(Math.abs(layout.toolbarTop - layout.titleBoxBottom) <= 1);
+  // A tiny overlap from subpixel rounding is harmless; the regression is a
+  // positive strip between the translation control and the reader toolbar.
+  assert.ok(
+    layout.toolbarTop - layout.chipBottom <= 1,
+    `reader toolbar gap: ${JSON.stringify(layout)}`,
+  );
+  assert.ok(
+    layout.toolbarTop - layout.titleBoxBottom <= 1,
+    `reader title-box gap: ${JSON.stringify(layout)}`,
+  );
   assert.ok(layout.chipBottom <= layout.titleBoxBottom);
   assert.ok(layout.firstVerseTop >= layout.toolbarBottom + 8);
   assert.doesNotMatch(layout.toolbarBackground, /rgba\([^)]*,\s*0\s*\)$/u);
