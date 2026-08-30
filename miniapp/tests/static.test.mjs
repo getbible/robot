@@ -418,7 +418,7 @@ test("offers one-click contributor sync with lossless personal-to-global present
   );
   assert.match(
     app,
-    /scheduleContributionStatusPoll[\s\S]*?allowPendingPoll: true,[\s\S]*?allowAuthorityRecovery: true/,
+    /scheduleContributionStatusPoll[\s\S]*?force: contributionAuthorityUnknown\(\),[\s\S]*?allowPendingPoll: true,[\s\S]*?allowAuthorityRecovery: true/,
   );
   assert.match(app, /let contributionStatusPollTimerDueAt = 0/);
   assert.match(
