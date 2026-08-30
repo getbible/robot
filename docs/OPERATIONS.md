@@ -124,6 +124,18 @@ service transactionally and removes the public route when the Mini App is
 disabled. See [Mini App deployment](MINI_APP.md) for DNS, Caddy, BotFather,
 authentication, and verification requirements.
 
+For this release's upgrade of an existing setup-managed Caddy instance, run
+the target checkout's manager so its expanded API allow-list is applied:
+
+```bash
+sudo /path/to/robot-target/setup.sh upgrade production \
+  --source /path/to/robot-target
+```
+
+Do not initiate that one-time upgrade through the previously installed
+`getbible-robot` manager. The old process cannot execute route-generation logic
+introduced by the target release merely by copying the new manager over itself.
+
 ## Contributor enrolment and moderation
 
 Contributor enrolment is intentionally private and operator-directed. Give a

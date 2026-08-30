@@ -52,11 +52,14 @@ git status --short
 sudo ./setup.sh upgrade production --source .
 ```
 
-The installed command is equivalent when given the source checkout:
-
-```bash
-sudo getbible-robot upgrade production --source /path/to/robot-upgrade
-```
+For this release, existing instances that use setup-managed Caddy must invoke
+`setup.sh` from the reviewed target checkout exactly as shown above. Do **not**
+start this upgrade through the previously installed `getbible-robot` manager:
+that already-running older script cannot execute the target release's new
+transactional API-route regeneration, even though it replaces the installed
+manager later in the upgrade. Running the target checkout's script regenerates,
+validates, installs, and reloads the managed allow-list before the upgrade is
+accepted, and restores the prior Caddy files if the new application fails.
 
 The manager:
 
@@ -69,11 +72,14 @@ The manager:
 6. runs `pip check`;
 7. validates the existing instance environment with the target code;
 8. installs and verifies the target manager/unit;
-9. stops only the selected instance;
-10. atomically replaces `app` and retains `app.previous`;
-11. starts the service and waits for readiness;
-12. verifies the configured Mini App listener and public HTTPS route;
-13. automatically restores the prior application if readiness fails.
+9. transactionally regenerates and reloads setup-managed Caddy routes when
+   enabled;
+10. stops only the selected instance;
+11. atomically replaces `app` and retains `app.previous`;
+12. starts the service and waits for readiness;
+13. verifies the configured Mini App listener and public HTTPS route;
+14. automatically restores both the prior Caddy files and application if
+    readiness fails.
 
 Source, virtual environment, and lock are always moved as one application tree. The service never combines code from one commit with a lock from another.
 

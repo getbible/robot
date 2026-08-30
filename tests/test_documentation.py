@@ -276,6 +276,15 @@ class DocumentationContractTestCase(unittest.TestCase):
                     failures.append(f"{document.relative_to(ROOT)} -> {value}")
         self.assertEqual(failures, [])
 
+    def test_managed_caddy_upgrade_uses_the_target_checkout_manager(self) -> None:
+        upgrading = (ROOT / "docs" / "UPGRADING.md").read_text(encoding="utf-8")
+        operations = (ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
+        for document in (upgrading, operations):
+            self.assertIn("target checkout", document)
+            self.assertIn("previously installed", document)
+        self.assertNotIn("The installed command is equivalent", upgrading)
+        self.assertIn("restores the prior Caddy files", upgrading)
+
 
 if __name__ == "__main__":
     unittest.main()

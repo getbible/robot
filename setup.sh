@@ -3344,6 +3344,8 @@ cmd_upgrade() {
     local previous_dir
     local env_file
     local service
+    local mini_app_enabled
+    local reverse_proxy_mode
     source_dir=$(resolve_source_dir "$source_request")
     source_url=$(source_url_for "$source_dir")
     target_sha=$(git_source_read "$source_dir" rev-parse HEAD)
@@ -3374,6 +3376,14 @@ cmd_upgrade() {
     systemctl daemon-reload
     systemd-analyze verify "$service"
 
+    mini_app_enabled=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_ENABLED")
+    reverse_proxy_mode=$(dotenv_value "$app_dir" "$env_file" "REVERSE_PROXY_MODE")
+    reverse_proxy_mode=${reverse_proxy_mode:-caddy}
+    if [[ "$mini_app_enabled" == "true" && "$reverse_proxy_mode" == "caddy" ]]; then
+        begin_caddy_transaction ||
+            die "The managed Caddy routes could not be refreshed for this upgrade."
+    fi
+
     systemctl stop "$service"
     [[ ! -e "$previous_dir" ]] || safe_remove_tree "$previous_dir"
     mv -- "$app_dir" "$previous_dir"
@@ -3388,6 +3398,7 @@ cmd_upgrade() {
     if systemctl start "$service" &&
         wait_for_readiness "$ACTIVE_PORT" &&
         verify_mini_app_instance "$app_dir" "$env_file"; then
+        commit_caddy_transaction
         record_operation upgrade "$ACTIVE_INSTANCE" ok
         printf 'Upgrade succeeded. app.previous is retained for one-step rollback.\n'
         printf 'The complete application tree, including Mini App assets, now runs commit %s.\n' \
@@ -3397,6 +3408,7 @@ cmd_upgrade() {
     fi
 
     warn "Upgrade failed readiness; restoring the previous application."
+    rollback_caddy_transaction
     systemctl stop "$service" || true
     safe_remove_tree "$app_dir"
     mv -- "$previous_dir" "$app_dir"
