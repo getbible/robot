@@ -901,6 +901,11 @@ function scheduleContributionStatusPoll(delay = CONTRIBUTION_STATUS_POLL_MS) {
     contributionStatusPollTimer = null;
     contributionStatusPollTimerDueAt = 0;
     void refreshContributionStatus({
+      // A denied upload deliberately leaves an approved-but-suspended local
+      // authority marker. Its short recovery poll must reach the server even
+      // when the successful pre-upload status check is still inside the
+      // ordinary freshness window.
+      force: contributionAuthorityUnknown(),
       synchronizeWhenApproved: true,
       allowPendingPoll: true,
       allowAuthorityRecovery: true,
