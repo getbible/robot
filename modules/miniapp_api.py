@@ -2037,6 +2037,11 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
 
 
 def _query(value: str) -> dict[str, str]:
+    # Python 3.10 treats an empty string as a malformed field when strict
+    # parsing is enabled, while newer supported runtimes return an empty
+    # mapping.  A URL with no query component is valid on every route.
+    if value == "":
+        return {}
     try:
         parsed = parse_qs(
             value,
