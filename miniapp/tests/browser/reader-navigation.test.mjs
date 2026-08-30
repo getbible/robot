@@ -1189,20 +1189,22 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     await page.locator("#bookmark-detail-title").innerText(),
     "Geestelike wedergeboorte",
   );
+  // John 3:3 was deliberately hidden through the reader popover above. Use
+  // the next still-visible global assignment to verify localized hydration.
   const globalExcerpt = page.locator(
-    '[data-bookmark-preview-text="global_spiritual-rebirth_43_3_3"]',
+    '[data-bookmark-preview-text="global_spiritual-rebirth_43_3_4"]',
   );
   await globalExcerpt.scrollIntoViewIfNeeded();
   await page.waitForFunction(() => {
     const excerpt = document.querySelector(
-      '[data-bookmark-preview-text="global_spiritual-rebirth_43_3_3"]',
+      '[data-bookmark-preview-text="global_spiritual-rebirth_43_3_4"]',
     );
     return excerpt && !excerpt.hidden &&
-      excerpt.textContent === "AOV John 3 text 3";
+      excerpt.textContent === "AOV John 3 text 4";
   });
   assert.equal(
     await page.locator(
-      '[data-bookmark-open="global_spiritual-rebirth_43_3_3"]',
+      '[data-bookmark-open="global_spiritual-rebirth_43_3_4"]',
     ).getAttribute("aria-describedby"),
     await globalExcerpt.getAttribute("id"),
   );
