@@ -120,6 +120,12 @@ test("keeps History as a first-class page in the permanent bottom navigation", a
     css,
     /\.reader-toolbar\s*{[\s\S]*?grid-template-columns: 44px minmax\(0, 1fr\) 44px/,
   );
+  assert.match(css, /\.view--reader\s*{\s*padding:\s*0/);
+  assert.equal(
+    (css.match(/\.view:not\(\.view--reader\)\s*{\s*padding-top:/g) ?? [])
+      .length,
+    2,
+  );
   assert.match(css, /data-telegram-fullscreen="true"/);
   assert.match(css, /\.is-header-condensed/);
   assert.match(css, /--fullscreen-control-height: 32px/);

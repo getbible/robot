@@ -3533,7 +3533,7 @@ select:focus-visible {
 }
 
 @media (max-width: 520px) {
-  .view {
+  .view:not(.view--reader) {
     padding-top: 18px;
   }
 
@@ -3609,7 +3609,7 @@ select:focus-visible {
 }
 
 @media (min-width: 760px) {
-  .view {
+  .view:not(.view--reader) {
     padding-top: 30px;
   }
 
