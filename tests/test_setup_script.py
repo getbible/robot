@@ -495,6 +495,22 @@ cat "$dropin_root/alpha.conf"
             script,
         )
 
+    def test_upgrade_refreshes_managed_caddy_transactionally(self) -> None:
+        script = SETUP.read_text(encoding="utf-8")
+        start = script.index("cmd_upgrade() {")
+        end = script.index("\ncmd_rollback() {", start)
+        upgrade = script[start:end]
+
+        begin = upgrade.index("begin_caddy_transaction")
+        cutover = upgrade.index('systemctl stop "$service"')
+        verify = upgrade.index("verify_mini_app_instance")
+        commit = upgrade.index("commit_caddy_transaction", verify)
+        rollback = upgrade.index("rollback_caddy_transaction", commit)
+        self.assertLess(begin, cutover)
+        self.assertLess(cutover, verify)
+        self.assertLess(verify, commit)
+        self.assertLess(commit, rollback)
+
     def test_mini_app_manager_enforces_https_and_loopback(self) -> None:
         script = SETUP.read_text(encoding="utf-8")
         self.assertIn("validate_mini_app_url", script)

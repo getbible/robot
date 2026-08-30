@@ -211,6 +211,11 @@ sudo getbible-robot miniapp <instance>
 sudo getbible-robot update <instance>
 ```
 
+For this release's one-time upgrade of an existing setup-managed Caddy
+instance, run `sudo ./setup.sh update <instance> --source "$PWD"` from the
+reviewed target checkout so the new API route transaction executes. See
+[Upgrading and rollback](docs/UPGRADING.md).
+
 Do not edit generated Caddy/systemd configuration directly.
 
 ## Dependency policy

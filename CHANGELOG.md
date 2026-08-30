@@ -15,6 +15,10 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   Approved work publishes to the running instance immediately; native
   deployments can then generate a privacy-safe export and use a dedicated
   non-root Git account to create, commit, and push a review branch.
+- Expanded setup-managed Caddy's exact API allow-list for the live catalogue
+  and contribution endpoints. Existing managed-Caddy instances must run this
+  release's checkout `setup.sh` for the one-time upgrade; it refreshes the
+  routes transactionally and restores the prior Caddy files if cutover fails.
 - Made canonical topics permanent after their first live publication, while
   folding pre-publication upsert/delete chains chronologically so superseded
   review events cannot remain stranded.

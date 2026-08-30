@@ -322,6 +322,7 @@ systemctl() {
             ;;
         reload)
             local service=$1
+            printf 'systemctl reload %s\n' "$service" >>"$CADDY_LOG"
             if [[ ${FAIL_NEXT_RELOAD:-} == "$service" ]]; then
                 unset FAIL_NEXT_RELOAD
                 return 1
@@ -896,6 +897,24 @@ assert_contains "$(environment_file_for alpha)" \
 assert_contains "$(environment_file_for alpha)" \
     'MINI_APP_LAUNCH_TTL_SECONDS="300"'
 
+cmd_miniapp alpha <<EOF
+y
+https://bot.example.com/getbible/alpha
+9201
+EOF
+# Model the generated allow-list left by the previous release. Its catch-all
+# remains valid, but it does not know the new live-catalogue API paths.
+sed -i \
+    -e 's# /getbible/alpha/api/v1/bookmarks/catalog##' \
+    -e 's# /getbible/alpha/api/v1/contributions/status##' \
+    -e 's# /getbible/alpha/api/v1/contributions/events##' \
+    "$CADDY_ROUTES"
+! grep -Fq '/getbible/alpha/api/v1/bookmarks/catalog' "$CADDY_ROUTES" ||
+    fail "pre-release Caddy fixture retained the bookmark catalogue route"
+SUCCESS_UPGRADE_CADDY_RELOADS=$(
+    grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true
+)
+
 SECOND_SHA=$(commit_fixture_version v2)
 cmd_upgrade alpha --source "$SOURCE_DIR" <<EOF
 
@@ -908,6 +927,14 @@ assert_equal \
     "$(git -C "${INSTANCE_ROOT}/alpha/app.previous" rev-parse HEAD)" \
     "$FIRST_SHA"
 assert_contribution_assets "${INSTANCE_ROOT}/alpha/app.previous"
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/bookmarks/catalog'
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/status'
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/events'
+verify_managed_caddy_routes ||
+    fail "successful upgrade did not install the regenerated managed Caddy routes"
+assert_equal \
+    "$(grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true)" \
+    "$((SUCCESS_UPGRADE_CADDY_RELOADS + 1))"
 
 cmd_rollback alpha <<EOF
 y
@@ -921,6 +948,18 @@ assert_equal \
     "$SECOND_SHA"
 assert_contribution_assets "${INSTANCE_ROOT}/alpha/app.previous"
 
+# A failed upgraded service must restore the exact pre-upgrade Caddy bytes and
+# reload them after the candidate allow-list was already installed.
+sed -i \
+    -e 's# /getbible/alpha/api/v1/bookmarks/catalog##' \
+    -e 's# /getbible/alpha/api/v1/contributions/status##' \
+    -e 's# /getbible/alpha/api/v1/contributions/events##' \
+    "$CADDY_ROUTES"
+FAILED_UPGRADE_CADDYFILE_HASH=$(sha256sum "$CADDYFILE" | awk '{print $1}')
+FAILED_UPGRADE_ROUTES_HASH=$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')
+FAILED_UPGRADE_CADDY_RELOADS=$(
+    grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true
+)
 THIRD_SHA=$(commit_fixture_version v3)
 export FAIL_NEXT_START
 FAIL_NEXT_START=$(service_name_for alpha)
@@ -938,6 +977,15 @@ assert_equal "$ACTIVE_SHA" "$FIRST_SHA"
 assert_equal "$(git -C "$(application_dir_for alpha)" rev-parse HEAD)" "$FIRST_SHA"
 [[ "$THIRD_SHA" != "$ACTIVE_SHA" ]] ||
     fail "failed upgrade metadata was retained"
+assert_equal "$(sha256sum "$CADDYFILE" | awk '{print $1}')" \
+    "$FAILED_UPGRADE_CADDYFILE_HASH"
+assert_equal "$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')" \
+    "$FAILED_UPGRADE_ROUTES_HASH"
+assert_equal \
+    "$(grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true)" \
+    "$((FAILED_UPGRADE_CADDY_RELOADS + 2))"
+assert_equal "$(systemctl is-active caddy.service)" "active"
+assert_equal "$(systemctl is-enabled caddy.service)" "enabled"
 
 cmd_miniapp alpha <<EOF
 y
