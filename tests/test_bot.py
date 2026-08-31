@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
 from telegram.error import BadRequest
-from telegram.ext import CommandHandler
+from telegram.ext import CommandHandler, MessageHandler, filters
 
 import bot
 from modules.service import ScriptureQuery
@@ -92,7 +92,25 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
                 "contributor",
             },
         )
-        self.assertEqual(application.add_handler.call_count, 11)
+        self.assertEqual(application.add_handler.call_count, 12)
+        # Contribution push bundles arrive as web_app_data service messages,
+        # so their handler must be registered and must run before the generic
+        # TEXT interaction handler and the unknown-command fallback.
+        message_handlers = [
+            handler for handler in handlers if isinstance(handler, MessageHandler)
+        ]
+        self.assertEqual(
+            [handler.callback for handler in message_handlers],
+            [
+                bot.contribution_push_message,
+                bot.interaction_reply,
+                bot.unknown_command,
+            ],
+        )
+        self.assertIs(
+            message_handlers[0].filters,
+            filters.StatusUpdate.WEB_APP_DATA,
+        )
         application.add_error_handler.assert_called_once_with(bot.error_handler)
         services = result.bot_data[bot.APPLICATION_SERVICES_SLOT]
         self.assertIs(services.settings, result.bot_data[bot.SETTINGS_SLOT])
