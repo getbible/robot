@@ -1567,8 +1567,7 @@ async function reconcilePublishedContributionTopics(
 }
 
 function handleContributionSyncError(error, { catalog = false } = {}) {
-  if (error instanceof ApiError && [401, 409].includes(error.status)) {
-    handleSessionError(error);
+  if (handleSessionError(error)) {
     return;
   }
   if (contributionControlVisible()) {
