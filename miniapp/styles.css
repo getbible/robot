@@ -2432,6 +2432,12 @@ select:focus-visible {
   font-weight: 690;
 }
 
+.contributor-sync__actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .contributor-sync__button {
   min-height: 44px;
   white-space: nowrap;
@@ -3780,6 +3786,10 @@ select:focus-visible {
 
   .contributor-sync {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .contributor-sync__actions {
+    width: 100%;
   }
 
   .contributor-sync__button {

@@ -494,7 +494,7 @@
                   id="contributor-topic-guidance"
                   class="bookmark-contribution-manager__guidance"
                   data-i18n="bookmarks.contribution_english_guidance"
-                >Contributor topics must use an English name. Your topic and verse changes are sent securely for review after they are saved locally.</p>
+                >Contributor topics must use an English name. Push sends your topic and verse changes to the bot for review; Pull loads the reviewed global catalogue.</p>
                 <section
                   id="contributor-sync"
                   class="contributor-sync"
@@ -511,21 +511,31 @@
                       role="status"
                       aria-live="polite"
                       data-i18n="bookmarks.contribution_sync_idle"
-                    >Ready to sync your topics and verse links.</p>
+                    >Push sends your changes for review; Pull loads the reviewed catalogue.</p>
                     <p
                       id="contributor-sync-details"
                       class="contributor-sync__details"
                       hidden
                     ></p>
                   </div>
-                  <button
-                    id="contributor-sync-button"
-                    class="button button--secondary contributor-sync__button"
-                    type="button"
-                    aria-describedby="contributor-sync-status"
-                  >
-                    <span data-i18n="bookmarks.contribution_sync_now">Sync now</span>
-                  </button>
+                  <div class="contributor-sync__actions">
+                    <button
+                      id="contributor-push-button"
+                      class="button button--secondary contributor-sync__button"
+                      type="button"
+                      aria-describedby="contributor-sync-status"
+                    >
+                      <span data-i18n="bookmarks.contribution_push">Push</span>
+                    </button>
+                    <button
+                      id="contributor-pull-button"
+                      class="button button--secondary contributor-sync__button"
+                      type="button"
+                      aria-describedby="contributor-sync-status"
+                    >
+                      <span data-i18n="bookmarks.contribution_pull">Pull</span>
+                    </button>
+                  </div>
                 </section>
               </div>
             </details>
