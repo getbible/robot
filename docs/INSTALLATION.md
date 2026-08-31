@@ -189,8 +189,9 @@ Before enabling a service, setup:
   and reloads it transactionally;
 - verifies both the local Mini App shell and its public certificate, route, and
   expected response content;
-- verifies the local and public contribution status/event routes reach Robot
-  by requiring its unauthenticated JSON `401` response;
+- verifies the local and public `bookmarks/catalog`, `contributions/status`,
+  and `contributions/receipt` GET routes reach Robot by requiring their
+  unauthenticated JSON `401` responses;
 - waits for `/readyz` when health checks are enabled.
 
 Partial installation failures before unit verification are cleaned up transactionally. A service that starts but does not become ready is retained for diagnosis through `getbible-robot doctor` and `getbible-robot logs`.
