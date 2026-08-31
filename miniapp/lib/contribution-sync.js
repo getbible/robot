@@ -394,8 +394,17 @@ export class ContributionSync {
       revision: this.#state.revision,
     };
     // The exact transfer commits durably before the first sendData call.
-    if (!await this.#persist()) {
-      this.#state.outbox = null;
+    // Journal-backed persistence rejects on failure while the localStorage
+    // fallback resolves false; both must leave no phantom in-memory outbox.
+    let persisted = false;
+    try {
+      persisted = await this.#persist();
+    } finally {
+      if (!persisted) {
+        this.#state.outbox = null;
+      }
+    }
+    if (!persisted) {
       throw new Error(
         "Contribution retry storage is unavailable; the push was not prepared.",
       );
@@ -417,8 +426,18 @@ export class ContributionSync {
     }
     const message = outbox.messages[outbox.attempt_index];
     outbox.attempt_index += 1;
-    if (!await this.#persist()) {
-      outbox.attempt_index -= 1;
+    // Journal-backed persistence rejects on failure while the localStorage
+    // fallback resolves false; both must roll the pointer back so no chunk
+    // is ever skipped by a phantom in-memory advance.
+    let persisted = false;
+    try {
+      persisted = await this.#persist();
+    } finally {
+      if (!persisted) {
+        outbox.attempt_index -= 1;
+      }
+    }
+    if (!persisted) {
       throw new Error(
         "Contribution retry storage is unavailable; the push was not sent.",
       );
