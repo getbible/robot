@@ -1816,10 +1816,9 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             json.loads(second.body)["session_token"],
             json.loads(first.body)["session_token"],
         )
-        self.assertEqual(
-            second.headers["X-Contribution-Token"],
-            first.headers["X-Contribution-Token"],
-        )
+        # Approval no longer mints an HTTPS push credential on either exchange.
+        self.assertNotIn("X-Contribution-Token", first.headers)
+        self.assertNotIn("X-Contribution-Token", second.headers)
 
     async def test_invalid_launch_and_bootstrap_failure_do_not_burn_init_data(
         self,
