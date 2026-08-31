@@ -149,6 +149,22 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(preference_store.call_args_list[1].kwargs["path"])
 
+    def test_configured_contribution_database_failure_stops_startup(self) -> None:
+        settings = self.settings()
+        settings.contribution_store_file = (
+            "/var/lib/getbible-robot/production/contributions.sqlite3"
+        )
+
+        with patch.object(
+            bot,
+            "ContributionStore",
+            side_effect=OSError("permission denied"),
+        ), self.assertRaisesRegex(
+            RuntimeError,
+            "Configured contributor storage is unavailable",
+        ):
+            bot._build_contribution_store(settings)
+
     async def test_startup_and_shutdown_cover_telegram_health_and_service(self) -> None:
         health = SimpleNamespace(
             start=AsyncMock(),
