@@ -131,9 +131,11 @@ back to all topics and, when opened from the reader, back to the source verse.
 The assignment picker places a clearable **Recently used** group in most-recent
 order above the complete locale-aware alphabetical topic list. It retains every
 topic used until the user clears it (within the 100-topic product limit), and a
-recent topic also remains in the complete list intentionally. Manage Topics
-uses only the alphabetical presentation and never rewrites persisted topic
-order merely to sort the screen.
+recent topic also remains in the complete list intentionally. The main topic
+list uses only the alphabetical presentation and never rewrites persisted topic
+order merely to sort the screen. A plus-card at the end of that list expands
+the name/color form for creating one topic; topic editing is kept in the opened
+topic instead of a second manager list.
 
 The Bookmarks surface lists personal and global verse links together in one
 topic list; global rows carry a **G** marker and progressively hydrate visible
@@ -150,15 +152,23 @@ They never consume personal records, enter `CloudStorage`, or enter backups.
 
 Personal records are bounded to 800 canonical verses, and each may belong to
 multiple topics without consuming another verse slot. Global topic definitions
-are reviewed server-owned metadata and do not appear in the personal topic
-editor; their visibility and verse exclusions use the separate global controls.
-Custom topics remain user-named and support add, rename, recolor, and removal.
-Personal topic removal warns that its personal assignments will also be
-removed. **Restore default tags** adds only missing defaults and preserves
-custom topics and personal bookmarks. The global catalogue provider merges a
-validated, reviewed per-instance overlay over the bundled catalogue. The
-bundled source remains available when the overlay request, validation, or local
-cache fails.
+are reviewed server-owned metadata: their localized names cannot be edited,
+but their user-facing colors can be changed from topic detail. Custom topic
+detail supports the same color control and inline name editing with explicit
+confirm and cancel actions. Removing any topic warns that its linked verse
+assignments will also be removed. Removing a global topic changes only that
+user's catalogue state; **Add all** recreates it from the reviewed definition.
+The new-topic plus-card is therefore the only topic-creation area, and the UI
+does not duplicate global restoration there. The global catalogue provider
+merges a validated, reviewed per-instance overlay over the bundled catalogue.
+The bundled source remains available when the overlay request, validation, or
+local cache fails.
+
+Immediately below the Global topics controls, an approved contributor sees a
+collapsible **Manage Contribution** panel containing synchronization state,
+review information, and its sync action. The panel is absent when the
+authenticated session has no contribution authority. It is independent of the
+new-topic form and remains available without scrolling past the topic list.
 
 `BookmarkStore` writes personal aggregate version 3 immediately to scoped
 `localStorage`. `TelegramBookmarkStorage` compares timestamped candidates from

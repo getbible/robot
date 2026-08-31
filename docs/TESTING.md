@@ -117,8 +117,10 @@ Tests must prove:
 `BookmarkStore` and `TelegramBookmarkStorage` tests must cover:
 
 - the shipped default topic definitions and localized core-name keys, read-only
-  built-in names, bounded custom add/rename, recolor/removal warnings, and
-  restoration of missing defaults without overwriting user changes;
+  built-in names, detail-level recoloring for built-in and custom topics,
+  bounded custom add/inline-rename, confirm/cancel behavior, removal warnings,
+  and global-topic restoration through **Add all** without overwriting user
+  changes;
 - complete Home-summary, History, and Bookmark locale-key coverage, including
   canonical English fallback for newly published topic keys, with each governed
   alias/fallback reusing the established whole-application
@@ -137,9 +139,9 @@ Tests must prove:
 - the source-derived global catalogue topic and link totals, generated-file
   freshness, unified personal/global ordering,
   **G** marker, compact add-all/remove-all controls before search, and
-  idempotent per-link, per-topic, and all-catalog reset without personal sync
-  or backup, including renamed numeric-topic remapping and display-only
-  active-translation excerpts;
+  idempotent per-link, whole-topic, and all-catalog removal/restoration without
+  personal sync or backup, including renamed numeric-topic remapping and
+  display-only active-translation excerpts;
 - authenticated-scope global-preference reconciliation across localStorage and
   Telegram `DeviceStorage`, including legacy migration, fresh-WebView restore,
   deterministic timestamp ties, tombstones, coalescing, bounded retry, and a
@@ -196,12 +198,18 @@ modules, and browser APIs. It verifies:
    assignment updates the reader, topic navigation returns to all topics or the
    source verse, and the five-item footer remains usable;
 7. an explicit chat-backup action sends the current bookmark document through
-   the authenticated Robot endpoint; and
+   the authenticated Robot endpoint;
 8. personal and global links share one topic list, global links carry **G**,
-   compact all-catalog controls precede search, per-link hide and
-   per-topic/all reset stay device-local, and no global link enters personal
-   backup or CloudStorage; and
-9. no legacy Robot Scripture or history request is emitted.
+   compact all-catalog controls precede search, the **G** badge is centered,
+   per-link hide and per-topic/all reset stay device-local, and no global link
+   enters personal backup or CloudStorage;
+9. the add-topic plus-card is the only topic-creation panel; opened custom
+   topics support inline name confirm/cancel and color editing, opened global
+   topics keep their name read-only while allowing color editing, and topic
+   removal confirms linked-verse deletion;
+10. **Manage Contribution** appears directly below Global topics only for an
+    approved contributor and remains separate from topic creation; and
+11. no legacy Robot Scripture or history request is emitted.
 
 Focused model, storage, API, and backend tests separately verify selection
 identity and unselect state transitions, Post authority and server failure
@@ -259,13 +267,16 @@ After all deterministic gates pass, deploy one validated commit and verify in Te
   translation, and can be cleared per-entry or completely;
 - history remains on the same browser after reopening but is absent on a clean
   second device;
-- multi-topic personal assignment, topic management/default restoration, the
+- multi-topic personal assignment, plus-card topic creation, detail-level
+  rename/recolor/removal, global restoration through **Add all**, the
   800-record bound, and cross-translation canonical deduplication work;
 - personal bookmarks and last-read synchronize on a second supported Telegram
   client;
 - the unified topic list marks global links with **G**, exposes equal-size
-  add-all/remove-all controls before search, and supports per-link hide plus
-  per-topic/all reset without personal sync or backup;
+  add-all/remove-all controls before search, centers the marker, and supports
+  per-link hide plus per-topic/all reset without personal sync or backup;
+- an approved contributor sees the collapsible **Manage Contribution** panel
+  directly below Global topics, while an ordinary session does not;
 - global topics survive reopening Telegram Desktop after its WebView
   localStorage is cleared, using DeviceStorage without CloudStorage;
 - unchanged CloudStorage items remain stable, partial commits are rejected by

@@ -84,13 +84,13 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   personal synchronization, or backups. Global rows resolve their verse text
   in the currently selected translation without copying that text into
   personal storage.
-- Global topic definitions are server-owned and remain outside the personal
-  topic editor; their visibility and individual verse exclusions use the
-  global controls above. Custom personal topics remain user-named and support
-  add, rename, recolor, and removal. Removing a personal topic warns that its
-  personal verse assignments will also be removed. **Restore default tags**
-  recreates only missing defaults while preserving custom topics and personal
-  bookmarks.
+- A plus-card after the topic list creates personal topics. Topic detail keeps
+  editing in context: every topic color is user-editable, custom names support
+  inline confirm/cancel editing, and global names remain read-only server-owned
+  metadata. Removing a topic warns that its linked verse assignments will also
+  be removed; removing a global topic is user-local and **Add all** restores
+  it. Approved contributors alone see the collapsible **Manage Contribution**
+  panel immediately below Global topics.
 - Personal bookmark aggregate version 3, topics, the clearable recently-used
   topic order, the active topic, and the compact last-read coordinate reconcile
   by timestamp across scoped

@@ -227,10 +227,12 @@ The domain permits topic add/rename/recolor/removal and warns before topic
 removal also removes its personal verse assignments. Built-in topic identity
 and English migration names remain stable storage metadata, while display names
 come from localized constants and are read-only; built-in colors remain
-editable. Custom topic names remain editable. Restoring default tags adds only
-missing definitions, preserving existing recolors, custom topics, and personal
-bookmarks. Bookmarks represent the complete verse; text
-ranges and notes from a compatible imported document are not made active
+editable. Custom topic names remain editable. The UI creates topics from the
+plus-card after the alphabetical list and edits names/colors in topic detail;
+it has no second topic editor. Removing a global topic is a user-local catalogue
+choice, and **Add all** restores its reviewed definition while preserving
+custom topics and personal bookmarks. Bookmarks represent the complete verse;
+text ranges and notes from a compatible imported document are not made active
 bookmark state.
 
 Personal aggregate version 3 is written immediately to scoped browser

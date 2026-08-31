@@ -136,13 +136,15 @@ identifiers when reading.
 Bookmark identity is canonical book/chapter/verse, not translation. Assigning
 the same verse from another translation updates its one record. Assigning it to
 another topic extends that record, while repeating an existing assignment is a
-no-op. Removing a personal topic warns before removing that topic's personal
-assignments. Global topic definitions come from the reviewed catalogue and stay
-outside the personal topic editor; their visibility and verse exclusions use
-the separate global controls. Custom topics remain user-named and editable.
-Restoring default tags recreates only missing definitions while preserving
-custom topics and personal bookmarks. Selections remain independent and
-ephemeral, and the public cache remains identity-free.
+no-op. A plus-card after the topic list opens the bounded new-topic form; there
+is no separate topic-management editor. Opening a topic exposes its controls in
+context: every topic color is user-editable, while only a custom topic name can
+enter inline confirm/cancel editing. Curated global names and identities remain
+read-only server-owned metadata. **Remove topic** requires confirmation and
+removes that user's topic and linked verse assignments. For a global topic this
+is a user-local catalogue removal, not deletion of the reviewed definition;
+**Add all** restores it. Selections remain independent and ephemeral, and the
+public cache remains identity-free.
 
 ### Global catalog overlay
 
