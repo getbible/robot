@@ -810,7 +810,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   await personalTopicCard.click();
   await page.waitForFunction(() => (
     !document.querySelector("#bookmark-detail")?.hidden &&
-    document.querySelector("#bookmark-detail-title")?.textContent ===
+    document.querySelector("#bookmark-detail-title")?.textContent?.trim() ===
       "Field Notes"
   ));
 
@@ -837,7 +837,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   await detailNameInput.fill("Study Notes");
   await detailNameInput.press("Enter");
   await page.waitForFunction(() => (
-    document.querySelector("#bookmark-detail-title")?.textContent ===
+    document.querySelector("#bookmark-detail-title")?.textContent?.trim() ===
       "Study Notes"
   ));
   await detailNameForm.waitFor({ state: "hidden" });
@@ -1091,7 +1091,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   await page.evaluate(() => window.__telegramState.backHandler?.());
   await page.waitForFunction(() => (
     document.querySelector("#app")?.dataset.activeRoute === "bookmarks" &&
-    document.querySelector("#bookmark-detail-title")?.textContent ===
+    document.querySelector("#bookmark-detail-title")?.textContent?.trim() ===
       "Spiritual Rebirth" &&
     document.activeElement?.getAttribute("data-bookmark-open") ===
       "global_spiritual-rebirth_43_3_3"
@@ -1270,7 +1270,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   await localizedSpiritualRebirth.click();
   await page.waitForFunction(() => (
     !document.querySelector("#bookmark-detail")?.hidden &&
-    document.querySelector("#bookmark-detail-title")?.textContent ===
+    document.querySelector("#bookmark-detail-title")?.textContent?.trim() ===
       "Geestelike wedergeboorte"
   ));
   assert.equal(
@@ -1359,7 +1359,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   ).click();
   await page.waitForFunction(() => (
     !document.querySelector("#bookmark-detail")?.hidden &&
-    document.querySelector("#bookmark-detail-title")?.textContent === "Genade"
+    document.querySelector("#bookmark-detail-title")?.textContent?.trim() === "Genade"
   ));
   const personalGraceRemovalsBefore = contributionBatches.flat().filter(
     (event) => event.type === "verse_remove" &&
