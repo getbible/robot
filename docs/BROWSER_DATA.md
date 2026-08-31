@@ -23,9 +23,10 @@ The reading and persistence split is:
   device-local global-catalog visibility, per-link exclusions, and legacy
   topic mapping; `CloudStorage` is excluded;
 - per-instance, authenticated-user-scoped IndexedDB stores the approved
-  contributor journal and recovery checkpoints; Web Locks coordinate tabs;
-- Robot authorizes contributors, accepts bounded idempotent review events, and
-  publishes the reviewed live global-catalogue overlay;
+  contributor push outbox and explicit global add/remove intents;
+- Robot authorizes contributors, consumes pushed contribution bundles from
+  Telegram `web_app_data` updates, and publishes the reviewed live
+  global-catalogue overlay;
 - Robot authenticates Telegram, retains compatible reader preferences, accepts
   the final ordered post request, validates it, and sends authoritative
   Scripture or an explicitly requested bookmark backup document to Telegram.
@@ -47,7 +48,7 @@ The reading and persistence split is:
 | Bookmark/topic editing and local import/export | Yes | No | No |
 | Bookmark and last-read device/cloud sync | Telegram Mini App storage | No | No |
 | Global catalog visibility and exclusions | Scoped localStorage + Telegram DeviceStorage | No | No |
-| Contributor journal and recovery | Per-instance scoped IndexedDB + Web Locks | Authenticated event intake/review | No |
+| Contributor push outbox and explicit intents | Per-instance scoped IndexedDB | Telegram `web_app_data` intake/review | No |
 | Reviewed live global catalogue | Strict instance-scoped browser cache + bundled fallback | Revisioned publication | No |
 | Private-chat bookmark backup/restore transport | Confirm/merge in browser | Yes | No |
 | Telegram authentication | No | Yes | No |
@@ -70,8 +71,9 @@ flowchart LR
     T --> H[Scoped local ReadingHistoryStore]
     T --> M[BookmarkStore]
     M <-->|newest timestamped aggregate| TS[Telegram DeviceStorage / CloudStorage]
-    T --> C[Contribution journal]
-    C -->|bounded idempotent review events| P
+    T --> C[Contribution push outbox]
+    C -->|numbered GBC1 sendData chunks| G
+    G -->|web_app_data updates| I[Robot contribution intake]
     B -->|final ordered coordinates once| P[Robot protected endpoints]
     M -->|explicit bounded JSON backup| P
     P -->|validated Scripture or private backup document| G[Telegram]
