@@ -312,14 +312,16 @@ No ordinary click may create server basket state. Legacy per-click basket and Ro
 The public HTML shell is not an authentication boundary. Robot validates fresh
 Telegram-signed `initData` and the owner-bound launch during the initial session
 exchange only. It then issues an active opaque session bearer for ordinary
-actions and, only for a currently approved contributor, a separate revocable
-contributor capability. The bot token remains server-side.
+actions, including the contributor status, receipt, and catalogue reads. No
+separate contributor credential exists: a pushed contribution is authorized by
+the Telegram account that sent it. The bot token remains server-side.
 
 The browser is untrusted for final output. It may control display state, but it cannot determine the authoritative text delivered to Telegram. Final output remains bounded, escaped, idempotent, and tied to the originating user, chat, and topic.
 
 The browser is also untrusted for contributor authority and global catalogue
-publication. Every synchronization validates the durable capability and
-current approved numeric Telegram user ID. Client-supplied verse text is never
+publication. Every staged push chunk and every committed contribution is
+validated against the current approved numeric Telegram user ID of the
+sending account. Client-supplied verse text is never
 a review authority; the terminal reviewer fetches and validates the configured
 translation directly from `query.getbible.net` and defers when it is
 unavailable.
@@ -360,7 +362,7 @@ sudo getbible-robot doctor production
 | `MINI_APP_MAX_SEARCHES_PER_SESSION` | Bounded Librarian result snapshots |
 | `MINI_APP_MAX_SELECTIONS` | Browser and final-post selection limit |
 | `MINI_APP_TRUSTED_PROXY_CIDRS` | Optional advanced restriction for forwarded client addresses |
-| `CONTRIBUTION_STORE_FILE` | Absolute private SQLite path; blank disables contribution endpoints and `/contributor` applications |
+| `CONTRIBUTION_STORE_FILE` | Absolute private SQLite path; blank disables `/contributor` applications and the push intake and makes the contribution status/receipt endpoints return `503` |
 | `CONTRIBUTION_CONTRIBUTOR_LIMIT` | Bounded application population |
 | `CONTRIBUTION_EVENT_LIMIT` | Bounded retained event journal |
 
@@ -376,9 +378,10 @@ host address and `MINI_APP_PORT` printed by setup.
 
 The generated Caddy route is deny-by-default. It forwards only packaged
 shell/assets and the bounded Mini App `/api/v1/*` namespace; every other
-request receives an empty `404` without contacting Tornado. Exact backup and
-contribution-sync matchers apply 5 MiB and 1 MiB limits before the general
-64 KiB API matcher. Tornado remains deny-by-default inside that namespace and
+request receives an empty `404` without contacting Tornado. The exact
+`bookmarks/backup` matcher applies its 5 MiB limit before the general 64 KiB
+API matcher; contribution push never traverses this route at all.
+Tornado remains deny-by-default inside that namespace and
 recognizes routes and methods before authentication or rate-limit accounting.
 This prefix prevents a newly deployed API from being stranded behind a stale
 endpoint allow-list without exposing a broad site catch-all.
@@ -428,10 +431,10 @@ After deployment, verify:
     sync and backup;
 18. topic management is alphabetical, while verse assignment shows a clearable
     recent group followed by the full alphabetical list;
-19. an unapproved user never receives a contributor capability or creates
-    server contribution events, while an approved user's one-request snapshot
-    sync commits atomically, replays the same receipt after an ambiguous
-    response, and keeps every local mutation on server failure;
+19. an unapproved user's pushed chunks are refused without creating server
+    contribution events, while an approved user's pushed snapshot commits
+    atomically, an identical resend replays the same receipt, and every local
+    mutation survives server failure;
 20. a newly published live topic appears on the same instance, uses its English
     source when the active locale lacks a translation, and falls back to the
     bundled catalogue when overlay validation fails;
