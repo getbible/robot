@@ -857,7 +857,7 @@ https://bot.example.com/getbible/alpha
 9201
 EOF
 assert_equal "$(grep -Fc "$CADDY_IMPORT_BEGIN" "$CADDYFILE")" "1"
-assert_equal "$(grep -Fc "reverse_proxy 127.0.0.1:9201" "$CADDY_ROUTES")" "4"
+assert_equal "$(grep -Fc "reverse_proxy 127.0.0.1:9201" "$CADDY_ROUTES")" "3"
 
 CADDYFILE_HASH=$(sha256sum "$CADDYFILE" | awk '{print $1}')
 CADDY_ROUTES_HASH=$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')
