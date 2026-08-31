@@ -20,7 +20,7 @@ import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeAlias, cast
 
 ApplicationState = Literal[
     "pending",
@@ -39,6 +39,11 @@ TOPIC_STATES = frozenset({"pending", "mapped", "rejected", "deferred"})
 EVENT_TYPES = frozenset({"topic_upsert", "topic_delete", "verse_add", "verse_remove"})
 
 MAX_CONTRIBUTION_BATCH = 50
+MAX_SNAPSHOT_TOPICS = 100
+MAX_SNAPSHOT_VERSES = 800
+MAX_SNAPSHOT_ASSIGNMENTS_PER_VERSE = 100
+MAX_SNAPSHOT_ASSIGNMENTS = 10_000
+MAX_SYNC_OPERATIONS = 2_000
 MAX_CLIENT_EVENT_ID = 128
 MAX_LOCAL_TOPIC_ID = 128
 MAX_TOPIC_NAME = 80
@@ -52,7 +57,9 @@ MAX_CONTRIBUTION_STATUS_TOPICS = 1000
 MAX_PUBLIC_OVERLAY_TOPICS = 39
 MAX_PUBLIC_OVERLAY_ASSOCIATIONS = 10_000
 MAX_PUBLIC_OVERLAY_BYTES = 2 * 1024 * 1024
-DATABASE_SCHEMA_VERSION = 4
+MAX_ACTIVE_CONTRIBUTOR_CAPABILITIES = 16
+CONTRIBUTOR_CAPABILITY_TTL_SECONDS = 24 * 60 * 60
+DATABASE_SCHEMA_VERSION = 5
 
 # The browser contribution journal accepts this complete separator-safe
 # alphabet in every position. Personal bookmark IDs are a subset, but imported
@@ -62,6 +69,7 @@ _SAFE_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _CANONICAL_TOPIC_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,79}\Z")
 _COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}\Z")
 _CHECKSUM_RE = re.compile(r"[0-9a-f]{64}\Z")
+_CONTRIBUTOR_CAPABILITY_RE = re.compile(r"gbc_[A-Za-z0-9_-]{43}\Z")
 _ENGLISH_TOPIC_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]\Z")
 # Protestant canon order used by the bundled global bookmark catalogue and its
 # repository CSV. Contributions outside this catalogue are rejected before
@@ -305,6 +313,29 @@ class EventBatchResult:
     accepted: int
     replayed: int
     event_ids: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotSyncResult:
+    accepted: int
+    replayed: int
+    event_ids: dict[str, int]
+    snapshot_digest: str
+    replayed_sync: bool
+
+
+NormalizedEvent: TypeAlias = tuple[
+    str,
+    EventType,
+    str,
+    str | None,
+    str | None,
+    int | None,
+    int | None,
+    int | None,
+    str,
+    bytes,
+]
 
 
 class ContributionStore:
@@ -734,6 +765,15 @@ class ContributionStore:
                 """,
                 (state, now, now, state, state, identity),
             )
+            if state != "approved":
+                # Capabilities are deliberately server-revocable.  Removing
+                # them here makes a moderator decision effective immediately;
+                # authenticate_capability also rechecks the application state
+                # so an older process can never retain authority by accident.
+                connection.execute(
+                    "DELETE FROM contributor_capabilities WHERE contributor_id = ?",
+                    (identity,),
+                )
             connection.execute(
                 """
                 INSERT INTO contribution_decisions (
@@ -771,6 +811,129 @@ class ContributionStore:
             assert row is not None
             return _application(row)
 
+    def issue_capability(
+        self,
+        user_id: int,
+        *,
+        ttl_seconds: int = CONTRIBUTOR_CAPABILITY_TTL_SECONDS,
+    ) -> str:
+        """Issue a restart-safe, revocable bearer capability to one contributor.
+
+        Only the SHA-256 digest is retained.  Issuance intentionally creates a
+        fresh capability on every successful exchange: if an HTTP response is
+        lost the caller can retry safely, while the per-user active-token bound
+        prevents unbounded state growth.
+        """
+        identity = _telegram_user_id(user_id)
+        ttl = _positive_integer(
+            ttl_seconds,
+            "ttl_seconds",
+            CONTRIBUTOR_CAPABILITY_TTL_SECONDS,
+        )
+        now = time.time_ns()
+        expires_at = now + ttl * 1_000_000_000
+        with self._guard, self._transaction() as connection:
+            application = connection.execute(
+                "SELECT state FROM contributor_applications WHERE user_id = ?",
+                (identity,),
+            ).fetchone()
+            if application is None or application[0] != "approved":
+                raise ContributionNotAllowed(
+                    "This Telegram user is not an approved contributor."
+                )
+            connection.execute(
+                "DELETE FROM contributor_capabilities WHERE expires_at <= ?",
+                (now,),
+            )
+            active = connection.execute(
+                """
+                SELECT token_digest
+                FROM contributor_capabilities
+                WHERE contributor_id = ?
+                ORDER BY last_used_at, issued_at, token_digest
+                """,
+                (identity,),
+            ).fetchall()
+            overflow = len(active) - MAX_ACTIVE_CONTRIBUTOR_CAPABILITIES + 1
+            if overflow > 0:
+                connection.executemany(
+                    "DELETE FROM contributor_capabilities WHERE token_digest = ?",
+                    ((bytes(row[0]),) for row in active[:overflow]),
+                )
+
+            token: str | None = None
+            digest: bytes | None = None
+            for _ in range(4):
+                candidate = f"gbc_{secrets.token_urlsafe(32)}"
+                candidate_digest = hashlib.sha256(candidate.encode("ascii")).digest()
+                exists = connection.execute(
+                    "SELECT 1 FROM contributor_capabilities WHERE token_digest = ?",
+                    (candidate_digest,),
+                ).fetchone()
+                if exists is None:
+                    token = candidate
+                    digest = candidate_digest
+                    break
+            if token is None or digest is None:
+                raise RuntimeError("Could not allocate a unique contributor capability.")
+            connection.execute(
+                """
+                INSERT INTO contributor_capabilities (
+                    token_digest, contributor_id, issued_at, expires_at, last_used_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (digest, identity, now, expires_at, now),
+            )
+            self._audit_locked(
+                connection,
+                actor=f"telegram:{identity}",
+                action="capability_issued",
+                contributor_id=identity,
+                subject_type="capability",
+                subject_id=digest.hex(),
+                detail={"expires_at": expires_at},
+                now=now,
+            )
+        return token
+
+    def authenticate_capability(self, token: str) -> int:
+        """Resolve an unexpired capability and recheck current approval."""
+        if not isinstance(token, str) or _CONTRIBUTOR_CAPABILITY_RE.fullmatch(token) is None:
+            raise ContributionNotAllowed("The contributor capability is invalid or expired.")
+        digest = hashlib.sha256(token.encode("ascii")).digest()
+        now = time.time_ns()
+        identity: int | None = None
+        with self._guard, self._transaction() as connection:
+            connection.execute(
+                "DELETE FROM contributor_capabilities WHERE expires_at <= ?",
+                (now,),
+            )
+            row = connection.execute(
+                """
+                SELECT capability.contributor_id
+                FROM contributor_capabilities AS capability
+                JOIN contributor_applications AS application
+                  ON application.user_id = capability.contributor_id
+                WHERE capability.token_digest = ?
+                  AND capability.expires_at > ?
+                  AND application.state = 'approved'
+                """,
+                (digest, now),
+            ).fetchone()
+            if row is not None:
+                identity = int(row[0])
+                connection.execute(
+                    """
+                    UPDATE contributor_capabilities
+                    SET last_used_at = ?
+                    WHERE token_digest = ? AND expires_at > ?
+                    """,
+                    (now, digest, now),
+                )
+        if identity is None:
+            raise ContributionNotAllowed("The contributor capability is invalid or expired.")
+        return identity
+
     def record_events(
         self,
         contributor_id: int,
@@ -788,174 +951,455 @@ class ContributionStore:
         if len(set(client_ids)) != len(client_ids):
             raise ContributionError("client_event_id values must be unique in a batch.")
         now = time.time_ns()
-        accepted = 0
-        replayed = 0
-        event_ids: dict[str, int] = {}
         with self._guard, self._transaction() as connection:
-            application = connection.execute(
-                """
-                SELECT state, disclosure_acknowledged_at
-                FROM contributor_applications WHERE user_id = ?
-                """,
-                (identity,),
-            ).fetchone()
-            if application is None or application[0] != "approved":
-                raise ContributionNotAllowed("This Telegram user is not an approved contributor.")
-            if application[1] is None:
-                raise ContributionNotAllowed(
-                    "The contributor disclosure must be acknowledged first."
-                )
-            current_events = int(
-                connection.execute("SELECT COUNT(*) FROM contribution_events").fetchone()[0]
+            self._require_contributor_locked(connection, identity, require_disclosure=True)
+            return self._record_normalized_events_locked(
+                connection,
+                identity,
+                normalized,
+                now=now,
             )
-            for (
-                client_event_id,
-                event_type,
-                local_topic_id,
-                topic_name,
-                topic_color,
-                book,
-                chapter,
-                verse,
-                payload_json,
-                digest,
-            ) in normalized:
-                existing = connection.execute(
-                    """
-                    SELECT id, payload_digest FROM contribution_events
-                    WHERE contributor_id = ? AND client_event_id = ?
-                    """,
-                    (identity, client_event_id),
-                ).fetchone()
-                if existing is not None:
-                    if not _constant_digest_equal(bytes(existing[1]), digest):
-                        raise ContributionIdempotencyConflict(
-                            "client_event_id was already used for different data."
-                        )
-                    connection.execute(
-                        """
-                        UPDATE contribution_events
-                        SET replay_count = replay_count + 1, updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (now, int(existing[0])),
+
+    def synchronize_snapshot(
+        self,
+        contributor_id: int,
+        *,
+        sync_id: str,
+        client_id: str,
+        snapshot: Mapping[str, object],
+        operations: Sequence[Mapping[str, object]] = (),
+        disclosure_acknowledged: bool = False,
+    ) -> SnapshotSyncResult:
+        """Atomically reconcile one client's complete desired contribution state.
+
+        The snapshot, its derived moderation events, any explicit compatibility
+        operations, disclosure acknowledgement, and retry receipt share one
+        SQLite transaction.  Consequently an HTTP timeout can be retried with
+        the same ``sync_id`` without duplicating or partially applying work.
+        """
+        identity = _telegram_user_id(contributor_id)
+        checked_sync_id = _safe_id(sync_id, "sync_id")
+        checked_client_id = _safe_id(client_id, "client_id")
+        if not isinstance(disclosure_acknowledged, bool):
+            raise ContributionError("disclosure_acknowledged must be a boolean.")
+        normalized_snapshot = _normalize_snapshot(snapshot)
+        if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
+            raise ContributionError("operations must be an array.")
+        if len(operations) > MAX_SYNC_OPERATIONS:
+            raise ContributionError(
+                f"operations cannot contain more than {MAX_SYNC_OPERATIONS} items."
+            )
+        normalized_operations = tuple(_normalize_event(value) for value in operations)
+        operation_ids = [value[0] for value in normalized_operations]
+        if len(set(operation_ids)) != len(operation_ids):
+            raise ContributionError("client_event_id values must be unique in operations.")
+
+        snapshot_json = _json(normalized_snapshot)
+        snapshot_digest = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+        request_json = _json(
+            {
+                "client_id": checked_client_id,
+                "snapshot": normalized_snapshot,
+                "operations": [json.loads(value[8]) for value in normalized_operations],
+                "disclosure_acknowledged": disclosure_acknowledged,
+            }
+        )
+        request_digest = hashlib.sha256(request_json.encode("utf-8")).digest()
+        now = time.time_ns()
+
+        with self._guard, self._transaction() as connection:
+            application = self._require_contributor_locked(
+                connection,
+                identity,
+                require_disclosure=False,
+            )
+            receipt = connection.execute(
+                """
+                SELECT request_digest, accepted, replayed, event_ids_json,
+                       snapshot_digest
+                FROM contribution_sync_receipts
+                WHERE contributor_id = ? AND sync_id = ?
+                """,
+                (identity, checked_sync_id),
+            ).fetchone()
+            if receipt is not None:
+                if not _constant_digest_equal(bytes(receipt[0]), request_digest):
+                    raise ContributionIdempotencyConflict(
+                        "sync_id was already used for different data."
                     )
-                    replayed += 1
-                    event_ids[client_event_id] = int(existing[0])
-                    continue
-                if current_events + accepted >= self._max_events:
-                    raise ContributionError("Contribution event capacity is full.")
-                connection.execute(
-                    """
-                    INSERT INTO contributor_source_topics (
-                        contributor_id, local_topic_id, name, color, aliases,
-                        state, canonical_topic_id, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, '[]', 'pending', NULL, ?, ?)
-                    ON CONFLICT(contributor_id, local_topic_id) DO UPDATE SET
-                        name = CASE
-                            WHEN ? = 'topic_upsert' THEN excluded.name
-                            ELSE COALESCE(
-                                contributor_source_topics.name,
-                                excluded.name
-                            )
-                        END,
-                        color = CASE
-                            WHEN ? = 'topic_upsert' THEN excluded.color
-                            ELSE COALESCE(
-                                contributor_source_topics.color,
-                                excluded.color
-                            )
-                        END,
-                        updated_at = excluded.updated_at,
-                        state = CASE
-                            WHEN contributor_source_topics.state = 'rejected'
-                                THEN 'pending'
-                            ELSE contributor_source_topics.state
-                        END
-                    """,
-                    (
-                        identity,
-                        local_topic_id,
-                        topic_name,
-                        topic_color,
-                        now,
-                        now,
-                        event_type,
-                        event_type,
-                    ),
+                return SnapshotSyncResult(
+                    accepted=int(receipt[1]),
+                    replayed=int(receipt[2]),
+                    event_ids={
+                        str(key): int(value)
+                        for key, value in json.loads(str(receipt[3])).items()
+                    },
+                    snapshot_digest=str(receipt[4]),
+                    replayed_sync=True,
                 )
-                source_mapping = connection.execute(
-                    """
-                    SELECT state, canonical_topic_id
-                    FROM contributor_source_topics
-                    WHERE contributor_id = ? AND local_topic_id = ?
-                    """,
-                    (identity, local_topic_id),
-                ).fetchone()
-                assert source_mapping is not None
-                event_canonical = (
-                    cast(str | None, source_mapping[1])
-                    if str(source_mapping[0]) == "mapped"
-                    else None
-                )
-                if event_type in {"topic_upsert", "topic_delete"}:
-                    # A mapped source may later propose a rename/recolour or a
-                    # deletion.  Reopen it for an explicit moderator decision;
-                    # retaining the mapping makes merge review intelligible but
-                    # never silently mutates the canonical definition.
-                    connection.execute(
-                        """
-                        UPDATE contributor_source_topics
-                        SET state = 'pending', updated_at = ?
-                        WHERE contributor_id = ? AND local_topic_id = ?
-                        """,
-                        (now, identity, local_topic_id),
-                    )
+
+            if application[1] is None and disclosure_acknowledged:
                 cursor = connection.execute(
                     """
-                    INSERT INTO contribution_events (
-                        contributor_id, client_event_id, event_type,
-                        local_topic_id, topic_name, topic_color, book, chapter,
-                        verse, payload_json, payload_digest, state,
-                        canonical_topic_id, replay_count, submitted_at,
-                        updated_at, decided_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending',
-                              ?, 0, ?, ?, NULL)
+                    UPDATE contributor_applications
+                    SET disclosure_acknowledged_at = ?, updated_at = ?
+                    WHERE user_id = ? AND state = 'approved'
+                      AND disclosure_acknowledged_at IS NULL
                     """,
-                    (
-                        identity,
-                        client_event_id,
-                        event_type,
-                        local_topic_id,
-                        topic_name,
-                        topic_color,
-                        book,
-                        chapter,
-                        verse,
-                        payload_json,
-                        digest,
-                        event_canonical,
-                        now,
-                        now,
-                    ),
+                    (now, now, identity),
                 )
-                if cursor.lastrowid is None:
-                    raise RuntimeError("SQLite did not return a contribution event ID.")
-                server_id = int(cursor.lastrowid)
-                event_ids[client_event_id] = server_id
-                accepted += 1
-            if accepted:
+                if cursor.rowcount != 1:
+                    raise ContributionNotAllowed(
+                        "This Telegram user is not an approved contributor."
+                    )
                 self._audit_locked(
                     connection,
                     actor=f"telegram:{identity}",
-                    action="events_submitted",
+                    action="disclosure_acknowledged",
                     contributor_id=identity,
-                    subject_type="event_batch",
-                    subject_id=f"{now}:{accepted}",
-                    detail={"accepted": accepted, "replayed": replayed},
+                    subject_type="application",
+                    subject_id=str(identity),
+                    detail={},
                     now=now,
                 )
+            elif application[1] is None:
+                raise ContributionNotAllowed(
+                    "The contributor disclosure must be acknowledged first."
+                )
+
+            previous_row = connection.execute(
+                """
+                SELECT snapshot_json
+                FROM contribution_client_snapshots
+                WHERE contributor_id = ? AND client_id = ?
+                """,
+                (identity, checked_client_id),
+            ).fetchone()
+            if previous_row is not None:
+                previous_snapshot = cast(
+                    dict[str, object], json.loads(str(previous_row[0]))
+                )
+            else:
+                any_v5_snapshot = connection.execute(
+                    """
+                    SELECT 1 FROM contribution_client_snapshots
+                    WHERE contributor_id = ? LIMIT 1
+                    """,
+                    (identity,),
+                ).fetchone()
+                previous_snapshot = (
+                    self._legacy_snapshot_locked(connection, identity)
+                    if any_v5_snapshot is None
+                    else {"topics": [], "assignments": []}
+                )
+            derived = tuple(
+                _normalize_event(value)
+                for value in _snapshot_diff_events(
+                    checked_sync_id,
+                    previous_snapshot,
+                    normalized_snapshot,
+                )
+            )
+            normalized_events = (*derived, *normalized_operations)
+            all_client_ids = [value[0] for value in normalized_events]
+            if len(set(all_client_ids)) != len(all_client_ids):
+                raise ContributionError(
+                    "Generated and explicit client_event_id values must be unique."
+                )
+            result = self._record_normalized_events_locked(
+                connection,
+                identity,
+                normalized_events,
+                now=now,
+            )
+            connection.execute(
+                """
+                INSERT INTO contribution_client_snapshots (
+                    contributor_id, client_id, snapshot_json, snapshot_digest,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(contributor_id, client_id) DO UPDATE SET
+                    snapshot_json = excluded.snapshot_json,
+                    snapshot_digest = excluded.snapshot_digest,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    identity,
+                    checked_client_id,
+                    snapshot_json,
+                    bytes.fromhex(snapshot_digest),
+                    now,
+                    now,
+                ),
+            )
+            event_ids_json = _json(result.event_ids)
+            connection.execute(
+                """
+                INSERT INTO contribution_sync_receipts (
+                    contributor_id, sync_id, client_id, request_digest,
+                    accepted, replayed, event_ids_json, snapshot_digest,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    identity,
+                    checked_sync_id,
+                    checked_client_id,
+                    request_digest,
+                    result.accepted,
+                    result.replayed,
+                    event_ids_json,
+                    snapshot_digest,
+                    now,
+                ),
+            )
+            self._audit_locked(
+                connection,
+                actor=f"telegram:{identity}",
+                action="snapshot_synchronized",
+                contributor_id=identity,
+                subject_type="sync",
+                subject_id=checked_sync_id,
+                detail={
+                    "accepted": result.accepted,
+                    "replayed": result.replayed,
+                    "snapshot_digest": snapshot_digest,
+                },
+                now=now,
+            )
+            return SnapshotSyncResult(
+                accepted=result.accepted,
+                replayed=result.replayed,
+                event_ids=result.event_ids,
+                snapshot_digest=snapshot_digest,
+                replayed_sync=False,
+            )
+
+    @staticmethod
+    def _require_contributor_locked(
+        connection: sqlite3.Connection,
+        identity: int,
+        *,
+        require_disclosure: bool,
+    ) -> sqlite3.Row:
+        application = connection.execute(
+            """
+            SELECT state, disclosure_acknowledged_at
+            FROM contributor_applications WHERE user_id = ?
+            """,
+            (identity,),
+        ).fetchone()
+        if application is None or application[0] != "approved":
+            raise ContributionNotAllowed("This Telegram user is not an approved contributor.")
+        if require_disclosure and application[1] is None:
+            raise ContributionNotAllowed(
+                "The contributor disclosure must be acknowledged first."
+            )
+        return application
+
+    def _record_normalized_events_locked(
+        self,
+        connection: sqlite3.Connection,
+        identity: int,
+        normalized: Sequence[NormalizedEvent],
+        *,
+        now: int,
+    ) -> EventBatchResult:
+        accepted = 0
+        replayed = 0
+        event_ids: dict[str, int] = {}
+        current_events = int(
+            connection.execute("SELECT COUNT(*) FROM contribution_events").fetchone()[0]
+        )
+        for (
+            client_event_id,
+            event_type,
+            local_topic_id,
+            topic_name,
+            topic_color,
+            book,
+            chapter,
+            verse,
+            payload_json,
+            digest,
+        ) in normalized:
+            existing = connection.execute(
+                """
+                SELECT id, payload_digest FROM contribution_events
+                WHERE contributor_id = ? AND client_event_id = ?
+                """,
+                (identity, client_event_id),
+            ).fetchone()
+            if existing is not None:
+                if not _constant_digest_equal(bytes(existing[1]), digest):
+                    raise ContributionIdempotencyConflict(
+                        "client_event_id was already used for different data."
+                    )
+                connection.execute(
+                    """
+                    UPDATE contribution_events
+                    SET replay_count = replay_count + 1, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, int(existing[0])),
+                )
+                replayed += 1
+                event_ids[client_event_id] = int(existing[0])
+                continue
+            if current_events + accepted >= self._max_events:
+                raise ContributionError("Contribution event capacity is full.")
+            connection.execute(
+                """
+                INSERT INTO contributor_source_topics (
+                    contributor_id, local_topic_id, name, color, aliases,
+                    state, canonical_topic_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, '[]', 'pending', NULL, ?, ?)
+                ON CONFLICT(contributor_id, local_topic_id) DO UPDATE SET
+                    name = CASE
+                        WHEN ? = 'topic_upsert' THEN excluded.name
+                        ELSE COALESCE(contributor_source_topics.name, excluded.name)
+                    END,
+                    color = CASE
+                        WHEN ? = 'topic_upsert' THEN excluded.color
+                        ELSE COALESCE(contributor_source_topics.color, excluded.color)
+                    END,
+                    updated_at = excluded.updated_at,
+                    state = CASE
+                        WHEN contributor_source_topics.state = 'rejected' THEN 'pending'
+                        ELSE contributor_source_topics.state
+                    END
+                """,
+                (
+                    identity,
+                    local_topic_id,
+                    topic_name,
+                    topic_color,
+                    now,
+                    now,
+                    event_type,
+                    event_type,
+                ),
+            )
+            source_mapping = connection.execute(
+                """
+                SELECT state, canonical_topic_id
+                FROM contributor_source_topics
+                WHERE contributor_id = ? AND local_topic_id = ?
+                """,
+                (identity, local_topic_id),
+            ).fetchone()
+            assert source_mapping is not None
+            event_canonical = (
+                cast(str | None, source_mapping[1])
+                if str(source_mapping[0]) == "mapped"
+                else None
+            )
+            if event_type in {"topic_upsert", "topic_delete"}:
+                connection.execute(
+                    """
+                    UPDATE contributor_source_topics
+                    SET state = 'pending', updated_at = ?
+                    WHERE contributor_id = ? AND local_topic_id = ?
+                    """,
+                    (now, identity, local_topic_id),
+                )
+            cursor = connection.execute(
+                """
+                INSERT INTO contribution_events (
+                    contributor_id, client_event_id, event_type,
+                    local_topic_id, topic_name, topic_color, book, chapter,
+                    verse, payload_json, payload_digest, state,
+                    canonical_topic_id, replay_count, submitted_at,
+                    updated_at, decided_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending',
+                          ?, 0, ?, ?, NULL)
+                """,
+                (
+                    identity,
+                    client_event_id,
+                    event_type,
+                    local_topic_id,
+                    topic_name,
+                    topic_color,
+                    book,
+                    chapter,
+                    verse,
+                    payload_json,
+                    digest,
+                    event_canonical,
+                    now,
+                    now,
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise RuntimeError("SQLite did not return a contribution event ID.")
+            event_ids[client_event_id] = int(cursor.lastrowid)
+            accepted += 1
+        if accepted:
+            self._audit_locked(
+                connection,
+                actor=f"telegram:{identity}",
+                action="events_submitted",
+                contributor_id=identity,
+                subject_type="event_batch",
+                subject_id=f"{now}:{accepted}",
+                detail={"accepted": accepted, "replayed": replayed},
+                now=now,
+            )
         return EventBatchResult(accepted, replayed, event_ids)
+
+    @staticmethod
+    def _legacy_snapshot_locked(
+        connection: sqlite3.Connection,
+        identity: int,
+    ) -> dict[str, object]:
+        """Reconstruct the legacy journal's last desired state once per client."""
+        rows = connection.execute(
+            """
+            SELECT event_type, local_topic_id, topic_name, topic_color,
+                   book, chapter, verse
+            FROM contribution_events
+            WHERE contributor_id = ?
+            ORDER BY id
+            """,
+            (identity,),
+        ).fetchall()
+        topics: dict[str, dict[str, object]] = {}
+        assignments: set[tuple[str, int, int, int]] = set()
+        for row in rows:
+            event_type = str(row[0])
+            topic_id = str(row[1])
+            name = cast(str | None, row[2])
+            color = cast(str | None, row[3])
+            if event_type == "topic_upsert" and name is not None and color is not None:
+                topics[topic_id] = {"id": topic_id, "name": name, "color": color}
+            elif event_type == "topic_delete":
+                topics.pop(topic_id, None)
+                assignments = {value for value in assignments if value[0] != topic_id}
+            elif event_type in {"verse_add", "verse_remove"}:
+                if name is not None and color is not None:
+                    topics.setdefault(
+                        topic_id,
+                        {"id": topic_id, "name": name, "color": color},
+                    )
+                coordinate = (
+                    topic_id,
+                    int(row[4]),
+                    int(row[5]),
+                    int(row[6]),
+                )
+                if event_type == "verse_add":
+                    assignments.add(coordinate)
+                else:
+                    assignments.discard(coordinate)
+        assignments = {value for value in assignments if value[0] in topics}
+        return {
+            "topics": sorted(topics.values(), key=lambda value: cast(str, value["id"])),
+            "assignments": [
+                {"topic_id": value[0], "book": value[1], "chapter": value[2], "verse": value[3]}
+                for value in sorted(assignments)
+            ],
+        }
 
     def list_source_topics(
         self,
@@ -1937,11 +2381,16 @@ class ContributionStore:
                 self._migrate_v1_to_v2(connection)
                 self._migrate_v2_to_v3(connection)
                 self._migrate_v3_to_v4(connection)
+                self._migrate_v4_to_v5(connection)
             elif user_version == 2:
                 self._migrate_v2_to_v3(connection)
                 self._migrate_v3_to_v4(connection)
+                self._migrate_v4_to_v5(connection)
             elif user_version == 3:
                 self._migrate_v3_to_v4(connection)
+                self._migrate_v4_to_v5(connection)
+            elif user_version == 4:
+                self._migrate_v4_to_v5(connection)
             self._ensure_seed_state(connection)
         except BaseException:
             connection.close()
@@ -2108,7 +2557,48 @@ class ContributionStore:
                 repo_error TEXT,
                 updated_at INTEGER NOT NULL
             );
-            PRAGMA user_version=4;
+
+            CREATE TABLE IF NOT EXISTS contribution_client_snapshots (
+                contributor_id INTEGER NOT NULL,
+                client_id TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                snapshot_digest BLOB NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (contributor_id, client_id),
+                FOREIGN KEY (contributor_id)
+                    REFERENCES contributor_applications(user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS contribution_sync_receipts (
+                contributor_id INTEGER NOT NULL,
+                sync_id TEXT NOT NULL,
+                client_id TEXT NOT NULL,
+                request_digest BLOB NOT NULL,
+                accepted INTEGER NOT NULL,
+                replayed INTEGER NOT NULL,
+                event_ids_json TEXT NOT NULL,
+                snapshot_digest TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (contributor_id, sync_id),
+                FOREIGN KEY (contributor_id)
+                    REFERENCES contributor_applications(user_id)
+            );
+            CREATE INDEX IF NOT EXISTS contribution_sync_receipts_created
+                ON contribution_sync_receipts (created_at, contributor_id);
+
+            CREATE TABLE IF NOT EXISTS contributor_capabilities (
+                token_digest BLOB PRIMARY KEY,
+                contributor_id INTEGER NOT NULL,
+                issued_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                last_used_at INTEGER NOT NULL,
+                FOREIGN KEY (contributor_id)
+                    REFERENCES contributor_applications(user_id)
+            );
+            CREATE INDEX IF NOT EXISTS contributor_capabilities_owner
+                ON contributor_capabilities (contributor_id, expires_at, last_used_at);
+            PRAGMA user_version=5;
             COMMIT;
             """
         )
@@ -2205,6 +2695,55 @@ class ContributionStore:
             raise
         else:
             connection.execute("COMMIT")
+
+    @staticmethod
+    def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
+        """Add atomic snapshot receipts and durable contributor capabilities."""
+        connection.executescript(
+            """
+            BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS contribution_client_snapshots (
+                contributor_id INTEGER NOT NULL,
+                client_id TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                snapshot_digest BLOB NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (contributor_id, client_id),
+                FOREIGN KEY (contributor_id)
+                    REFERENCES contributor_applications(user_id)
+            );
+            CREATE TABLE IF NOT EXISTS contribution_sync_receipts (
+                contributor_id INTEGER NOT NULL,
+                sync_id TEXT NOT NULL,
+                client_id TEXT NOT NULL,
+                request_digest BLOB NOT NULL,
+                accepted INTEGER NOT NULL,
+                replayed INTEGER NOT NULL,
+                event_ids_json TEXT NOT NULL,
+                snapshot_digest TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (contributor_id, sync_id),
+                FOREIGN KEY (contributor_id)
+                    REFERENCES contributor_applications(user_id)
+            );
+            CREATE INDEX IF NOT EXISTS contribution_sync_receipts_created
+                ON contribution_sync_receipts (created_at, contributor_id);
+            CREATE TABLE IF NOT EXISTS contributor_capabilities (
+                token_digest BLOB PRIMARY KEY,
+                contributor_id INTEGER NOT NULL,
+                issued_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                last_used_at INTEGER NOT NULL,
+                FOREIGN KEY (contributor_id)
+                    REFERENCES contributor_applications(user_id)
+            );
+            CREATE INDEX IF NOT EXISTS contributor_capabilities_owner
+                ON contributor_capabilities (contributor_id, expires_at, last_used_at);
+            PRAGMA user_version=5;
+            COMMIT;
+            """
+        )
 
     @staticmethod
     def _ensure_seed_state(connection: sqlite3.Connection) -> None:
@@ -2505,20 +3044,178 @@ def normalize_catalog(value: Mapping[str, object]) -> dict[str, Any]:
     return normalized
 
 
-def _normalize_event(
-    raw: Mapping[str, object],
-) -> tuple[
-    str,
-    EventType,
-    str,
-    str | None,
-    str | None,
-    int | None,
-    int | None,
-    int | None,
-    str,
-    bytes,
-]:
+def _normalize_snapshot(raw: Mapping[str, object]) -> dict[str, object]:
+    if not isinstance(raw, Mapping) or set(raw) != {"topics", "assignments"}:
+        raise ContributionError("snapshot must contain topics and assignments.")
+    raw_topics = raw.get("topics")
+    if not isinstance(raw_topics, Sequence) or isinstance(raw_topics, (str, bytes)):
+        raise ContributionError("snapshot topics must be an array.")
+    if len(raw_topics) > MAX_SNAPSHOT_TOPICS:
+        raise ContributionError(
+            f"snapshot cannot contain more than {MAX_SNAPSHOT_TOPICS} topics."
+        )
+    topics: dict[str, dict[str, object]] = {}
+    for raw_topic in raw_topics:
+        if not isinstance(raw_topic, Mapping) or set(raw_topic) != {"id", "name", "color"}:
+            raise ContributionError("Each snapshot topic must contain id, name, and color.")
+        topic_id = _safe_id(raw_topic.get("id"), "topic id")
+        if topic_id in topics:
+            raise ContributionError("snapshot topic IDs must be unique.")
+        topics[topic_id] = {
+            "id": topic_id,
+            "name": _topic_name(raw_topic.get("name")),
+            "color": _color(raw_topic.get("color")),
+        }
+
+    raw_assignments = raw.get("assignments")
+    if not isinstance(raw_assignments, Sequence) or isinstance(
+        raw_assignments, (str, bytes)
+    ):
+        raise ContributionError("snapshot assignments must be an array.")
+    if len(raw_assignments) > MAX_SNAPSHOT_ASSIGNMENTS:
+        raise ContributionError(
+            f"snapshot cannot contain more than {MAX_SNAPSHOT_ASSIGNMENTS} assignments."
+        )
+    assignments: set[tuple[str, int, int, int]] = set()
+    per_verse: dict[tuple[int, int, int], set[str]] = {}
+    for raw_assignment in raw_assignments:
+        if not isinstance(raw_assignment, Mapping) or set(raw_assignment) != {
+            "topic_id",
+            "book",
+            "chapter",
+            "verse",
+        }:
+            raise ContributionError(
+                "Each snapshot assignment must contain topic_id, book, chapter, and verse."
+            )
+        topic_id = _safe_id(raw_assignment.get("topic_id"), "assignment topic_id")
+        if topic_id not in topics:
+            raise ContributionError("Every snapshot assignment must reference a snapshot topic.")
+        book, chapter, verse = _scripture_coordinate(
+            raw_assignment.get("book"),
+            raw_assignment.get("chapter"),
+            raw_assignment.get("verse"),
+        )
+        assignment = (topic_id, book, chapter, verse)
+        if assignment in assignments:
+            continue
+        assignments.add(assignment)
+        coordinate = (book, chapter, verse)
+        per_verse.setdefault(coordinate, set()).add(topic_id)
+        if len(per_verse) > MAX_SNAPSHOT_VERSES:
+            raise ContributionError(
+                f"snapshot cannot contain more than {MAX_SNAPSHOT_VERSES} unique verses."
+            )
+        if len(per_verse[coordinate]) > MAX_SNAPSHOT_ASSIGNMENTS_PER_VERSE:
+            raise ContributionError(
+                "A verse cannot have more than "
+                f"{MAX_SNAPSHOT_ASSIGNMENTS_PER_VERSE} topic assignments."
+            )
+    return {
+        "topics": [topics[topic_id] for topic_id in sorted(topics)],
+        "assignments": [
+            {"topic_id": value[0], "book": value[1], "chapter": value[2], "verse": value[3]}
+            for value in sorted(assignments)
+        ],
+    }
+
+
+def _snapshot_diff_events(
+    sync_id: str,
+    previous: Mapping[str, object],
+    desired: Mapping[str, object],
+) -> tuple[dict[str, object], ...]:
+    previous_topics = {
+        cast(str, value["id"]): value
+        for value in cast(list[dict[str, object]], previous["topics"])
+    }
+    desired_topics = {
+        cast(str, value["id"]): value
+        for value in cast(list[dict[str, object]], desired["topics"])
+    }
+    previous_assignments = {
+        (
+            cast(str, value["topic_id"]),
+            cast(int, value["book"]),
+            cast(int, value["chapter"]),
+            cast(int, value["verse"]),
+        )
+        for value in cast(list[dict[str, object]], previous["assignments"])
+    }
+    desired_assignments = {
+        (
+            cast(str, value["topic_id"]),
+            cast(int, value["book"]),
+            cast(int, value["chapter"]),
+            cast(int, value["verse"]),
+        )
+        for value in cast(list[dict[str, object]], desired["assignments"])
+    }
+    raw_events: list[dict[str, object]] = []
+    sync_digest = hashlib.sha256(sync_id.encode("utf-8")).hexdigest()
+
+    def event_id() -> str:
+        return f"sync:{sync_digest}:{len(raw_events):06d}"
+
+    for topic_id in sorted(desired_topics):
+        topic = desired_topics[topic_id]
+        if previous_topics.get(topic_id) == topic:
+            continue
+        raw_events.append(
+            {
+                "client_event_id": event_id(),
+                "type": "topic_upsert",
+                "topic": {
+                    "local_topic_id": topic_id,
+                    "name": topic["name"],
+                    "color": topic["color"],
+                },
+            }
+        )
+    for topic_id, book, chapter, verse in sorted(
+        desired_assignments - previous_assignments
+    ):
+        topic = desired_topics[topic_id]
+        raw_events.append(
+            {
+                "client_event_id": event_id(),
+                "type": "verse_add",
+                "topic": {
+                    "local_topic_id": topic_id,
+                    "name": topic["name"],
+                    "color": topic["color"],
+                },
+                "verse": {"book": book, "chapter": chapter, "verse": verse},
+            }
+        )
+    for topic_id, book, chapter, verse in sorted(
+        previous_assignments - desired_assignments
+    ):
+        topic = previous_topics[topic_id]
+        raw_events.append(
+            {
+                "client_event_id": event_id(),
+                "type": "verse_remove",
+                "topic": {
+                    "local_topic_id": topic_id,
+                    "name": topic["name"],
+                    "color": topic["color"],
+                },
+                "verse": {"book": book, "chapter": chapter, "verse": verse},
+            }
+        )
+    for topic_id in sorted(previous_topics.keys() - desired_topics.keys()):
+        raw_events.append(
+            {
+                "client_event_id": event_id(),
+                "type": "topic_delete",
+                "topic": {"local_topic_id": topic_id},
+            }
+        )
+    return tuple(raw_events)
+
+
+def _normalize_event(raw: Mapping[str, object]) -> NormalizedEvent:
     if not isinstance(raw, Mapping):
         raise ContributionError("Each contribution event must be an object.")
     if set(raw) != {"client_event_id", "type", "topic"} and set(raw) != {

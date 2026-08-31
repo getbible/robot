@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import hmac
 import json
 import logging
 import math
@@ -78,11 +77,13 @@ from .service import ScriptureQuery, ScriptureService
 LOGGER = logging.getLogger(__name__)
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
 _BEARER_RE = re.compile(r"Bearer ([A-Za-z0-9_-]{16,128})\Z")
+_CONTRIBUTION_BEARER_RE = re.compile(r"Bearer (gbc_[A-Za-z0-9_-]{16,252})\Z")
 _ERROR_CODE_RE = re.compile(r"[a-z0-9_]{1,64}\Z")
 _DIRECT_SELECTION_RE = re.compile(
     r"gbd_([a-z0-9][a-z0-9._-]{0,63})_([0-9]{3})_([0-9]{4})_([0-9]{4})\Z"
 )
 MAX_MINIAPP_CHAPTER_VERSES = 250
+MAX_CONTRIBUTION_SYNC_REQUEST_BYTES = 1024 * 1024
 _MAX_JAVASCRIPT_SAFE_INTEGER = (1 << 53) - 1
 _PREFERENCE_UNCHANGED = object()
 _SEARCH_ENUMS: dict[str, frozenset[str]] = {
@@ -134,6 +135,20 @@ def _unavailable_contribution_status() -> dict[str, object]:
             },
         },
     }
+
+
+def _committed_contribution_status() -> dict[str, object]:
+    """Return a safe full status when post-commit enrichment is unavailable."""
+    status = _unavailable_contribution_status()
+    status.update(
+        {
+            "enabled": True,
+            "state": "approved",
+            "can_contribute": True,
+            "disclosure_required": False,
+        }
+    )
+    return status
 
 
 def _legacy_contribution_status(status: Mapping[str, object]) -> dict[str, object]:
@@ -383,11 +398,11 @@ class MiniAppApi:
                     "Access-Control-Max-Age": "600",
                 },
             )
-        request_body_limit = (
-            MAX_BOOKMARK_BACKUP_REQUEST_BYTES
-            if parts.path == f"{self._api_prefix}/bookmarks/backup"
-            else self._max_body
-        )
+        request_body_limit = self._max_body
+        if parts.path == f"{self._api_prefix}/bookmarks/backup":
+            request_body_limit = MAX_BOOKMARK_BACKUP_REQUEST_BYTES
+        elif parts.path == f"{self._api_prefix}/contributions/sync":
+            request_body_limit = MAX_CONTRIBUTION_SYNC_REQUEST_BYTES
         if len(request.body) > request_body_limit:
             return self._error_response(
                 413,
@@ -406,6 +421,11 @@ class MiniAppApi:
                     session = await self._authenticated(request)
                     return await self._revoke_session(session)
                 return self._method_not_allowed("GET, POST, DELETE, OPTIONS")
+
+            if parts.path == f"{self._api_prefix}/contributions/sync":
+                if method != "POST":
+                    return self._method_not_allowed("POST, OPTIONS")
+                return await self._synchronize_contributions(request)
 
             session = await self._authenticated(request)
             if parts.path == f"{self._api_prefix}/translations":
@@ -609,6 +629,7 @@ class MiniAppApi:
             f"{self._api_prefix}/preferences": ("PUT",),
             f"{self._api_prefix}/contributions/status": ("GET", "PATCH"),
             f"{self._api_prefix}/contributions/events": ("POST",),
+            f"{self._api_prefix}/contributions/sync": ("POST",),
             f"{self._api_prefix}/bookmarks/catalog": ("GET",),
             f"{self._api_prefix}/bookmarks/backup": ("POST",),
             f"{self._api_prefix}/bookmarks/restore": ("GET", "DELETE"),
@@ -643,6 +664,41 @@ class MiniAppApi:
         ):
             raise MiniAppAuthenticationError("Invalid Mini App launch.")
         launch_token = supplied_launch or principal.start_param
+        init_data_digest = hashlib.sha256(init_data.encode("utf-8")).digest()
+
+        # A successful exchange may commit its in-memory session immediately
+        # before the HTTP response is lost.  Recover that exact exchange by
+        # the validated Telegram user plus the digest of the complete signed
+        # initData.  This is deliberately checked independently of the replay
+        # cache so retryability lasts for the active session, not just for the
+        # replay-cache TTL.
+        exact_session = self._sessions.find_by_init_data(
+            init_data_digest,
+            user_id=principal.user_id,
+        )
+        if exact_session is not None:
+            expected_launch_token = (
+                None
+                if exact_session.launch.token == "generic-private"
+                else exact_session.launch.token
+            )
+            if launch_token != expected_launch_token:
+                raise MiniAppAuthenticationError("Invalid Mini App launch.")
+            await self._limiter.acquire(
+                user_id=principal.user_id,
+                chat_id=principal.rate_limit_chat_id,
+                client_key=request.client_key,
+            )
+            if not self._sessions.rebind(
+                exact_session,
+                principal,
+                init_data_digest=init_data_digest,
+            ):
+                raise MiniAppAuthenticationError("Invalid Mini App launch.")
+            return await self._session_bootstrap(
+                exact_session,
+                status=200,
+            )
 
         if self._replay_guard.contains(init_data):
             raise MiniAppReplayError("Telegram authorization was replayed.")
@@ -679,7 +735,6 @@ class MiniAppApi:
         )
         translation = self._preferences.translation_for(principal.user_id)
         translations = await self._service.translations()
-        init_data_digest = hashlib.sha256(init_data.encode("utf-8")).digest()
 
         if recovery_session is not None:
             self._replay_guard.claim(init_data)
@@ -812,6 +867,11 @@ class MiniAppApi:
                     "search_timeout_seconds": self._service.settings.search_timeout,
                 },
             },
+            extra_headers=self._contribution_capability_headers(
+                session,
+                contribution_status,
+                fail_open=True,
+            ),
         )
         if (
             principal is not None
@@ -852,20 +912,6 @@ class MiniAppApi:
         session = self._sessions.get(match.group(1), touch=False)
         if session is None:
             raise MiniAppAuthenticationError("Invalid Mini App session.")
-        raw_init_data = _header(request.headers, "x-telegram-init-data")
-        if raw_init_data is None:
-            raise MiniAppAuthenticationError("Invalid Telegram authorization.")
-        principal = self._validator.validate(
-            raw_init_data,
-            check_freshness=False,
-        )
-        digest = hashlib.sha256(raw_init_data.encode("utf-8")).digest()
-        if (
-            not hmac.compare_digest(digest, session.init_data_digest)
-            or principal.user_id != session.user_id
-            or (session.query_id is not None and principal.query_id != session.query_id)
-        ):
-            raise MiniAppAuthenticationError("Invalid Telegram authorization.")
         await self._limiter.acquire(
             user_id=session.user_id,
             chat_id=session.chat_id,
@@ -1009,6 +1055,7 @@ class MiniAppApi:
             f"{self._api_prefix}/bookmarks/backup",
             f"{self._api_prefix}/bookmarks/restore",
             f"{self._api_prefix}/contributions/events",
+            f"{self._api_prefix}/contributions/sync",
         }
         if request.method.upper() != "DELETE" and path in expensive:
             return 1.0
@@ -1037,6 +1084,7 @@ class MiniAppApi:
             "preferences",
             "contributions/status",
             "contributions/events",
+            "contributions/sync",
             "bookmarks/catalog",
             "bookmarks/backup",
             "bookmarks/restore",
@@ -1372,6 +1420,50 @@ class MiniAppApi:
             )
             return _unavailable_contribution_status()
 
+    def _contribution_capability_headers(
+        self,
+        session: MiniAppSession,
+        status: Mapping[str, object],
+        *,
+        fail_open: bool = False,
+    ) -> dict[str, str]:
+        """Issue one durable capability and repeat it on approved responses.
+
+        Repeating the same in-memory token lets an HTTP response-loss retry
+        recover it.  The capability is never placed in JSON, a URL, or a log.
+        Current contributor authority is still rechecked by the durable store
+        on every synchronization request.
+        """
+        if status.get("state") != "approved":
+            if status.get("state") != "unavailable":
+                session.contribution_capability_token = None
+                session.contribution_capability_issued = False
+            return {}
+        store = self._contributions
+        if store is None:
+            return {}
+        if session.contribution_capability_token is None:
+            try:
+                token = store.issue_capability(session.user_id)
+            except (
+                ContributionNotAllowed,
+                OSError,
+                sqlite3.Error,
+                RuntimeError,
+            ):
+                if not fail_open:
+                    raise
+                LOGGER.warning(
+                    "Contributor capability could not be issued during bootstrap",
+                    exc_info=True,
+                )
+                return {}
+            session.contribution_capability_token = token
+            session.contribution_capability_issued = True
+        return {
+            "X-Contribution-Token": session.contribution_capability_token,
+        }
+
     def _contribution_status(
         self,
         session: MiniAppSession,
@@ -1383,6 +1475,10 @@ class MiniAppApi:
             return self._contributions_unavailable_response()
         try:
             status = store.contribution_status(session.user_id)
+            capability_headers = self._contribution_capability_headers(
+                session,
+                status,
+            )
         except (OSError, sqlite3.Error, RuntimeError):
             LOGGER.warning(
                 "Explicit contributor status is temporarily unavailable",
@@ -1392,6 +1488,7 @@ class MiniAppApi:
         return self._response(
             200,
             status if details else _legacy_contribution_status(status),
+            extra_headers=capability_headers,
         )
 
     def _acknowledge_contribution_disclosure(
@@ -1411,6 +1508,10 @@ class MiniAppApi:
             return self._contributions_unavailable_response()
         try:
             status = store.acknowledge_disclosure(session.user_id)
+            capability_headers = self._contribution_capability_headers(
+                session,
+                status,
+            )
         except (OSError, sqlite3.Error, RuntimeError):
             LOGGER.warning(
                 "Contributor disclosure acknowledgement is temporarily unavailable",
@@ -1420,6 +1521,7 @@ class MiniAppApi:
         return self._response(
             200,
             status if details else _legacy_contribution_status(status),
+            extra_headers=capability_headers,
         )
 
     def _contributions_unavailable_response(self) -> MiniAppHttpResponse:
@@ -1428,6 +1530,155 @@ class MiniAppApi:
             "contributions_unavailable",
             "Contributor synchronization is temporarily unavailable.",
             details={"retryable": True},
+        )
+
+    async def _synchronize_contributions(
+        self,
+        request: MiniAppHttpRequest,
+    ) -> MiniAppHttpResponse:
+        """Atomically reconcile one complete contributor snapshot."""
+        store = self._contributions
+        if store is None:
+            return self._contributions_unavailable_response()
+
+        authorization = _header(request.headers, "authorization") or ""
+        match = _CONTRIBUTION_BEARER_RE.fullmatch(authorization)
+        if match is None:
+            raise MiniAppAuthenticationError("Invalid contribution capability.")
+        # Capability verification reaches durable SQLite state, so bound
+        # unauthenticated attempts by client before doing that work.
+        await self._ingress.acquire(request.client_key)
+        try:
+            contributor_id = await asyncio.to_thread(
+                store.authenticate_capability,
+                match.group(1),
+            )
+        except ContributionNotAllowed:
+            raise
+        except (OSError, sqlite3.Error, RuntimeError):
+            LOGGER.warning(
+                "Contributor capability authentication is temporarily unavailable",
+                exc_info=True,
+            )
+            return self._contributions_unavailable_response()
+
+        await self._limiter.acquire(
+            user_id=contributor_id,
+            chat_id=contributor_id,
+            cost=1.0,
+            client_key=request.client_key,
+        )
+        payload = self._json_body(request)
+        required_fields = {
+            "protocol_version",
+            "sync_id",
+            "client_id",
+            "snapshot",
+            "operations",
+            "disclosure_acknowledged",
+        }
+        if set(payload) != required_fields:
+            raise MiniAppApiInputError(
+                "Contribution sync request does not match protocol version 1."
+            )
+        if type(payload["protocol_version"]) is not int or payload["protocol_version"] != 1:
+            raise MiniAppApiInputError("protocol_version must be 1.")
+        sync_id = payload["sync_id"]
+        client_id = payload["client_id"]
+        snapshot = payload["snapshot"]
+        operations = payload["operations"]
+        disclosure_acknowledged = payload["disclosure_acknowledged"]
+        if not isinstance(sync_id, str) or not sync_id:
+            raise MiniAppApiInputError("sync_id must be non-empty text.")
+        if not isinstance(client_id, str) or not client_id:
+            raise MiniAppApiInputError("client_id must be non-empty text.")
+        if not isinstance(snapshot, dict):
+            raise MiniAppApiInputError("snapshot must be an object.")
+        if not isinstance(operations, list) or any(
+            not isinstance(operation, dict) for operation in operations
+        ):
+            raise MiniAppApiInputError("operations must be an array of objects.")
+        if not isinstance(disclosure_acknowledged, bool):
+            raise MiniAppApiInputError(
+                "disclosure_acknowledged must be a boolean."
+            )
+
+        try:
+            result = await asyncio.to_thread(
+                store.synchronize_snapshot,
+                contributor_id,
+                sync_id=sync_id,
+                client_id=client_id,
+                snapshot=snapshot,
+                operations=operations,
+                disclosure_acknowledged=disclosure_acknowledged,
+            )
+        except (OSError, sqlite3.Error, RuntimeError):
+            LOGGER.warning(
+                "Contributor snapshot could not be committed",
+                exc_info=True,
+            )
+            return self._contributions_unavailable_response()
+        explicit_event_ids = {
+            str(operation["client_event_id"])
+            for operation in operations
+        }
+
+        # The snapshot is durably committed at this point.  Status or catalog
+        # enrichment must never turn that success into a retryable failure,
+        # which would make the user repeat work that the server already owns.
+        try:
+            status = await asyncio.to_thread(
+                store.contribution_status,
+                contributor_id,
+            )
+        except (ContributionError, OSError, sqlite3.Error, RuntimeError):
+            LOGGER.warning(
+                "Post-commit contributor status enrichment failed",
+                exc_info=True,
+            )
+            status = _committed_contribution_status()
+        try:
+            current_catalog = await asyncio.to_thread(store.current_catalog)
+            catalog: dict[str, object] = {
+                "revision": current_catalog.revision,
+                "checksum": current_catalog.checksum,
+            }
+        except (ContributionError, OSError, sqlite3.Error, RuntimeError):
+            LOGGER.warning(
+                "Post-commit contribution catalog enrichment failed",
+                exc_info=True,
+            )
+            catalog = {
+                "revision": None,
+                "checksum": None,
+                "available": False,
+            }
+
+        return self._response(
+            200,
+            {
+                "protocol_version": 1,
+                "receipt": {
+                    "sync_id": sync_id,
+                    "snapshot_digest": result.snapshot_digest,
+                    "outcome": (
+                        "replayed" if result.replayed_sync else "accepted"
+                    ),
+                    "accepted": result.accepted,
+                    "replayed": result.replayed,
+                    "event_ids": {
+                        client_event_id: _contribution_receipt_id(
+                            contributor_id,
+                            client_event_id,
+                        )
+                        for client_event_id in result.event_ids
+                        if client_event_id in explicit_event_ids
+                    },
+                },
+                "status": status,
+                "catalog": catalog,
+            },
         )
 
     def _submit_contribution_events(
@@ -2017,6 +2268,7 @@ class MiniAppApi:
     ) -> MiniAppHttpResponse:
         headers = {
             "Access-Control-Allow-Origin": self._origin,
+            "Access-Control-Expose-Headers": "X-Contribution-Token",
             "Cache-Control": "no-store, max-age=0",
             "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
             "Cross-Origin-Resource-Policy": "same-origin",
