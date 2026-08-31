@@ -133,17 +133,27 @@ token belongs to the bot that opened the app. For group launch failures,
 confirm the Main Mini App URL in `@BotFather`. See
 [Mini App deployment](MINI_APP.md).
 
-If **Sync now** fails, first verify the user remains approved with
+If a contribution **Push** fails, first verify the user remains approved with
 `sudo getbible-robot contributions INSTANCE status`, then rerun
-`sudo getbible-robot doctor INSTANCE`. The contributor control should be
-absent unless the approved session supplied its separate capability. One click
-must produce one `POST .../api/v1/contributions/sync`; it must not open a
-WebSocket, target another port, or sequence status/events/catalogue requests.
-A lost response is safe to retry with the same `sync_id`: Robot returns the
-stored receipt instead of duplicating moderation events. HTTP `401` means the
-capability is invalid, `403` means current approval/disclosure policy refused
-it, `409` means that sync ID was reused with different content, and `413`
-means the 1 MiB bound was exceeded.
+`sudo getbible-robot doctor INSTANCE`. The contributor panel and the bot's
+**Push contribution** reply-keyboard button should be absent for an ordinary
+user. One push produces one or more Telegram `sendData` messages, never an
+HTTP request: each chunk closes the Mini App and reaches the bot as a
+`web_app_data` service message, the bot deletes that service message, a
+multi-part transfer keeps one edited progress message ("Received part i of
+n"), and the outcome arrives as one bot confirmation in the chat. Push adds
+zero listeners, so the one-exposed-port firewall guidance above is unchanged;
+in polling mode a push needs no inbound connectivity at all. If no
+confirmation arrives, check that the bot is receiving updates in the selected
+polling or webhook mode and that `CONTRIBUTION_STORE_FILE` is configured: with
+an empty store the bot replies that contributions are unavailable and the
+contribution status/receipt endpoints return `503`. A lost or interrupted
+transfer is safe to resend — the Mini App replays the identical bytes with the
+same `sync_id`, and Robot returns the stored durable receipt instead of
+duplicating moderation events; a `sync_id` reused with different content is
+refused. **Pull** failures are ordinary authenticated-read failures: `401`
+means the Mini App session expired (relaunch from the bot), `503` means the
+contribution store is disabled on this instance.
 
 ## Service fails with `status=200/CHDIR`
 
