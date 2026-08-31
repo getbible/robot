@@ -481,6 +481,55 @@
               ></p>
             </section>
 
+            <details
+              id="contributor-manager"
+              class="bookmark-disclosure bookmark-contribution-manager"
+              hidden
+            >
+              <summary data-i18n="bookmarks.manage_contribution">
+                Manage contribution
+              </summary>
+              <div class="bookmark-contribution-manager__body">
+                <p
+                  id="contributor-topic-guidance"
+                  class="bookmark-contribution-manager__guidance"
+                  data-i18n="bookmarks.contribution_english_guidance"
+                >Contributor topics must use an English name. Your topic and verse changes are sent securely for review after they are saved locally.</p>
+                <section
+                  id="contributor-sync"
+                  class="contributor-sync"
+                  data-state="idle"
+                  aria-labelledby="contributor-sync-title"
+                >
+                  <div class="contributor-sync__copy">
+                    <h3
+                      id="contributor-sync-title"
+                      data-i18n="bookmarks.contribution_sync_title"
+                    >Contributor sync</h3>
+                    <p
+                      id="contributor-sync-status"
+                      role="status"
+                      aria-live="polite"
+                      data-i18n="bookmarks.contribution_sync_idle"
+                    >Ready to sync your topics and verse links.</p>
+                    <p
+                      id="contributor-sync-details"
+                      class="contributor-sync__details"
+                      hidden
+                    ></p>
+                  </div>
+                  <button
+                    id="contributor-sync-button"
+                    class="button button--secondary contributor-sync__button"
+                    type="button"
+                    aria-describedby="contributor-sync-status"
+                  >
+                    <span data-i18n="bookmarks.contribution_sync_now">Sync now</span>
+                  </button>
+                </section>
+              </div>
+            </details>
+
             <label class="bookmark-search" for="bookmark-topic-search">
               <span data-i18n="bookmarks.search_label">Find a bookmark topic</span>
               <input
@@ -498,94 +547,41 @@
               role="list"
               aria-label="Bookmark topics"
               data-i18n-aria-label="bookmarks.groups_label"
-            ></div>
+            >
+              <details id="bookmark-topic-manager" class="bookmark-topic-add">
+                <summary>
+                  <span class="bookmark-topic-add__icon" aria-hidden="true">+</span>
+                  <strong data-i18n="bookmarks.add_topic">Add topic</strong>
+                </summary>
+                <form id="bookmark-topic-form" class="bookmark-topic-form">
+                  <label>
+                    <span data-i18n="bookmarks.topic_name">Topic name</span>
+                    <input
+                      id="bookmark-topic-name"
+                      type="text"
+                      maxlength="80"
+                      autocomplete="off"
+                      required
+                      placeholder="New topic"
+                      data-i18n-placeholder="bookmarks.new_topic"
+                    >
+                  </label>
+                  <label>
+                    <span data-i18n="bookmarks.topic_color">Topic color</span>
+                    <input id="bookmark-topic-color" type="color" value="#fde68a">
+                  </label>
+                  <button class="button button--secondary" type="submit">
+                    <span data-i18n="bookmarks.add_topic">Add topic</span>
+                  </button>
+                </form>
+              </details>
+            </div>
             <p
               id="bookmark-groups-empty"
               class="bookmark-empty-copy"
               data-i18n="bookmarks.no_match"
               hidden
             >No topics match your search.</p>
-
-            <details id="bookmark-topic-manager" class="bookmark-topic-manager">
-              <summary data-i18n="bookmarks.manage_topics">Manage topic names and colors</summary>
-              <form id="bookmark-topic-form" class="bookmark-topic-form">
-                <label>
-                  <span data-i18n="bookmarks.topic_name">Topic name</span>
-                  <input
-                    id="bookmark-topic-name"
-                    type="text"
-                    maxlength="80"
-                    autocomplete="off"
-                    required
-                    placeholder="New topic"
-                    data-i18n-placeholder="bookmarks.new_topic"
-                  >
-                </label>
-                <label>
-                  <span data-i18n="bookmarks.topic_color">Topic color</span>
-                  <input id="bookmark-topic-color" type="color" value="#fde68a">
-                </label>
-                <button class="button button--secondary" type="submit">
-                  <span data-i18n="bookmarks.add_topic">Add topic</span>
-                </button>
-              </form>
-              <p
-                id="contributor-topic-guidance"
-                class="bookmark-topic-manager__guidance"
-                data-i18n="bookmarks.contribution_english_guidance"
-                hidden
-              >Contributor topics must use an English name. Your topic and verse changes are sent securely for review after they are saved locally.</p>
-              <section
-                id="contributor-sync"
-                class="contributor-sync"
-                data-state="idle"
-                aria-labelledby="contributor-sync-title"
-                hidden
-              >
-                <div class="contributor-sync__copy">
-                  <h3
-                    id="contributor-sync-title"
-                    data-i18n="bookmarks.contribution_sync_title"
-                  >Contributor sync</h3>
-                  <p
-                    id="contributor-sync-status"
-                    role="status"
-                    aria-live="polite"
-                    data-i18n="bookmarks.contribution_sync_idle"
-                  >Ready to sync your topics and verse links.</p>
-                  <p
-                    id="contributor-sync-details"
-                    class="contributor-sync__details"
-                    hidden
-                  ></p>
-                </div>
-                <button
-                  id="contributor-sync-button"
-                  class="button button--secondary contributor-sync__button"
-                  type="button"
-                  aria-describedby="contributor-sync-status"
-                >
-                  <span data-i18n="bookmarks.contribution_sync_now">Sync now</span>
-                </button>
-              </section>
-              <div id="bookmark-topic-editor" class="bookmark-topic-editor"></div>
-              <div class="bookmark-topic-defaults">
-                <button
-                  id="restore-default-bookmark-topics"
-                  class="button button--secondary"
-                  type="button"
-                  aria-describedby="bookmark-default-topic-status"
-                >
-                  <span data-i18n="bookmarks.restore_default_tags">Restore default tags</span>
-                </button>
-                <p
-                  id="bookmark-default-topic-status"
-                  class="bookmark-topic-defaults__status"
-                  role="status"
-                  aria-live="polite"
-                ></p>
-              </div>
-            </details>
 
             <section class="bookmark-backup" aria-labelledby="bookmark-backup-title">
               <h2 id="bookmark-backup-title" data-i18n="bookmarks.backup_title">Backup and restore</h2>
@@ -626,9 +622,39 @@
               </button>
             </div>
             <div class="bookmark-detail__heading">
-              <span id="bookmark-detail-dot" class="bookmark-dot" aria-hidden="true"></span>
+              <label class="bookmark-detail__color-control">
+                <span id="bookmark-detail-dot" class="bookmark-dot" aria-hidden="true"></span>
+                <input id="bookmark-detail-color" type="color" value="#fde68a">
+              </label>
               <div class="bookmark-detail__copy">
-                <h2 id="bookmark-detail-title"></h2>
+                <h2 id="bookmark-detail-title" tabindex="-1">
+                  <button
+                    id="bookmark-detail-name-edit"
+                    class="bookmark-detail__title-button"
+                    type="button"
+                  ></button>
+                  <span id="bookmark-detail-name-static" hidden></span>
+                </h2>
+                <form id="bookmark-detail-name-form" class="bookmark-detail__name-form" hidden>
+                  <input
+                    id="bookmark-detail-name-input"
+                    type="text"
+                    maxlength="80"
+                    autocomplete="off"
+                    required
+                  >
+                  <button
+                    id="bookmark-detail-name-cancel"
+                    type="button"
+                    aria-label="Cancel editing"
+                    data-i18n-aria-label="bookmarks.cancel_topic_edit"
+                  >×</button>
+                  <button
+                    type="submit"
+                    aria-label="Save topic name"
+                    data-i18n-aria-label="bookmarks.save_topic_edit"
+                  >✓</button>
+                </form>
                 <p id="bookmark-detail-count"></p>
                 <p
                   id="bookmark-topic-global-status"
@@ -656,6 +682,13 @@
                   hidden
                 >
                   <span data-i18n="bookmarks.clear_topic_global">Clear global verses</span>
+                </button>
+                <button
+                  id="delete-bookmark-topic"
+                  class="button button--secondary bookmark-detail__delete"
+                  type="button"
+                >
+                  <span data-i18n="bookmarks.delete_topic">Delete topic</span>
                 </button>
               </div>
             </div>

@@ -117,6 +117,7 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "bookmarks.search_label": "Find a bookmark topic",
   "bookmarks.search_placeholder": "Search topics",
   "bookmarks.no_match": "No topics match your search.",
+  "bookmarks.manage_contribution": "Manage contribution",
   "bookmarks.manage_topics": "Manage topic names and colors",
   "bookmarks.topic_name": "Topic name",
   "bookmarks.topic_color": "Topic color",
@@ -207,6 +208,9 @@ export const ENGLISH_MESSAGES = Object.freeze({
     "Hide global bookmark {reference} from {name} in this browser",
   "bookmarks.rename_aria": "Rename {name}",
   "bookmarks.color_aria": "Choose a color for {name}",
+  "bookmarks.cancel_topic_edit": "Cancel editing",
+  "bookmarks.save_topic_edit": "Save topic name",
+  "bookmarks.delete_topic": "Delete topic",
   "bookmarks.remove_topic_aria": "Remove topic {name}",
   "bookmarks.clear_confirm":
     "Remove every personal bookmark? Global bookmarks and topics will remain.",
