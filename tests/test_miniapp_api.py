@@ -933,8 +933,12 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(bootstrap.status, 201)
         self.assertNotIn("X-Contribution-Token", bootstrap.headers)
-        self.assertNotIn("gbc_", bootstrap.body.decode())
-        session_token = json.loads(bootstrap.body)["session_token"]
+        payload = json.loads(bootstrap.body)
+        self.assertEqual(
+            [key for key in payload if "token" in key],
+            ["session_token"],
+        )
+        session_token = payload["session_token"]
 
         self.contributions.decide_application(42, "approved", actor="admin")
         for method, path in (
@@ -952,7 +956,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(approved.status, 200)
                 self.assertNotIn("X-Contribution-Token", approved.headers)
-                self.assertNotIn("gbc_", approved.body.decode())
+                self.assertNotIn("capability", approved.body.decode())
 
         session = self.sessions.get(session_token, touch=False)
         self.assertIsNotNone(session)
