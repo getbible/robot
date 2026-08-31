@@ -54,7 +54,11 @@ MAX_PUBLIC_OVERLAY_ASSOCIATIONS = 10_000
 MAX_PUBLIC_OVERLAY_BYTES = 2 * 1024 * 1024
 DATABASE_SCHEMA_VERSION = 4
 
-_SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+# The browser contribution journal accepts this complete separator-safe
+# alphabet in every position. Personal bookmark IDs are a subset, but imported
+# IDs may begin with ``_`` or ``-``. Keep the server contract identical so a
+# locally valid topic cannot become unsynchronizable after its owner is approved.
+_SAFE_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _CANONICAL_TOPIC_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,79}\Z")
 _COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}\Z")
 _CHECKSUM_RE = re.compile(r"[0-9a-f]{64}\Z")

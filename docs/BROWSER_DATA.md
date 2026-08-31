@@ -136,12 +136,13 @@ identifiers when reading.
 Bookmark identity is canonical book/chapter/verse, not translation. Assigning
 the same verse from another translation updates its one record. Assigning it to
 another topic extends that record, while repeating an existing assignment is a
-no-op. Removing a topic warns before removing that topic's personal assignments.
-Built-in topic names come from localized constants and cannot be renamed;
-users may recolor or remove them. Custom topics remain user-named and editable.
-Restoring default tags recreates only missing definitions, preserving recolors,
-custom topics, and personal bookmarks. Selections remain independent
-and ephemeral, and the public cache remains identity-free.
+no-op. Removing a personal topic warns before removing that topic's personal
+assignments. Global topic definitions come from the reviewed catalogue and stay
+outside the personal topic editor; their visibility and verse exclusions use
+the separate global controls. Custom topics remain user-named and editable.
+Restoring default tags recreates only missing definitions while preserving
+custom topics and personal bookmarks. Selections remain independent and
+ephemeral, and the public cache remains identity-free.
 
 ### Global catalog overlay
 

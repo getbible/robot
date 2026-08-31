@@ -256,10 +256,19 @@ export const ENGLISH_MESSAGES = Object.freeze({
     "The server asked us to wait before syncing again. We will retry automatically.",
   "bookmarks.contribution_sync_unavailable":
     "Contributor sync is temporarily unavailable. Your bookmarks remain safe on this device.",
+  "bookmarks.contribution_sync_invalid_data":
+    "The review server could not accept one saved contribution record. It remains personal and safe. After the app or server is updated, tap Sync again; if it continues, report any reference shown.",
+  "bookmarks.contribution_sync_server_error":
+    "The contributor review service is temporarily unavailable. Your bookmarks are safe; Sync will retry automatically.",
+  "bookmarks.contribution_sync_update_error":
+    "Contributor sync is unavailable on this server version. Your contribution remains personal and safe; Sync will work after the server update completes.",
+  "bookmarks.contribution_sync_local_error":
+    "The Mini App could not prepare some saved contribution data. It remains personal and safe. After the app is updated, tap Sync again.",
   "bookmarks.contribution_sync_error":
-    "Sync could not finish. Your bookmarks are safe; try again when you are online.",
+    "Sync could not finish. Your contribution remains personal and safe; tap Sync again.",
   "bookmarks.contribution_sync_catalog_error":
     "Your updates reached the review server, but the global topic library could not be refreshed. Try Sync again.",
+  "bookmarks.contribution_sync_reference": "Reference: {reference}",
   "bookmarks.contribution_pending_marker": "Personal contributor topic or verse link",
   "bookmarks.contribution_topic_outcomes": "Topics",
   "bookmarks.contribution_event_outcomes": "Updates",

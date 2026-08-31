@@ -5,7 +5,7 @@ import { extname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { chromium } from "playwright";
+import { chromium, webkit } from "playwright";
 
 const miniappRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const mainApiPattern = /^https:\/\/api\.getbible\.net\/v2\/.+/;
@@ -19,6 +19,11 @@ const acceptedTopic = Object.freeze({
 });
 const acceptedVerses = Object.freeze([2, 3, 4]);
 const waitingVerse = 5;
+const browserName = process.env.PLAYWRIGHT_BROWSER ?? "chromium";
+const browserType = { chromium, webkit }[browserName];
+if (!browserType) {
+  throw new TypeError("PLAYWRIGHT_BROWSER must be chromium or webkit.");
+}
 const bookNames = [
   "Genesis", "Exodus", "Leviticus", "Numbers", "Deuteronomy", "Joshua",
   "Judges", "Ruth", "1 Samuel", "2 Samuel", "1 Kings", "2 Kings",
@@ -243,8 +248,10 @@ async function createBrowserFixture(
   context,
   { initialContributorState = "pending" } = {},
 ) {
-  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
-  const browser = await chromium.launch({
+  const executablePath = browserName === "chromium"
+    ? process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+    : process.env.PLAYWRIGHT_WEBKIT_EXECUTABLE_PATH;
+  const browser = await browserType.launch({
     headless: true,
     ...(executablePath ? { executablePath } : {}),
   });
@@ -407,6 +414,7 @@ async function createBrowserFixture(
         return fulfillJson(route, {
           error: "not_found",
           message: "The contribution route is temporarily unavailable.",
+          request_id: "deploy_0123456789abcdef",
           retryable: false,
         }, 404);
       }
@@ -892,6 +900,11 @@ test("a contributor can retry one-click sync and receive published G mappings wi
     input.value === "Community Hope"
   )?.dataset.topicName ?? null);
   assert.ok(localTopicId);
+  const personalEditor = page.locator(`[data-topic-editor="${localTopicId}"]`);
+  assert.equal(await personalEditor.locator("[data-topic-name]").count(), 1);
+  assert.equal(await personalEditor.locator("[data-topic-color]").count(), 1);
+  assert.equal(await personalEditor.locator("[data-topic-save]").count(), 1);
+  assert.equal(await personalEditor.locator("[data-topic-delete]").count(), 1);
 
   await page.locator('[data-route="bible"]').click();
   await page.waitForSelector('#bible-verses [data-reader-verse="2"]');
@@ -927,10 +940,12 @@ test("a contributor can retry one-click sync and receive published G mappings wi
     document.querySelector("#contributor-sync")?.dataset.state === "error"
   ));
   assert.equal(eventAttempts.length, 1);
-  assert.match(
-    await page.locator("#contributor-sync-status").innerText(),
-    /failed|retry|try again|could not|unavailable/i,
-  );
+  const missingRouteStatus = await page.locator(
+    "#contributor-sync-status",
+  ).innerText();
+  assert.match(missingRouteStatus, /server version|server update/i);
+  assert.match(missingRouteStatus, /Reference: deploy_012345678/i);
+  assert.doesNotMatch(missingRouteStatus, /temporarily unavailable/i);
   assert.equal(await page.locator("#contributor-sync-button").isEnabled(), true);
 
   // The next click retries the durable baseline. The events route accepts the
@@ -991,9 +1006,8 @@ test("a contributor can retry one-click sync and receive published G mappings wi
     "P",
   );
   assert.equal(
-    await page.locator("#bookmark-topic-editor .bookmark-topic-editor__name--core")
-      .filter({ hasText: "Steadfast Hope" }).count(),
-    0,
+    await page.locator(`[data-topic-editor="${localTopicId}"] [data-topic-name]`).count(),
+    1,
   );
 
   // Review status can become visible before the independently cached catalog
@@ -1018,9 +1032,8 @@ test("a contributor can retry one-click sync and receive published G mappings wi
     "P",
   );
   assert.equal(
-    await page.locator("#bookmark-topic-editor .bookmark-topic-editor__name--core")
-      .filter({ hasText: "Steadfast Hope" }).count(),
-    0,
+    await page.locator(`[data-topic-editor="${localTopicId}"] [data-topic-name]`).count(),
+    1,
   );
 
   // The independently scheduled catalog-only retry receives the newer
@@ -1030,16 +1043,52 @@ test("a contributor can retry one-click sync and receive published G mappings wi
   fixture.publishCatalog();
   const attemptsBeforeCatalogRetry = eventAttempts.length;
   await page.waitForFunction((topicId) => {
-    const row = document.querySelector(`[data-topic-editor="${topicId}"]`);
+    const card = document.querySelector(
+      `.bookmark-group-card[data-bookmark-topic="${topicId}"]`,
+    );
     return document.querySelector("#contributor-sync")?.dataset.state === "success" &&
-      row?.querySelector(".bookmark-topic-editor__name--core")?.textContent ===
-        "Steadfast Hope";
+      !document.querySelector(`[data-topic-editor="${topicId}"]`) &&
+      card?.querySelector("strong")?.textContent === "Steadfast Hope" &&
+      card?.querySelector(".bookmark-contribution-badge")?.textContent === "G";
   }, localTopicId);
   assert.equal(eventAttempts.length, attemptsBeforeCatalogRetry);
   assert.equal(
-    await page.locator(`[data-topic-editor="${localTopicId}"] [data-topic-name]`).count(),
+    await page.locator(`[data-topic-editor="${localTopicId}"]`).count(),
     0,
   );
+
+  // Delegated handlers may still receive a click from a stale pre-publication
+  // row. Neither action may mutate or enqueue the now server-owned topic.
+  for (const action of ["save", "delete"]) {
+    await page.evaluate(({ action, topicId }) => {
+      const row = document.createElement("div");
+      row.dataset.topicEditor = topicId;
+      const name = document.createElement("input");
+      name.dataset.topicName = topicId;
+      name.value = "Stale personal name";
+      const color = document.createElement("input");
+      color.dataset.topicColor = topicId;
+      color.value = "#123456";
+      const button = document.createElement("button");
+      button.type = "button";
+      if (action === "save") {
+        button.dataset.topicSave = topicId;
+      } else {
+        button.dataset.topicDelete = topicId;
+      }
+      row.append(name, color, button);
+      document.querySelector("#bookmark-topic-editor")?.append(row);
+    }, { action, topicId: localTopicId });
+    await page.locator(
+      action === "save"
+        ? `[data-topic-save="${localTopicId}"]`
+        : `[data-topic-delete="${localTopicId}"]`,
+    ).click();
+    await page.waitForFunction((topicId) => (
+      !document.querySelector(`[data-topic-editor="${topicId}"]`)
+    ), localTopicId);
+    assert.equal(eventAttempts.length, attemptsBeforeCatalogRetry);
+  }
   assert.match(
     await page.locator("#contributor-sync-status").innerText(),
     /accepted|global|published|synced|up to date/i,

@@ -219,6 +219,36 @@ class ContributionStoreTestCase(unittest.TestCase):
             )
         )
 
+    def test_browser_safe_separator_prefixed_ids_are_accepted(self) -> None:
+        self.approve()
+
+        for index, prefix in enumerate("._:-", start=1):
+            result = self.store.record_events(
+                42,
+                [
+                    {
+                        "client_event_id": f"{prefix}imported-event-{index}",
+                        "type": "topic_upsert",
+                        "topic": {
+                            "local_topic_id": f"{prefix}imported-topic-{index}",
+                            "name": f"Imported Topic {index}",
+                            "color": "#bbf7d0",
+                        },
+                    }
+                ],
+            )
+            self.assertEqual(result.accepted, 1)
+
+        self.assertEqual(
+            {topic.local_topic_id for topic in self.store.list_source_topics()},
+            {
+                ".imported-topic-1",
+                "_imported-topic-2",
+                ":imported-topic-3",
+                "-imported-topic-4",
+            },
+        )
+
     def test_database_is_durable_wal_versioned_and_reopens(self) -> None:
         self.approve()
         self.store.close()

@@ -46,6 +46,7 @@ import {
   ContributionSync,
   isEnglishContributionTopicName,
 } from "./lib/contribution-sync.js";
+import { contributionErrorPresentation } from "./lib/contribution-errors.js";
 import {
   GLOBAL_BOOKMARK_CATALOG,
   GLOBAL_BOOKMARK_SOURCE,
@@ -598,14 +599,7 @@ async function initializeContributionSync() {
         scheduleContributionRetry(error);
       }
     }
-    if (phase === "catalog") {
-      setContributionPresentation(
-        "error",
-        "bookmarks.contribution_sync_catalog_error",
-      );
-    } else {
-      handleContributionSyncError(error);
-    }
+    handleContributionSyncError(error, { catalog: phase === "catalog" });
     updateContributorPresentation();
   } finally {
     if (generation === sessionGeneration) {
@@ -794,7 +788,16 @@ function updateContributorPresentation() {
     "aria-busy",
     String(stateName === "syncing"),
   );
-  elements.contributorSyncStatus.textContent = i18n.t(statusKey, values);
+  const statusMessage = i18n.t(statusKey, values);
+  const requestReference = typeof values?.reference === "string"
+    ? values.reference
+    : null;
+  elements.contributorSyncStatus.textContent = requestReference
+    ? `${statusMessage} · ${i18n.t(
+        "bookmarks.contribution_sync_reference",
+        { reference: requestReference },
+      )}`
+    : statusMessage;
   elements.contributorSyncButton.hidden = passiveApplication;
   elements.contributorSyncButton.disabled =
     passiveApplication || stateName === "syncing";
@@ -1060,14 +1063,7 @@ async function refreshContributionStatus({
         ? scheduleGlobalBookmarkCatalogRetry(error)
         : recordContributionRetryDeadline(error);
     }
-    if (catalogRefreshStarted) {
-      setContributionPresentation(
-        "error",
-        "bookmarks.contribution_sync_catalog_error",
-      );
-    } else {
-      handleContributionSyncError(error);
-    }
+    handleContributionSyncError(error, { catalog: catalogRefreshStarted });
     throw error;
   }).finally(() => {
     if (contributionStatusRefreshTask === refreshTask) {
@@ -1234,19 +1230,13 @@ async function synchronizeContributionsNow() {
         ? adoptContributionAuthorityLoss(inactiveStatus)
         : null;
       const catalogRefreshFailed = phase === "catalog";
-      setContributionPresentation(
-        inactive?.state ?? "error",
-        inactive?.messageKey ?? (catalogRefreshFailed
-          ? "bookmarks.contribution_sync_catalog_error"
-          : "bookmarks.contribution_sync_error"),
-      );
       if (inactive) {
+        setContributionPresentation(inactive.state, inactive.messageKey);
         renderContributionMarkers();
+      } else {
+        handleContributionSyncError(error, { catalog: catalogRefreshFailed });
       }
       bridge.notifyError();
-      if (!inactive) {
-        handleContributionSyncError(error);
-      }
       if (contributionFailureIsRetryable(error)) {
         if (phase === "catalog") {
           scheduleGlobalBookmarkCatalogRetry(error);
@@ -1576,18 +1566,17 @@ async function reconcilePublishedContributionTopics(
   };
 }
 
-function handleContributionSyncError(error) {
+function handleContributionSyncError(error, { catalog = false } = {}) {
   if (error instanceof ApiError && [401, 409].includes(error.status)) {
     handleSessionError(error);
     return;
   }
-  if (
-    contributionControlVisible() &&
-    contributionPresentationState !== "error"
-  ) {
+  if (contributionControlVisible()) {
+    const presentation = contributionErrorPresentation(error, { catalog });
     setContributionPresentation(
       "error",
-      "bookmarks.contribution_sync_error",
+      presentation.messageKey,
+      presentation.values,
     );
   }
 }
@@ -5905,6 +5894,9 @@ function renderBookmarkTopicEditor() {
   const fragment = document.createDocumentFragment();
   for (const topic of sortedBookmarkTopics(snapshot.topics)) {
     const presentation = bookmarkTopicPresentation(topic);
+    if (presentation.core) {
+      continue;
+    }
     const row = document.createElement("div");
     row.className = "bookmark-topic-editor__row";
     row.dataset.topicEditor = topic.id;
@@ -6059,6 +6051,13 @@ async function onBookmarkTopicEdit(event) {
   const topicId = save?.dataset.topicSave ?? remove?.dataset.topicDelete;
   const topic = bookmarkStore?.topic(topicId);
   if (!topic) {
+    return;
+  }
+  if (coreBookmarkTopicDefinition(topic.id)) {
+    // Global topic definitions are server-owned. A stale row from an older
+    // render (or synthetic delegated click) must never turn a local display
+    // preference into a canonical metadata/deletion contribution.
+    renderBookmarkTopicEditor();
     return;
   }
   if (save) {
