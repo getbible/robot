@@ -4,6 +4,45 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Telegram-native contribution push and pull
+
+- Moved contributor synchronization onto Telegram's own uplink. `/contributor`
+  now attaches a persistent **Push contribution** reply-keyboard button for
+  approved contributors, and the Mini App's **Push** serializes one bounded
+  snapshot envelope, deflate-compresses it when smaller, base64url-encodes it,
+  and sends numbered `GBC1` chunks of at most 4096 bytes (at most 64 per
+  transfer) through `Telegram.WebApp.sendData()`. Telegram delivers them as
+  `web_app_data` service messages on the ordinary polling/webhook update
+  channel, so a push needs no inbound port, proxy route, WebSocket, or bearer
+  token.
+- Added the bot-side intake (`modules/contribution_intake.py`): rate-limited,
+  durable, per-chunk-idempotent staging in schema-v6 SQLite tables with
+  24-hour stale-bundle expiry and exactly-one bundle assembly; service-message
+  deletion with one edited progress message per multi-part transfer; SHA-256
+  digest verification under a 1 MiB decompression-bomb bound; and a commit
+  through the unchanged atomic `ContributionStore.synchronize_snapshot` path
+  with its durable idempotent receipt. Approval and disclosure are rechecked
+  on every staging and commit write, and the bot confirms each outcome in the
+  chat.
+- Removed the entire HTTP contribution ingest: the bearer contributor
+  capability and its request header, the one-request synchronization POST
+  endpoint, the legacy event-batch and status-mutation routes, the dedicated
+  1 MiB Caddy sync matcher, and the 60-second status polling loop.
+- Replaced **Sync now** with **Push** and **Pull**. Pull refreshes status over
+  the kept `GET /api/v1/contributions/status`, confirms a pending push receipt
+  through the new `GET /api/v1/contributions/receipt`, strictly revalidates
+  the live catalogue, and reclassifies published contributor topics from
+  personal to global without touching personal verses outside the global set;
+  status now refreshes at session bootstrap and on Pull only. The Mini App
+  persists the push outbox before the first send and clears explicit intents
+  only when the server's receipt is observed.
+- Reduced the generated Caddy routes to the static, 5 MiB `bookmarks/backup`,
+  and general 64 KiB `/api/v1/*` matchers, and pointed setup postflight at the
+  unauthenticated JSON `401` from the `bookmarks/catalog`,
+  `contributions/status`, and `contributions/receipt` GET routes. No
+  environment variables changed; `CONTRIBUTION_STORE_FILE` still gates the
+  whole feature.
+
 ### Trusted topic contributions and reader polish
 
 - Added private, numeric-Telegram-ID contributor applications through the
