@@ -341,7 +341,7 @@ class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
     def test_session_exchange_bootstraps_status_without_capability_header(self) -> None:
         bootstrap = self._exchange_session()
 
-        header_names = {name.lower() for name in self._session_response.headers.keys()}
+        header_names = {name.lower() for name in self._session_response.headers}
         self.assertNotIn("x-contribution-token", header_names)
         self.assertFalse(
             any("contribution" in name for name in header_names),
