@@ -178,18 +178,27 @@ response keeps the last valid cached or bundled catalogue usable.
 ### Trusted contribution mirror
 
 Only a server-approved Telegram identity can mirror changes. After the
-one-time disclosure is acknowledged, **Sync now** submits the complete bounded
+one-time disclosure is acknowledged, **Push** shares the complete bounded
 current personal topic/assignment snapshot plus any pending explicit global
-removals in one request. Topic source names use the repository's English
-grammar; missing locale strings continue to fall back to that English source.
+removals over Telegram's own uplink: one envelope, compressed when smaller and
+base64url-encoded, split into numbered `GBC1` chunks that
+`Telegram.WebApp.sendData()` hands to Telegram from the reply-keyboard push
+launch. The bot stages each delivered `web_app_data` chunk durably, verifies
+the assembled bundle's digest, and commits it atomically. Topic source names
+use the repository's English grammar; missing locale strings continue to fall
+back to that English source.
 
-`BookmarkStore` remains the durable current-state source. The same stable
-client and `sync_id` values make an ambiguous request safe to retry; Robot
-returns the durable receipt for an exact replay and rejects conflicting reuse.
-The server derives missing moderation events from the last accepted snapshot
-and commits them with that snapshot and receipt in one SQLite transaction.
-Transport failure does not modify personal bookmarks or require a browser
-event journal, cursor recovery, Web Lock, WebSocket, or extra port.
+`BookmarkStore` remains the durable current-state source. The outbox persists
+the envelope and its encoded messages before the first `sendData` call, so an
+interrupted transfer resends the identical bytes under the same stable
+`client_id` and `sync_id`; Robot returns the durable receipt for an exact
+replay and rejects conflicting reuse. The server derives missing moderation
+events from the last accepted snapshot and commits them with that snapshot and
+receipt in one SQLite transaction. Explicit global add/remove intents clear
+only when **Pull** observes the server's receipt, and a failed transfer never
+modifies personal bookmarks. No HTTP ingest, WebSocket, extra port, or bearer
+token participates in push; **Pull** reads status, the pending receipt, and
+the reviewed catalogue over the ordinary authenticated session.
 
 ### Portable recovery
 
@@ -282,9 +291,9 @@ A failed validation never replaces a previously accepted record.
 - Telegram storage failure degrades bookmark/last-read sync to whichever valid
   local or Telegram store remains available; it does not invalidate Scripture
   content, history, or selection.
-- Contribution journal, network, or rate-limit failure never rolls back a local
-  bookmark mutation; durable checkpoints retry automatically, while an
-  unavailable journal is disclosed as memory-only.
+- A contribution push, staging, or rate-limit failure never rolls back a local
+  bookmark mutation; the persisted outbox resends the identical transfer, and
+  explicit intents clear only on an observed server receipt.
 - A malformed, oversized, or unavailable live catalogue never replaces a valid
   cached or bundled catalogue; a validated authenticated `200` remains
   authoritative after database recovery.
@@ -328,9 +337,9 @@ The release gate must prove:
 - the unified global/personal list, **G** marker, per-link hide, and
   per-topic/all-catalog reset remain browser-local and absent from personal
   sync and backup;
-- approved contribution capability/disclosure, one-request bounded snapshots,
-  atomic durable receipts, exact retry, and explicit global removals remain
-  local-first;
+- approved contribution disclosure, chunked bounded push bundles, atomic
+  durable receipts, exact byte-for-byte resend, and explicit global removals
+  remain local-first;
 - strict live-catalog validation, authoritative instance-scoped revalidation,
   explicit load refresh, English fallback, and bundled offline fallback hold;
 - private-chat backup is owner-bound and bounded, restore uses a fresh
