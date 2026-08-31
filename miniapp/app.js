@@ -159,6 +159,8 @@ const state = {
   bookmarks: {
     popoverSelectionId: null,
     selectedTopicId: null,
+    editingTopicNameId: null,
+    editingTopicNameDraft: "",
     originVerse: null,
     originTopicId: null,
     originBookmarkId: null,
@@ -318,22 +320,27 @@ const elements = mapElements({
   bookmarkTopicForm: "bookmark-topic-form",
   bookmarkTopicName: "bookmark-topic-name",
   bookmarkTopicColor: "bookmark-topic-color",
-  bookmarkTopicEditor: "bookmark-topic-editor",
-  restoreDefaultBookmarkTopics: "restore-default-bookmark-topics",
-  bookmarkDefaultTopicStatus: "bookmark-default-topic-status",
   loadGlobalBookmarks: "load-global-bookmarks",
   clearGlobalBookmarks: "clear-global-bookmarks",
   globalBookmarkStatus: "global-bookmark-status",
+  contributorManager: "contributor-manager",
   bookmarkDetail: "bookmark-detail",
   bookmarkAllTopics: "bookmark-all-topics",
   bookmarkBackToVerse: "bookmark-back-to-verse",
   bookmarkDetailDot: "bookmark-detail-dot",
+  bookmarkDetailColor: "bookmark-detail-color",
   bookmarkDetailTitle: "bookmark-detail-title",
+  bookmarkDetailNameEdit: "bookmark-detail-name-edit",
+  bookmarkDetailNameStatic: "bookmark-detail-name-static",
+  bookmarkDetailNameForm: "bookmark-detail-name-form",
+  bookmarkDetailNameInput: "bookmark-detail-name-input",
+  bookmarkDetailNameCancel: "bookmark-detail-name-cancel",
   bookmarkDetailCount: "bookmark-detail-count",
   bookmarkTopicGlobalStatus: "bookmark-topic-global-status",
   loadTopicGlobalBookmarks: "load-topic-global-bookmarks",
   loadTopicGlobalBookmarksLabel: "load-topic-global-bookmarks-label",
   clearTopicGlobalBookmarks: "clear-topic-global-bookmarks",
+  deleteBookmarkTopic: "delete-bookmark-topic",
   bookmarkDetailEmpty: "bookmark-detail-empty",
   bookmarkList: "bookmark-list",
   backupBookmarks: "backup-bookmarks",
@@ -752,7 +759,15 @@ function renderContributionMarkers() {
 }
 
 function updateContributorPresentation() {
-  elements.contributorTopicGuidance.hidden = !contributionSync?.canContribute;
+  const visible = Boolean(
+    contributionStatus?.enabled && contributionStatus.can_contribute,
+  );
+  elements.contributorManager.hidden = !visible;
+  elements.contributorTopicGuidance.hidden = !visible;
+  elements.contributorSync.hidden = !visible;
+  if (!visible) {
+    elements.contributorManager.open = false;
+  }
   const messageKey = contributionSync?.persistenceFailed
     ? "bookmarks.contribution_storage_attention"
     : contributionSync?.recovering
@@ -761,8 +776,6 @@ function updateContributorPresentation() {
   elements.contributorTopicGuidance.textContent = i18n.t(
     messageKey,
   );
-  const visible = contributionControlVisible();
-  elements.contributorSync.hidden = !visible;
   if (!visible) {
     return;
   }
@@ -1584,6 +1597,11 @@ function mutatePersonalBookmarks(operation) {
   const before = bookmarkStore?.snapshot();
   const result = operation();
   const after = bookmarkStore?.snapshot();
+  capturePersonalBookmarkMutation(before, after);
+  return result;
+}
+
+function capturePersonalBookmarkMutation(before, after) {
   if (before && after && contributionSync) {
     try {
       void Promise.resolve(contributionSync.captureMutation(before, after))
@@ -1602,7 +1620,6 @@ function mutatePersonalBookmarks(operation) {
       // local bookmark write. A broken journal must never undo user data.
     }
   }
-  return result;
 }
 
 function captureGlobalBookmarkRemoval(bookmark) {
@@ -2334,13 +2351,8 @@ function attachListeners() {
   });
   elements.bookmarkGroupList.addEventListener("click", onBookmarkGroupAction);
   elements.bookmarkTopicForm.addEventListener("submit", onBookmarkTopicCreate);
-  elements.bookmarkTopicEditor.addEventListener("click", onBookmarkTopicEdit);
-  elements.bookmarkTopicEditor.addEventListener("change", onBookmarkTopicColorChange);
   elements.contributorSyncButton.addEventListener("click", () => {
     void synchronizeContributionsNow();
-  });
-  elements.restoreDefaultBookmarkTopics.addEventListener("click", () => {
-    restoreDefaultBookmarkTopics();
   });
   elements.bookmarkAllTopics.addEventListener("click", showAllBookmarkTopics);
   elements.bookmarkBackToVerse.addEventListener("click", () => {
@@ -2359,6 +2371,26 @@ function attachListeners() {
   });
   elements.clearTopicGlobalBookmarks.addEventListener("click", () => {
     void clearTopicGlobalBookmarks();
+  });
+  elements.bookmarkDetailColor.addEventListener("change", () => {
+    updateSelectedBookmarkTopicColor();
+  });
+  elements.bookmarkDetailNameEdit.addEventListener("click", () => {
+    startBookmarkTopicNameEdit();
+  });
+  elements.bookmarkDetailNameInput.addEventListener("input", () => {
+    state.bookmarks.editingTopicNameDraft =
+      elements.bookmarkDetailNameInput.value;
+  });
+  elements.bookmarkDetailNameForm.addEventListener(
+    "submit",
+    saveBookmarkTopicName,
+  );
+  elements.bookmarkDetailNameCancel.addEventListener("click", () => {
+    cancelBookmarkTopicNameEdit();
+  });
+  elements.deleteBookmarkTopic.addEventListener("click", () => {
+    void deleteSelectedBookmarkTopic();
   });
   elements.backupBookmarks.addEventListener("click", () => {
     void backupBookmarksToChat();
@@ -3103,7 +3135,6 @@ function syncInterfaceLocale(code) {
     // These are transient rendered messages, not application state. Clear or
     // refresh them so a completed action from the previous locale cannot
     // leave one English (or otherwise stale) sentence in the new view.
-    elements.bookmarkDefaultTopicStatus.textContent = "";
     elements.bookmarkBackupStatus.textContent = bookmarkBackupTask
       ? i18n.t("bookmarks.backup_sending")
       : "";
@@ -4912,7 +4943,9 @@ function bookmarkTopicPresentation(topic) {
   return {
     core: Boolean(definition),
     definition,
-    color: definition?.color ?? topic?.color ?? BOOKMARK_TOPIC_COLORS[0],
+    // The catalog owns a global topic's identity and translated name, while
+    // its locally stored color remains a user preference on every topic.
+    color: topic?.color ?? definition?.color ?? BOOKMARK_TOPIC_COLORS[0],
     name: definition
       ? translated === definition.name_key ? definition.name : translated
       : topic?.name ?? "",
@@ -5230,7 +5263,6 @@ function renderBookmarks() {
     );
   } else {
     renderBookmarkGroups(snapshot, classifiedTopics);
-    renderBookmarkTopicEditor();
     setBookmarkColorInput(elements.bookmarkTopicColor);
   }
 }
@@ -5250,7 +5282,7 @@ function renderBookmarkGroups(
   classifiedTopics = null,
 ) {
   if (!snapshot) {
-    elements.bookmarkGroupList.replaceChildren();
+    elements.bookmarkGroupList.replaceChildren(elements.bookmarkTopicManager);
     elements.bookmarkGroupsEmpty.hidden = true;
     return;
   }
@@ -5313,6 +5345,7 @@ function renderBookmarkGroups(
     button.append(dot, copy, arrow);
     fragment.append(button);
   }
+  fragment.append(elements.bookmarkTopicManager);
   elements.bookmarkGroupList.replaceChildren(fragment);
   elements.bookmarkGroupsEmpty.hidden = topics.length > 0;
 }
@@ -5350,6 +5383,8 @@ function showAllBookmarkTopics() {
 
 function clearBookmarkNavigation() {
   state.bookmarks.selectedTopicId = null;
+  state.bookmarks.editingTopicNameId = null;
+  state.bookmarks.editingTopicNameDraft = "";
   state.bookmarks.originVerse = null;
   state.bookmarks.originTopicId = null;
   state.bookmarks.originBookmarkId = null;
@@ -5447,9 +5482,46 @@ function renderBookmarkDetail(
   );
   const topicPresentation = bookmarkTopicPresentation(topic);
   const topicName = topicPresentation.name;
+  const editingName = !topicPresentation.core &&
+    state.bookmarks.editingTopicNameId === topic.id;
   applyBookmarkColor(elements.bookmarkDetail, topicPresentation.color);
-  elements.bookmarkDetailTitle.tabIndex = -1;
-  elements.bookmarkDetailTitle.textContent = topicName;
+  setBookmarkColorInput(
+    elements.bookmarkDetailColor,
+    topic.color ?? topicPresentation.color,
+  );
+  elements.bookmarkDetailColor.setAttribute(
+    "aria-label",
+    i18n.t("bookmarks.color_aria", { name: topicName }),
+  );
+  elements.bookmarkDetailTitle.hidden = editingName;
+  elements.bookmarkDetailNameForm.hidden = !editingName;
+  elements.bookmarkDetailNameEdit.hidden = topicPresentation.core;
+  elements.bookmarkDetailNameStatic.hidden = !topicPresentation.core;
+  elements.bookmarkDetailNameEdit.textContent = topicPresentation.core
+    ? ""
+    : topicName;
+  elements.bookmarkDetailNameStatic.textContent = topicPresentation.core
+    ? topicName
+    : "";
+  elements.bookmarkDetailTitle.classList.toggle(
+    "bookmark-detail__title--editable",
+    !topicPresentation.core,
+  );
+  if (!topicPresentation.core) {
+    elements.bookmarkDetailNameEdit.setAttribute(
+      "aria-label",
+      i18n.t("bookmarks.rename_aria", { name: topicName }),
+    );
+  } else {
+    elements.bookmarkDetailNameEdit.removeAttribute("aria-label");
+  }
+  elements.bookmarkDetailNameInput.value = editingName
+    ? state.bookmarks.editingTopicNameDraft
+    : topic.name;
+  elements.bookmarkDetailNameInput.setAttribute(
+    "aria-label",
+    i18n.t("bookmarks.rename_aria", { name: topicName }),
+  );
   elements.bookmarkDetailCount.textContent = i18n.plural(
     "bookmarks.count",
     bookmarks.length,
@@ -5462,6 +5534,10 @@ function renderBookmarkDetail(
       : "bookmarks.load_topic_global",
   );
   elements.clearTopicGlobalBookmarks.hidden = !canonicalTopicId || !globalsEnabled;
+  elements.deleteBookmarkTopic.setAttribute(
+    "aria-label",
+    i18n.t("bookmarks.remove_topic_aria", { name: topicName }),
+  );
   if (canonicalTopicId) {
     elements.bookmarkTopicGlobalStatus.textContent = i18n.t(
       globalsEnabled
@@ -5884,90 +5960,6 @@ function focusBookmarkListAfterRemoval(index) {
   });
 }
 
-function renderBookmarkTopicEditor() {
-  const snapshot = bookmarkStore?.snapshot();
-  if (!snapshot) {
-    elements.bookmarkTopicEditor.replaceChildren();
-    return;
-  }
-  const fragment = document.createDocumentFragment();
-  for (const topic of sortedBookmarkTopics(snapshot.topics)) {
-    const presentation = bookmarkTopicPresentation(topic);
-    if (presentation.core) {
-      continue;
-    }
-    const row = document.createElement("div");
-    row.className = "bookmark-topic-editor__row";
-    row.dataset.topicEditor = topic.id;
-    applyBookmarkColor(row, presentation.color);
-
-    const identity = document.createElement("div");
-    identity.className = "bookmark-topic-editor__identity";
-    const dot = document.createElement("span");
-    dot.className = "bookmark-dot";
-    dot.setAttribute("aria-hidden", "true");
-    const name = document.createElement(
-      presentation.core ? "span" : "input",
-    );
-    name.className = `bookmark-topic-editor__name${
-      presentation.core ? " bookmark-topic-editor__name--core" : ""
-    }`;
-    if (presentation.core) {
-      name.textContent = presentation.name;
-      name.setAttribute(
-        "aria-label",
-        `${presentation.name}. ${i18n.t("bookmarks.core_topic_name")}`,
-      );
-    } else {
-      name.type = "text";
-      name.maxLength = 80;
-      name.required = true;
-      name.value = topic.name;
-      name.dataset.topicName = topic.id;
-      name.setAttribute(
-        "aria-label",
-        i18n.t("bookmarks.rename_aria", { name: presentation.name }),
-      );
-    }
-    identity.append(dot, name);
-    const contributionMarker = createBookmarkContributionBadge(
-      bookmarkTopicContributionMarker(topic),
-    );
-    if (contributionMarker) {
-      identity.append(contributionMarker);
-    }
-
-    const color = document.createElement("input");
-    color.className = "bookmark-topic-editor__color";
-    color.type = "color";
-    color.dataset.topicColor = topic.id;
-    color.setAttribute(
-      "aria-label",
-      i18n.t("bookmarks.color_aria", { name: presentation.name }),
-    );
-    setBookmarkColorInput(color, topic.color);
-
-    const actions = document.createElement("div");
-    actions.className = "bookmark-topic-editor__actions";
-    const save = document.createElement("button");
-    save.type = "button";
-    save.dataset.topicSave = topic.id;
-    save.textContent = i18n.t("bookmarks.save_topic");
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.dataset.topicDelete = topic.id;
-    remove.setAttribute(
-      "aria-label",
-      i18n.t("bookmarks.remove_topic_aria", { name: presentation.name }),
-    );
-    remove.textContent = "×";
-    actions.append(save, remove);
-    row.append(identity, color, actions);
-    fragment.append(row);
-  }
-  elements.bookmarkTopicEditor.replaceChildren(fragment);
-}
-
 function onBookmarkTopicCreate(event) {
   event.preventDefault();
   if (!bookmarkStore) {
@@ -5987,8 +5979,16 @@ function onBookmarkTopicCreate(event) {
     ));
     elements.bookmarkTopicForm.reset();
     setBookmarkColorInput(elements.bookmarkTopicColor, topic.color);
+    elements.bookmarkTopicManager.open = false;
+    state.bookmarks.search = "";
+    elements.bookmarkTopicSearch.value = "";
     renderBookmarks();
     announce(i18n.t("bookmarks.topic_added"));
+    window.requestAnimationFrame(() => {
+      elements.bookmarkGroupList.querySelector(
+        `[data-bookmark-topic="${topic.id}"]`,
+      )?.focus();
+    });
   } catch (error) {
     toast(i18n.t(
       error instanceof ContributorTopicLanguageError
@@ -6000,90 +6000,97 @@ function onBookmarkTopicCreate(event) {
   }
 }
 
-async function restoreDefaultBookmarkTopics() {
-  if (!bookmarkStore) {
+function startBookmarkTopicNameEdit() {
+  const topic = bookmarkStore?.topic(state.bookmarks.selectedTopicId);
+  if (!topic || coreBookmarkTopicDefinition(topic.id)) {
     return;
   }
-  try {
-    const result = bookmarkStore.ensureTopics(
-      globalBookmarkCatalog.topicDefinitions({ defaultsOnly: true }),
-      globalBookmarkTopicMappings(),
-    );
-    await globalBookmarkPreferences?.setTopicMappings(
-      result.topic_ids,
-      bookmarkStore.snapshot().topics,
-    );
-    renderBookmarks();
-    if (bookmarkStorage) {
-      void bookmarkStorage.flush().catch(() => undefined);
-    }
-    const message = result.topics_added > 0
-      ? i18n.plural("bookmarks.default_tags_restored", result.topics_added)
-      : i18n.t("bookmarks.default_tags_current");
-    elements.bookmarkDefaultTopicStatus.textContent = message;
-    bridge.notifySuccess();
-    announce(message);
-  } catch (error) {
-    const message = error instanceof RangeError
-      ? i18n.t("bookmarks.default_tags_limit")
-      : i18n.t("bookmarks.default_tags_failed");
-    elements.bookmarkDefaultTopicStatus.textContent = message;
-    bridge.notifyError();
-    announce(message);
-  }
+  state.bookmarks.editingTopicNameId = topic.id;
+  state.bookmarks.editingTopicNameDraft = topic.name;
+  renderBookmarks();
+  window.requestAnimationFrame(() => {
+    elements.bookmarkDetailNameInput.focus({ preventScroll: true });
+    elements.bookmarkDetailNameInput.select();
+  });
 }
 
-function onBookmarkTopicColorChange(event) {
-  const select = event.target.closest("[data-topic-color]");
-  if (!select) {
+function cancelBookmarkTopicNameEdit() {
+  if (!state.bookmarks.editingTopicNameId) {
     return;
   }
-  const row = select.closest("[data-topic-editor]");
-  if (row) {
-    applyBookmarkColor(row, select.value);
-  }
+  state.bookmarks.editingTopicNameId = null;
+  state.bookmarks.editingTopicNameDraft = "";
+  renderBookmarks();
+  window.requestAnimationFrame(() => {
+    elements.bookmarkDetailNameEdit.focus({ preventScroll: true });
+  });
 }
 
-async function onBookmarkTopicEdit(event) {
-  const save = event.target.closest("[data-topic-save]");
-  const remove = event.target.closest("[data-topic-delete]");
-  const topicId = save?.dataset.topicSave ?? remove?.dataset.topicDelete;
+function saveBookmarkTopicName(event) {
+  event.preventDefault();
+  const topicId = state.bookmarks.selectedTopicId;
   const topic = bookmarkStore?.topic(topicId);
+  if (
+    !topic ||
+    state.bookmarks.editingTopicNameId !== topicId ||
+    coreBookmarkTopicDefinition(topicId)
+  ) {
+    cancelBookmarkTopicNameEdit();
+    return;
+  }
+  const name = elements.bookmarkDetailNameInput.value;
+  try {
+    if (
+      contributionSync?.canContribute &&
+      !isEnglishContributionTopicName(name)
+    ) {
+      throw new ContributorTopicLanguageError();
+    }
+    mutatePersonalBookmarks(() => bookmarkStore.updateTopic(topic.id, { name }));
+    state.bookmarks.editingTopicNameId = null;
+    state.bookmarks.editingTopicNameDraft = "";
+    renderBookmarks();
+    announce(i18n.t("bookmarks.topic_updated"));
+    window.requestAnimationFrame(() => {
+      elements.bookmarkDetailNameEdit.focus({ preventScroll: true });
+    });
+  } catch (error) {
+    toast(i18n.t(
+      error instanceof ContributorTopicLanguageError
+        ? "bookmarks.contribution_english_required"
+        : "bookmarks.invalid_topic",
+    ));
+    elements.bookmarkDetailNameInput.focus({ preventScroll: true });
+  }
+}
+
+function updateSelectedBookmarkTopicColor() {
+  const topic = bookmarkStore?.topic(state.bookmarks.selectedTopicId);
   if (!topic) {
     return;
   }
-  if (coreBookmarkTopicDefinition(topic.id)) {
-    // Global topic definitions are server-owned. A stale row from an older
-    // render (or synthetic delegated click) must never turn a local display
-    // preference into a canonical metadata/deletion contribution.
-    renderBookmarkTopicEditor();
-    return;
-  }
-  if (save) {
-    const row = save.closest("[data-topic-editor]");
-    const name = row?.querySelector("[data-topic-name]")?.value;
-    const color = row?.querySelector("[data-topic-color]")?.value;
-    try {
-      if (
-        contributionSync?.canContribute &&
-        !coreBookmarkTopicDefinition(topic.id) &&
-        !isEnglishContributionTopicName(name)
-      ) {
-        throw new ContributorTopicLanguageError();
-      }
-      mutatePersonalBookmarks(() => bookmarkStore.updateTopic(
-        topic.id,
-        coreBookmarkTopicDefinition(topic.id) ? { color } : { name, color },
-      ));
-      renderBookmarks();
-      announce(i18n.t("bookmarks.topic_updated"));
-    } catch (error) {
-      toast(i18n.t(
-        error instanceof ContributorTopicLanguageError
-          ? "bookmarks.contribution_english_required"
-          : "bookmarks.invalid_topic",
-      ));
+  const color = elements.bookmarkDetailColor.value;
+  try {
+    if (coreBookmarkTopicDefinition(topic.id)) {
+      // A global topic's color is a local preference. It must never become a
+      // proposal to rewrite the server-owned global topic definition.
+      bookmarkStore.updateTopic(topic.id, { color });
+    } else {
+      mutatePersonalBookmarks(() => bookmarkStore.updateTopic(topic.id, { color }));
     }
+    renderBookmarks();
+    if (state.bible.status === "ready") {
+      renderBible();
+    }
+    announce(i18n.t("bookmarks.topic_updated"));
+  } catch {
+    toast(i18n.t("bookmarks.invalid_topic"));
+  }
+}
+
+async function deleteSelectedBookmarkTopic() {
+  const topic = bookmarkStore?.topic(state.bookmarks.selectedTopicId);
+  if (!topic) {
     return;
   }
   if (bookmarkStore.topicCount === 1) {
@@ -6124,16 +6131,40 @@ async function onBookmarkTopicEdit(event) {
     globalBookmarkPreferences?.disableTopic(canonicalTopicId);
     await globalBookmarkPreferences?.flush();
   }
-  mutatePersonalBookmarks(() => bookmarkStore.removeTopic(topic.id));
+  let removed;
+  if (canonicalTopicId) {
+    const before = bookmarkStore.snapshot();
+    removed = bookmarkStore.removeTopic(topic.id);
+    if (removed) {
+      const after = bookmarkStore.snapshot();
+      // The reviewed global topic still exists on the server, so deleting its
+      // local card must not enqueue topic_delete. Its personal verse links did
+      // change, however, and must produce verse_remove events (also cancelling
+      // any queued verse_add for the same assignment).
+      capturePersonalBookmarkMutation(before, {
+        ...after,
+        topics: before.topics,
+      });
+    }
+  } else {
+    removed = mutatePersonalBookmarks(() => bookmarkStore.removeTopic(topic.id));
+  }
+  if (!removed) {
+    return;
+  }
   await globalBookmarkPreferences?.pruneTopicMappings(
     bookmarkStore.snapshot().topics,
   );
   await globalBookmarkPreferences?.flush();
+  clearBookmarkNavigation();
   renderBookmarks();
   if (state.bible.status === "ready") {
     renderBible();
   }
   announce(i18n.t("bookmarks.topic_removed"));
+  window.requestAnimationFrame(() => {
+    elements.bookmarkTopicSearch.focus({ preventScroll: true });
+  });
 }
 
 function setBookmarkColorInput(input, selected = null) {
@@ -6383,6 +6414,7 @@ function setGlobalBookmarkBusy(busy) {
   for (const button of [
     elements.loadTopicGlobalBookmarks,
     elements.clearTopicGlobalBookmarks,
+    elements.deleteBookmarkTopic,
   ]) {
     button.disabled = disabled;
     button.setAttribute("aria-busy", String(Boolean(busy)));
