@@ -146,6 +146,8 @@ verify_mini_app_local() {
         "$base_url" >>"$MINI_APP_VERIFY_LOG"
     printf 'local POST %sapi/v1/contributions/events\n' \
         "$base_url" >>"$MINI_APP_VERIFY_LOG"
+    printf 'local POST %sapi/v1/contributions/sync\n' \
+        "$base_url" >>"$MINI_APP_VERIFY_LOG"
     [[ ${FAIL_MINI_APP_LOCAL:-0} != "1" ]]
 }
 
@@ -160,6 +162,8 @@ verify_mini_app_public() {
     printf 'public GET %sapi/v1/contributions/status\n' \
         "$base_url" >>"$MINI_APP_VERIFY_LOG"
     printf 'public POST %sapi/v1/contributions/events\n' \
+        "$base_url" >>"$MINI_APP_VERIFY_LOG"
+    printf 'public POST %sapi/v1/contributions/sync\n' \
         "$base_url" >>"$MINI_APP_VERIFY_LOG"
     [[ ${FAIL_MINI_APP_PUBLIC:-0} != "1" ]]
 }
@@ -758,13 +762,10 @@ assert_file "$CADDY_ROUTES"
 assert_contains "$CADDYFILE" "$CADDY_IMPORT_BEGIN"
 assert_contains "$CADDY_ROUTES" "bot.example.com {"
 assert_contains "$CADDY_ROUTES" "@gb_alpha_static path /getbible/alpha /getbible/alpha/"
-assert_contains "$CADDY_ROUTES" "/getbible/alpha/api/v1/session"
-assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/post'
+assert_contains "$CADDY_ROUTES" 'path /getbible/alpha/api/v1/*'
 assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/bookmarks/backup'
-assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/bookmarks/restore'
-assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/bookmarks/catalog'
-assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/status'
-assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/events'
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/sync'
+assert_contains "$CADDY_ROUTES" 'max_size 1MiB'
 assert_contains "$CADDY_ROUTES" 'max_size 5MB'
 assert_contains "$CADDY_ROUTES" 'respond "" 404'
 assert_contains "$CADDY_ROUTES" "reverse_proxy 127.0.0.1:9201"
@@ -960,28 +961,24 @@ EOF
 
 # Routine restart is also a repair boundary for generated managed routes.
 sed -i \
-    -e 's# /getbible/alpha/api/v1/contributions/status##' \
-    -e 's# /getbible/alpha/api/v1/contributions/events##' \
+    -e 's#path /getbible/alpha/api/v1/[*]#path /getbible/alpha/api/v0/*#' \
     "$CADDY_ROUTES"
 RESTART_CADDY_RELOADS=$(
     grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true
 )
 cmd_restart alpha
-assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/status'
-assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/events'
+assert_contains "$CADDY_ROUTES" 'path /getbible/alpha/api/v1/*'
 assert_equal \
     "$(grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true)" \
     "$((RESTART_CADDY_RELOADS + 1))"
 
-# Model the generated allow-list left by the previous release. Its catch-all
-# remains valid, but it does not know the new live-catalogue API paths.
+# Model the generated route left by the previous release. Its catch-all
+# remains valid, but its API prefix does not reach the current backend routes.
 sed -i \
-    -e 's# /getbible/alpha/api/v1/bookmarks/catalog##' \
-    -e 's# /getbible/alpha/api/v1/contributions/status##' \
-    -e 's# /getbible/alpha/api/v1/contributions/events##' \
+    -e 's#path /getbible/alpha/api/v1/[*]#path /getbible/alpha/api/v0/*#' \
     "$CADDY_ROUTES"
-! grep -Fq '/getbible/alpha/api/v1/bookmarks/catalog' "$CADDY_ROUTES" ||
-    fail "pre-release Caddy fixture retained the bookmark catalogue route"
+! grep -Fq 'path /getbible/alpha/api/v1/*' "$CADDY_ROUTES" ||
+    fail "pre-release Caddy fixture retained the current API prefix"
 SUCCESS_UPGRADE_CADDY_RELOADS=$(
     grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true
 )
@@ -998,9 +995,8 @@ assert_equal \
     "$(git -C "${INSTANCE_ROOT}/alpha/app.previous" rev-parse HEAD)" \
     "$FIRST_SHA"
 assert_contribution_assets "${INSTANCE_ROOT}/alpha/app.previous"
-assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/bookmarks/catalog'
-assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/status'
-assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/events'
+assert_contains "$CADDY_ROUTES" 'path /getbible/alpha/api/v1/*'
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/sync'
 verify_managed_caddy_routes ||
     fail "successful upgrade did not install the regenerated managed Caddy routes"
 assert_equal \
@@ -1010,8 +1006,7 @@ assert_equal \
 # Re-running update at the deployed commit is a repair operation. It must use
 # the target manager's migration/route logic without rotating app.previous.
 sed -i \
-    -e 's# /getbible/alpha/api/v1/contributions/status##' \
-    -e 's# /getbible/alpha/api/v1/contributions/events##' \
+    -e 's#path /getbible/alpha/api/v1/[*]#path /getbible/alpha/api/v0/*#' \
     "$CADDY_ROUTES"
 SAME_SHA_PREVIOUS=$(
     git -C "${INSTANCE_ROOT}/alpha/app.previous" rev-parse HEAD
@@ -1024,8 +1019,7 @@ REFRESH_OUTPUT=$(cmd_upgrade alpha --source "$SOURCE_DIR" <<EOF
 
 EOF
 )
-assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/status'
-assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/events'
+assert_contains "$CADDY_ROUTES" 'path /getbible/alpha/api/v1/*'
 assert_equal \
     "$(git -C "${INSTANCE_ROOT}/alpha/app.previous" rev-parse HEAD)" \
     "$SAME_SHA_PREVIOUS"
@@ -1041,11 +1035,15 @@ assert_contains "$MINI_APP_VERIFY_LOG" \
 assert_contains "$MINI_APP_VERIFY_LOG" \
     'local POST http://127.0.0.1:9201/getbible/alpha/api/v1/contributions/events'
 assert_contains "$MINI_APP_VERIFY_LOG" \
+    'local POST http://127.0.0.1:9201/getbible/alpha/api/v1/contributions/sync'
+assert_contains "$MINI_APP_VERIFY_LOG" \
     'public GET https://bot.example.com/getbible/alpha/api/v1/bookmarks/catalog'
 assert_contains "$MINI_APP_VERIFY_LOG" \
     'public GET https://bot.example.com/getbible/alpha/api/v1/contributions/status'
 assert_contains "$MINI_APP_VERIFY_LOG" \
     'public POST https://bot.example.com/getbible/alpha/api/v1/contributions/events'
+assert_contains "$MINI_APP_VERIFY_LOG" \
+    'public POST https://bot.example.com/getbible/alpha/api/v1/contributions/sync'
 
 # A same-commit repair is an artifact transaction, not merely a Caddy
 # transaction. Force the candidate restart to fail after every managed file has
@@ -1056,9 +1054,7 @@ printf '# installed unit sentinel\n' >>"$UNIT_PATH"
 printf '# installed logrotate sentinel\n' >>"$LOGROTATE_PATH"
 printf '# installed resource sentinel\n' >>"$(resource_dropin_for alpha)"
 sed -i \
-    -e 's# /getbible/alpha/api/v1/bookmarks/catalog##' \
-    -e 's# /getbible/alpha/api/v1/contributions/status##' \
-    -e 's# /getbible/alpha/api/v1/contributions/events##' \
+    -e 's#path /getbible/alpha/api/v1/[*]#path /getbible/alpha/api/v0/*#' \
     "$CADDY_ROUTES"
 FAILED_REFRESH_ENV_HASH=$(sha256sum "$(environment_file_for alpha)" | awk '{print $1}')
 FAILED_REFRESH_MANAGER_HASH=$(sha256sum "$MANAGER_PATH" | awk '{print $1}')
@@ -1142,11 +1138,9 @@ assert_equal \
 assert_contribution_assets "${INSTANCE_ROOT}/alpha/app.previous"
 
 # A failed upgraded service must restore the exact pre-upgrade Caddy bytes and
-# reload them after the candidate allow-list was already installed.
+# reload them after the candidate API prefix was already installed.
 sed -i \
-    -e 's# /getbible/alpha/api/v1/bookmarks/catalog##' \
-    -e 's# /getbible/alpha/api/v1/contributions/status##' \
-    -e 's# /getbible/alpha/api/v1/contributions/events##' \
+    -e 's#path /getbible/alpha/api/v1/[*]#path /getbible/alpha/api/v0/*#' \
     "$CADDY_ROUTES"
 FAILED_UPGRADE_CADDYFILE_HASH=$(sha256sum "$CADDYFILE" | awk '{print $1}')
 FAILED_UPGRADE_ROUTES_HASH=$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')

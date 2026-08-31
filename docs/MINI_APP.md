@@ -208,22 +208,33 @@ authorization. After approval, the next authenticated Mini App launch shows a
 one-time disclosure that topic and verse-tag changes are shared for review.
 Synchronization starts only after that disclosure is acknowledged.
 
-The first synchronization emits a deterministic baseline containing existing
-personal assignments, every topic they reference, and genuinely custom topics.
-Later successful `BookmarkStore` mutations produce explicit, idempotent
-`topic_upsert`, `topic_delete`, `verse_add`, or `verse_remove` events. The
-browser stores a bounded per-instance, authenticated-user-scoped IndexedDB
-journal and submits at most 50 events per request. Short Web Locks protect each
-read/modify/write checkpoint across tabs, but are released before network I/O;
-idempotent identifiers make a repeated in-flight request safe. A valid legacy
-version-1 `localStorage` journal is removed only after its transactional
-IndexedDB copy commits. Network failure and rate limiting leave the local
-bookmark mutation intact, preserve the journal, and schedule a paced retry
-using bounded `Retry-After` guidance. Journal overflow switches to compact,
-checkpointed snapshot reconciliation instead of discarding a mutation. When
-IndexedDB or Web Locks are unavailable, bookmarks remain usable with an
-explicit memory-only durability warning. Revoked/rejected status stops future
-submission without deleting the user's personal topics or markings.
+An approved session response supplies a separate, revocable contributor
+capability. The browser sends that capability in `Authorization` only to the
+same-origin `POST /api/v1/contributions/sync` endpoint. It never infers
+authority from a cached status flag, and Robot rechecks the capability owner
+against current approval on every synchronization.
+
+**Sync now** sends one bounded request and receives one definitive response.
+The request contains protocol version 1, stable client and idempotency IDs, the
+current personal topic/assignment snapshot, any still-pending explicit legacy
+operations, and the disclosure acknowledgement. It contains coordinate
+identity only, never Scripture text or Telegram identity. Robot validates the
+complete request, derives the missing moderation events from the last accepted
+snapshot, and commits the snapshot, operations, disclosure, events, and durable
+receipt in one SQLite transaction. An exact `sync_id` replay returns that
+receipt; reuse with different content fails closed. The response carries the
+receipt, complete contributor status, and live-catalogue revision/checksum, so
+success is not coupled to separate status or catalogue requests.
+
+`BookmarkStore` remains the durable source for current personal state. A
+transport failure cannot roll back a bookmark mutation and leaves the same
+idempotent synchronization available for retry. Revocation or rejection stops
+future submission without deleting personal topics or markings. The transport
+is ordinary same-origin HTTPS on the Mini App domain and port already in use;
+it needs no WebSocket, long-lived connection, extra listener, or Telegram
+`sendData` bridge. The former status/event endpoints remain temporarily for
+older deployed clients, but new clients do not orchestrate batches through
+them.
 
 Contribution source topic names must be English. The UI explains that rule,
 the browser omits invalid topic-name proposals, the server validates them
@@ -263,16 +274,20 @@ No ordinary click may create server basket state. Legacy per-click basket and Ro
 
 ## Security boundary
 
-The public HTML shell is not an authentication boundary. Robot action routes require fresh Telegram-signed `initData`, an owner-bound launch, and an active opaque session. The bot token remains server-side.
+The public HTML shell is not an authentication boundary. Robot validates fresh
+Telegram-signed `initData` and the owner-bound launch during the initial session
+exchange only. It then issues an active opaque session bearer for ordinary
+actions and, only for a currently approved contributor, a separate revocable
+contributor capability. The bot token remains server-side.
 
 The browser is untrusted for final output. It may control display state, but it cannot determine the authoritative text delivered to Telegram. Final output remains bounded, escaped, idempotent, and tied to the originating user, chat, and topic.
 
 The browser is also untrusted for contributor authority and global catalogue
-publication. Every status or event request revalidates the Telegram-bound
-session and current approved numeric user ID. Client-supplied verse text is
-never a review authority; the terminal reviewer fetches and validates the
-configured translation directly from `query.getbible.net` and defers when it
-is unavailable.
+publication. Every synchronization validates the durable capability and
+current approved numeric Telegram user ID. Client-supplied verse text is never
+a review authority; the terminal reviewer fetches and validates the configured
+translation directly from `query.getbible.net` and defers when it is
+unavailable.
 
 Do not trust `Referer`, `User-Agent`, an obscure URL, or client IP as authentication. Do not expose the bot token, session token, or Telegram init data to GetBible API origins or browser persistent caches.
 
@@ -325,10 +340,18 @@ used. The external proxy keeps its public HTTPS port and forwards to the bot
 host address and `MINI_APP_PORT` printed by setup.
 
 The generated Caddy route is deny-by-default. It forwards only packaged
-shell/assets and documented API paths; every other request receives an empty
-`404` without contacting Tornado. Tornado independently recognizes routes and
-methods before session lookup, Telegram validation, or rate-limit accounting.
-Never replace the generated matchers with a catch-all reverse proxy.
+shell/assets and the bounded Mini App `/api/v1/*` namespace; every other
+request receives an empty `404` without contacting Tornado. Exact backup and
+contribution-sync matchers apply 5 MiB and 1 MiB limits before the general
+64 KiB API matcher. Tornado remains deny-by-default inside that namespace and
+recognizes routes and methods before authentication or rate-limit accounting.
+This prefix prevents a newly deployed API from being stranded behind a stale
+endpoint allow-list without exposing a broad site catch-all.
+
+Caddy's normal reverse-proxy behavior preserves `Authorization` and `Origin`;
+the generated route does not strip or reconstruct them. Authenticated requests
+do not depend on `X-Telegram-Init-Data`: raw launch data is consumed by the
+initial session exchange and is not a per-request proxy credential.
 
 Posting is one bounded authenticated action. The browser sends ordered
 coordinate identities and an idempotency key. Robot validates every coordinate
@@ -370,9 +393,10 @@ After deployment, verify:
     sync and backup;
 18. topic management is alphabetical, while verse assignment shows a clearable
     recent group followed by the full alphabetical list;
-19. an unapproved user never creates server contribution events, while an
-    approved user receives the disclosure, submits a bounded baseline, retries
-    offline events, and keeps every local mutation on server failure;
+19. an unapproved user never receives a contributor capability or creates
+    server contribution events, while an approved user's one-request snapshot
+    sync commits atomically, replays the same receipt after an ambiguous
+    response, and keeps every local mutation on server failure;
 20. a newly published live topic appears on the same instance, uses its English
     source when the active locale lacks a translation, and falls back to the
     bundled catalogue when overlay validation fails;

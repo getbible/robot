@@ -209,7 +209,10 @@ modules, and browser APIs. It verifies:
    removal confirms linked-verse deletion;
 10. **Manage Contribution** appears directly below Global topics only for an
     approved contributor and remains separate from topic creation; and
-11. no legacy Robot Scripture or history request is emitted.
+11. **Sync now** emits one same-origin snapshot request and accepts one atomic
+    receipt/status/catalogue response, including exact replay after a lost
+    response; and
+12. no legacy Robot Scripture or history request is emitted.
 
 Focused model, storage, API, and backend tests separately verify selection
 identity and unselect state transitions, Post authority and server failure
@@ -246,6 +249,9 @@ Inject and verify independent failures for:
 - oversized, malformed, wrong-owner, missing, or changed bookmark backup
   documents;
 - restore persistence or acknowledgement failure;
+- contribution capability expiry/revocation, a lost sync response followed by
+  exact replay, conflicting `sync_id` reuse, an oversized snapshot, and SQLite
+  rollback before receipt commit;
 - final Telegram send failure.
 
 Each failure must remain inside its ownership boundary. Public API errors must not invalidate authentication; search errors must not disable reading; Post errors must not erase local selections.
@@ -277,6 +283,9 @@ After all deterministic gates pass, deploy one validated commit and verify in Te
   per-link hide plus per-topic/all reset without personal sync or backup;
 - an approved contributor sees the collapsible **Manage Contribution** panel
   directly below Global topics, while an ordinary session does not;
+- approved **Sync now** performs one `POST .../api/v1/contributions/sync`, an
+  ambiguous retry returns the same receipt without duplicate moderation
+  events, and revoked or ordinary users cannot submit;
 - global topics survive reopening Telegram Desktop after its WebView
   localStorage is cleared, using DeviceStorage without CloudStorage;
 - unchanged CloudStorage items remain stable, partial commits are rejected by

@@ -59,8 +59,6 @@ No reader navigation, catalog load, chapter load, select, unselect, reorder, cle
 | `miniapp/lib/telegram-bookmark-storage.js` | Aggregate-v3 timestamp reconciliation across localStorage, Telegram DeviceStorage, and Telegram CloudStorage, with compact cloud topic and recent-topic indexes |
 | `miniapp/lib/bookmark-topic-sort.js` | Presentation-only alphabetical topic ordering without rewriting canonical storage order |
 | `miniapp/lib/bible-canon.js` | Shared 66-book and per-book chapter bounds for contribution and live-catalog coordinates |
-| `miniapp/lib/contribution-journal.js` | Per-instance, authenticated-user-scoped transactional IndexedDB journal |
-| `miniapp/lib/contribution-sync.js` | Local-first contributor baseline, explicit idempotent mutation events, paced retry, and checkpointed overflow recovery |
 | `miniapp/lib/global-bookmark-live-catalog.js` | Strict ETag/revision overlay validation, instance-scoped cache, and bundled fallback |
 | `miniapp/lib/instance-scope.js` | Deterministic non-secret namespace for state bound to one Robot API path |
 | `miniapp/lib/api.js` | Robot session/search/preferences/Post, bookmark backup/restore, contribution, and live-catalog transport facade plus public API composition |
@@ -270,13 +268,16 @@ English canonical topic metadata and bounded 66-book coordinate deltas, caches
 by instance plus authenticated scope, and falls back to the bundled provider on
 offline, malformed, or oversized data. A validated authenticated `200` replaces
 the cache after database recovery even when its revision moves backward or
-diverges; `304` retains the cached envelope. Approved contributors mirror
-successful local topic and assignment changes through a separate IndexedDB
-journal. Short Web Locks serialize browser checkpoints without covering
-network I/O, while a distinct cross-tab sync-owner lock serializes the complete
-network drain; 50-event idempotent batches are paced and resume from persisted
-baseline or recovery cursors. Contributor state never enters Telegram storage,
-and a failed mirror never rolls back the personal bookmark mutation.
+diverges; `304` retains the cached envelope. Approved contributors synchronize
+the current personal topic/assignment snapshot plus pending explicit
+compatibility operations through one same-origin request. The server-issued
+contributor capability is independent from client UI state and is checked
+against current approval on every write. One SQLite transaction derives
+moderation events, stores the accepted snapshot and stable `sync_id` receipt,
+and returns that receipt with complete status and catalogue revision/checksum.
+Exact request replay returns the same receipt; conflicting reuse fails closed.
+Contributor state never enters Telegram storage, and a failed request never
+rolls back the personal bookmark mutation.
 
 The user may download or import the same bounded personal JSON locally. New
 backup documents are version 4 and carry each record's topic assignments as
@@ -336,6 +337,13 @@ The authenticated Mini App session has a three-hour default absolute lifetime
 and is not extended indefinitely by activity. This is long enough for sustained
 reading while preserving a definite authentication boundary.
 
+Fresh Telegram `initData` is signature-, age-, user-, chat-, and launch-checked
+only at the initial session exchange. Robot then uses its own opaque session
+bearer for ordinary protected requests. An approved session also receives an
+audience-bound, revocable contribution capability; **Sync now** uses it for one
+bounded HTTPS request on the existing Mini App listener. No WebSocket or extra
+port participates in this control plane.
+
 Browser selection mutations are synchronous and single-threaded. Search pagination uses latest-request coordination so stale responses cannot overwrite current state. Preference writes are serialized per user. Final posting is serialized and idempotent.
 
 Bookmark writes are synchronous locally and asynchronously coalesced for
@@ -357,6 +365,7 @@ Synchronous Librarian work runs in fixed executors. Timeouts do not release capa
 | Telegram Mini App storage unavailable | local bookmark and last-read copies continue; UI reports degraded sync |
 | Browser local storage unavailable | history falls back to memory; Telegram bookmark storage can still persist when supported |
 | Bookmark chat backup unavailable | live bookmarks remain unchanged; local JSON export remains available |
+| Contribution sync unavailable | personal bookmarks remain authoritative; the same idempotent request can be retried |
 | Invalid public response | rejected without cache replacement |
 | Failed Post | ordered browser selection preserved |
 | Expired Robot session | protected operations fail closed; public cached data remains identity-free |
@@ -402,10 +411,9 @@ A release is production-ready only when permanent CI and CodeQL pass on the exac
 - the unified global/personal list, **G** marker, compact all-catalog controls,
   scoped local/DeviceStorage restoration of global visibility and exclusions,
   and per-link/per-topic/all-catalog reset without CloudStorage or personal sync;
-- approved-contributor disclosure and authority, transactional per-instance
-  IndexedDB journaling, cross-tab checkpoints, bounded idempotent batches,
-  offline/rate-limit retry, global-removal capture, and strict live-catalog
-  revision/fallback behavior;
+- approved-contributor disclosure and capability authority, one-request bounded
+  snapshots, atomic durable receipts, exact idempotent replay, offline retry,
+  global-removal capture, and strict live-catalog revision/fallback behavior;
 - bounded JSON download/import plus owner-bound private-chat backup, fresh
   one-time restore launch, compact v4 `colorIndexes` plus v1/v2/v3 import,
   persistence-before-acknowledgement, and absence of global links or backup

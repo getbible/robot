@@ -1427,24 +1427,6 @@ for host in sorted(routes):
                 path + "/lib/*",
                 path + "/assets/*",
             )
-            api_paths = (
-                path + "/api/v1/session",
-                path + "/api/v1/translations",
-                path + "/api/v1/books",
-                path + "/api/v1/chapters",
-                path + "/api/v1/scripture",
-                path + "/api/v1/search",
-                path + "/api/v1/basket",
-                path + "/api/v1/basket/items",
-                path + "/api/v1/basket/order",
-                path + "/api/v1/preferences",
-                path + "/api/v1/bookmarks/restore",
-                path + "/api/v1/bookmarks/catalog",
-                path + "/api/v1/contributions/status",
-                path + "/api/v1/contributions/events",
-                path + "/api/v1/post",
-                path + "/api/v1/cleanup",
-            )
             lines.extend(
                 (
                     f"    @{matcher}_static path {' '.join(static_paths)}",
@@ -1461,21 +1443,21 @@ for host in sorted(routes):
                     "        }",
                     f"        reverse_proxy 127.0.0.1:{port}",
                     "    }",
-                    f"    @{matcher}_api {{",
-                    f"        path {' '.join(api_paths)}",
-                    "        method GET POST PUT PATCH DELETE OPTIONS",
+                    f"    @{matcher}_contribution_sync {{",
+                    f"        path {path}/api/v1/contributions/sync",
+                    "        method POST OPTIONS",
                     "    }",
-                    f"    handle @{matcher}_api {{",
+                    f"    handle @{matcher}_contribution_sync {{",
                     "        request_body {",
-                    "            max_size 64KB",
+                    "            max_size 1MiB",
                     "        }",
                     f"        reverse_proxy 127.0.0.1:{port}",
                     "    }",
-                    f"    @{matcher}_api_token {{",
-                    "        method GET DELETE OPTIONS",
-                    f"        path_regexp ^{re.escape(path)}/api/v1/(?:search|basket/items)/[A-Za-z0-9_-]{{16,128}}$",
+                    f"    @{matcher}_api {{",
+                    f"        path {path}/api/v1/*",
+                    "        method GET POST PUT PATCH DELETE OPTIONS",
                     "    }",
-                    f"    handle @{matcher}_api_token {{",
+                    f"    handle @{matcher}_api {{",
                     "        request_body {",
                     "            max_size 64KB",
                     "        }",
@@ -1487,18 +1469,6 @@ for host in sorted(routes):
             static_paths = (
                 "/", "/index.html", "/app.js", "/styles.css",
                 "/api-contract.json", "/lib/*", "/assets/*",
-            )
-            api_paths = (
-                "/api/v1/session", "/api/v1/translations", "/api/v1/books",
-                "/api/v1/chapters", "/api/v1/scripture", "/api/v1/search",
-                "/api/v1/basket",
-                "/api/v1/basket/items",
-                "/api/v1/basket/order", "/api/v1/preferences",
-                "/api/v1/bookmarks/restore",
-                "/api/v1/bookmarks/catalog",
-                "/api/v1/contributions/status",
-                "/api/v1/contributions/events",
-                "/api/v1/post", "/api/v1/cleanup",
             )
             lines.extend(
                 (
@@ -1516,21 +1486,21 @@ for host in sorted(routes):
                     "        }",
                     f"        reverse_proxy 127.0.0.1:{port}",
                     "    }",
-                    f"    @{matcher}_api {{",
-                    f"        path {' '.join(api_paths)}",
-                    "        method GET POST PUT PATCH DELETE OPTIONS",
+                    f"    @{matcher}_contribution_sync {{",
+                    "        path /api/v1/contributions/sync",
+                    "        method POST OPTIONS",
                     "    }",
-                    f"    handle @{matcher}_api {{",
+                    f"    handle @{matcher}_contribution_sync {{",
                     "        request_body {",
-                    "            max_size 64KB",
+                    "            max_size 1MiB",
                     "        }",
                     f"        reverse_proxy 127.0.0.1:{port}",
                     "    }",
-                    f"    @{matcher}_api_token {{",
-                    "        method GET DELETE OPTIONS",
-                    "        path_regexp ^/api/v1/(?:search|basket/items)/[A-Za-z0-9_-]{16,128}$",
+                    f"    @{matcher}_api {{",
+                    "        path /api/v1/*",
+                    "        method GET POST PUT PATCH DELETE OPTIONS",
                     "    }",
-                    f"    handle @{matcher}_api_token {{",
+                    f"    handle @{matcher}_api {{",
                     "        request_body {",
                     "            max_size 64KB",
                     "        }",
@@ -1879,7 +1849,10 @@ probe_mini_app_surface() {
             "${base_url}/api/v1/contributions/status" GET "$public_origin" &&
         probe_mini_app_api_url \
             "$app_dir/venv/bin/python" \
-            "${base_url}/api/v1/contributions/events" POST "$public_origin"
+            "${base_url}/api/v1/contributions/events" POST "$public_origin" &&
+        probe_mini_app_api_url \
+            "$app_dir/venv/bin/python" \
+            "${base_url}/api/v1/contributions/sync" POST "$public_origin"
 }
 
 wait_for_mini_app_surface() {

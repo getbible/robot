@@ -108,12 +108,14 @@ The cloud firewall must allow public TCP `80` and `443`, but must not expose
 `9201` or the instance's assigned Mini App port. Requests reach the Mini App
 through Caddy; they never connect to the loopback listener directly.
 
-Probes such as `/.env`, `/.git/*`, `/wp-admin`, and unknown `/api/v1/*` paths
-should return an empty `404` from Caddy and must not appear as Tornado access
-events. If they reach Python or become `502` responses while Robot is stopped,
-the generated Caddy routes are stale or were replaced by a catch-all proxy.
-Run `sudo getbible-robot doctor INSTANCE`, then use the manager's Mini App or
-upgrade flow to regenerate and transactionally validate them.
+Probes such as `/.env`, `/.git/*`, and `/wp-admin` should return an empty `404`
+from Caddy and must not appear as Tornado access events. The bounded
+`/api/v1/*` namespace is intentionally forwarded so a newly deployed backend
+route cannot be stranded behind stale endpoint enumeration; unknown API paths
+must still receive Robot's deny-by-default `404`. If a non-API probe reaches
+Python, or an API request becomes `502` while Robot is healthy, run
+`sudo getbible-robot doctor INSTANCE`, then use the manager's Mini App or
+upgrade flow to regenerate and transactionally validate the route.
 
 If setup reports a DNS error, create or correct the public `A`/`AAAA` record
 and ensure inbound TCP `80` and `443` reach this host. If Caddy validation or
@@ -123,11 +125,25 @@ the marked import or `/etc/caddy/getbible-robot.caddy`.
 
 An ordinary browser may retrieve the application shell; that is not a security
 failure. Protected data and action APIs must reject missing, expired,
-malformed, replayed, or user-mismatched Telegram authorization. Launch the app
+malformed, or user-mismatched authorization. Raw Telegram `initData` is
+validated at the initial session exchange only; later protected requests use
+Robot-issued opaque bearers. Launch the app
 again from the bot, verify the server clock, and check that the configured bot
 token belongs to the bot that opened the app. For group launch failures,
 confirm the Main Mini App URL in `@BotFather`. See
 [Mini App deployment](MINI_APP.md).
+
+If **Sync now** fails, first verify the user remains approved with
+`sudo getbible-robot contributions INSTANCE status`, then rerun
+`sudo getbible-robot doctor INSTANCE`. The contributor control should be
+absent unless the approved session supplied its separate capability. One click
+must produce one `POST .../api/v1/contributions/sync`; it must not open a
+WebSocket, target another port, or sequence status/events/catalogue requests.
+A lost response is safe to retry with the same `sync_id`: Robot returns the
+stored receipt instead of duplicating moderation events. HTTP `401` means the
+capability is invalid, `403` means current approval/disclosure policy refused
+it, `409` means that sync ID was reused with different content, and `413`
+means the 1 MiB bound was exceeded.
 
 ## Service fails with `status=200/CHDIR`
 

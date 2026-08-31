@@ -58,7 +58,9 @@ The previously installed manager compares its upgrade logic with the reviewed
 target. If the target checkout manager is newer, it hands the operation to that
 exact checkout before configuration migration or route generation begins. This
 prevents an already-running older process from applying an obsolete Caddy
-allow-list while deploying newer application code.
+route schema while deploying newer application code. Current generated routes
+forward the bounded `/api/v1/*` namespace so a new backend endpoint does not
+require fragile per-endpoint proxy enumeration.
 
 An update to the commit that is already deployed is a supported repair path.
 It does not rotate the application trees. It reapplies backwards-compatible

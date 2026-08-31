@@ -91,6 +91,12 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   be removed; removing a global topic is user-local and **Add all** restores
   it. Approved contributors alone see the collapsible **Manage Contribution**
   panel immediately below Global topics.
+- **Sync now** uses one bounded same-origin HTTPS request with a revocable
+  server-issued contributor capability. Robot atomically accepts the current
+  topic/assignment snapshot and pending explicit operations, then returns a
+  durable idempotent receipt, current status, and catalogue checksum in the
+  same response. It requires no WebSocket, additional port, or repeated raw
+  Telegram `initData` header.
 - Personal bookmark aggregate version 3, topics, the clearable recently-used
   topic order, the active topic, and the compact last-read coordinate reconcile
   by timestamp across scoped
@@ -117,9 +123,10 @@ The public Mini App shell is not an authentication boundary.
 
 Robot protects actions with:
 
-- fresh Telegram-signed `initData`;
+- fresh Telegram-signed `initData` at the initial session exchange;
 - owner-bound, one-time launch tokens;
 - bounded opaque sessions with a three-hour default absolute lifetime;
+- a separate revocable capability for approved-contributor synchronization;
 - user/chat/topic binding;
 - bounded request bodies and output;
 - per-user, per-chat, and trusted-client rate limits;
@@ -272,6 +279,8 @@ The permanent release gate requires:
 - scoped durable reading-history move-to-front/reopen/remove/clear and persistence tests;
 - bookmark topic/domain, Telegram storage reconciliation, bounded JSON, and
   private-chat backup/restore tests;
+- one-request contribution snapshot, atomic receipt, capability revocation,
+  and exact-replay tests;
 - no pre-Post Robot selection mutation;
 - authoritative idempotent Post tests;
 - Bandit, dependency audit, secret scan, systemd verification, and CodeQL.
@@ -306,7 +315,10 @@ After deploying one exact green commit, verify:
 18. the unified topic list identifies global links with **G**, supports
     per-link hide and per-topic/all-catalog reset, and never includes those
     links in personal sync or backup;
-19. private command and launcher cleanup still works.
+19. approved-contributor Sync now completes through one request, exact retries
+    return the same durable receipt, and an ordinary or revoked user cannot
+    submit;
+20. private command and launcher cleanup still works.
 
 Record the deployed commit SHA and permanent CI/CodeQL run links with release evidence.
 

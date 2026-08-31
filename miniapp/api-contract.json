@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "getBible.Life Telegram Mini App API",
-    "version": "1.0.0",
-    "description": "Same-origin API contract for the getBible.Life Telegram Mini App. Telegram initData is revalidated on every authenticated request. Verse text is never accepted as authoritative input for basket or post operations."
+    "version": "1.1.0",
+    "description": "Same-origin API contract for the getBible.Life Telegram Mini App. Telegram initData is validated only when exchanging the initial session; subsequent requests use bounded server-issued opaque bearers. Verse text is never accepted as authoritative input for basket, contribution, or post operations."
   },
   "servers": [
     {
@@ -13,8 +13,7 @@
   ],
   "security": [
     {
-      "bearerAuth": [],
-      "telegramInitData": []
+      "bearerAuth": []
     }
   ],
   "paths": {
@@ -50,6 +49,11 @@
         "responses": {
           "200": {
             "description": "A reopened Telegram WebView was rebound to its still-active owner/chat session",
+            "headers": {
+              "X-Contribution-Token": {
+                "$ref": "#/components/headers/ContributionToken"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -60,6 +64,11 @@
           },
           "201": {
             "description": "Validated Telegram session and initial application state",
+            "headers": {
+              "X-Contribution-Token": {
+                "$ref": "#/components/headers/ContributionToken"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -71,16 +80,6 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
-          "409": {
-            "description": "The signed Telegram launch data has already been exchanged",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
           "429": {
             "$ref": "#/components/responses/RateLimited"
           }
@@ -91,6 +90,11 @@
         "responses": {
           "200": {
             "description": "Current session state with the same active bearer",
+            "headers": {
+              "X-Contribution-Token": {
+                "$ref": "#/components/headers/ContributionToken"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -120,7 +124,7 @@
     "/cleanup": {
       "post": {
         "summary": "Signal browser readiness and clean retained launch messages",
-        "description": "Authenticates the current bearer and its original Telegram initData, then removes the bot launch prompt and ephemeral source command as one idempotent cleanup unit. The browser treats transport failure as non-fatal after a session has opened.",
+        "description": "Authenticates the current opaque session bearer, then removes the bot launch prompt and ephemeral source command as one idempotent cleanup unit. The browser treats transport failure as non-fatal after a session has opened.",
         "responses": {
           "204": {
             "description": "Launch-message cleanup completed or was already complete"
@@ -716,6 +720,8 @@
     "/contributions/status": {
       "get": {
         "summary": "Read the authenticated user's contributor status",
+        "deprecated": true,
+        "description": "Compatibility endpoint. New clients use POST /contributions/sync, whose response includes the complete status.",
         "parameters": [
           {
             "name": "details",
@@ -731,6 +737,11 @@
         "responses": {
           "200": {
             "description": "Contributor application and enrolment state",
+            "headers": {
+              "X-Contribution-Token": {
+                "$ref": "#/components/headers/ContributionToken"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -755,6 +766,8 @@
       },
       "patch": {
         "summary": "Acknowledge the one-time contributor disclosure",
+        "deprecated": true,
+        "description": "Compatibility endpoint. New clients acknowledge disclosure inside their atomic POST /contributions/sync request.",
         "parameters": [
           {
             "name": "details",
@@ -787,6 +800,11 @@
         "responses": {
           "200": {
             "description": "Disclosure acknowledgement recorded",
+            "headers": {
+              "X-Contribution-Token": {
+                "$ref": "#/components/headers/ContributionToken"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -819,7 +837,8 @@
     "/contributions/events": {
       "post": {
         "summary": "Submit a bounded idempotent contributor event batch",
-        "description": "Accepts English topic metadata and translation-independent verse coordinates only. Scripture text and Telegram identity fields are never accepted from the browser.",
+        "deprecated": true,
+        "description": "Compatibility endpoint for older clients. New clients submit their current snapshot and any explicit legacy operations once through POST /contributions/sync. Scripture text and Telegram identity fields are never accepted from the browser.",
         "requestBody": {
           "required": true,
           "content": {
@@ -889,6 +908,85 @@
           },
           "503": {
             "$ref": "#/components/responses/InvalidRequest"
+          }
+        }
+      }
+    },
+    "/contributions/sync": {
+      "post": {
+        "summary": "Atomically synchronize the contributor's current bookmark state",
+        "description": "The complete bounded snapshot, pending explicit operations, disclosure acknowledgement, moderation status, receipt, and catalogue revision cross the same-origin boundary in one request and one response. The server validates current contributor authority from its durable capability, derives missing idempotent events, and commits the snapshot, operations, and receipt in one SQLite transaction. An exact sync_id replay returns the stored receipt without duplicating events. No WebSocket or additional listener is required.",
+        "security": [
+          {
+            "contributionCapability": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "At most 1 MiB of JSON. The snapshot carries coordinate identity only; it never carries Scripture text or Telegram identity.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContributionSyncRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The complete synchronization was committed or replayed atomically",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContributionSyncResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "The capability owner is not currently approved to contribute or has not acknowledged the disclosure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The sync_id was previously committed with different content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request exceeded the 1 MiB contribution-sync limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ContributionUnavailable"
           }
         }
       }
@@ -975,11 +1073,23 @@
         "bearerFormat": "opaque",
         "description": "Server-issued URL-safe opaque token matching ^[A-Za-z0-9_-]{16,128}$."
       },
-      "telegramInitData": {
-        "type": "apiKey",
-        "in": "header",
-        "name": "X-Telegram-Init-Data",
-        "description": "Raw Telegram WebApp.initData. Never log or persist this value."
+      "contributionCapability": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque",
+        "description": "Durable, revocable contributor capability issued by Robot only for a currently approved numeric Telegram user. It is exactly `gbc_` followed by 43 URL-safe Base64 characters and must never be logged."
+      }
+    },
+    "headers": {
+      "ContributionToken": {
+        "description": "Present only for a currently approved contributor. Durable, revocable capability for POST /contributions/sync; exactly `gbc_` plus 43 URL-safe Base64 characters.",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "minLength": 47,
+          "maxLength": 47,
+          "pattern": "^gbc_[A-Za-z0-9_-]{43}$"
+        }
       }
     },
     "parameters": {
@@ -1738,6 +1848,17 @@
           }
         }
       },
+      "ContributionFullStatus": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ContributionStatus"
+          },
+          {
+            "type": "object",
+            "required": ["topics", "summary"]
+          }
+        ]
+      },
       "ContributionCanonicalTopic": {
         "type": "object",
         "additionalProperties": false,
@@ -1888,6 +2009,182 @@
           "book": { "type": "integer", "minimum": 1, "maximum": 66 },
           "chapter": { "type": "integer", "minimum": 1, "maximum": 1000 },
           "verse": { "type": "integer", "minimum": 1, "maximum": 2000 }
+        }
+      },
+      "ContributionSnapshotTopic": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "color"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 80,
+            "pattern": "^(?=[A-Za-z0-9 &'():?-]{2,80}$)(?=.*[A-Za-z])(?!.* {2})[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]$",
+            "description": "English source topic name."
+          },
+          "color": {
+            "type": "string",
+            "pattern": "^#[a-f0-9]{6}$"
+          }
+        }
+      },
+      "ContributionSnapshotAssignment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["topic_id", "book", "chapter", "verse"],
+        "properties": {
+          "topic_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "book": { "type": "integer", "minimum": 1, "maximum": 66 },
+          "chapter": { "type": "integer", "minimum": 1, "maximum": 1000 },
+          "verse": { "type": "integer", "minimum": 1, "maximum": 2000 }
+        }
+      },
+      "ContributionSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["topics", "assignments"],
+        "properties": {
+          "topics": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/ContributionSnapshotTopic"
+            }
+          },
+          "assignments": {
+            "type": "array",
+            "maxItems": 10000,
+            "description": "Flattened topic memberships across at most 800 distinct verse coordinates and at most 100 topics for any coordinate.",
+            "items": {
+              "$ref": "#/components/schemas/ContributionSnapshotAssignment"
+            }
+          }
+        }
+      },
+      "ContributionSyncRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["protocol_version", "sync_id", "client_id", "snapshot", "operations", "disclosure_acknowledged"],
+        "properties": {
+          "protocol_version": { "const": 1 },
+          "sync_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "client_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/ContributionSnapshot"
+          },
+          "operations": {
+            "type": "array",
+            "maxItems": 2000,
+            "description": "Explicit legacy event objects retained for global removals and compatibility while the snapshot remains authoritative for current personal state.",
+            "items": {
+              "$ref": "#/components/schemas/ContributionEvent"
+            }
+          },
+          "disclosure_acknowledged": { "type": "boolean" }
+        }
+      },
+      "ContributionSyncReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sync_id", "snapshot_digest", "outcome", "accepted", "replayed", "event_ids"],
+        "properties": {
+          "sync_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "snapshot_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["accepted", "replayed"]
+          },
+          "accepted": { "type": "integer", "minimum": 0, "maximum": 12100 },
+          "replayed": { "type": "integer", "minimum": 0, "maximum": 12100 },
+          "event_ids": {
+            "type": "object",
+            "maxProperties": 2000,
+            "description": "Opaque receipts for the caller-supplied explicit operations only; snapshot-derived event identifiers remain server-private.",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        }
+      },
+      "ContributionSyncCatalog": {
+        "description": "The live catalogue revision when enrichment succeeds. A committed sync remains successful when this independent read model is temporarily unavailable.",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["revision", "checksum"],
+            "properties": {
+              "revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "checksum": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["revision", "checksum", "available"],
+            "properties": {
+              "revision": { "type": "null" },
+              "checksum": { "type": "null" },
+              "available": { "const": false }
+            }
+          }
+        ]
+      },
+      "ContributionSyncResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["protocol_version", "receipt", "status", "catalog"],
+        "properties": {
+          "protocol_version": { "const": 1 },
+          "receipt": {
+            "$ref": "#/components/schemas/ContributionSyncReceipt"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ContributionFullStatus"
+          },
+          "catalog": {
+            "$ref": "#/components/schemas/ContributionSyncCatalog"
+          }
         }
       },
       "ContributionEvent": {

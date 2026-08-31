@@ -694,18 +694,29 @@ cat "$dropin_root/alpha.conf"
         self.assertIn("dl.cloudsmith.io/public/caddy/stable", script)
         self.assertIn("render_caddy_routes", script)
         self.assertIn("max_size 64KB", script)
+        self.assertIn("max_size 1MiB", script)
         self.assertIn("max_size 5MB", script)
         self.assertIn("/api/v1/bookmarks/backup", script)
-        self.assertIn("/api/v1/bookmarks/restore", script)
         render_start = script.index("render_caddy_routes() {")
         render_end = script.index("\nmanaged_caddy_routes_required() {", render_start)
         caddy_renderer = script[render_start:render_end]
-        self.assertEqual(caddy_renderer.count('"/api/v1/bookmarks/catalog"'), 2)
-        self.assertEqual(caddy_renderer.count('"/api/v1/contributions/status"'), 2)
-        self.assertEqual(caddy_renderer.count('"/api/v1/contributions/events"'), 2)
-        self.assertIn('path + "/api/v1/bookmarks/catalog"', script)
-        self.assertIn('path + "/api/v1/contributions/status"', script)
-        self.assertIn('path + "/api/v1/contributions/events"', script)
+        self.assertEqual(caddy_renderer.count("path {path}/api/v1/*"), 1)
+        self.assertEqual(caddy_renderer.count("path /api/v1/*"), 1)
+        self.assertEqual(
+            caddy_renderer.count("/api/v1/contributions/sync"),
+            2,
+        )
+        self.assertNotIn('"/api/v1/contributions/status"', caddy_renderer)
+        self.assertNotIn('"/api/v1/contributions/events"', caddy_renderer)
+        for nested in (True, False):
+            marker = "f\"        path {path}/api/v1/*\"" if nested else (
+                '"        path /api/v1/*"'
+            )
+            prefix_at = caddy_renderer.index(marker)
+            sync_at = caddy_renderer.rfind("_contribution_sync", 0, prefix_at)
+            backup_at = caddy_renderer.rfind("_bookmark_backup", 0, sync_at)
+            self.assertGreater(sync_at, backup_at)
+            self.assertGreater(prefix_at, sync_at)
         self.assertIn("caddy validate --config", script)
         self.assertIn("rollback_caddy_transaction", script)
         self.assertIn("wait_for_mini_app_surface", script)
@@ -715,6 +726,7 @@ cat "$dropin_root/alpha.conf"
         self.assertIn('"${base_url}/api/v1/bookmarks/catalog" GET', surface)
         self.assertIn('"${base_url}/api/v1/contributions/status" GET', surface)
         self.assertIn('"${base_url}/api/v1/contributions/events" POST', surface)
+        self.assertIn('"${base_url}/api/v1/contributions/sync" POST', surface)
         self.assertIn("verify_mini_app_public", script)
         self.assertIn('systemctl enable --now "$service"', script)
         self.assertNotIn("Traefik", (ROOT / "docs" / "MINI_APP.md").read_text())
@@ -722,6 +734,69 @@ cat "$dropin_root/alpha.conf"
         self.assertIn("does not migrate an older Robot installation", uninstall_doc)
         self.assertIn("no broad", uninstall_doc)
         self.assertIn("managed Caddy route", uninstall_doc)
+
+    def test_managed_caddy_routes_bound_root_and_nested_api_prefixes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task_root = Path(temporary)
+            for instance, public_url, port in (
+                ("nested", "https://nested.example.com/getbible/app", 9201),
+                ("root", "https://root.example.com", 9202),
+            ):
+                app_dir = task_root / instance / "app"
+                (app_dir / "venv" / "bin").mkdir(parents=True)
+                os.symlink(sys.executable, app_dir / "venv" / "bin" / "python")
+                (task_root / f"{instance}.env").write_text(
+                    "MINI_APP_ENABLED=true\n"
+                    "REVERSE_PROXY_MODE=caddy\n"
+                    f"MINI_APP_PUBLIC_URL={public_url}\n"
+                    f"MINI_APP_PORT={port}\n",
+                    encoding="utf-8",
+                )
+            destination = task_root / "routes.caddy"
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    """
+source "$1"
+task_root=$2
+task_python=$3
+instance_names() { printf '%s\\n' nested root; }
+application_dir_for() { printf '%s/%s/app\\n' "$task_root" "$1"; }
+environment_file_for() { printf '%s/%s.env\\n' "$task_root" "$1"; }
+select_python() { printf '%s\\n' "$task_python"; }
+dotenv_value() {
+    awk -F= -v key="$3" '$1 == key {sub(/^[^=]*=/, ""); gsub(/^"|"$/, ""); print; exit}' "$2"
+}
+render_caddy_routes "$4"
+""",
+                    "caddy-prefix-test",
+                    str(SETUP),
+                    str(task_root),
+                    sys.executable,
+                    str(destination),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            routes = destination.read_text(encoding="utf-8")
+            self.assertIn("path /getbible/app/api/v1/*", routes)
+            self.assertIn("path /api/v1/*", routes)
+            self.assertIn("path /getbible/app/api/v1/contributions/sync", routes)
+            self.assertIn("path /api/v1/contributions/sync", routes)
+            self.assertEqual(routes.count("max_size 1MiB"), 2)
+            self.assertEqual(routes.count("max_size 5MB"), 2)
+            self.assertEqual(routes.count("max_size 64KB"), 2)
+            for matcher in ("gb_nested", "gb_root"):
+                backup = routes.index(f"@{matcher}_bookmark_backup")
+                sync = routes.index(f"@{matcher}_contribution_sync")
+                api = routes.index(f"@{matcher}_api ")
+                self.assertLess(backup, sync)
+                self.assertLess(sync, api)
+            self.assertNotIn("header_up -Authorization", routes)
+            self.assertNotIn("header_up -Origin", routes)
 
     def test_real_service_account_access_is_a_release_contract(self) -> None:
         script = SETUP.read_text(encoding="utf-8")
