@@ -945,6 +945,8 @@ async function pushContribution() {
   }
   const generation = sessionGeneration;
   const task = (async () => {
+    // Yield once so the shared task reference is installed before cleanup.
+    await Promise.resolve();
     try {
       if (!contributionSync?.canContribute) {
         // An applicant's button is a status check, exactly like before.
@@ -1018,6 +1020,8 @@ async function pullContribution() {
   }
   const generation = sessionGeneration;
   const task = (async () => {
+    // Yield once so the shared task reference is installed before cleanup.
+    await Promise.resolve();
     setContributionPresentation("syncing", "bookmarks.contribution_pulling");
     try {
       await loadContributionStatus();

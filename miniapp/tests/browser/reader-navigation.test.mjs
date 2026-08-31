@@ -98,7 +98,7 @@ function installTelegramMock() {
   const emit = (name, payload) => {
     for (const handler of events.get(name) ?? []) handler(payload);
   };
-  window.__telegramState = { readyCalls: 0 };
+  window.__telegramState = { readyCalls: 0, sentData: [] };
   window.Telegram = {
     WebApp: {
       initData: "query_id=browser-test&user=%7B%22id%22%3A42%7D",
@@ -109,6 +109,12 @@ function installTelegramMock() {
       safeAreaInset: { top: 0, right: 0, bottom: 18, left: 0 },
       contentSafeAreaInset: { top: 56, right: 0, bottom: 34, left: 0 },
       isFullscreen: false,
+      // Contribution pushes travel through sendData from the reply-keyboard
+      // launch only. Record every payload so this test can prove ordinary
+      // reading and bookmarking never hand Telegram a push message.
+      sendData(data) {
+        window.__telegramState.sentData.push(String(data));
+      },
       BackButton: {
         onClick(handler) { window.__telegramState.backHandler = handler; },
         offClick(handler) {
@@ -448,8 +454,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     reader_location: { translation: "kjv", book: 43, chapter: 3, verse: 1 },
   };
   let bookmarkBackupRequest = null;
-  const contributionCapability = `gbc_${"A".repeat(43)}`;
-  const contributionSyncRequests = [];
+  const contributionRequests = [];
   const contributionStatus = {
     enabled: true,
     state: "approved",
@@ -467,11 +472,13 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       !["translations", "books", "chapters", "scripture"].includes(apiPath),
       `public Bible data must not be proxied through Robot: ${apiPath}`,
     );
+    if (apiPath.startsWith("contributions/")) {
+      contributionRequests.push(`${request.method()} ${apiPath}`);
+    }
     if (apiPath === "session") {
       return route.fulfill({
         status: 201,
         contentType: "application/json",
-        headers: { "X-Contribution-Token": contributionCapability },
         body: jsonBody({
           session_token: "BrowserTestSessionToken123",
           expires_in: 10_800,
@@ -484,34 +491,14 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       });
     }
     if (apiPath === "cleanup") return fulfillJson(route, {});
-    if (apiPath === "contributions/status") {
+    // The redesigned contribution surface is read-only over HTTPS: the pull
+    // side keeps status and receipt GETs while a push travels exclusively
+    // through Telegram sendData. Anything else falls through to the 404.
+    if (apiPath === "contributions/status" && request.method() === "GET") {
       return fulfillJson(route, contributionStatus);
     }
-    if (apiPath === "contributions/sync") {
-      assert.equal(
-        request.headers().authorization,
-        `Bearer ${contributionCapability}`,
-      );
-      const sync = request.postDataJSON();
-      contributionSyncRequests.push(sync);
-      return fulfillJson(route, {
-        protocol_version: 1,
-        receipt: {
-          sync_id: sync.sync_id,
-          snapshot_digest: "0".repeat(64),
-          outcome: "accepted",
-          accepted:
-            sync.snapshot.topics.length +
-            sync.snapshot.assignments.length +
-            sync.operations.length,
-          replayed: 0,
-          event_ids: Object.fromEntries(
-            sync.operations.map((event, index) => [event.client_event_id, index + 1]),
-          ),
-        },
-        status: contributionStatus,
-        catalog: { revision: 0, checksum: "0".repeat(64) },
-      });
+    if (apiPath === "contributions/receipt" && request.method() === "GET") {
+      return fulfillJson(route, { found: false, receipt: null });
     }
     if (apiPath === "bookmarks/catalog") {
       return fulfillJson(route, {
@@ -1615,12 +1602,16 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     [],
   );
   assert.equal(robotRequests.some((path) => path.includes("history")), false);
-  assert.equal(
-    contributionSyncRequests.length,
-    0,
-    "browser-local bookmark edits must wait for an explicit contributor sync",
+  assert.deepEqual(
+    contributionRequests,
+    [],
+    "browser-local bookmark edits must never touch the contributions surface",
   );
-  assert.equal(robotRequests.includes("contributions/events"), false);
+  assert.deepEqual(
+    await page.evaluate(() => window.__telegramState.sentData),
+    [],
+    "browser-local bookmark edits must never hand Telegram a push message",
+  );
   assert.deepEqual(consoleMessages, []);
   assert.deepEqual(pageErrors, []);
   assert.deepEqual(failedRequests, []);
