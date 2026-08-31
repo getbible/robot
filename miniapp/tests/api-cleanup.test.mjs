@@ -86,7 +86,7 @@ test("a created session sends one authenticated launch-cleanup signal", async ()
   );
   assert.equal(
     requests[1].options.headers["X-Telegram-Init-Data"],
-    "signed-init-data",
+    undefined,
   );
   assert.equal(requests[1].options.keepalive, true);
 });

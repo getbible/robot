@@ -21,6 +21,7 @@ const MAX_SEARCH_TIMEOUT_MS = 900_000;
 // deadline, so a server that gives up first can say why.
 const SEARCH_TIMEOUT_GRACE_MS = 10_000;
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+const CONTRIBUTION_TOKEN_PATTERN = /^gbc_[A-Za-z0-9_-]{43}$/;
 
 export class ApiError extends Error {
   constructor(message, {
@@ -43,6 +44,7 @@ export class ApiError extends Error {
 export class MiniAppApi {
   #initData;
   #sessionToken = null;
+  #contributionToken = null;
   #searchTimeoutMs = DEFAULT_SEARCH_TIMEOUT_MS;
   #timeoutMs;
   #cleanupAttempted = false;
@@ -142,7 +144,12 @@ export class MiniAppApi {
 
   clearSession() {
     this.#sessionToken = null;
+    this.#contributionToken = null;
     this.#cleanupAttempted = false;
+  }
+
+  get contributionTransportReady() {
+    return this.#contributionToken !== null;
   }
 
   async revokeSession() {
@@ -256,15 +263,26 @@ export class MiniAppApi {
     });
   }
 
-  submitContributionEvents(events) {
-    if (!Array.isArray(events) || events.length < 1 || events.length > 50) {
-      throw new TypeError("A bounded contribution event batch is required.");
+  syncContributions(envelope) {
+    if (
+      !envelope ||
+      typeof envelope !== "object" ||
+      Array.isArray(envelope)
+    ) {
+      throw new TypeError("A contribution sync envelope is required.");
     }
-    return this.#request("contributions/events", {
+    if (!this.#contributionToken) {
+      throw new ApiError("Contribution sync is not available for this session.", {
+        code: "contribution_transport_not_ready",
+        status: 403,
+      });
+    }
+    return this.#request("contributions/sync", {
       method: "POST",
-      body: { events },
+      body: envelope,
       timeoutMs: 30_000,
-    }).then((payload) => normalizeContributionEventReceipt(payload, events));
+      contributionAuthenticated: true,
+    });
   }
 
   bookmarkCatalog(etag = null) {
@@ -419,12 +437,19 @@ export class MiniAppApi {
     keepalive = false,
     timeoutMs = this.#timeoutMs,
     headers: requestHeaders = {},
+    contributionAuthenticated = false,
     allowNotModified = false,
     includeEtag = false,
   } = {}) {
     if (authenticated && !this.#sessionToken) {
       throw new ApiError("Your secure session is not ready.", {
         code: "session_not_ready",
+      });
+    }
+    if (contributionAuthenticated && !this.#contributionToken) {
+      throw new ApiError("Contribution sync is not available for this session.", {
+        code: "contribution_transport_not_ready",
+        status: 403,
       });
     }
     const controller = new AbortController();
@@ -436,8 +461,11 @@ export class MiniAppApi {
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     if (authenticated) {
-      headers.Authorization = `Bearer ${this.#sessionToken}`;
-      headers["X-Telegram-Init-Data"] = this.#initData;
+      headers.Authorization = `Bearer ${
+        contributionAuthenticated
+          ? this.#contributionToken
+          : this.#sessionToken
+      }`;
     }
     let response;
     try {
@@ -465,6 +493,9 @@ export class MiniAppApi {
       );
     } finally {
       this.#clearTimeout(timeout);
+    }
+    if (response.ok) {
+      this.#acceptContributionToken(response);
     }
     if (allowNotModified && response.status === 304) {
       return {
@@ -517,6 +548,24 @@ export class MiniAppApi {
       ? { ...payload, etag: response.headers.get("etag") }
       : payload;
   }
+
+  #acceptContributionToken(response) {
+    const token = response.headers.get("x-contribution-token");
+    if (token === null) {
+      return;
+    }
+    if (!CONTRIBUTION_TOKEN_PATTERN.test(token)) {
+      throw new ApiError(
+        "getBible.Life returned an invalid contribution capability.",
+        {
+          code: "invalid_response",
+          status: response.status,
+          retryable: true,
+        },
+      );
+    }
+    this.#contributionToken = token;
+  }
 }
 
 function retryAfterSeconds(response, payload) {
@@ -563,46 +612,6 @@ function publicApiError(error) {
     status: error.status,
     retryable: error.retryable,
   });
-}
-
-function normalizeContributionEventReceipt(value, events) {
-  const keys = value && typeof value === "object" && !Array.isArray(value)
-    ? Object.keys(value).sort()
-    : [];
-  const expectedKeys = ["accepted", "event_ids", "replayed"];
-  const eventIds = value?.event_ids;
-  const submittedIds = events.map((event) => event?.client_event_id);
-  if (
-    keys.length !== expectedKeys.length ||
-    keys.some((key, index) => key !== expectedKeys[index]) ||
-    !Number.isInteger(value.accepted) ||
-    value.accepted < 0 ||
-    !Number.isInteger(value.replayed) ||
-    value.replayed < 0 ||
-    value.accepted + value.replayed !== events.length ||
-    !eventIds ||
-    typeof eventIds !== "object" ||
-    Array.isArray(eventIds) ||
-    new Set(submittedIds).size !== submittedIds.length ||
-    Object.keys(eventIds).length !== submittedIds.length ||
-    submittedIds.some((id) =>
-      typeof id !== "string" ||
-      !Object.hasOwn(eventIds, id) ||
-      !Number.isSafeInteger(eventIds[id]) ||
-      eventIds[id] < 1
-    ) ||
-    Object.keys(eventIds).some((id) => !submittedIds.includes(id))
-  ) {
-    throw new ApiError("getBible.Life returned an unexpected contribution receipt.", {
-      code: "invalid_response",
-      retryable: true,
-    });
-  }
-  return {
-    accepted: value.accepted,
-    replayed: value.replayed,
-    event_ids: { ...eventIds },
-  };
 }
 
 function params(values) {

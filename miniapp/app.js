@@ -82,10 +82,7 @@ let globalBookmarkCatalogRetryNotBefore = 0;
 let globalBookmarkCatalogRetryDelayMs = 2_000;
 let contributionSync = null;
 let contributionOpenTask = null;
-let contributionSyncTask = null;
-let contributionDisclosureTask = null;
 let contributionStatusRefreshTask = null;
-let contributionAuthorityRecoveryTask = null;
 let contributionManualSyncTask = null;
 let contributionStatusPollTimer = null;
 let contributionStatusPollTimerDueAt = 0;
@@ -97,14 +94,8 @@ let contributionLastStatusRefreshAt = 0;
 let contributionPresentationState = "idle";
 let contributionPresentationMessageKey = "bookmarks.contribution_sync_idle";
 let contributionPresentationMessageValues = {};
-let contributionRetryTimer = null;
-let contributionRetryTimerDueAt = 0;
-let contributionRetryTimerMode = "background";
 let contributionRetryNotBefore = 0;
 let contributionRetryDelayMs = 2_000;
-// The default server refill is one contribution request per five seconds.
-// Keep a margin so long baselines do not oscillate into the abuse backoff.
-let contributionBatchDelayMs = 5_250;
 const CONTRIBUTION_STATUS_POLL_MS = 60_000;
 const CONTRIBUTION_STATUS_STALE_MS = 15_000;
 const contributionRetryDelays = new WeakMap();
@@ -563,16 +554,8 @@ async function boot() {
 
 async function initializeContributionSync() {
   const generation = sessionGeneration;
-  let phase = "disclosure";
   updateContributorPresentation();
   try {
-    if (contributionSync?.canContribute) {
-      await ensureContributionDisclosure();
-      if (generation !== sessionGeneration) {
-        return;
-      }
-      scheduleContributionSync();
-    }
     const reviewDetailsAvailable = contributionSync
       ? contributionSync.reviewDetailsAvailable
       : contributionReviewDetailsAvailable(contributionStatus);
@@ -588,11 +571,16 @@ async function initializeContributionSync() {
         contributionStatus?.topics,
         { detailsAvailable: reviewDetailsAvailable },
       );
-      phase = "catalog";
-      await refreshLiveGlobalBookmarkCatalog({ requireNetwork: true });
-      if (generation !== sessionGeneration) {
-        return;
-      }
+      // Publication is a separate read model. Refresh it opportunistically,
+      // but never couple its availability to contribution transport state.
+      void refreshLiveGlobalBookmarkCatalog().catch((error) => {
+        if (
+          generation === sessionGeneration &&
+          contributionFailureIsRetryable(error)
+        ) {
+          scheduleGlobalBookmarkCatalogRetry(error);
+        }
+      });
     }
     updateContributorPresentation();
   } catch (error) {
@@ -600,13 +588,9 @@ async function initializeContributionSync() {
       return;
     }
     if (contributionFailureIsRetryable(error)) {
-      if (phase === "catalog") {
-        scheduleGlobalBookmarkCatalogRetry(error);
-      } else if (contributionSync?.canContribute) {
-        scheduleContributionRetry(error);
-      }
+      recordContributionRetryDeadline(error);
     }
-    handleContributionSyncError(error, { catalog: phase === "catalog" });
+    handleContributionSyncError(error);
     updateContributorPresentation();
   } finally {
     if (generation === sessionGeneration) {
@@ -642,13 +626,15 @@ function contributionAuthorityUnknown(status = contributionStatus) {
 }
 
 function contributionControlVisible(status = contributionStatus) {
+  if (!status?.enabled) {
+    return false;
+  }
+  if (status.can_contribute) {
+    return api?.contributionTransportReady === true;
+  }
   return Boolean(
-    status?.enabled &&
-    (
-      status.can_contribute ||
-      contributionAuthorityUnknown(status) ||
-      ["pending", "deferred", "rejected", "revoked"].includes(status.state)
-    )
+    contributionAuthorityUnknown(status) ||
+    ["pending", "deferred", "rejected", "revoked"].includes(status.state)
   );
 }
 
@@ -656,7 +642,11 @@ async function ensureContributionSync(initialStatus) {
   if (contributionSync) {
     return contributionSync;
   }
-  if (!initialStatus?.enabled || !initialStatus.can_contribute) {
+  if (
+    !initialStatus?.enabled ||
+    !initialStatus.can_contribute ||
+    api?.contributionTransportReady !== true
+  ) {
     return null;
   }
   if (contributionOpenTask) {
@@ -667,14 +657,10 @@ async function ensureContributionSync(initialStatus) {
     instanceScope,
     api,
     initialStatus,
+    coreTopics: globalBookmarkCatalog.topicDefinitions(),
     coreTopicIds: globalBookmarkCatalog
       .topicDefinitions()
       .map((definition) => definition.id),
-    // Pace background batches below the server's small per-user burst
-    // budget. A Retry-After response remains authoritative below.
-    batchPause: () => new Promise((resolve) =>
-      window.setTimeout(resolve, contributionBatchDelayMs)
-    ),
   };
   const generation = sessionGeneration;
   const openTask = (async () => {
@@ -682,13 +668,9 @@ async function ensureContributionSync(initialStatus) {
     try {
       openedSync = await ContributionSync.open(contributionOptions);
     } catch {
-      // IndexedDB/Web Locks may be unavailable in an older WebView. Personal
-      // bookmarks still open normally; online contribution retries remain
-      // memory-only and the contributor sees the durability warning.
-      openedSync = new ContributionSync({
-        ...contributionOptions,
-        storage: null,
-      });
+      // Older WebViews may not expose IndexedDB. Fall back to the scoped local
+      // store so a response-loss retry keeps the exact same sync identity.
+      openedSync = new ContributionSync(contributionOptions);
     }
     if (generation !== sessionGeneration) {
       return null;
@@ -704,42 +686,6 @@ async function ensureContributionSync(initialStatus) {
   } finally {
     if (contributionOpenTask === openTask) {
       contributionOpenTask = null;
-    }
-  }
-}
-
-async function ensureContributionDisclosure() {
-  if (!contributionSync?.canContribute || !contributionSync.disclosureRequired) {
-    return false;
-  }
-  if (contributionDisclosureTask) {
-    return contributionDisclosureTask;
-  }
-  const generation = sessionGeneration;
-  const sync = contributionSync;
-  const disclosureTask = (async () => {
-    await bridge.alert(i18n.t("bookmarks.contribution_disclosure"));
-    if (
-      generation !== sessionGeneration ||
-      sync !== contributionSync
-    ) {
-      return false;
-    }
-    if (sync.canContribute && sync.disclosureRequired) {
-      await sync.acknowledgeDisclosure();
-      if (generation !== sessionGeneration || sync !== contributionSync) {
-        return false;
-      }
-      contributionStatus = sync.status;
-    }
-    return true;
-  })();
-  contributionDisclosureTask = disclosureTask;
-  try {
-    return await disclosureTask;
-  } finally {
-    if (contributionDisclosureTask === disclosureTask) {
-      contributionDisclosureTask = null;
     }
   }
 }
@@ -760,7 +706,10 @@ function renderContributionMarkers() {
 
 function updateContributorPresentation() {
   const visible = Boolean(
-    contributionStatus?.enabled && contributionStatus.can_contribute,
+    contributionStatus?.enabled &&
+    contributionStatus.can_contribute &&
+    contributionSync?.canContribute &&
+    api?.contributionTransportReady,
   );
   elements.contributorManager.hidden = !visible;
   elements.contributorTopicGuidance.hidden = !visible;
@@ -922,7 +871,6 @@ function scheduleContributionStatusPoll(delay = CONTRIBUTION_STATUS_POLL_MS) {
       // when the successful pre-upload status check is still inside the
       // ordinary freshness window.
       force: contributionAuthorityUnknown(),
-      synchronizeWhenApproved: true,
       allowPendingPoll: true,
       allowAuthorityRecovery: true,
     })
@@ -932,12 +880,10 @@ function scheduleContributionStatusPoll(delay = CONTRIBUTION_STATUS_POLL_MS) {
 
 async function refreshContributionStatus({
   force = false,
-  synchronizeWhenApproved = true,
   refreshCatalog = true,
   allowApplicantCheck = false,
   allowPendingPoll = false,
   allowAuthorityRecovery = false,
-  acknowledgeWhenApproved = true,
 } = {}) {
   const generation = sessionGeneration;
   if (
@@ -984,7 +930,6 @@ async function refreshContributionStatus({
     return contributionStatusRefreshTask;
   }
   let statusRetryDelay = null;
-  let catalogRefreshStarted = false;
   const refreshTask = (async () => {
     const previousCanContribute = Boolean(contributionStatus?.can_contribute);
     const hadContributionSync = Boolean(contributionSync);
@@ -1006,25 +951,19 @@ async function refreshContributionStatus({
       if (generation !== sessionGeneration) {
         return null;
       }
-      if (acknowledgeWhenApproved) {
-        await ensureContributionDisclosure();
-      }
-      if (generation !== sessionGeneration) {
-        return null;
-      }
       status = contributionStatus ?? status;
-      if (synchronizeWhenApproved) {
-        scheduleContributionSync();
-      }
       if (refreshCatalog) {
         stageContributionTopicOutcomes(status.topics, {
           detailsAvailable: reviewDetailsAvailable,
         });
-        catalogRefreshStarted = true;
-        await refreshLiveGlobalBookmarkCatalog({ requireNetwork: true });
-        if (generation !== sessionGeneration) {
-          return null;
-        }
+        void refreshLiveGlobalBookmarkCatalog().catch((error) => {
+          if (
+            generation === sessionGeneration &&
+            contributionFailureIsRetryable(error)
+          ) {
+            scheduleGlobalBookmarkCatalogRetry(error);
+          }
+        });
       }
       if (!["syncing", "success"].includes(contributionPresentationState)) {
         setContributionPresentation(
@@ -1053,11 +992,14 @@ async function refreshContributionStatus({
       stageContributionTopicOutcomes(status.topics, {
         detailsAvailable: reviewDetailsAvailable,
       });
-      catalogRefreshStarted = true;
-      await refreshLiveGlobalBookmarkCatalog({ requireNetwork: true });
-      if (generation !== sessionGeneration) {
-        return null;
-      }
+      void refreshLiveGlobalBookmarkCatalog().catch((error) => {
+        if (
+          generation === sessionGeneration &&
+          contributionFailureIsRetryable(error)
+        ) {
+          scheduleGlobalBookmarkCatalogRetry(error);
+        }
+      });
     }
     if (
       hadContributionSync &&
@@ -1072,11 +1014,9 @@ async function refreshContributionStatus({
       return null;
     }
     if (contributionFailureIsRetryable(error)) {
-      statusRetryDelay = catalogRefreshStarted
-        ? scheduleGlobalBookmarkCatalogRetry(error)
-        : recordContributionRetryDeadline(error);
+      statusRetryDelay = recordContributionRetryDeadline(error);
     }
-    handleContributionSyncError(error, { catalog: catalogRefreshStarted });
+    handleContributionSyncError(error);
     throw error;
   }).finally(() => {
     if (contributionStatusRefreshTask === refreshTask) {
@@ -1108,7 +1048,6 @@ async function synchronizeContributionsNow() {
     );
     let result = null;
     let statusRetryDelay = null;
-    let phase = "status";
     try {
       if (!cancelContributionRetry({ respectAuthority: true })) {
         setContributionPresentation(
@@ -1122,11 +1061,9 @@ async function synchronizeContributionsNow() {
       if (applicantCheck) {
         await refreshContributionStatus({
           force: true,
-          synchronizeWhenApproved: false,
           refreshCatalog: false,
           allowApplicantCheck: true,
           allowAuthorityRecovery: authorityCheck,
-          acknowledgeWhenApproved: false,
         });
         if (generation !== sessionGeneration) {
           return null;
@@ -1135,54 +1072,45 @@ async function synchronizeContributionsNow() {
           return null;
         }
       }
-      if (!contributionSync?.canContribute) {
+      if (
+        !contributionSync?.canContribute ||
+        api?.contributionTransportReady !== true
+      ) {
         setContributionPresentation(
           "pending",
           contributionApplicationMessageKey(contributionStatus?.state),
         );
         return null;
       }
-      phase = "upload";
+      if (contributionSync.disclosureRequired) {
+        // Consent is carried in the same atomic sync envelope. Showing the
+        // disclosure here must not introduce a preliminary status write or a
+        // second upload request.
+        await bridge.alert(i18n.t("bookmarks.contribution_disclosure"));
+        if (generation !== sessionGeneration) {
+          return null;
+        }
+      }
       result = await contributionSync.synchronizeNow(
         bookmarkStore.snapshot(),
+        { disclosureAcknowledged: contributionSync.disclosureRequired },
       );
       if (generation !== sessionGeneration) {
         return null;
       }
       contributionStatus = result.status;
-      if (result.status.disclosure_required) {
-        phase = "disclosure";
-        await ensureContributionDisclosure();
-        if (generation !== sessionGeneration) {
-          return null;
-        }
-        phase = "upload";
-        result = await contributionSync.synchronizeNow(
-          bookmarkStore.snapshot(),
-        );
-        if (generation !== sessionGeneration) {
-          return null;
-        }
-        contributionStatus = result.status;
-      }
       stageContributionTopicOutcomes(result.topic_outcomes, {
         detailsAvailable: result.review_details_available === true,
       });
       const inactive = !result.status.can_contribute
         ? adoptContributionAuthorityLoss(result.status)
         : null;
-      phase = "catalog";
-      await refreshLiveGlobalBookmarkCatalog({ requireNetwork: true });
-      if (generation !== sessionGeneration) {
-        return null;
-      }
       if (inactive) {
         bridge.notifyError();
         return null;
       }
       contributionRetryDelayMs = 2_000;
       if (result.pending > 0) {
-        scheduleContributionRetry(null);
         setContributionPresentation(
           "pending",
           result.pending === 1
@@ -1210,30 +1138,6 @@ async function synchronizeContributionsNow() {
       if (generation !== sessionGeneration) {
         return null;
       }
-      const deniedSync = contributionSync;
-      const recoveredStatus = await refreshContributionAuthorityAfterDenial(
-        error,
-        deniedSync,
-        generation,
-      );
-      if (
-        generation !== sessionGeneration ||
-        (deniedSync && deniedSync !== contributionSync)
-      ) {
-        return null;
-      }
-      if (
-        recoveredStatus?.can_contribute &&
-        contributionSync?.canContribute &&
-        !contributionSync.disclosureRequired
-      ) {
-        setContributionPresentation(
-          "idle",
-          "bookmarks.contribution_sync_idle",
-        );
-        scheduleContributionSync();
-        return null;
-      }
       const inactiveStatus = result?.status && !result.status.can_contribute
         ? result.status
         : contributionSync && !contributionSync.canContribute
@@ -1242,20 +1146,15 @@ async function synchronizeContributionsNow() {
       const inactive = inactiveStatus
         ? adoptContributionAuthorityLoss(inactiveStatus)
         : null;
-      const catalogRefreshFailed = phase === "catalog";
       if (inactive) {
         setContributionPresentation(inactive.state, inactive.messageKey);
         renderContributionMarkers();
       } else {
-        handleContributionSyncError(error, { catalog: catalogRefreshFailed });
+        handleContributionSyncError(error);
       }
       bridge.notifyError();
       if (contributionFailureIsRetryable(error)) {
-        if (phase === "catalog") {
-          scheduleGlobalBookmarkCatalogRetry(error);
-        } else if (!inactive && contributionSync?.canContribute) {
-          scheduleContributionRetry(error, { mode: "manual" });
-        } else if (!inactive) {
+        if (!inactive) {
           statusRetryDelay = recordContributionRetryDeadline(error);
         }
       }
@@ -1305,127 +1204,6 @@ function adoptContributionAuthorityLoss(status = contributionSync?.status) {
   setContributionPresentation(inactive.state, inactive.messageKey);
   scheduleContributionStatusPoll();
   return inactive;
-}
-
-function explicitContributionDenial(error) {
-  return error instanceof ApiError &&
-    error.status === 403 &&
-    error.code === "contribution_not_allowed";
-}
-
-function refreshContributionAuthorityAfterDenial(error, sync, generation) {
-  if (
-    !explicitContributionDenial(error) ||
-    !sync ||
-    generation !== sessionGeneration ||
-    sync !== contributionSync
-  ) {
-    return Promise.resolve(null);
-  }
-  const activeRecovery = contributionAuthorityRecoveryTask;
-  if (activeRecovery) {
-    return activeRecovery.generation === generation && activeRecovery.sync === sync
-      ? activeRecovery.promise
-      : Promise.resolve(null);
-  }
-
-  const recovery = { generation, sync, promise: null };
-  const recoveryPromise = (async () => {
-    const earlierRefresh = contributionStatusRefreshTask;
-    if (earlierRefresh) {
-      await earlierRefresh.catch(() => undefined);
-    }
-    if (generation !== sessionGeneration || sync !== contributionSync) {
-      return null;
-    }
-    try {
-      const status = await sync.refreshStatus();
-      if (generation !== sessionGeneration || sync !== contributionSync) {
-        return null;
-      }
-      contributionLastStatusRefreshAt = Date.now();
-      contributionStatus = status;
-      const detailsAvailable = sync.reviewDetailsAvailable;
-      const stagedOutcomes = stageContributionTopicOutcomes(status.topics, {
-        detailsAvailable,
-      });
-      const catalogTask = stagedOutcomes
-        ? refreshLiveGlobalBookmarkCatalog({ requireNetwork: true })
-          .catch((catalogError) => {
-            if (
-              generation === sessionGeneration &&
-              sync === contributionSync &&
-              contributionFailureIsRetryable(catalogError)
-            ) {
-              scheduleGlobalBookmarkCatalogRetry(catalogError);
-            }
-            return null;
-          })
-        : Promise.resolve(null);
-      if (status.can_contribute && status.disclosure_required) {
-        try {
-          await ensureContributionDisclosure();
-        } catch (disclosureError) {
-          if (
-            disclosureError instanceof ApiError &&
-            [401, 409].includes(disclosureError.status)
-          ) {
-            handleSessionError(disclosureError);
-            return null;
-          }
-          if (
-            generation === sessionGeneration &&
-            sync === contributionSync &&
-            contributionFailureIsRetryable(disclosureError)
-          ) {
-            scheduleContributionStatusPoll(
-              recordContributionRetryDeadline(disclosureError),
-            );
-          }
-        }
-      }
-      if (sync.canContribute && !sync.disclosureRequired) {
-        // Publication reconciliation has its own serialized retry lane and
-        // must never hold the preserved upload journal behind catalog latency.
-        void catalogTask;
-      } else {
-        await catalogTask;
-      }
-      if (generation !== sessionGeneration || sync !== contributionSync) {
-        return null;
-      }
-      contributionStatus = sync.status;
-      updateContributorPresentation();
-      return contributionStatus;
-    } catch (refreshError) {
-      if (generation !== sessionGeneration || sync !== contributionSync) {
-        return null;
-      }
-      if (
-        refreshError instanceof ApiError &&
-        [401, 409].includes(refreshError.status)
-      ) {
-        handleSessionError(refreshError);
-        return null;
-      }
-      if (contributionFailureIsRetryable(refreshError)) {
-        recordContributionRetryDeadline(refreshError);
-      }
-      // The POST denial already suspended upload and preserved the outbox.
-      // Keep that stale, deliberately inconsistent approval visible so a later
-      // explicit status check can recover after this one guarded GET failed.
-      contributionStatus = sync.status;
-      updateContributorPresentation();
-      return contributionStatus;
-    }
-  })().finally(() => {
-    if (contributionAuthorityRecoveryTask?.promise === recoveryPromise) {
-      contributionAuthorityRecoveryTask = null;
-    }
-  });
-  recovery.promise = recoveryPromise;
-  contributionAuthorityRecoveryTask = recovery;
-  return recoveryPromise;
 }
 
 function stageContributionTopicOutcomes(
@@ -1605,15 +1383,7 @@ function capturePersonalBookmarkMutation(before, after) {
   if (before && after && contributionSync) {
     try {
       void Promise.resolve(contributionSync.captureMutation(before, after))
-        .then(() => {
-          updateContributorPresentation();
-          if (
-            contributionSync.pendingCount > 0 ||
-            contributionSync.recovering
-          ) {
-            scheduleContributionSync();
-          }
-        })
+        .then(() => updateContributorPresentation())
         .catch(() => updateContributorPresentation());
     } catch {
       // Contribution mirroring is deliberately subordinate to the completed
@@ -1646,12 +1416,9 @@ function captureGlobalBookmarkRemoval(bookmark) {
       },
       bookmarkStore.snapshot(),
     );
-    void Promise.resolve(captured).then(() => {
-      updateContributorPresentation();
-      if (contributionSync.pendingCount > 0 || contributionSync.recovering) {
-        scheduleContributionSync();
-      }
-    }).catch(() => updateContributorPresentation());
+    void Promise.resolve(captured)
+      .then(() => updateContributorPresentation())
+      .catch(() => updateContributorPresentation());
   } catch {
     // The global hide has already succeeded locally. Contribution recovery is
     // intentionally independent and may retry without undoing that choice.
@@ -1695,12 +1462,9 @@ function captureGlobalBookmarkAdditions(bookmarks) {
       assignments,
       bookmarkStore.snapshot(),
     );
-    void Promise.resolve(captured).then(() => {
-      updateContributorPresentation();
-      if (contributionSync.pendingCount > 0 || contributionSync.recovering) {
-        scheduleContributionSync();
-      }
-    }).catch(() => updateContributorPresentation());
+    void Promise.resolve(captured)
+      .then(() => updateContributorPresentation())
+      .catch(() => updateContributorPresentation());
   } catch {
     // The exclusions have already been restored locally. A failed mirror stays
     // subordinate to that completed preference write and remains visible in
@@ -1709,131 +1473,10 @@ function captureGlobalBookmarkAdditions(bookmarks) {
   }
 }
 
-function scheduleContributionSync() {
-  if (
-    contributionSyncTask ||
-    contributionRetryTimer !== null ||
-    !contributionSync?.canContribute ||
-    contributionSync.disclosureRequired ||
-    !bookmarkStore ||
-    contributionRetryRemaining() > 0 ||
-    navigator.onLine === false
-  ) {
-    return;
-  }
-  const snapshot = bookmarkStore.snapshot();
-  const generation = sessionGeneration;
-  const sync = contributionSync;
-  let completed = false;
-  let resumeAfterAuthorityRecovery = false;
-  const syncTask = Promise.resolve()
-    .then(() => {
-      if (generation !== sessionGeneration || sync !== contributionSync) {
-        return null;
-      }
-      return sync.synchronize(snapshot);
-    })
-    .then(() => {
-      if (generation !== sessionGeneration || sync !== contributionSync) {
-        return;
-      }
-      completed = true;
-      contributionRetryDelayMs = 2_000;
-    })
-    .catch(async (error) => {
-      if (generation !== sessionGeneration || sync !== contributionSync) {
-        return;
-      }
-      if (error instanceof ApiError && [401, 409].includes(error.status)) {
-        handleSessionError(error);
-        return;
-      }
-      const recoveredStatus = await refreshContributionAuthorityAfterDenial(
-        error,
-        sync,
-        generation,
-      );
-      if (generation !== sessionGeneration || sync !== contributionSync) {
-        return;
-      }
-      if (
-        recoveredStatus?.can_contribute &&
-        sync.canContribute &&
-        !sync.disclosureRequired
-      ) {
-        resumeAfterAuthorityRecovery = true;
-        return;
-      }
-      if (!sync.canContribute) {
-        adoptContributionAuthorityLoss(sync.status);
-        return;
-      }
-      if (contributionFailureIsRetryable(error)) {
-        scheduleContributionRetry(error);
-      }
-    })
-    .finally(() => {
-      if (contributionSyncTask === syncTask) {
-        contributionSyncTask = null;
-      }
-      if (generation !== sessionGeneration || sync !== contributionSync) {
-        return;
-      }
-      updateContributorPresentation();
-      // Close the narrow race where a mutation is durably captured after the
-      // drain observes an empty queue but before this task releases its local
-      // single-flight marker.
-      if (
-        resumeAfterAuthorityRecovery ||
-        (completed &&
-        contributionRetryTimer === null &&
-        (contributionSync?.pendingCount > 0 || contributionSync?.recovering))
-      ) {
-        queueMicrotask(scheduleContributionSync);
-      }
-    });
-  contributionSyncTask = syncTask;
-}
-
 function contributionFailureIsRetryable(error) {
   return error instanceof ApiError
     ? error.retryable && ![401, 409].includes(error.status)
     : navigator.onLine !== false;
-}
-
-function scheduleContributionRetry(error, { mode = "background" } = {}) {
-  if (!contributionSync?.canContribute) {
-    return null;
-  }
-  if (mode === "manual") {
-    contributionRetryTimerMode = "manual";
-  }
-  const delay = recordContributionRetryDeadline(error);
-  const now = Date.now();
-  const dueAt = Math.max(now + delay, contributionRetryNotBefore);
-  if (
-    contributionRetryTimer !== null &&
-    contributionRetryTimerDueAt >= dueAt
-  ) {
-    return Math.max(0, contributionRetryTimerDueAt - now);
-  }
-  if (contributionRetryTimer !== null) {
-    window.clearTimeout(contributionRetryTimer);
-  }
-  contributionRetryTimerDueAt = dueAt;
-  contributionRetryTimer = window.setTimeout(() => {
-    const retryMode = contributionRetryTimerMode;
-    contributionRetryTimer = null;
-    contributionRetryTimerDueAt = 0;
-    contributionRetryTimerMode = "background";
-    contributionRetryNotBefore = 0;
-    if (retryMode === "manual") {
-      void synchronizeContributionsNow();
-    } else {
-      scheduleContributionSync();
-    }
-  }, Math.max(1, dueAt - now));
-  return dueAt - now;
 }
 
 function cancelContributionRetry({ respectAuthority = false } = {}) {
@@ -1843,17 +1486,8 @@ function cancelContributionRetry({ respectAuthority = false } = {}) {
   ) {
     return false;
   }
-  if (contributionRetryTimer === null) {
-    contributionRetryNotBefore = 0;
-    contributionRetryTimerDueAt = 0;
-    contributionRetryTimerMode = "background";
-    return true;
-  }
-  window.clearTimeout(contributionRetryTimer);
-  contributionRetryTimer = null;
   contributionRetryNotBefore = 0;
-  contributionRetryTimerDueAt = 0;
-  contributionRetryTimerMode = "background";
+  contributionRetryDelayMs = 2_000;
   return true;
 }
 
@@ -2130,14 +1764,11 @@ function attachListeners() {
     void refreshLiveGlobalBookmarkCatalog();
     void refreshContributionStatus({
       force: true,
-      synchronizeWhenApproved: true,
     }).catch(() => undefined);
-    scheduleContributionSync();
   });
   window.addEventListener("offline", updateConnectionState);
   window.addEventListener("focus", () => {
-    void refreshContributionStatus({ synchronizeWhenApproved: true })
-      .catch(() => undefined);
+    void refreshContributionStatus().catch(() => undefined);
   });
 
   document.querySelectorAll("[data-route]").forEach((button) => {
@@ -2179,8 +1810,7 @@ function attachListeners() {
       }
       void globalBookmarkPreferences?.flush();
     } else {
-      void refreshContributionStatus({ synchronizeWhenApproved: true })
-        .catch(() => undefined);
+      void refreshContributionStatus().catch(() => undefined);
     }
   });
   window.addEventListener("pagehide", () => {
@@ -7353,10 +6983,7 @@ function invalidateClientSessionState() {
   cancelGlobalBookmarkCatalogRetry();
   contributionSync = null;
   contributionOpenTask = null;
-  contributionSyncTask = null;
-  contributionDisclosureTask = null;
   contributionStatusRefreshTask = null;
-  contributionAuthorityRecoveryTask = null;
   contributionManualSyncTask = null;
   contributionStatus = null;
   verifiedPublishedContributionTopics = new Map();
@@ -7367,7 +6994,6 @@ function invalidateClientSessionState() {
   contributionPresentationMessageKey = "bookmarks.contribution_sync_idle";
   contributionPresentationMessageValues = {};
   contributionRetryDelayMs = 2_000;
-  contributionBatchDelayMs = 5_250;
   globalBookmarkCatalogRefreshQueue = Promise.resolve();
   basketMutationTask = Promise.resolve();
   searchRequestId += 1;
