@@ -1,3 +1,4 @@
+import json
 import re
 import unittest
 from pathlib import Path
@@ -201,6 +202,49 @@ class DocumentationContractTestCase(unittest.TestCase):
                 self.assertIn(required, joined)
         self.assertIn("never enter the live", operations)
         self.assertIn("only for native deployments", docker)
+
+    def test_one_request_contribution_sync_contract_is_documented(self) -> None:
+        contract = json.loads(
+            (ROOT / "miniapp" / "api-contract.json").read_text(encoding="utf-8")
+        )
+        sync = contract["paths"]["/contributions/sync"]["post"]
+        self.assertEqual(sync["security"], [{"contributionCapability": []}])
+        self.assertEqual(
+            sync["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ContributionSyncRequest",
+        )
+        schemas = contract["components"]["schemas"]
+        request = schemas["ContributionSyncRequest"]
+        self.assertEqual(request["properties"]["protocol_version"]["const"], 1)
+        self.assertEqual(
+            request["properties"]["snapshot"]["$ref"],
+            "#/components/schemas/ContributionSnapshot",
+        )
+        self.assertEqual(request["properties"]["operations"]["maxItems"], 2000)
+        snapshot = schemas["ContributionSnapshot"]
+        self.assertEqual(snapshot["properties"]["topics"]["maxItems"], 100)
+        self.assertEqual(snapshot["properties"]["assignments"]["maxItems"], 10000)
+        self.assertTrue(contract["paths"]["/contributions/status"]["get"]["deprecated"])
+        self.assertTrue(contract["paths"]["/contributions/events"]["post"]["deprecated"])
+        self.assertNotIn("telegramInitData", contract["components"]["securitySchemes"])
+
+        docs = "\n".join(
+            (ROOT / relative).read_text(encoding="utf-8")
+            for relative in (
+                "README.md",
+                "docs/ARCHITECTURE.md",
+                "docs/MINI_APP.md",
+                "docs/RELEASE_GATE.md",
+            )
+        )
+        for required in (
+            "one request",
+            "durable receipt",
+            "No WebSocket",
+            "initial session exchange",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, docs)
 
     def test_published_container_version_matches_project(self) -> None:
         project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")

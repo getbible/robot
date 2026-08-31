@@ -112,6 +112,25 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - History, selections, translation catalogs, chapters, and public cache entries
   never enter Telegram user storage.
 
+## Contribution synchronization
+
+- Only an approved session receives the separate `gbc_` contributor
+  capability, and every write rechecks its numeric Telegram owner against
+  current approval and revocation state.
+- **Sync now** makes one same-origin `POST /api/v1/contributions/sync`; it does
+  not orchestrate status, event-batch, or catalogue requests and does not use a
+  WebSocket or another port.
+- Version 1 accepts at most 100 topics, 10,000 flattened assignments across at
+  most 800 verse coordinates, 2,000 explicit operations, and a 1 MiB body.
+- Snapshot derivation, disclosure acknowledgement, explicit operations,
+  moderation events, and the durable receipt commit in one SQLite transaction.
+- Exact `sync_id` replay returns the stored receipt without duplicate events;
+  reuse with changed content fails closed and transaction failure stores
+  neither snapshot nor receipt.
+- The response returns its receipt, complete contributor status, and catalogue
+  revision/checksum together; a later catalogue fetch cannot turn a committed
+  synchronization into a reported failure.
+
 ## Bookmark portability and chat recovery
 
 - Browser JSON download/import is versioned, merge-safe, and bounded.
@@ -154,7 +173,9 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 
 ## Authentication and privacy
 
-- Telegram `initData` signature, age, user, chat, chat instance, and launch ownership are validated.
+- Telegram `initData` signature, age, user, chat, chat instance, and launch
+  ownership are validated at the initial session exchange; later requests use
+  Robot-issued opaque bearers instead of forwarding raw `initData` again.
 - Launches and sessions are bounded and owner-bound; authenticated Mini App
   sessions have a three-hour default absolute lifetime.
 - The bot token never enters HTML, JavaScript, URLs, logs, browser storage, or public API traffic.
@@ -180,6 +201,10 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - CPU, memory, PID, tmpfs, restart, and graceful-shutdown bounds remain enforced.
 - Host Mini App, webhook, and health listeners remain separate and loopback/private behind ingress.
 - Caddy/systemd setup remains transactional and rollback-safe.
+- Managed Caddy forwards the bounded Mini App `/api/v1/*` namespace for both
+  root and nested public URLs, applies the 5 MiB backup and 1 MiB sync
+  exceptions before the general 64 KiB matcher, and leaves the backend router
+  deny-by-default.
 - One bot token has one active polling/webhook workload.
 - Production container build and smoke test pass.
 - systemd verification passes.

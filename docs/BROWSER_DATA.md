@@ -176,23 +176,18 @@ response keeps the last valid cached or bundled catalogue usable.
 ### Trusted contribution mirror
 
 Only a server-approved Telegram identity can mirror changes. After the
-one-time disclosure is acknowledged, the browser submits a deterministic
-baseline containing custom topics and personal assignments, then records each
-successful local topic/assignment mutation as an explicit idempotent event.
-Global assignment hides are also mirrored as removals. Topic source names use
-the repository's English grammar; missing locale strings continue to fall back
-to that English source.
+one-time disclosure is acknowledged, **Sync now** submits the complete bounded
+current personal topic/assignment snapshot plus any pending explicit global
+removals in one request. Topic source names use the repository's English
+grammar; missing locale strings continue to fall back to that English source.
 
-The journal is transactional IndexedDB state scoped to the Robot instance and
-authenticated user. Short Web Locks protect each cross-tab checkpoint but are
-released before a network request. At most 50 events are submitted per request;
-stable identifiers make retries safe, persisted cursors resume interrupted
-baselines, and compact snapshot reconciliation repairs a bounded outbox
-overflow. Requests are paced for the server refill budget and honor bounded
-`Retry-After` guidance automatically. A valid legacy version-1 localStorage
-journal is removed only after its IndexedDB copy commits. If durable journal
-storage is unavailable, personal bookmarks still succeed and the Mini App
-shows an explicit memory-only warning.
+`BookmarkStore` remains the durable current-state source. The same stable
+client and `sync_id` values make an ambiguous request safe to retry; Robot
+returns the durable receipt for an exact replay and rejects conflicting reuse.
+The server derives missing moderation events from the last accepted snapshot
+and commits them with that snapshot and receipt in one SQLite transaction.
+Transport failure does not modify personal bookmarks or require a browser
+event journal, cursor recovery, Web Lock, WebSocket, or extra port.
 
 ### Portable recovery
 
@@ -331,9 +326,9 @@ The release gate must prove:
 - the unified global/personal list, **G** marker, per-link hide, and
   per-topic/all-catalog reset remain browser-local and absent from personal
   sync and backup;
-- approved contribution authority/disclosure, per-instance IndexedDB journal,
-  cross-tab checkpoints, baseline resume, bounded overflow reconciliation,
-  paced Retry-After recovery, and explicit global removals remain local-first;
+- approved contribution capability/disclosure, one-request bounded snapshots,
+  atomic durable receipts, exact retry, and explicit global removals remain
+  local-first;
 - strict live-catalog validation, authoritative instance-scoped revalidation,
   explicit load refresh, English fallback, and bundled offline fallback hold;
 - private-chat backup is owner-bound and bounded, restore uses a fresh
