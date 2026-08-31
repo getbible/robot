@@ -965,6 +965,99 @@ Settings.from_env(load_environment_file=False)
 PY
 }
 
+verify_contribution_store_access() {
+    local app_dir=$1
+    local env_file=$2
+    local service_user=$3
+    local store_file
+    local contributor_limit
+    local event_limit
+    store_file=$(dotenv_value "$app_dir" "$env_file" "CONTRIBUTION_STORE_FILE")
+    # An explicit blank is the documented native opt-out. Missing settings are
+    # added by migrate_instance_configuration; do not silently reverse an
+    # operator's deliberate disablement during an update.
+    [[ -n "$store_file" ]] || return 0
+    contributor_limit=$(
+        dotenv_value "$app_dir" "$env_file" "CONTRIBUTION_CONTRIBUTOR_LIMIT"
+    )
+    event_limit=$(dotenv_value "$app_dir" "$env_file" "CONTRIBUTION_EVENT_LIMIT")
+    contributor_limit=${contributor_limit:-10000}
+    event_limit=${event_limit:-250000}
+    validate_contribution_store_path \
+        "$app_dir/venv/bin/python" "$store_file" "$service_user" || return 1
+    runuser --user "$service_user" -- \
+        env PYTHONPATH="$app_dir" \
+        "$app_dir/venv/bin/python" - \
+        "$store_file" "$contributor_limit" "$event_limit" <<'PY'
+from __future__ import annotations
+
+import sys
+
+from modules.contributions import ContributionStore
+
+store = ContributionStore(
+    path=sys.argv[1],
+    max_contributors=int(sys.argv[2]),
+    max_events=int(sys.argv[3]),
+)
+try:
+    catalog = store.current_catalog()
+    if catalog.revision < 0 or not catalog.checksum:
+        raise RuntimeError("Contribution catalogue seed is unavailable.")
+    status = store.contribution_status(1)
+    if not isinstance(status, dict) or "can_contribute" not in status:
+        raise RuntimeError("Contribution authority lookup is unavailable.")
+finally:
+    store.close()
+PY
+}
+
+verify_contribution_store_readonly() {
+    local app_dir=$1
+    local env_file=$2
+    local service_user=$3
+    local store_file
+    store_file=$(dotenv_value "$app_dir" "$env_file" "CONTRIBUTION_STORE_FILE")
+    [[ -n "$store_file" ]] || return 0
+    validate_contribution_store_path \
+        "$app_dir/venv/bin/python" "$store_file" "$service_user" || return 1
+    runuser --user "$service_user" -- \
+        env PYTHONPATH="$app_dir" \
+        "$app_dir/venv/bin/python" - "$store_file" <<'PY'
+from __future__ import annotations
+
+from pathlib import Path
+import sqlite3
+import sys
+
+from modules.contributions import DATABASE_SCHEMA_VERSION
+
+path = Path(sys.argv[1]).resolve()
+connection = sqlite3.connect(
+    f"{path.as_uri()}?mode=rw",
+    uri=True,
+    timeout=5.0,
+    isolation_level=None,
+)
+try:
+    connection.execute("PRAGMA busy_timeout=5000")
+    check = connection.execute("PRAGMA quick_check").fetchone()
+    if check is None or str(check[0]).casefold() != "ok":
+        raise sqlite3.DatabaseError("Contribution database integrity check failed.")
+    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    if not 1 <= version <= DATABASE_SCHEMA_VERSION:
+        raise sqlite3.DatabaseError("Contribution database schema is unsupported.")
+    # Exercise the same write lock/WAL-directory capability the runtime needs,
+    # while rolling back without changing contribution-domain records.
+    connection.execute("BEGIN IMMEDIATE")
+    connection.execute("ROLLBACK")
+finally:
+    if connection.in_transaction:
+        connection.execute("ROLLBACK")
+    connection.close()
+PY
+}
+
 dotenv_value() {
     local app_dir=$1
     local env_file=$2
@@ -1629,7 +1722,7 @@ rollback_upgrade_refresh_transaction() {
         warn "The upgrade refresh snapshot path is invalid; manual recovery is required."
         return 1
     fi
-    warn "Upgrade refresh failed; restoring the previous managed files and service state."
+    warn "Upgrade transaction failed; restoring the previous managed files and service state."
     dropin_dir=$(resource_dropin_dir_for "$instance")
     restore_upgrade_refresh_file \
         "$(environment_file_for "$instance")" environment "$transaction" || failed=1
@@ -2681,6 +2774,8 @@ cmd_install() {
     prepare_application \
         "$source_dir" "$source_url" "$sha" "$app_dir" "$python_bin" \
         "$service_user" "$env_file"
+    verify_contribution_store_access "$app_dir" "$env_file" "$service_user" ||
+        die "The contribution database could not be initialized by the service account."
     verify_content_access "$service_user" "$instance"
     write_metadata "$instance" "$service_user" "$health_port" "$sha" "$source_url" "$created_at"
     write_resource_dropin \
@@ -3039,6 +3134,10 @@ cmd_doctor() {
         }
         validate_environment "$app_dir" "$env_file" || {
             warn "Configuration validation failed."
+            ((failures += 1))
+        }
+        verify_contribution_store_readonly "$app_dir" "$env_file" "$ACTIVE_USER" || {
+            warn "The configured contribution database is not runtime-writable by the service account."
             ((failures += 1))
         }
         "$app_dir/venv/bin/python" -m pip check || ((failures += 1))
@@ -3655,6 +3754,9 @@ cmd_upgrade() {
             "$source_dir" "$python_bin" "$env_file" "$ACTIVE_USER" "$ACTIVE_INSTANCE"
         sync_resource_dropin_from_env "$app_dir" "$env_file" "$ACTIVE_INSTANCE"
         validate_environment "$app_dir" "$env_file"
+        verify_contribution_store_access \
+            "$app_dir" "$env_file" "$ACTIVE_USER" ||
+            die "The contribution database failed its upgrade preflight."
         install_shared_manager "$source_dir"
         install_log_rotation
         systemctl daemon-reload
@@ -3689,14 +3791,25 @@ cmd_upgrade() {
     confirm "Build and deploy this exact reviewed commit?" yes ||
         die "Upgrade cancelled."
 
+    begin_upgrade_refresh_transaction "$ACTIVE_INSTANCE" "$service" ||
+        die "The current deployment state could not be snapshotted safely."
     migrate_instance_configuration \
         "$source_dir" "$python_bin" "$env_file" "$ACTIVE_USER" "$ACTIVE_INSTANCE"
     sync_resource_dropin_from_env "$app_dir" "$env_file" "$ACTIVE_INSTANCE"
+    validate_environment "$app_dir" "$env_file"
     [[ ! -e "$next_dir" ]] || safe_remove_tree "$next_dir"
     UPGRADE_NEXT=$next_dir
     prepare_application \
         "$source_dir" "$source_url" "$target_sha" "$next_dir" "$python_bin" \
         "$ACTIVE_USER" "$env_file"
+    if ! verify_contribution_store_access \
+        "$next_dir" "$env_file" "$ACTIVE_USER"; then
+        safe_remove_tree "$next_dir"
+        UPGRADE_NEXT=""
+        rollback_upgrade_refresh_transaction ||
+            warn "The failed upgrade preflight requires manual recovery from its retained snapshot."
+        die "The target contribution database failed its upgrade preflight."
+    fi
     install_shared_manager "$source_dir"
     install_log_rotation
     systemctl daemon-reload
@@ -3707,6 +3820,7 @@ cmd_upgrade() {
             die "The managed Caddy routes could not be refreshed for this upgrade."
     fi
 
+    UPGRADE_REFRESH_SERVICE_TOUCHED=1
     systemctl stop "$service"
     [[ ! -e "$previous_dir" ]] || safe_remove_tree "$previous_dir"
     mv -- "$app_dir" "$previous_dir"
@@ -3722,6 +3836,7 @@ cmd_upgrade() {
         wait_for_readiness "$ACTIVE_PORT" &&
         verify_mini_app_instance "$app_dir" "$env_file"; then
         commit_caddy_transaction
+        commit_upgrade_refresh_transaction
         record_operation upgrade "$ACTIVE_INSTANCE" ok
         printf 'Upgrade succeeded. app.previous is retained for one-step rollback.\n'
         printf 'The complete application tree, including Mini App assets, now runs commit %s.\n' \
@@ -3738,9 +3853,8 @@ cmd_upgrade() {
     write_metadata \
         "$ACTIVE_INSTANCE" "$ACTIVE_USER" "$ACTIVE_PORT" "$ACTIVE_SHA" \
         "$ACTIVE_SOURCE_URL" "$ACTIVE_CREATED_AT"
-    systemctl daemon-reload
-    systemctl start "$service"
-    wait_for_readiness "$ACTIVE_PORT" || true
+    rollback_upgrade_refresh_transaction ||
+        warn "The failed upgrade requires manual recovery from its retained snapshot."
     record_operation upgrade "$ACTIVE_INSTANCE" rolled-back
     die "Upgrade failed and the previous application was restored."
 }
@@ -4327,7 +4441,7 @@ load_contribution_context() {
         die "Update this instance before using contribution review."
     store_file=$(dotenv_value "$app_dir" "$env_file" "CONTRIBUTION_STORE_FILE")
     [[ -n "$store_file" ]] ||
-        store_file="${STATE_ROOT}/${ACTIVE_INSTANCE}/contributions.sqlite3"
+        die "Contribution storage is disabled for this instance; run update before reviewing contributors."
     validate_contribution_store_path \
         "$app_dir/venv/bin/python" "$store_file" "$ACTIVE_USER" ||
         die "The contribution store path failed its ownership or type check."

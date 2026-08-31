@@ -45,7 +45,6 @@ class SetupScriptTestCase(unittest.TestCase):
             text=True,
         )
         self.assertIn("Manager self-test passed.", result.stdout)
-
         help_result = subprocess.run(
             ["bash", str(SETUP), "help"],
             check=True,
@@ -91,6 +90,35 @@ class SetupScriptTestCase(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.assertIn(command, help_result.stdout)
+
+    def test_upgrade_preserves_an_explicitly_disabled_contribution_store(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / "robot.env"
+            env_file.write_text(
+                'CONTRIBUTION_STORE_FILE=""\n',
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; ensure_env_value "$2" "$3" '
+                    'CONTRIBUTION_STORE_FILE "$4"',
+                    "setup-contribution-migration-test",
+                    str(SETUP),
+                    sys.executable,
+                    str(env_file),
+                    "/var/lib/getbible-robot/live/contributions.sqlite3",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertEqual(
+                env_file.read_text(encoding="utf-8"),
+                'CONTRIBUTION_STORE_FILE=""\n',
+            )
 
     def test_contribution_review_is_privilege_separated_and_catalogue_aware(self) -> None:
         script = SETUP.read_text(encoding="utf-8")
@@ -547,6 +575,34 @@ cat "$dropin_root/alpha.conf"
         self.assertLess(
             upgrade_body.index("handoff_upgrade_to_target_manager"),
             upgrade_body.index("migrate_instance_configuration"),
+        )
+
+    def test_upgrade_requires_the_service_account_contribution_database(self) -> None:
+        script = SETUP.read_text(encoding="utf-8")
+        upgrade_start = script.index("cmd_upgrade() {")
+        upgrade_end = script.index("\ncmd_rollback() {", upgrade_start)
+        upgrade = script[upgrade_start:upgrade_end]
+        prepare = upgrade.index("prepare_application")
+        target_preflight = upgrade.index("verify_contribution_store_access", prepare)
+        cutover = upgrade.index('systemctl stop "$service"', target_preflight)
+        self.assertLess(prepare, target_preflight)
+        self.assertLess(target_preflight, cutover)
+        self.assertIn('"$next_dir" "$env_file" "$ACTIVE_USER"', upgrade)
+        self.assertIn('ensure_env_value "$python_bin" "$env_file"', script)
+
+        readonly_start = script.index("verify_contribution_store_readonly() {")
+        readonly_end = script.index("\ndotenv_value() {", readonly_start)
+        readonly = script[readonly_start:readonly_end]
+        self.assertIn('?mode=rw', readonly)
+        self.assertIn('connection.execute("BEGIN IMMEDIATE")', readonly)
+        self.assertIn('connection.execute("ROLLBACK")', readonly)
+
+        context_start = script.index("load_contribution_context() {")
+        context_end = script.index("\nrun_contribution_cli() {", context_start)
+        context = script[context_start:context_end]
+        self.assertNotIn(
+            'store_file="${STATE_ROOT}/${ACTIVE_INSTANCE}/contributions.sqlite3"',
+            context,
         )
 
     def test_mini_app_postflight_requires_robot_json_from_sync_routes(self) -> None:

@@ -33,6 +33,7 @@ RUNUSER_LOG="${TEST_ROOT}/runuser"
 CADDY_LOG="${TEST_ROOT}/caddy.log"
 DNS_LOG="${TEST_ROOT}/dns.log"
 MINI_APP_VERIFY_LOG="${TEST_ROOT}/mini-app-verify.log"
+CONTRIBUTION_STORE_VERIFY_LOG="${TEST_ROOT}/contribution-store-verify.log"
 SYSTEM_PYTHON=$(command -v python3)
 mkdir -p \
     "$METADATA_ROOT" \
@@ -45,6 +46,7 @@ mkdir -p \
 : >"$CADDY_LOG"
 : >"$DNS_LOG"
 : >"$MINI_APP_VERIFY_LOG"
+: >"$CONTRIBUTION_STORE_VERIFY_LOG"
 
 fail() {
     printf 'lifecycle assertion failed: %s\n' "$*" >&2
@@ -173,6 +175,15 @@ validate_environment() {
     assert_contains "$env_file" 'TELEGRAM_API_TOKEN="'
     assert_contains "$env_file" 'INSTANCE_NAME="'
     assert_contains "$env_file" 'LOG_FILE="'
+}
+
+verify_contribution_store_access() {
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$CONTRIBUTION_STORE_VERIFY_LOG"
+    [[ ${FAIL_CONTRIBUTION_STORE_VERIFY:-0} != "1" ]]
+}
+
+verify_contribution_store_readonly() {
+    verify_contribution_store_access "$@"
 }
 
 dotenv_value() {
@@ -1139,10 +1150,33 @@ sed -i \
     "$CADDY_ROUTES"
 FAILED_UPGRADE_CADDYFILE_HASH=$(sha256sum "$CADDYFILE" | awk '{print $1}')
 FAILED_UPGRADE_ROUTES_HASH=$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')
+FAILED_UPGRADE_ENV_HASH=$(sha256sum "$(environment_file_for alpha)" | awk '{print $1}')
+FAILED_UPGRADE_MANAGER_HASH=$(sha256sum "$MANAGER_PATH" | awk '{print $1}')
+FAILED_UPGRADE_UNIT_HASH=$(sha256sum "$UNIT_PATH" | awk '{print $1}')
+FAILED_UPGRADE_LOGROTATE_HASH=$(sha256sum "$LOGROTATE_PATH" | awk '{print $1}')
+FAILED_UPGRADE_RESOURCE_HASH=$(sha256sum "$(resource_dropin_for alpha)" | awk '{print $1}')
 FAILED_UPGRADE_CADDY_RELOADS=$(
     grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true
 )
 THIRD_SHA=$(commit_fixture_version v3)
+export FAIL_CONTRIBUTION_STORE_VERIFY
+FAIL_CONTRIBUTION_STORE_VERIFY=1
+if (
+    cmd_upgrade alpha --source "$SOURCE_DIR" <<EOF
+
+EOF
+)
+then
+    fail "an unavailable target contribution database was reported as upgrade-ready"
+fi
+unset FAIL_CONTRIBUTION_STORE_VERIFY
+load_instance alpha
+assert_equal "$ACTIVE_SHA" "$FIRST_SHA"
+assert_equal "$(git -C "$(application_dir_for alpha)" rev-parse HEAD)" "$FIRST_SHA"
+assert_absent "${INSTANCE_ROOT}/alpha/app.next"
+assert_equal "$(sha256sum "$(environment_file_for alpha)" | awk '{print $1}')" \
+    "$FAILED_UPGRADE_ENV_HASH"
+
 export FAIL_NEXT_START
 FAIL_NEXT_START=$(service_name_for alpha)
 if (
@@ -1163,6 +1197,16 @@ assert_equal "$(sha256sum "$CADDYFILE" | awk '{print $1}')" \
     "$FAILED_UPGRADE_CADDYFILE_HASH"
 assert_equal "$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')" \
     "$FAILED_UPGRADE_ROUTES_HASH"
+assert_equal "$(sha256sum "$(environment_file_for alpha)" | awk '{print $1}')" \
+    "$FAILED_UPGRADE_ENV_HASH"
+assert_equal "$(sha256sum "$MANAGER_PATH" | awk '{print $1}')" \
+    "$FAILED_UPGRADE_MANAGER_HASH"
+assert_equal "$(sha256sum "$UNIT_PATH" | awk '{print $1}')" \
+    "$FAILED_UPGRADE_UNIT_HASH"
+assert_equal "$(sha256sum "$LOGROTATE_PATH" | awk '{print $1}')" \
+    "$FAILED_UPGRADE_LOGROTATE_HASH"
+assert_equal "$(sha256sum "$(resource_dropin_for alpha)" | awk '{print $1}')" \
+    "$FAILED_UPGRADE_RESOURCE_HASH"
 assert_equal \
     "$(grep -Fc 'systemctl reload caddy.service' "$CADDY_LOG" || true)" \
     "$((FAILED_UPGRADE_CADDY_RELOADS + 2))"

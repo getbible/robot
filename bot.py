@@ -221,13 +221,13 @@ def _build_contribution_store(settings: Settings) -> ContributionStore | None:
             max_events=getattr(settings, "contribution_event_limit", 250_000),
         )
     except (OSError, sqlite3.Error) as error:
-        LOGGER.error(
-            "Contributor storage is unavailable; contribution enrolment and "
-            "synchronization are disabled for this process (%s)",
+        LOGGER.critical(
+            "Configured contributor storage is unavailable; refusing to start "
+            "with contribution authority detached from its database (%s)",
             type(error).__name__,
             exc_info=True,
         )
-        return None
+        raise RuntimeError("Configured contributor storage is unavailable.") from error
 
 
 def build_application(settings: Settings) -> Application:
