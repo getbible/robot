@@ -276,7 +276,7 @@ class ContributionStoreTestCase(unittest.TestCase):
 
         with sqlite3.connect(self.path) as connection:
             self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 6)
 
         self.store = ContributionStore(path=str(self.path))
         application = self.store.application_for(42)
@@ -308,7 +308,7 @@ class ContributionStoreTestCase(unittest.TestCase):
 
         self.store = ContributionStore(path=str(self.path))
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 6)
         self.assertEqual(self.store.current_catalog().checksum, first.checksum)
 
     def test_v3_notification_schema_migrates_and_recovers_unclaimable_leases(
@@ -358,7 +358,7 @@ class ContributionStoreTestCase(unittest.TestCase):
 
         self.store = ContributionStore(path=str(self.path))
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 6)
             columns = {
                 str(row[1])
                 for row in connection.execute("PRAGMA table_info(contribution_notifications)")
@@ -382,7 +382,7 @@ class ContributionStoreTestCase(unittest.TestCase):
 
         self.store = ContributionStore(path=str(self.path))
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 6)
             tables = {
                 str(row[0])
                 for row in connection.execute(
@@ -783,55 +783,183 @@ class ContributionStoreTestCase(unittest.TestCase):
         self.assertEqual(second.accepted, 1)
         self.assertNotIn("topic_delete", [event.event_type for event in self.store.list_events()])
 
-    def test_contributor_capability_persists_without_storing_raw_token(self) -> None:
+    def test_push_chunks_stage_durably_and_assemble_exactly_once(self) -> None:
         self.approve()
-        token = self.store.issue_capability(42)
-        self.assertRegex(token, r"\Agbc_[A-Za-z0-9_-]{43}\Z")
-        with sqlite3.connect(self.path) as connection:
-            stored = connection.execute(
-                "SELECT token_digest FROM contributor_capabilities"
-            ).fetchone()
-            assert stored is not None
-            self.assertNotIn(token.encode("ascii"), bytes(stored[0]))
+        digest = "ab" * 32
+        first = self.store.stage_push_chunk(
+            42,
+            bundle_id="client:s:0:1234567890abcdef",
+            index=2,
+            count=2,
+            encoding="j",
+            digest=digest,
+            payload="second",
+        )
+        self.assertFalse(first.complete)
+        self.assertEqual((first.received, first.chunk_count), (1, 2))
+
+        # Redelivering the same chunk is an idempotent replacement.
+        repeated = self.store.stage_push_chunk(
+            42,
+            bundle_id="client:s:0:1234567890abcdef",
+            index=2,
+            count=2,
+            encoding="j",
+            digest=digest,
+            payload="second",
+        )
+        self.assertFalse(repeated.complete)
+        self.assertEqual(repeated.received, 1)
 
         self.store.close()
         self.store = ContributionStore(path=str(self.path))
-        self.assertEqual(self.store.authenticate_capability(token), 42)
-
-    def test_contributor_capability_expires_and_is_pruned(self) -> None:
-        self.approve()
-        token = self.store.issue_capability(42)
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("UPDATE contributor_capabilities SET expires_at = 0")
-
-        with self.assertRaises(ContributionNotAllowed):
-            self.store.authenticate_capability(token)
+        completed = self.store.stage_push_chunk(
+            42,
+            bundle_id="client:s:0:1234567890abcdef",
+            index=1,
+            count=2,
+            encoding="j",
+            digest=digest,
+            payload="first-",
+        )
+        self.assertTrue(completed.complete)
+        self.assertEqual(completed.payload, "first-second")
         with sqlite3.connect(self.path) as connection:
             self.assertEqual(
-                connection.execute("SELECT COUNT(*) FROM contributor_capabilities").fetchone()[0],
+                connection.execute(
+                    "SELECT COUNT(*) FROM contribution_push_chunks"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM contribution_push_bundles"
+                ).fetchone()[0],
                 0,
             )
 
-    def test_contributor_capabilities_are_bounded_and_revoked_with_application(self) -> None:
-        self.approve()
-        tokens = [self.store.issue_capability(42) for _ in range(20)]
-        with sqlite3.connect(self.path) as connection:
-            self.assertEqual(
-                connection.execute("SELECT COUNT(*) FROM contributor_capabilities").fetchone()[0],
-                16,
-            )
+    def test_push_staging_requires_current_contributor_authority(self) -> None:
+        digest = "cd" * 32
         with self.assertRaises(ContributionNotAllowed):
-            self.store.authenticate_capability(tokens[0])
-        self.assertEqual(self.store.authenticate_capability(tokens[-1]), 42)
-
+            self.store.stage_push_chunk(
+                42,
+                bundle_id="client:s:1:fedcba9876543210",
+                index=1,
+                count=1,
+                encoding="j",
+                digest=digest,
+                payload="data",
+            )
+        self.approve()
+        staged = self.store.stage_push_chunk(
+            42,
+            bundle_id="client:s:1:fedcba9876543210",
+            index=1,
+            count=2,
+            encoding="j",
+            digest=digest,
+            payload="data",
+        )
+        self.assertFalse(staged.complete)
         self.store.decide_application(42, "revoked", actor="admin")
-        with self.assertRaises(ContributionNotAllowed):
-            self.store.authenticate_capability(tokens[-1])
         with sqlite3.connect(self.path) as connection:
             self.assertEqual(
-                connection.execute("SELECT COUNT(*) FROM contributor_capabilities").fetchone()[0],
+                connection.execute(
+                    "SELECT COUNT(*) FROM contribution_push_chunks"
+                ).fetchone()[0],
                 0,
             )
+        with self.assertRaises(ContributionNotAllowed):
+            self.store.stage_push_chunk(
+                42,
+                bundle_id="client:s:1:fedcba9876543210",
+                index=2,
+                count=2,
+                encoding="j",
+                digest=digest,
+                payload="more",
+            )
+
+    def test_push_bundle_metadata_mismatch_restarts_the_transfer(self) -> None:
+        self.approve()
+        first_digest = "ab" * 32
+        second_digest = "cd" * 32
+        self.store.stage_push_chunk(
+            42,
+            bundle_id="client:s:2:0000000000000000",
+            index=1,
+            count=3,
+            encoding="j",
+            digest=first_digest,
+            payload="one",
+        )
+        restarted = self.store.stage_push_chunk(
+            42,
+            bundle_id="client:s:2:0000000000000000",
+            index=1,
+            count=2,
+            encoding="d",
+            digest=second_digest,
+            payload="alpha",
+        )
+        self.assertTrue(restarted.restarted)
+        self.assertEqual((restarted.received, restarted.chunk_count), (1, 2))
+        completed = self.store.stage_push_chunk(
+            42,
+            bundle_id="client:s:2:0000000000000000",
+            index=2,
+            count=2,
+            encoding="d",
+            digest=second_digest,
+            payload="beta",
+        )
+        self.assertTrue(completed.complete)
+        self.assertEqual(completed.payload, "alphabeta")
+
+    def test_push_progress_message_is_remembered_per_bundle(self) -> None:
+        self.approve()
+        digest = "ef" * 32
+        staged = self.store.stage_push_chunk(
+            42,
+            bundle_id="client:s:3:1111111111111111",
+            index=1,
+            count=2,
+            encoding="j",
+            digest=digest,
+            payload="one",
+        )
+        self.assertIsNone(staged.progress_message_id)
+        self.store.set_push_progress_message(42, "client:s:3:1111111111111111", 777)
+        repeated = self.store.stage_push_chunk(
+            42,
+            bundle_id="client:s:3:1111111111111111",
+            index=1,
+            count=2,
+            encoding="j",
+            digest=digest,
+            payload="one",
+        )
+        self.assertEqual(repeated.progress_message_id, 777)
+
+    def test_sync_receipt_reads_back_a_committed_synchronization(self) -> None:
+        self.approve()
+        self.assertIsNone(self.store.sync_receipt(42, "sync-missing"))
+        result = self.store.synchronize_snapshot(
+            42,
+            sync_id="sync-receipt-1",
+            client_id="client-a",
+            snapshot=_snapshot(),
+            operations=(),
+            disclosure_acknowledged=True,
+        )
+        receipt = self.store.sync_receipt(42, "sync-receipt-1")
+        assert receipt is not None
+        self.assertEqual(receipt["accepted"], result.accepted)
+        self.assertEqual(receipt["replayed"], result.replayed)
+        self.assertEqual(receipt["snapshot_digest"], result.snapshot_digest)
+        self.assertEqual(receipt["event_ids"], result.event_ids)
+        # Another contributor can never read this receipt.
+        self.assertIsNone(self.store.sync_receipt(43, "sync-receipt-1"))
 
     def test_private_sync_status_tracks_publication_without_leaking_contributors(
         self,

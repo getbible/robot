@@ -28,7 +28,9 @@
               "schema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["init_data"],
+                "required": [
+                  "init_data"
+                ],
                 "properties": {
                   "init_data": {
                     "type": "string",
@@ -36,7 +38,10 @@
                     "maxLength": 8192
                   },
                   "launch_token": {
-                    "type": ["string", "null"],
+                    "type": [
+                      "string",
+                      "null"
+                    ],
                     "minLength": 16,
                     "maxLength": 128,
                     "pattern": "^[A-Za-z0-9_-]+$"
@@ -49,11 +54,6 @@
         "responses": {
           "200": {
             "description": "A reopened Telegram WebView was rebound to its still-active owner/chat session",
-            "headers": {
-              "X-Contribution-Token": {
-                "$ref": "#/components/headers/ContributionToken"
-              }
-            },
             "content": {
               "application/json": {
                 "schema": {
@@ -64,11 +64,6 @@
           },
           "201": {
             "description": "Validated Telegram session and initial application state",
-            "headers": {
-              "X-Contribution-Token": {
-                "$ref": "#/components/headers/ContributionToken"
-              }
-            },
             "content": {
               "application/json": {
                 "schema": {
@@ -90,11 +85,6 @@
         "responses": {
           "200": {
             "description": "Current session state with the same active bearer",
-            "headers": {
-              "X-Contribution-Token": {
-                "$ref": "#/components/headers/ContributionToken"
-              }
-            },
             "content": {
               "application/json": {
                 "schema": {
@@ -149,7 +139,10 @@
                 "schema": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["selected", "items"],
+                  "required": [
+                    "selected",
+                    "items"
+                  ],
                   "properties": {
                     "selected": {
                       "$ref": "#/components/schemas/TranslationCode"
@@ -191,7 +184,9 @@
                 "schema": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["preferences"],
+                  "required": [
+                    "preferences"
+                  ],
                   "properties": {
                     "preferences": {
                       "$ref": "#/components/schemas/Preferences"
@@ -220,7 +215,10 @@
                 "schema": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["translation", "items"],
+                  "required": [
+                    "translation",
+                    "items"
+                  ],
                   "properties": {
                     "translation": {
                       "$ref": "#/components/schemas/TranslationCode"
@@ -266,7 +264,11 @@
                 "schema": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["translation", "book", "items"],
+                  "required": [
+                    "translation",
+                    "book",
+                    "items"
+                  ],
                   "properties": {
                     "translation": {
                       "$ref": "#/components/schemas/TranslationCode"
@@ -300,7 +302,11 @@
               "schema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["translation", "book", "chapter"],
+                "required": [
+                  "translation",
+                  "book",
+                  "chapter"
+                ],
                 "properties": {
                   "translation": {
                     "$ref": "#/components/schemas/TranslationCode"
@@ -400,7 +406,10 @@
               "schema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["query", "options"],
+                "required": [
+                  "query",
+                  "options"
+                ],
                 "properties": {
                   "query": {
                     "type": "string",
@@ -492,7 +501,9 @@
               "schema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["selection_id"],
+                "required": [
+                  "selection_id"
+                ],
                 "properties": {
                   "selection_id": {
                     "$ref": "#/components/schemas/SelectionId"
@@ -522,7 +533,9 @@
               "schema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["selection_ids"],
+                "required": [
+                  "selection_ids"
+                ],
                 "properties": {
                   "selection_ids": {
                     "type": "array",
@@ -578,7 +591,10 @@
               "schema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["idempotency_key", "backup"],
+                "required": [
+                  "idempotency_key",
+                  "backup"
+                ],
                 "properties": {
                   "idempotency_key": {
                     "type": "string",
@@ -720,8 +736,7 @@
     "/contributions/status": {
       "get": {
         "summary": "Read the authenticated user's contributor status",
-        "deprecated": true,
-        "description": "Compatibility endpoint. New clients use POST /contributions/sync, whose response includes the complete status.",
+        "description": "Pull-side read of the contributor state. Push travels outside HTTP: the Mini App sends numbered GBC1 chunks through Telegram.WebApp.sendData() from the contributor reply-keyboard launch, and the bot consumes the web_app_data messages on its ordinary update channel.",
         "parameters": [
           {
             "name": "details",
@@ -730,18 +745,15 @@
             "description": "Set to 1 to include private topic outcomes and review counts. Omit for the legacy four-field response.",
             "schema": {
               "type": "string",
-              "enum": ["1"]
+              "enum": [
+                "1"
+              ]
             }
           }
         ],
         "responses": {
           "200": {
             "description": "Contributor application and enrolment state",
-            "headers": {
-              "X-Contribution-Token": {
-                "$ref": "#/components/headers/ContributionToken"
-              }
-            },
             "content": {
               "application/json": {
                 "schema": {
@@ -763,52 +775,31 @@
             "$ref": "#/components/responses/ContributionUnavailable"
           }
         }
-      },
-      "patch": {
-        "summary": "Acknowledge the one-time contributor disclosure",
-        "deprecated": true,
-        "description": "Compatibility endpoint. New clients acknowledge disclosure inside their atomic POST /contributions/sync request.",
+      }
+    },
+    "/contributions/receipt": {
+      "get": {
+        "summary": "Confirm one pushed synchronization by its sync identity",
+        "description": "Settles the durable client outbox after a Telegram sendData push: a found receipt proves the bot committed the transfer atomically, so the browser may clear its explicit operations. Receipts are contributor-scoped and replay-stable.",
         "parameters": [
           {
-            "name": "details",
+            "name": "sync_id",
             "in": "query",
-            "required": false,
-            "description": "Set to 1 to include private topic outcomes and review counts. Omit for the legacy four-field response.",
+            "required": true,
+            "description": "The pushed envelope identity (safe-ID charset).",
             "schema": {
               "type": "string",
-              "enum": ["1"]
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
             }
           }
         ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["disclosure_acknowledged"],
-                "properties": {
-                  "disclosure_acknowledged": {
-                    "const": true
-                  }
-                }
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
-            "description": "Disclosure acknowledgement recorded",
-            "headers": {
-              "X-Contribution-Token": {
-                "$ref": "#/components/headers/ContributionToken"
-              }
-            },
+            "description": "Receipt lookup outcome",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ContributionStatus"
+                  "$ref": "#/components/schemas/ContributionReceiptLookup"
                 }
               }
             }
@@ -818,166 +809,6 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/InvalidRequest"
-          },
-          "429": {
-            "$ref": "#/components/responses/RateLimited"
-          },
-          "500": {
-            "$ref": "#/components/responses/InternalError"
-          },
-          "503": {
-            "$ref": "#/components/responses/ContributionUnavailable"
-          }
-        }
-      }
-    },
-    "/contributions/events": {
-      "post": {
-        "summary": "Submit a bounded idempotent contributor event batch",
-        "deprecated": true,
-        "description": "Compatibility endpoint for older clients. New clients submit their current snapshot and any explicit legacy operations once through POST /contributions/sync. Scripture text and Telegram identity fields are never accepted from the browser.",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["events"],
-                "properties": {
-                  "events": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 50,
-                    "items": {
-                      "$ref": "#/components/schemas/ContributionEvent"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Events accepted or replayed idempotently",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": ["accepted", "replayed", "event_ids"],
-                  "properties": {
-                    "accepted": { "type": "integer", "minimum": 0, "maximum": 50 },
-                    "replayed": { "type": "integer", "minimum": 0, "maximum": 50 },
-                    "event_ids": {
-                      "description": "Opaque contributor-scoped receipt IDs keyed by client_event_id. Values are stable for exact replays and do not expose internal moderation row IDs.",
-                      "type": "object",
-                      "maxProperties": 50,
-                      "additionalProperties": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 9007199254740991
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/InvalidRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/InvalidRequest"
-          },
-          "409": {
-            "$ref": "#/components/responses/InvalidRequest"
-          },
-          "429": {
-            "$ref": "#/components/responses/RateLimited"
-          },
-          "500": {
-            "$ref": "#/components/responses/InternalError"
-          },
-          "503": {
-            "$ref": "#/components/responses/InvalidRequest"
-          }
-        }
-      }
-    },
-    "/contributions/sync": {
-      "post": {
-        "summary": "Atomically synchronize the contributor's current bookmark state",
-        "description": "The complete bounded snapshot, pending explicit operations, disclosure acknowledgement, moderation status, receipt, and catalogue revision cross the same-origin boundary in one request and one response. The server validates current contributor authority from its durable capability, derives missing idempotent events, and commits the snapshot, operations, and receipt in one SQLite transaction. An exact sync_id replay returns the stored receipt without duplicating events. No WebSocket or additional listener is required.",
-        "security": [
-          {
-            "contributionCapability": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "description": "At most 1 MiB of JSON. The snapshot carries coordinate identity only; it never carries Scripture text or Telegram identity.",
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ContributionSyncRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "The complete synchronization was committed or replayed atomically",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ContributionSyncResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/InvalidRequest"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "description": "The capability owner is not currently approved to contribute or has not acknowledged the disclosure",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The sync_id was previously committed with different content",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "The request exceeded the 1 MiB contribution-sync limit",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
@@ -1002,7 +833,10 @@
               "schema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["idempotency_key", "selection_ids"],
+                "required": [
+                  "idempotency_key",
+                  "selection_ids"
+                ],
                 "properties": {
                   "idempotency_key": {
                     "type": "string",
@@ -1033,7 +867,11 @@
                 "schema": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["status", "message_ids", "idempotent_replay"],
+                  "required": [
+                    "status",
+                    "message_ids",
+                    "idempotent_replay"
+                  ],
                   "properties": {
                     "status": {
                       "const": "posted"
@@ -1072,26 +910,9 @@
         "scheme": "bearer",
         "bearerFormat": "opaque",
         "description": "Server-issued URL-safe opaque token matching ^[A-Za-z0-9_-]{16,128}$."
-      },
-      "contributionCapability": {
-        "type": "http",
-        "scheme": "bearer",
-        "bearerFormat": "opaque",
-        "description": "Durable, revocable contributor capability issued by Robot only for a currently approved numeric Telegram user. It is exactly `gbc_` followed by 43 URL-safe Base64 characters and must never be logged."
       }
     },
-    "headers": {
-      "ContributionToken": {
-        "description": "Present only for a currently approved contributor. Durable, revocable capability for POST /contributions/sync; exactly `gbc_` plus 43 URL-safe Base64 characters.",
-        "required": false,
-        "schema": {
-          "type": "string",
-          "minLength": 47,
-          "maxLength": 47,
-          "pattern": "^gbc_[A-Za-z0-9_-]{43}$"
-        }
-      }
-    },
+    "headers": {},
     "parameters": {
       "TranslationQuery": {
         "name": "translation",
@@ -1197,7 +1018,13 @@
       "Translation": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["code", "name", "language", "lang", "direction"],
+        "required": [
+          "code",
+          "name",
+          "language",
+          "lang",
+          "direction"
+        ],
         "properties": {
           "code": {
             "$ref": "#/components/schemas/TranslationCode"
@@ -1220,7 +1047,10 @@
           },
           "direction": {
             "type": "string",
-            "enum": ["ltr", "rtl"],
+            "enum": [
+              "ltr",
+              "rtl"
+            ],
             "description": "Reading direction applied to the selected translation and interface."
           }
         }
@@ -1228,7 +1058,11 @@
       "Book": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["number", "name", "testament"],
+        "required": [
+          "number",
+          "name",
+          "testament"
+        ],
         "properties": {
           "number": {
             "type": "integer",
@@ -1241,15 +1075,26 @@
             "maxLength": 128
           },
           "testament": {
-            "type": ["string", "null"],
-            "enum": ["old", "new", "other", null]
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "old",
+              "new",
+              "other",
+              null
+            ]
           }
         }
       },
       "Chapter": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["number", "verses"],
+        "required": [
+          "number",
+          "verses"
+        ],
         "properties": {
           "number": {
             "type": "integer",
@@ -1270,9 +1115,16 @@
         }
       },
       "ChapterLocation": {
-        "type": ["object", "null"],
+        "type": [
+          "object",
+          "null"
+        ],
         "additionalProperties": false,
-        "required": ["book", "book_name", "chapter"],
+        "required": [
+          "book",
+          "book_name",
+          "chapter"
+        ],
         "properties": {
           "book": {
             "type": "integer",
@@ -1294,7 +1146,10 @@
       "ChapterNavigation": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["previous", "next"],
+        "required": [
+          "previous",
+          "next"
+        ],
         "properties": {
           "previous": {
             "$ref": "#/components/schemas/ChapterLocation"
@@ -1307,7 +1162,10 @@
       "Highlight": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["start", "end"],
+        "required": [
+          "start",
+          "end"
+        ],
         "properties": {
           "start": {
             "type": "integer",
@@ -1386,7 +1244,11 @@
       "Basket": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["items", "count", "maximum"],
+        "required": [
+          "items",
+          "count",
+          "maximum"
+        ],
         "properties": {
           "items": {
             "type": "array",
@@ -1428,28 +1290,46 @@
           },
           "words": {
             "type": "string",
-            "enum": ["all", "any", "phrase"]
+            "enum": [
+              "all",
+              "any",
+              "phrase"
+            ]
           },
           "match": {
             "type": "string",
-            "enum": ["whole_word", "substring"]
+            "enum": [
+              "whole_word",
+              "substring"
+            ]
           },
           "scope": {
             "type": "string",
-            "enum": ["bible", "old_testament", "new_testament", "deuterocanon"]
+            "enum": [
+              "bible",
+              "old_testament",
+              "new_testament",
+              "deuterocanon"
+            ]
           },
           "case_sensitive": {
             "type": "boolean"
           },
           "diacritics": {
             "type": "string",
-            "enum": ["fold", "exact"],
+            "enum": [
+              "fold",
+              "exact"
+            ],
             "default": "fold",
             "description": "Librarian's diacritics policy, passed through unaltered. \"fold\" removes accents, vowel pointing and precomposed letters so unaccented Greek, unpointed Hebrew and unvowelled Arabic reach the text; \"exact\" distinguishes pointed from unpointed."
           },
           "sort": {
             "type": "string",
-            "enum": ["canonical", "relevance"]
+            "enum": [
+              "canonical",
+              "relevance"
+            ]
           },
           "books": {
             "type": "array",
@@ -1472,7 +1352,10 @@
             }
           },
           "proximity": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0,
             "maximum": 100
           }
@@ -1481,7 +1364,11 @@
       "Preferences": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["translation", "search_defaults", "reader_location"],
+        "required": [
+          "translation",
+          "search_defaults",
+          "reader_location"
+        ],
         "properties": {
           "translation": {
             "$ref": "#/components/schemas/TranslationCode"
@@ -1513,7 +1400,11 @@
       "BookmarkTopic": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "name", "value"],
+        "required": [
+          "id",
+          "name",
+          "value"
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -1535,7 +1426,11 @@
       "BookmarkPassage": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["translation", "book", "chapter"],
+        "required": [
+          "translation",
+          "book",
+          "chapter"
+        ],
         "properties": {
           "translation": {
             "$ref": "#/components/schemas/TranslationCode"
@@ -1563,32 +1458,77 @@
         ],
         "oneOf": [
           {
-            "required": ["colorId", "reference"],
+            "required": [
+              "colorId",
+              "reference"
+            ],
             "not": {
               "anyOf": [
-                { "required": ["colorIds"] },
-                { "required": ["colorIndexes"] },
-                { "required": ["bookName"] }
+                {
+                  "required": [
+                    "colorIds"
+                  ]
+                },
+                {
+                  "required": [
+                    "colorIndexes"
+                  ]
+                },
+                {
+                  "required": [
+                    "bookName"
+                  ]
+                }
               ]
             }
           },
           {
-            "required": ["colorIds", "reference"],
+            "required": [
+              "colorIds",
+              "reference"
+            ],
             "not": {
               "anyOf": [
-                { "required": ["colorId"] },
-                { "required": ["colorIndexes"] },
-                { "required": ["bookName"] }
+                {
+                  "required": [
+                    "colorId"
+                  ]
+                },
+                {
+                  "required": [
+                    "colorIndexes"
+                  ]
+                },
+                {
+                  "required": [
+                    "bookName"
+                  ]
+                }
               ]
             }
           },
           {
-            "required": ["colorIndexes", "bookName"],
+            "required": [
+              "colorIndexes",
+              "bookName"
+            ],
             "not": {
               "anyOf": [
-                { "required": ["colorId"] },
-                { "required": ["colorIds"] },
-                { "required": ["reference"] }
+                {
+                  "required": [
+                    "colorId"
+                  ]
+                },
+                {
+                  "required": [
+                    "colorIds"
+                  ]
+                },
+                {
+                  "required": [
+                    "reference"
+                  ]
+                }
               ]
             }
           }
@@ -1609,12 +1549,18 @@
             "maximum": 2000
           },
           "start": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0,
             "maximum": 100000
           },
           "end": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 1,
             "maximum": 100000
           },
@@ -1671,21 +1617,44 @@
       },
       "BookmarkBackup": {
         "type": "object",
-        "required": ["version", "exportedAt", "colors", "markings"],
+        "required": [
+          "version",
+          "exportedAt",
+          "colors",
+          "markings"
+        ],
         "oneOf": [
           {
             "properties": {
               "version": {
-                "enum": [1, 2]
+                "enum": [
+                  1,
+                  2
+                ]
               },
               "markings": {
                 "items": {
-                  "required": ["colorId", "reference"],
+                  "required": [
+                    "colorId",
+                    "reference"
+                  ],
                   "not": {
                     "anyOf": [
-                      { "required": ["colorIds"] },
-                      { "required": ["colorIndexes"] },
-                      { "required": ["bookName"] }
+                      {
+                        "required": [
+                          "colorIds"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "colorIndexes"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "bookName"
+                        ]
+                      }
                     ]
                   }
                 }
@@ -1699,12 +1668,27 @@
               },
               "markings": {
                 "items": {
-                  "required": ["colorIds", "reference"],
+                  "required": [
+                    "colorIds",
+                    "reference"
+                  ],
                   "not": {
                     "anyOf": [
-                      { "required": ["colorId"] },
-                      { "required": ["colorIndexes"] },
-                      { "required": ["bookName"] }
+                      {
+                        "required": [
+                          "colorId"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "colorIndexes"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "bookName"
+                        ]
+                      }
                     ]
                   }
                 }
@@ -1718,12 +1702,27 @@
               },
               "markings": {
                 "items": {
-                  "required": ["colorIndexes", "bookName"],
+                  "required": [
+                    "colorIndexes",
+                    "bookName"
+                  ],
                   "not": {
                     "anyOf": [
-                      { "required": ["colorId"] },
-                      { "required": ["colorIds"] },
-                      { "required": ["reference"] }
+                      {
+                        "required": [
+                          "colorId"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "colorIds"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "reference"
+                        ]
+                      }
                     ]
                   }
                 }
@@ -1737,7 +1736,12 @@
           },
           "version": {
             "type": "integer",
-            "enum": [1, 2, 3, 4]
+            "enum": [
+              1,
+              2,
+              3,
+              4
+            ]
           },
           "exportedAt": {
             "type": "string",
@@ -1772,7 +1776,11 @@
       "BookmarkBackupReceipt": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["status", "message_id", "idempotent_replay"],
+        "required": [
+          "status",
+          "message_id",
+          "idempotent_replay"
+        ],
         "properties": {
           "status": {
             "const": "backed_up"
@@ -1789,7 +1797,10 @@
       "BookmarkRestore": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["backup", "source"],
+        "required": [
+          "backup",
+          "source"
+        ],
         "properties": {
           "backup": {
             "$ref": "#/components/schemas/BookmarkBackup"
@@ -1831,15 +1842,34 @@
       "ContributionStatus": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["enabled", "state", "can_contribute", "disclosure_required"],
+        "required": [
+          "enabled",
+          "state",
+          "can_contribute",
+          "disclosure_required"
+        ],
         "properties": {
-          "enabled": { "type": "boolean" },
+          "enabled": {
+            "type": "boolean"
+          },
           "state": {
             "type": "string",
-            "enum": ["not_applied", "pending", "approved", "deferred", "rejected", "revoked", "unavailable"]
+            "enum": [
+              "not_applied",
+              "pending",
+              "approved",
+              "deferred",
+              "rejected",
+              "revoked",
+              "unavailable"
+            ]
           },
-          "can_contribute": { "type": "boolean" },
-          "disclosure_required": { "type": "boolean" },
+          "can_contribute": {
+            "type": "boolean"
+          },
+          "disclosure_required": {
+            "type": "boolean"
+          },
           "topics": {
             "$ref": "#/components/schemas/ContributionTopicOutcomes"
           },
@@ -1855,14 +1885,22 @@
           },
           {
             "type": "object",
-            "required": ["topics", "summary"]
+            "required": [
+              "topics",
+              "summary"
+            ]
           }
         ]
       },
       "ContributionCanonicalTopic": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "name", "color", "aliases"],
+        "required": [
+          "id",
+          "name",
+          "color",
+          "aliases"
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -1893,7 +1931,11 @@
       "ContributionTopicOutcome": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["local_topic_id", "state", "published"],
+        "required": [
+          "local_topic_id",
+          "state",
+          "published"
+        ],
         "properties": {
           "local_topic_id": {
             "type": "string",
@@ -1903,7 +1945,12 @@
           },
           "state": {
             "type": "string",
-            "enum": ["pending", "mapped", "rejected", "deferred"]
+            "enum": [
+              "pending",
+              "mapped",
+              "rejected",
+              "deferred"
+            ]
           },
           "published": {
             "type": "boolean",
@@ -1931,35 +1978,86 @@
       "ContributionSummary": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["topics", "events"],
+        "required": [
+          "topics",
+          "events"
+        ],
         "properties": {
           "topics": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["pending", "mapped", "published", "rejected", "deferred"],
+            "required": [
+              "pending",
+              "mapped",
+              "published",
+              "rejected",
+              "deferred"
+            ],
             "properties": {
-              "pending": { "type": "integer", "minimum": 0, "maximum": 5000000 },
+              "pending": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5000000
+              },
               "mapped": {
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 5000000,
                 "description": "All retained local-to-canonical mappings, including sources reopened for a later proposal; published is a subset."
               },
-              "published": { "type": "integer", "minimum": 0, "maximum": 5000000 },
-              "rejected": { "type": "integer", "minimum": 0, "maximum": 5000000 },
-              "deferred": { "type": "integer", "minimum": 0, "maximum": 5000000 }
+              "published": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5000000
+              },
+              "rejected": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5000000
+              },
+              "deferred": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5000000
+              }
             }
           },
           "events": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["pending", "approved", "rejected", "deferred", "applied"],
+            "required": [
+              "pending",
+              "approved",
+              "rejected",
+              "deferred",
+              "applied"
+            ],
             "properties": {
-              "pending": { "type": "integer", "minimum": 0, "maximum": 5000000 },
-              "approved": { "type": "integer", "minimum": 0, "maximum": 5000000 },
-              "rejected": { "type": "integer", "minimum": 0, "maximum": 5000000 },
-              "deferred": { "type": "integer", "minimum": 0, "maximum": 5000000 },
-              "applied": { "type": "integer", "minimum": 0, "maximum": 5000000 }
+              "pending": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5000000
+              },
+              "approved": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5000000
+              },
+              "rejected": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5000000
+              },
+              "deferred": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5000000
+              },
+              "applied": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5000000
+              }
             }
           }
         }
@@ -1967,7 +2065,9 @@
       "ContributionTopicIdentity": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["local_topic_id"],
+        "required": [
+          "local_topic_id"
+        ],
         "properties": {
           "local_topic_id": {
             "type": "string",
@@ -1980,7 +2080,11 @@
       "ContributionTopicMetadata": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["local_topic_id", "name", "color"],
+        "required": [
+          "local_topic_id",
+          "name",
+          "color"
+        ],
         "properties": {
           "local_topic_id": {
             "type": "string",
@@ -2004,246 +2108,37 @@
       "ContributionVerseCoordinate": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["book", "chapter", "verse"],
+        "required": [
+          "book",
+          "chapter",
+          "verse"
+        ],
         "properties": {
-          "book": { "type": "integer", "minimum": 1, "maximum": 66 },
-          "chapter": { "type": "integer", "minimum": 1, "maximum": 1000 },
-          "verse": { "type": "integer", "minimum": 1, "maximum": 2000 }
-        }
-      },
-      "ContributionSnapshotTopic": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "name", "color"],
-        "properties": {
-          "id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._:-]+$"
+          "book": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 66
           },
-          "name": {
-            "type": "string",
-            "minLength": 2,
-            "maxLength": 80,
-            "pattern": "^(?=[A-Za-z0-9 &'():?-]{2,80}$)(?=.*[A-Za-z])(?!.* {2})[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]$",
-            "description": "English source topic name."
-          },
-          "color": {
-            "type": "string",
-            "pattern": "^#[a-f0-9]{6}$"
-          }
-        }
-      },
-      "ContributionSnapshotAssignment": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["topic_id", "book", "chapter", "verse"],
-        "properties": {
-          "topic_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._:-]+$"
-          },
-          "book": { "type": "integer", "minimum": 1, "maximum": 66 },
-          "chapter": { "type": "integer", "minimum": 1, "maximum": 1000 },
-          "verse": { "type": "integer", "minimum": 1, "maximum": 2000 }
-        }
-      },
-      "ContributionSnapshot": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["topics", "assignments"],
-        "properties": {
-          "topics": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 100,
-            "items": {
-              "$ref": "#/components/schemas/ContributionSnapshotTopic"
-            }
-          },
-          "assignments": {
-            "type": "array",
-            "maxItems": 10000,
-            "description": "Flattened topic memberships across at most 800 distinct verse coordinates and at most 100 topics for any coordinate.",
-            "items": {
-              "$ref": "#/components/schemas/ContributionSnapshotAssignment"
-            }
-          }
-        }
-      },
-      "ContributionSyncRequest": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["protocol_version", "sync_id", "client_id", "snapshot", "operations", "disclosure_acknowledged"],
-        "properties": {
-          "protocol_version": { "const": 1 },
-          "sync_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._:-]+$"
-          },
-          "client_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._:-]+$"
-          },
-          "snapshot": {
-            "$ref": "#/components/schemas/ContributionSnapshot"
-          },
-          "operations": {
-            "type": "array",
-            "maxItems": 2000,
-            "description": "Explicit legacy event objects retained for global removals and compatibility while the snapshot remains authoritative for current personal state.",
-            "items": {
-              "$ref": "#/components/schemas/ContributionEvent"
-            }
-          },
-          "disclosure_acknowledged": { "type": "boolean" }
-        }
-      },
-      "ContributionSyncReceipt": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["sync_id", "snapshot_digest", "outcome", "accepted", "replayed", "event_ids"],
-        "properties": {
-          "sync_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._:-]+$"
-          },
-          "snapshot_digest": {
-            "type": "string",
-            "pattern": "^[a-f0-9]{64}$"
-          },
-          "outcome": {
-            "type": "string",
-            "enum": ["accepted", "replayed"]
-          },
-          "accepted": { "type": "integer", "minimum": 0, "maximum": 12100 },
-          "replayed": { "type": "integer", "minimum": 0, "maximum": 12100 },
-          "event_ids": {
-            "type": "object",
-            "maxProperties": 2000,
-            "description": "Opaque receipts for the caller-supplied explicit operations only; snapshot-derived event identifiers remain server-private.",
-            "additionalProperties": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 9007199254740991
-            }
-          }
-        }
-      },
-      "ContributionSyncCatalog": {
-        "description": "The live catalogue revision when enrichment succeeds. A committed sync remains successful when this independent read model is temporarily unavailable.",
-        "oneOf": [
-          {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["revision", "checksum"],
-            "properties": {
-              "revision": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 9007199254740991
-              },
-              "checksum": {
-                "type": "string",
-                "pattern": "^[a-f0-9]{64}$"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["revision", "checksum", "available"],
-            "properties": {
-              "revision": { "type": "null" },
-              "checksum": { "type": "null" },
-              "available": { "const": false }
-            }
-          }
-        ]
-      },
-      "ContributionSyncResponse": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["protocol_version", "receipt", "status", "catalog"],
-        "properties": {
-          "protocol_version": { "const": 1 },
-          "receipt": {
-            "$ref": "#/components/schemas/ContributionSyncReceipt"
-          },
-          "status": {
-            "$ref": "#/components/schemas/ContributionFullStatus"
-          },
-          "catalog": {
-            "$ref": "#/components/schemas/ContributionSyncCatalog"
-          }
-        }
-      },
-      "ContributionEvent": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["client_event_id", "type", "topic"],
-        "properties": {
-          "client_event_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9._:-]+$"
-          },
-          "type": {
-            "enum": ["topic_upsert", "topic_delete", "verse_add", "verse_remove"]
-          },
-          "topic": {
-            "oneOf": [
-              { "$ref": "#/components/schemas/ContributionTopicIdentity" },
-              { "$ref": "#/components/schemas/ContributionTopicMetadata" }
-            ]
+          "chapter": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
           },
           "verse": {
-            "$ref": "#/components/schemas/ContributionVerseCoordinate"
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000
           }
-        },
-        "oneOf": [
-          {
-            "properties": {
-              "type": { "const": "topic_upsert" },
-              "topic": { "$ref": "#/components/schemas/ContributionTopicMetadata" }
-            },
-            "not": { "required": ["verse"] }
-          },
-          {
-            "properties": {
-              "type": { "const": "topic_delete" },
-              "topic": { "$ref": "#/components/schemas/ContributionTopicIdentity" }
-            },
-            "not": { "required": ["verse"] }
-          },
-          {
-            "required": ["verse"],
-            "properties": {
-              "type": { "enum": ["verse_add", "verse_remove"] },
-              "topic": {
-                "oneOf": [
-                  { "$ref": "#/components/schemas/ContributionTopicIdentity" },
-                  { "$ref": "#/components/schemas/ContributionTopicMetadata" }
-                ]
-              }
-            }
-          }
-        ]
+        }
       },
       "LiveBookmarkCatalog": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["revision", "checksum", "catalog"],
+        "required": [
+          "revision",
+          "checksum",
+          "catalog"
+        ],
         "properties": {
           "revision": {
             "type": "integer",
@@ -2257,16 +2152,27 @@
           "catalog": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["schema_version", "topics", "associations"],
+            "required": [
+              "schema_version",
+              "topics",
+              "associations"
+            ],
             "properties": {
-              "schema_version": { "const": 1 },
+              "schema_version": {
+                "const": 1
+              },
               "topics": {
                 "type": "array",
                 "maxItems": 39,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["id", "name", "color", "aliases"],
+                  "required": [
+                    "id",
+                    "name",
+                    "color",
+                    "aliases"
+                  ],
                   "properties": {
                     "id": {
                       "type": "string",
@@ -2280,7 +2186,10 @@
                       "maxLength": 80,
                       "pattern": "^(?=[A-Za-z0-9 &'():?-]{2,80}$)(?=.*[A-Za-z])(?!.* {2})[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]$"
                     },
-                    "color": { "type": "string", "pattern": "^#[a-f0-9]{6}$" },
+                    "color": {
+                      "type": "string",
+                      "pattern": "^#[a-f0-9]{6}$"
+                    },
                     "aliases": {
                       "type": "array",
                       "maxItems": 20,
@@ -2298,10 +2207,17 @@
               "associations": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["add", "remove"],
+                "required": [
+                  "add",
+                  "remove"
+                ],
                 "properties": {
-                  "add": { "$ref": "#/components/schemas/LiveBookmarkAssociations" },
-                  "remove": { "$ref": "#/components/schemas/LiveBookmarkAssociations" }
+                  "add": {
+                    "$ref": "#/components/schemas/LiveBookmarkAssociations"
+                  },
+                  "remove": {
+                    "$ref": "#/components/schemas/LiveBookmarkAssociations"
+                  }
                 }
               }
             }
@@ -2314,7 +2230,12 @@
         "items": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["topic_id", "book", "chapter", "verse"],
+          "required": [
+            "topic_id",
+            "book",
+            "chapter",
+            "verse"
+          ],
           "properties": {
             "topic_id": {
               "type": "string",
@@ -2322,16 +2243,36 @@
               "maxLength": 80,
               "pattern": "^[a-z0-9][a-z0-9-]{0,79}$"
             },
-            "book": { "type": "integer", "minimum": 1, "maximum": 66 },
-            "chapter": { "type": "integer", "minimum": 1, "maximum": 1000 },
-            "verse": { "type": "integer", "minimum": 1, "maximum": 2000 }
+            "book": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 66
+            },
+            "chapter": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "verse": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000
+            }
           }
         }
       },
       "ReaderLocation": {
-        "type": ["object", "null"],
+        "type": [
+          "object",
+          "null"
+        ],
         "additionalProperties": false,
-        "required": ["translation", "book", "chapter", "verse"],
+        "required": [
+          "translation",
+          "book",
+          "chapter",
+          "verse"
+        ],
         "properties": {
           "translation": {
             "$ref": "#/components/schemas/TranslationCode"
@@ -2367,39 +2308,65 @@
         "properties": {
           "words": {
             "type": "string",
-            "enum": ["all", "any", "phrase"]
+            "enum": [
+              "all",
+              "any",
+              "phrase"
+            ]
           },
           "match": {
             "type": "string",
-            "enum": ["whole_word", "substring"]
+            "enum": [
+              "whole_word",
+              "substring"
+            ]
           },
           "scope": {
             "type": "string",
-            "enum": ["bible", "old_testament", "new_testament", "deuterocanon"]
+            "enum": [
+              "bible",
+              "old_testament",
+              "new_testament",
+              "deuterocanon"
+            ]
           },
           "case_sensitive": {
             "type": "boolean"
           },
           "diacritics": {
             "type": "string",
-            "enum": ["fold", "exact"],
+            "enum": [
+              "fold",
+              "exact"
+            ],
             "default": "fold",
             "description": "Librarian's diacritics policy, passed through unaltered. \"fold\" removes accents, vowel pointing and precomposed letters so unaccented Greek, unpointed Hebrew and unvowelled Arabic reach the text; \"exact\" distinguishes pointed from unpointed."
           },
           "sort": {
             "type": "string",
-            "enum": ["canonical", "relevance"]
+            "enum": [
+              "canonical",
+              "relevance"
+            ]
           }
         }
       },
       "Entrypoint": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["route"],
+        "required": [
+          "route"
+        ],
         "properties": {
           "route": {
             "type": "string",
-            "enum": ["home", "search", "bible", "selection", "bookmarks"]
+            "enum": [
+              "home",
+              "search",
+              "bible",
+              "selection",
+              "bookmarks"
+            ]
           },
           "query": {
             "type": "string",
@@ -2442,7 +2409,9 @@
           "user": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["id"],
+            "required": [
+              "id"
+            ],
             "properties": {
               "id": {
                 "type": "integer",
@@ -2478,7 +2447,9 @@
         "type": "object",
         "additionalProperties": false,
         "description": "Server-declared budgets the page must honour. The browser cannot infer how long the robot will work on a request, and abandoning one early reports a timeout for work that was still in progress.",
-        "required": ["search_timeout_seconds"],
+        "required": [
+          "search_timeout_seconds"
+        ],
         "properties": {
           "search_timeout_seconds": {
             "type": "number",
@@ -2496,7 +2467,10 @@
           },
           {
             "type": "object",
-            "required": ["session_token", "expires_in"],
+            "required": [
+              "session_token",
+              "expires_in"
+            ],
             "properties": {
               "session_token": {
                 "type": "string",
@@ -2575,7 +2549,9 @@
       "ErrorEnvelope": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["error"],
+        "required": [
+          "error"
+        ],
         "properties": {
           "error": {
             "type": "string",
@@ -2597,6 +2573,63 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128
+          }
+        }
+      },
+      "ContributionReceiptLookup": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "found",
+          "receipt"
+        ],
+        "properties": {
+          "found": {
+            "type": "boolean"
+          },
+          "receipt": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "sync_id",
+                  "accepted",
+                  "replayed",
+                  "snapshot_digest",
+                  "event_ids"
+                ],
+                "properties": {
+                  "sync_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+                  },
+                  "accepted": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "replayed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "snapshot_digest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "event_ids": {
+                    "type": "object",
+                    "description": "Opaque, contributor-scoped receipt integers keyed by client_event_id; never store row IDs.",
+                    "additionalProperties": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  }
+                }
+              }
+            ]
           }
         }
       }
