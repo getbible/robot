@@ -271,6 +271,7 @@ async function createBrowserFixture(
   let statusPublished = false;
   let catalogPublished = false;
   let submitted = false;
+  let conflictNextEventRoute = false;
   let denyNextEventRoute = false;
   let failNextEventRoute = false;
   let failNextStatusRoute = false;
@@ -400,6 +401,14 @@ async function createBrowserFixture(
       requestSequence.push("events");
       const events = request.postDataJSON().events;
       eventAttempts.push(events);
+      if (conflictNextEventRoute) {
+        conflictNextEventRoute = false;
+        return fulfillJson(route, {
+          error: "idempotency_conflict",
+          message: "A private conflicting event detail.",
+          retryable: false,
+        }, 409);
+      }
       if (denyNextEventRoute) {
         denyNextEventRoute = false;
         contributorState = "revoked";
@@ -472,6 +481,7 @@ async function createBrowserFixture(
     requestSequence,
     statusRequests,
     approve() { contributorState = "approved"; },
+    conflictNextEventRoute() { conflictNextEventRoute = true; },
     denyNextEventRouteAndFailRecoveryStatus() { denyNextEventRoute = true; },
     failNextCatalogRoute() { failNextCatalogRoute = true; },
     failNextEventRoute() { failNextEventRoute = true; },
@@ -948,6 +958,27 @@ test("a contributor can retry one-click sync and receive published G mappings wi
   assert.doesNotMatch(missingRouteStatus, /temporarily unavailable/i);
   assert.equal(await page.locator("#contributor-sync-button").isEnabled(), true);
 
+  // A deterministic idempotency conflict is not a session-expiry signal. It
+  // must leave the durable journal intact and return the button to an
+  // actionable error state instead of remaining permanently aria-busy.
+  fixture.conflictNextEventRoute();
+  await page.locator("#contributor-sync-button").click();
+  await waitForCondition(
+    () => eventAttempts.length === 2,
+    "manual sync never reached the conflicting contribution route",
+  );
+  await page.waitForFunction(() => {
+    const section = document.querySelector("#contributor-sync");
+    const button = document.querySelector("#contributor-sync-button");
+    return section?.dataset.state === "error" &&
+      section.getAttribute("aria-busy") === "false" &&
+      button && !button.disabled;
+  });
+  assert.match(
+    await page.locator("#contributor-sync-status").innerText(),
+    /could not finish|personal|safe|sync again/i,
+  );
+
   // The next click retries the durable baseline. The events route accepts the
   // complete upload before the strict live-catalog pull fails with a 503, so
   // the UI must distinguish reconciliation failure from upload failure.
@@ -957,7 +988,7 @@ test("a contributor can retry one-click sync and receive published G mappings wi
   await page.waitForFunction(() => (
     document.querySelector("#contributor-sync")?.dataset.state === "error"
   ));
-  assert.equal(eventAttempts.length, 2);
+  assert.equal(eventAttempts.length, 3);
   assert.deepEqual(
     requestSequence.slice(catalogFailureOrderStart),
     ["status", "events", "status", "catalog"],
@@ -974,7 +1005,7 @@ test("a contributor can retry one-click sync and receive published G mappings wi
   await page.waitForFunction(() => (
     document.querySelector("#contributor-sync")?.dataset.state === "success"
   ));
-  assert.equal(eventAttempts.length, 2);
+  assert.equal(eventAttempts.length, 3);
   assert.equal(acceptedEvents.length, acceptedCountAfterCatalogFailure);
   assert.equal(fixture.localTopicId(), localTopicId);
   const submittedTopicCreates = acceptedEvents.filter((event) => (
