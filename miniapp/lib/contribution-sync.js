@@ -9,80 +9,66 @@ import {
   normalizeContributionStatus,
 } from "./model.js";
 
+// Keep the established key while migrating its value in place. A new key
+// would strand an unacknowledged v1 global-preference operation.
 const STORAGE_PREFIX = "getbible.miniapp.contributions.v1";
-const STORAGE_VERSION = 1;
-const GLOBAL_EVENT_ORIGIN = "g";
-const PERSONAL_EVENT_ORIGIN = "p";
-const MAX_BATCH_SIZE = 50;
-// Keep ordinary offline churn small enough to coexist with the bookmark record
-// and live catalogue under a shared-origin quota. If this journal fills, the
-// adapter switches atomically to compact snapshot reconciliation instead of
-// dropping the overflowing mutation.
-const MAX_OUTBOX_EVENTS = 256;
-const MAX_RECOVERY_EXTERNAL_EVENTS = 10_000;
-const MAX_RECOVERY_SNAPSHOT_BYTES = 512 * 1024;
+const STORAGE_VERSION = 2;
+const PROTOCOL_VERSION = 1;
+const MAX_BATCH_SIZE = 50; // Compatibility export; snapshot sync is unbatched.
+const MAX_EXPLICIT_OPERATIONS = 2_000;
+const MAX_SNAPSHOT_ASSIGNMENTS = 10_000;
 const MAX_PERSISTED_STATE_BYTES = 1024 * 1024;
+const MAX_SYNC_ENVELOPE_BYTES = 1024 * 1024;
 const SCOPE_PATTERN = /^[a-f0-9]{64}$/;
 const SAFE_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const CLIENT_ID_PATTERN = /^[A-Za-z0-9._:-]{1,80}$/;
 const COLOR_PATTERN = /^#[a-f0-9]{6}$/;
 const ENGLISH_TOPIC_PATTERN =
   /^(?=[A-Za-z0-9 &'():?-]{2,80}$)(?=.*[A-Za-z])(?!.* {2})[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]$/;
 
 /**
- * Durable, local-first contributor event journal.
+ * Durable adapter for the single-request contribution snapshot endpoint.
  *
- * Personal bookmark writes remain owned by BookmarkStore. This adapter only
- * observes successful before/after snapshots, persists an idempotent event,
- * and retries it independently. A network or server failure can therefore
- * never undo or block the reader's local data.
+ * BookmarkStore is the source of truth for personal topics. This class only
+ * persists an exact retry envelope and explicit global add/remove intents
+ * which cannot be reconstructed from BookmarkStore.
  */
 export class ContributionSync {
   #api;
-  #batchPause;
-  #clock;
   #coreTopicIds;
+  #coreTopics;
   #idFactory;
   #initialRaw;
   #journal;
   #key;
-  #lockManager;
-  #lockName;
-  #statusLockName;
-  #syncLockName;
-  #maximumOutboxEvents;
-  #manualSyncPromise = null;
   #persistenceFailed = false;
-  #status;
-  #statusTail = Promise.resolve();
+  #persistTail = Promise.resolve();
   #state;
   #storage;
   #syncPromise = null;
-  #validateStoredBaseline = false;
 
   static async open(options = {}) {
     const instanceScope = options.instanceScope ?? defaultInstanceScope();
     const key = contributionStorageKey(options.scope, instanceScope);
     const journal = options.journal ??
       await IndexedDbContributionJournal.open({ key });
-    const lockManager = options.lockManager ?? globalThis.navigator?.locks;
     if (
       !journal ||
       typeof journal.read !== "function" ||
       typeof journal.write !== "function" ||
-      typeof journal.remove !== "function" ||
-      !lockManager ||
-      typeof lockManager.request !== "function"
+      typeof journal.remove !== "function"
     ) {
       throw new TypeError("Transactional contribution storage is unavailable.");
     }
+
     let initialRaw = await journal.read();
     if (initialRaw === null) {
       const legacyStorage = storageLike(options.legacyStorage)
         ? options.legacyStorage
         : browserLocalStorage();
       const legacyKeys = [
-        `${STORAGE_PREFIX}:${instanceScope}:${options.scope}`,
-        `${STORAGE_PREFIX}:${options.scope}`,
+        STORAGE_PREFIX + ":" + instanceScope + ":" + options.scope,
+        STORAGE_PREFIX + ":" + options.scope,
       ];
       for (const legacyKey of legacyKeys) {
         let candidate = null;
@@ -91,32 +77,32 @@ export class ContributionSync {
         } catch {
           candidate = null;
         }
-        if (!validRawState(candidate)) {
+        if (!migratableRawState(candidate)) {
           continue;
         }
-        // Remove the legacy value only after the transactional copy commits.
-        // A failed migration therefore leaves the only durable copy intact.
         await journal.write(candidate);
         initialRaw = candidate;
         try {
           legacyStorage.removeItem(legacyKey);
         } catch {
-          // A duplicate legacy copy is harmless; IndexedDB is authoritative.
+          // The transactional copy is authoritative after it commits.
         }
         break;
       }
     }
+
     const sync = new ContributionSync({
       ...options,
       initialStatus: undefined,
       instanceScope,
       storage: null,
       journal,
-      lockManager,
       initialRaw,
     });
     if (options.initialStatus !== undefined) {
       await sync.seedStatus(options.initialStatus);
+    } else {
+      await sync.#persist();
     }
     return sync;
   }
@@ -124,97 +110,78 @@ export class ContributionSync {
   constructor({
     scope,
     api,
+    coreTopics = [],
     coreTopicIds = [],
     storage = browserLocalStorage(),
-    clock = Date.now,
-    idFactory = defaultEventToken,
-    maximumOutboxEvents = MAX_OUTBOX_EVENTS,
+    idFactory = defaultToken,
     instanceScope = defaultInstanceScope(),
     journal = null,
-    lockManager = null,
     initialRaw = undefined,
     initialStatus = undefined,
-    batchPause = null,
   } = {}) {
     if (typeof scope !== "string" || !SCOPE_PATTERN.test(scope)) {
       throw new TypeError("An authenticated contribution scope is required.");
     }
-    if (
-      !api ||
-      typeof api.contributionStatus !== "function" ||
-      typeof api.submitContributionEvents !== "function" ||
-      typeof api.acknowledgeContributionDisclosure !== "function"
-    ) {
-      throw new TypeError("A contribution API client is required.");
+    if (!api || typeof api.syncContributions !== "function") {
+      throw new TypeError("A contribution snapshot API client is required.");
     }
     if (
+      !Array.isArray(coreTopics) ||
       !Array.isArray(coreTopicIds) ||
-      coreTopicIds.some((id) => typeof id !== "string" || !SAFE_ID_PATTERN.test(id)) ||
-      typeof clock !== "function" ||
       typeof idFactory !== "function" ||
-      !Number.isSafeInteger(maximumOutboxEvents) ||
-      maximumOutboxEvents < 1 ||
-      maximumOutboxEvents > MAX_OUTBOX_EVENTS ||
       !isMiniAppInstanceScope(instanceScope)
     ) {
       throw new TypeError("Contribution sync dependencies are invalid.");
     }
-    if (batchPause !== null && typeof batchPause !== "function") {
-      throw new TypeError("Contribution sync pacing is invalid.");
+
+    this.#coreTopics = new Map();
+    for (const topic of coreTopics) {
+      const normalized = normalizeContributionTopic(topic);
+      if (this.#coreTopics.has(normalized.id)) {
+        throw new TypeError("A core contribution topic is duplicated.");
+      }
+      this.#coreTopics.set(normalized.id, normalized);
     }
-    this.#key = contributionStorageKey(scope, instanceScope);
-    this.#lockName = `${this.#key}:lock`;
-    this.#statusLockName = `${this.#key}:status`;
-    this.#syncLockName = `${this.#key}:sync`;
+    this.#coreTopicIds = new Set(this.#coreTopics.keys());
+    for (const id of coreTopicIds) {
+      if (typeof id !== "string" || !SAFE_ID_PATTERN.test(id)) {
+        throw new TypeError("A core contribution topic ID is invalid.");
+      }
+      this.#coreTopicIds.add(id);
+    }
+
     this.#api = api;
-    this.#batchPause = batchPause;
-    this.#coreTopicIds = new Set(coreTopicIds);
-    this.#journal = journal;
-    this.#lockManager = lockManager;
-    this.#initialRaw = initialRaw;
-    this.#storage = journal ? null : storageLike(storage) ? storage : null;
-    this.#persistenceFailed = !journal && this.#storage === null;
-    this.#clock = clock;
     this.#idFactory = idFactory;
-    this.#maximumOutboxEvents = maximumOutboxEvents;
+    this.#journal = journal;
+    this.#key = contributionStorageKey(scope, instanceScope);
+    this.#storage = journal ? null : storageLike(storage) ? storage : null;
+    this.#initialRaw = initialRaw;
     this.#state = this.#read();
     this.#persistenceFailed = !journal && this.#storage === null;
-    this.#status = statusFromState(this.#state);
     if (initialStatus !== undefined) {
-      const status = normalizeContributionStatus(initialStatus);
-      this.#applyStatus(status);
-      this.#status = cloneContributionStatus(status);
-      if (!journal) {
-        this.#write();
-      }
+      this.#applyStatus(normalizeContributionStatus(initialStatus));
+      void this.#persist().catch(() => undefined);
     }
-    // Only a baseline that was already complete when this client opened can
-    // hide personal changes made while no contribution journal was running.
-    this.#validateStoredBaseline = this.#state.baseline_complete;
   }
 
   get canContribute() {
-    return this.#state.approved;
+    return this.#state.status.enabled && this.#state.status.can_contribute;
   }
 
   get disclosureRequired() {
-    return this.#state.disclosure_required;
+    return this.canContribute && this.#state.status.disclosure_required;
   }
 
   get contributorState() {
-    return this.#state.contributor_state;
+    return this.#state.status.state;
   }
 
   get status() {
-    const status = cloneContributionStatus(this.#status);
-    status.state = this.#state.contributor_state;
-    status.can_contribute = this.#state.approved;
-    status.disclosure_required = this.#state.disclosure_required;
-    return status;
+    return cloneContributionStatus(this.#state.status);
   }
 
   get reviewDetailsAvailable() {
-    return contributionReviewDetailsAvailable(this.#status);
+    return contributionReviewDetailsAvailable(this.#state.status);
   }
 
   get topicOutcomes() {
@@ -225,653 +192,362 @@ export class ContributionSync {
     return this.status.summary;
   }
 
-  get baselineComplete() {
-    return this.#state.baseline_complete;
-  }
-
   get pendingCount() {
-    return this.#state.outbox.length;
-  }
-
-  get overflowed() {
-    return this.#state.overflowed;
-  }
-
-  get recovering() {
-    return this.#state.recovery_base !== null;
+    return this.#state.operations.length + (this.#state.dirty ? 1 : 0);
   }
 
   get persistenceFailed() {
     return this.#persistenceFailed;
   }
 
-  refreshStatus() {
-    return this.#withStatusLock(async () => {
-      try {
-        const status = normalizeContributionStatus(
-          await this.#api.contributionStatus(),
-        );
-        return this.#seedStatusLocked(status);
-      } catch (error) {
-        if (isContributionDenied(error)) {
-          await this.#suspendContributionsLocked();
-        }
-        throw error;
-      }
-    });
+  // Compatibility accessors during a rolling client/server deployment.
+  get baselineComplete() {
+    return !this.#state.dirty;
   }
 
-  /**
-   * Accepts the authenticated status bundled into the session bootstrap.
-   * Seeding is deliberately transport-free: callers can decide whether this
-   * user should open a journal or make any later contribution request.
-   */
-  seedStatus(value) {
-    const status = normalizeContributionStatus(value);
-    return this.#withStatusLock(() => this.#seedStatusLocked(status));
+  get overflowed() {
+    return false;
   }
 
-  #seedStatusLocked(status) {
-    return this.#withLock(async () => {
-      this.#applyStatus(status);
-      this.#status = cloneContributionStatus(status);
-      await this.#write();
-      return this.status;
-    });
+  get recovering() {
+    return false;
   }
 
-  #applyStatus(status) {
-    const wasApproved = this.#state.approved;
-    const approved = status.enabled && status.can_contribute;
-    this.#state.approved = approved;
-    this.#state.contributor_state = status.state;
-    this.#state.disclosure_required = approved && status.disclosure_required;
-    if (approved && !wasApproved) {
-      // Capturing is intentionally paused while authority is absent. Start a
-      // fresh additive baseline when it returns, then drain every preserved
-      // inverse/outbox event from before the authority transition.
-      this.#state.baseline_complete = false;
-      this.#state.baseline_cursor = 0;
-      this.#state.baseline_fingerprint = null;
-      this.#validateStoredBaseline = false;
-    }
+  async seedStatus(value) {
+    this.#applyStatus(normalizeContributionStatus(value));
+    await this.#persist().catch(() => false);
+    return this.status;
   }
 
-  acknowledgeDisclosure() {
-    return this.#withStatusLock(async () => {
-      const required = await this.#withLock(() =>
-        this.#state.approved && this.#state.disclosure_required
-      );
-      if (!required) {
-        return false;
-      }
-      try {
-        const status = normalizeContributionStatus(
-          await this.#api.acknowledgeContributionDisclosure(),
-        );
-        await this.#seedStatusLocked(status);
-        return true;
-      } catch (error) {
-        if (isContributionDenied(error)) {
-          await this.#suspendContributionsLocked();
-        }
-        throw error;
-      }
-    });
-  }
-
-  /**
-   * User-requested full synchronization. Unlike the quiet background drain,
-   * this operation always revalidates approval first and returns the newest
-   * review outcomes. A stale local `canContribute` value can therefore never
-   * prevent an approved contributor from starting their first baseline.
-   */
-  synchronizeNow(snapshot) {
-    if (this.#manualSyncPromise) {
-      return this.#manualSyncPromise;
+  async refreshStatus() {
+    if (typeof this.#api.contributionStatus !== "function") {
+      throw new TypeError("The contribution status transport is unavailable.");
     }
-    this.#manualSyncPromise = this.#synchronizeNow(snapshot).finally(() => {
-      this.#manualSyncPromise = null;
-    });
-    return this.#manualSyncPromise;
-  }
-
-  async #synchronizeNow(snapshot) {
-    const initialStatus = await this.refreshStatus();
-    if (!initialStatus.can_contribute || initialStatus.disclosure_required) {
-      return synchronizationReport(
-        { sent: 0, pending: this.pendingCount },
-        initialStatus,
-      );
-    }
-    const result = await this.synchronize(snapshot);
-    const finalStatus = await this.refreshStatus();
-    return synchronizationReport(result, finalStatus);
-  }
-
-  /** Records only the mutations that successfully reached BookmarkStore. */
-  captureMutation(before, after) {
-    if (this.#journal) {
-      return this.#withLock(() => this.#captureMutation(before, after));
-    }
-    return this.#captureMutation(before, after);
-  }
-
-  #captureMutation(before, after) {
-    if (!this.#state.approved) {
-      return 0;
-    }
-    if (this.#state.recovery_base !== null) {
-      const latest = compactRecoverySnapshot(after);
-      if (
-        this.#state.recovery_fingerprint === null &&
-        this.#state.recovery_cursor === 0
-      ) {
-        // The pre-overflow journal has not drained yet, so the original base
-        // still leads directly to the newest local target.
-        this.#state.recovery_target = latest;
-      } else {
-        // Freeze the target whose deterministic batches are in flight and
-        // queue one compact follow-up target for all intervening mutations.
-        this.#state.recovery_latest = latest;
-      }
-      return this.#persistCapture(0);
-    }
-    const events = contributionEventsForDiff(before, after);
-    const indexes = new Map(
-      this.#state.outbox.map((event, index) => [semanticEventKey(event), index]),
-    );
-    const newKeys = new Set(
-      events
-        .map(semanticEventKey)
-        .filter((key) => !indexes.has(key)),
-    );
-    if (
-      this.#state.outbox.length + newKeys.size > this.#maximumOutboxEvents
-    ) {
-      // Freeze the earliest unsent state transition before modifying the
-      // journal. Once the existing prefix drains, a deterministic diff from
-      // this base to the latest compact target recovers additions, removals,
-      // metadata changes, and topic deletions alike.
-      this.#state.overflowed = true;
-      this.#state.recovery_base = compactRecoverySnapshot(before);
-      this.#state.recovery_target = compactRecoverySnapshot(after);
-      this.#state.recovery_latest = null;
-      this.#state.recovery_cursor = 0;
-      this.#state.recovery_fingerprint = null;
-      this.#state.recovery_external = emptyRecoveryExternal();
-      this.#state.recovery_external_latest = emptyRecoveryExternal();
-      this.#state.recovery_sequence += 1;
-      return this.#persistCapture(0);
-    }
-    let accepted = 0;
-    for (const event of events) {
-      const key = semanticEventKey(event);
-      const index = indexes.get(key) ?? -1;
-      const queued = {
-        ...event,
-        client_event_id: this.#nextEventId(PERSONAL_EVENT_ORIGIN),
-      };
-      if (index >= 0) {
-        this.#state.outbox[index] = queued;
-        accepted += 1;
-      } else if (this.#state.outbox.length < this.#maximumOutboxEvents) {
-        indexes.set(key, this.#state.outbox.length);
-        this.#state.outbox.push(queued);
-        accepted += 1;
-      }
-    }
-    if (accepted > 0 || events.length > accepted) {
-      // Keep the in-memory queue so an online retry can still succeed, but do
-      // not report a durable capture when the device journal rejected it.
-      return this.#persistCapture(accepted);
-    }
-    return accepted;
-  }
-
-  /** Mirrors a successful local hide of one reviewed global assignment. */
-  captureGlobalRemoval(topic, verse, snapshot) {
-    return this.#captureGlobalAssignments(
-      "verse_remove",
-      [{ topic, verse }],
-      snapshot,
-    );
-  }
-
-  /** Mirrors an explicit restoration of one previously hidden assignment. */
-  captureGlobalAddition(topic, verse, snapshot) {
-    return this.#captureGlobalAssignments(
-      "verse_add",
-      [{ topic, verse }],
-      snapshot,
-    );
-  }
-
-  /** Mirrors a bounded bulk restoration with one transactional checkpoint. */
-  captureGlobalAdditions(assignments, snapshot) {
-    return this.#captureGlobalAssignments("verse_add", assignments, snapshot);
-  }
-
-  #captureGlobalAssignments(type, assignments, snapshot) {
-    const operation = () =>
-      this.#captureGlobalAssignmentsLocked(type, assignments, snapshot);
-    return this.#journal ? this.#withLock(operation) : operation();
-  }
-
-  #captureGlobalAssignmentsLocked(type, assignments, snapshot) {
-    if (!this.#state.approved) {
-      return 0;
-    }
-    if (
-      !["verse_add", "verse_remove"].includes(type) ||
-      !Array.isArray(assignments) ||
-      assignments.length > MAX_RECOVERY_EXTERNAL_EVENTS
-    ) {
-      throw new TypeError("Global bookmark contribution assignments are invalid.");
-    }
-    const eventsByKey = new Map();
-    for (const assignment of assignments) {
-      const normalizedTopic = normalizeContributionTopic(assignment?.topic);
-      const verse = assignment?.verse;
-      if (!isCanonicalVerseCoordinate(verse)) {
-        throw new TypeError("A canonical global bookmark coordinate is required.");
-      }
-      const event = verseEvent(type, {
-        topic: normalizedTopic,
-        verse: {
-          book: verse.book,
-          chapter: verse.chapter,
-          verse: verse.verse,
-        },
-      });
-      eventsByKey.set(semanticEventKey(event), event);
-    }
-    const events = [...eventsByKey.values()];
-    if (events.length === 0) {
-      return 0;
-    }
-    if (this.#state.recovery_base !== null) {
-      const target = this.#state.recovery_fingerprint === null
-        ? this.#state.recovery_external
-        : this.#state.recovery_external_latest;
-      addRecoveryExternalEvents(target, events);
-      return this.#persistCapture(events.length);
-    }
-
-    const indexes = new Map(
-      this.#state.outbox.map((event, index) => [semanticEventKey(event), index]),
-    );
-    const newKeys = events.filter((event) =>
-      !indexes.has(semanticEventKey(event))
-    ).length;
-    if (this.#state.outbox.length + newKeys <= this.#maximumOutboxEvents) {
-      for (const event of events) {
-        const key = semanticEventKey(event);
-        const index = indexes.get(key) ?? -1;
-        const queued = {
-          ...event,
-          client_event_id: this.#nextEventId(GLOBAL_EVENT_ORIGIN),
-        };
-        if (index >= 0) {
-          // A fresh id prevents an acknowledgement for a possibly in-flight
-          // inverse event from erasing this later intent.
-          this.#state.outbox[index] = queued;
-        } else {
-          indexes.set(key, this.#state.outbox.length);
-          this.#state.outbox.push(queued);
-        }
-      }
-      return this.#persistCapture(events.length);
-    }
-
-    const current = compactRecoverySnapshot(snapshot);
-    const external = emptyRecoveryExternal();
-    addRecoveryExternalEvents(external, events);
-    this.#state.overflowed = true;
-    this.#state.recovery_base = current;
-    this.#state.recovery_target = cloneCompactSnapshot(current);
-    this.#state.recovery_latest = null;
-    this.#state.recovery_cursor = 0;
-    this.#state.recovery_fingerprint = null;
-    this.#state.recovery_external = external;
-    this.#state.recovery_external_latest = emptyRecoveryExternal();
-    this.#state.recovery_sequence += 1;
-    return this.#persistCapture(events.length);
-  }
-
-  /**
-   * Sends a deterministic first baseline and then drains the explicit journal.
-   * The baseline includes personal assignments, every topic they reference,
-   * and genuinely custom topics; untouched bundled topics are intentionally
-   * excluded from the review queue.
-   */
-  synchronize(snapshot) {
-    if (this.#syncPromise) {
-      return this.#syncPromise;
-    }
-    const operation = this.#journal
-      ? this.#lockManager.request(this.#syncLockName, async () => {
-          // Only one tab may own the network drain. Refresh the shared
-          // checkpoint after acquiring that ownership so a waiting tab cannot
-          // restart another tab's baseline with a different fingerprint.
-          await this.#withLock(() => undefined);
-          return this.#synchronize(snapshot);
-        })
-      : this.#synchronize(snapshot);
-    this.#syncPromise = Promise.resolve(operation).finally(() => {
-      this.#syncPromise = null;
-    });
-    return this.#syncPromise;
-  }
-
-  async #synchronize(snapshot) {
-    // Normalize once before touching the durable checkpoint. Network requests
-    // never run while the short journal Web Lock is held: another tab can
-    // always capture a local mutation while the sync-owner lock spans a slow
-    // or rate-limited request.
-    const baseline = baselineContributionEvents(snapshot, this.#coreTopicIds);
-    let sent = 0;
     try {
-      while (true) {
-        const prepared = await this.#withLock(() =>
-          this.#prepareBaselineBatch(baseline)
-        );
-        if (prepared === null) break;
-        if (prepared.blocked) {
-          return { sent, pending: prepared.pending };
-        }
-        await this.#api.submitContributionEvents(prepared.batch);
-        sent += prepared.batch.length;
-        await this.#withLock(() => this.#acknowledgeBaselineBatch(prepared));
-        await this.#paceBatch();
-      }
-
-      while (true) {
-        const batch = await this.#withLock(() => {
-          if (!this.#state.approved || this.#state.disclosure_required) {
-            return null;
-          }
-          return this.#state.outbox.slice(0, MAX_BATCH_SIZE).map(cloneEvent);
-        });
-        if (!batch?.length) break;
-        await this.#api.submitContributionEvents(batch);
-        sent += batch.length;
-        await this.#withLock(async () => {
-          const sentIds = new Set(batch.map((event) => event.client_event_id));
-          this.#state.outbox = this.#state.outbox.filter(
-            (event) => !sentIds.has(event.client_event_id),
-          );
-          await this.#write();
-        });
-        await this.#paceBatch();
-      }
-
-      while (true) {
-        const prepared = await this.#withLock(() =>
-          this.#prepareRecoveryBatch()
-        );
-        if (prepared === null) break;
-        if (prepared.blocked) {
-          return { sent, pending: prepared.pending };
-        }
-        await this.#api.submitContributionEvents(prepared.batch);
-        sent += prepared.batch.length;
-        await this.#withLock(() => this.#acknowledgeRecoveryBatch(prepared));
-        await this.#paceBatch();
-      }
-
-      const pending = await this.#withLock(() => this.#state.outbox.length);
-      return { sent, pending };
+      return await this.seedStatus(await this.#api.contributionStatus());
     } catch (error) {
       if (isContributionDenied(error)) {
-        // The authority failure stops capture/upload immediately, but the
-        // journal remains the user's only durable record of unsent intent.
-        // Serialize this transition with status GET/PATCH so an older response
-        // cannot re-enable contribution after the denial was observed.
-        await this.#withStatusLock(() => this.#suspendContributionsLocked());
+        await this.#suspendAfterDenial();
       }
       throw error;
     }
   }
 
-  async #prepareBaselineBatch(baseline) {
-    if (!this.#state.approved || this.#state.disclosure_required) {
-      return { blocked: true, pending: this.#state.outbox.length };
+  /** Compatibility path; new manual flows acknowledge in synchronizeNow. */
+  async acknowledgeDisclosure() {
+    if (!this.disclosureRequired) {
+      return false;
     }
-    let fingerprint = null;
-    if (this.#validateStoredBaseline) {
-      this.#validateStoredBaseline = false;
-      fingerprint = baselineFingerprint(baseline);
-      const reconciled = reconcilePersonalOutbox(this.#state.outbox, baseline);
-      if (
-        this.#state.baseline_complete &&
-        this.#state.baseline_fingerprint !== fingerprint
-      ) {
-        this.#state.baseline_complete = false;
-        this.#state.baseline_cursor = 0;
-        this.#state.baseline_fingerprint = null;
-      } else if (reconciled) {
-        await this.#write();
-      }
+    if (typeof this.#api.acknowledgeContributionDisclosure !== "function") {
+      throw new TypeError("Disclosure must be acknowledged with snapshot sync.");
     }
-    if (this.#state.baseline_complete) {
-      return null;
-    }
-    fingerprint ??= baselineFingerprint(baseline);
-    if (this.#state.baseline_fingerprint !== fingerprint) {
-      this.#state.baseline_fingerprint = fingerprint;
-      this.#state.baseline_cursor = 0;
-      await this.#write();
-    }
-    if (this.#state.baseline_cursor < baseline.length) {
-      const start = this.#state.baseline_cursor;
-      return {
-        batch: baseline.slice(start, start + MAX_BATCH_SIZE).map(cloneEvent),
-        fingerprint,
-        start,
-      };
-    }
-    this.#state.baseline_complete = true;
-    this.#state.baseline_cursor = baseline.length;
-    pruneBaselineOutcomes(this.#state.outbox, baseline);
-    await this.#write();
-    return null;
-  }
-
-  async #acknowledgeBaselineBatch({ batch, fingerprint, start }) {
-    if (
-      this.#state.baseline_complete ||
-      this.#state.baseline_fingerprint !== fingerprint
-    ) {
-      return;
-    }
-    const end = start + batch.length;
-    if (this.#state.baseline_cursor === start) {
-      this.#state.baseline_cursor = end;
-      await this.#write();
-    }
-  }
-
-  async #prepareRecoveryBatch() {
-    if (!this.#state.approved || this.#state.disclosure_required) {
-      return { blocked: true, pending: this.#state.outbox.length };
-    }
-    while (
-      this.#state.recovery_base !== null &&
-      this.#state.recovery_target !== null
-    ) {
-      const events = recoveryContributionEvents(
-        expandRecoverySnapshot(this.#state.recovery_base),
-        expandRecoverySnapshot(this.#state.recovery_target),
-        this.#state.recovery_sequence,
-        expandRecoveryExternal(this.#state.recovery_external),
+    try {
+      await this.seedStatus(
+        await this.#api.acknowledgeContributionDisclosure(),
       );
-      const fingerprint = baselineFingerprint(events);
-      if (this.#state.recovery_fingerprint === null) {
-        this.#state.recovery_fingerprint = fingerprint;
-        this.#state.recovery_cursor = 0;
-        await this.#write();
-      } else if (this.#state.recovery_fingerprint !== fingerprint) {
-        throw new TypeError("The contribution recovery checkpoint is invalid.");
+      return true;
+    } catch (error) {
+      if (isContributionDenied(error)) {
+        await this.#suspendAfterDenial();
       }
-      if (this.#state.recovery_cursor < events.length) {
-        const start = this.#state.recovery_cursor;
-        return {
-          batch: events.slice(start, start + MAX_BATCH_SIZE).map(cloneEvent),
-          fingerprint,
-          start,
-        };
+      throw error;
+    }
+  }
+
+  /** Personal state is reconciled from the next current BookmarkStore snapshot. */
+  captureMutation(_before, after) {
+    normalizeDesiredSnapshot(after, this.#coreTopics, this.#coreTopicIds);
+    this.#state.dirty = true;
+    this.#state.revision += 1;
+    return this.#persistCapture(1);
+  }
+
+  captureGlobalRemoval(topic, verse, _snapshot) {
+    return this.#captureGlobalAssignments(
+      "verse_remove",
+      [{ topic, verse }],
+    );
+  }
+
+  captureGlobalAddition(topic, verse, _snapshot) {
+    return this.#captureGlobalAssignments(
+      "verse_add",
+      [{ topic, verse }],
+    );
+  }
+
+  captureGlobalAdditions(assignments, _snapshot) {
+    return this.#captureGlobalAssignments("verse_add", assignments);
+  }
+
+  #captureGlobalAssignments(type, assignments) {
+    if (!this.canContribute) {
+      return 0;
+    }
+    if (
+      !["verse_add", "verse_remove"].includes(type) ||
+      !Array.isArray(assignments)
+    ) {
+      throw new TypeError("Global contribution assignments are invalid.");
+    }
+
+    const incoming = new Map();
+    for (const assignment of assignments) {
+      const supplied = normalizeContributionTopic(assignment?.topic);
+      const authoritative = this.#coreTopics.get(supplied.id);
+      if (this.#coreTopicIds.has(supplied.id) && !authoritative) {
+        throw new TypeError(
+          "Authoritative metadata is required for a global contribution topic.",
+        );
       }
-      this.#state.recovery_base = this.#state.recovery_target;
-      if (
-        this.#state.recovery_latest !== null ||
-        this.#state.recovery_external_latest.e.length > 0
-      ) {
-        this.#state.recovery_target = this.#state.recovery_latest ??
-          cloneCompactSnapshot(this.#state.recovery_base);
-        this.#state.recovery_latest = null;
-        this.#state.recovery_external = this.#state.recovery_external_latest;
-        this.#state.recovery_external_latest = emptyRecoveryExternal();
-        this.#state.recovery_cursor = 0;
-        this.#state.recovery_fingerprint = null;
-        this.#state.recovery_sequence += 1;
-        await this.#write();
+      const topic = authoritative ?? supplied;
+      if (!isCanonicalVerseCoordinate(assignment?.verse)) {
+        throw new TypeError("A canonical global bookmark coordinate is required.");
+      }
+      const verse = {
+        book: assignment.verse.book,
+        chapter: assignment.verse.chapter,
+        verse: assignment.verse.verse,
+      };
+      incoming.set(operationKey(topic.id, verse), { topic, verse });
+    }
+
+    let changed = 0;
+    for (const [key, value] of incoming) {
+      const index = this.#state.operations.findIndex((operation) =>
+        operationKey(operation.topic.local_topic_id, operation.verse) === key
+      );
+      const current = index >= 0 ? this.#state.operations[index] : null;
+      if (current?.type === type && sameOperationPayload(current, value)) {
         continue;
       }
-      this.#state.recovery_base = null;
-      this.#state.recovery_target = null;
-      this.#state.recovery_cursor = 0;
-      this.#state.recovery_fingerprint = null;
-      this.#state.recovery_external = null;
-      this.#state.recovery_external_latest = null;
-      this.#state.overflowed = false;
-      await this.#write();
+      const operation = {
+        client_event_id: this.#nextId("e"),
+        type,
+        topic: {
+          local_topic_id: value.topic.id,
+          name: value.topic.name,
+          color: value.topic.color,
+        },
+        verse: value.verse,
+      };
+      if (index >= 0) {
+        this.#state.operations[index] = operation;
+      } else {
+        if (this.#state.operations.length >= MAX_EXPLICIT_OPERATIONS) {
+          throw new RangeError(
+            "Too many explicit contribution operations are pending.",
+          );
+        }
+        this.#state.operations.push(operation);
+      }
+      changed += 1;
     }
-    return null;
+    if (changed === 0) {
+      return 0;
+    }
+    this.#state.dirty = true;
+    this.#state.revision += 1;
+    return this.#persistCapture(changed);
   }
 
-  async #acknowledgeRecoveryBatch({ batch, fingerprint, start }) {
-    if (this.#state.recovery_fingerprint !== fingerprint) {
-      return;
+  synchronizeNow(snapshot, { disclosureAcknowledged = false } = {}) {
+    return this.#singleFlight(snapshot, disclosureAcknowledged === true);
+  }
+
+  synchronize(snapshot) {
+    return this.#singleFlight(snapshot, false);
+  }
+
+  #singleFlight(snapshot, disclosureAcknowledged) {
+    if (this.#syncPromise) {
+      return this.#syncPromise;
     }
-    const end = start + batch.length;
-    if (this.#state.recovery_cursor === start) {
-      this.#state.recovery_cursor = end;
-      await this.#write();
+    this.#syncPromise = this.#synchronize(snapshot, disclosureAcknowledged)
+      .finally(() => {
+        this.#syncPromise = null;
+      });
+    return this.#syncPromise;
+  }
+
+  async #synchronize(snapshot, disclosureAcknowledged) {
+    const desired = normalizeDesiredSnapshot(
+      snapshot,
+      this.#coreTopics,
+      this.#coreTopicIds,
+    );
+    const operations = this.#state.operations.map(cloneOperation);
+    const descriptor = {
+      snapshot: desired,
+      operations,
+      disclosure_acknowledged: disclosureAcknowledged,
+    };
+    const fingerprint = valueFingerprint(descriptor);
+    let envelope;
+    if (
+      this.#state.inflight?.fingerprint === fingerprint &&
+      inflightMatchesDescriptor(this.#state.inflight.envelope, descriptor)
+    ) {
+      envelope = cloneEnvelope(this.#state.inflight.envelope);
+    } else {
+      envelope = {
+        protocol_version: PROTOCOL_VERSION,
+        sync_id: this.#nextId("s", fingerprint),
+        client_id: this.#state.client_id,
+        snapshot: desired,
+        operations,
+        disclosure_acknowledged: disclosureAcknowledged,
+      };
+      this.#state.inflight = {
+        fingerprint,
+        envelope: cloneEnvelope(envelope),
+      };
+    }
+    if (utf8Length(JSON.stringify(envelope)) > MAX_SYNC_ENVELOPE_BYTES) {
+      throw new RangeError("The contribution snapshot is too large to synchronize.");
+    }
+
+    // The exact idempotency identity and body commit before transport.
+    const revision = this.#state.revision;
+    if (!await this.#persist()) {
+      throw new Error(
+        "Contribution retry storage is unavailable; synchronization was not sent.",
+      );
+    }
+    try {
+      const response = normalizeSyncResponse(
+        await this.#api.syncContributions(cloneEnvelope(envelope)),
+        envelope.sync_id,
+      );
+      const sentIds = new Set(
+        envelope.operations.map((operation) => operation.client_event_id),
+      );
+      this.#state.operations = this.#state.operations.filter(
+        (operation) => !sentIds.has(operation.client_event_id),
+      );
+      if (this.#state.revision === revision) {
+        this.#state.dirty = false;
+      }
+      if (this.#state.inflight?.envelope.sync_id === envelope.sync_id) {
+        this.#state.inflight = null;
+      }
+      this.#applyStatus(response.status);
+      // The server receipt is authoritative. If local cleanup cannot persist,
+      // the pre-request envelope remains durable and a later launch will make
+      // the same safe replay; never relabel the confirmed commit as a failure.
+      await this.#persist().catch(() => false);
+      return synchronizationReport(response, this.pendingCount);
+    } catch (error) {
+      if (isContributionDenied(error)) {
+        await this.#suspendAfterDenial();
+      }
+      throw error;
     }
   }
 
-  async #paceBatch() {
-    if (this.#batchPause) {
-      await this.#batchPause();
-    }
+  #applyStatus(status) {
+    this.#state.status = cloneContributionStatus(status);
   }
 
-  #nextEventId(origin) {
-    if (![PERSONAL_EVENT_ORIGIN, GLOBAL_EVENT_ORIGIN].includes(origin)) {
-      throw new TypeError("A contribution event origin is invalid.");
+  async #suspendAfterDenial() {
+    const current = this.status;
+    this.#applyStatus({
+      enabled: current.enabled,
+      state: current.state,
+      can_contribute: false,
+      disclosure_required: false,
+      ...(this.reviewDetailsAvailable
+        ? { topics: current.topics, summary: current.summary }
+        : {}),
+    });
+    await this.#persist().catch(() => false);
+  }
+
+  #nextId(kind, suffix = "") {
+    const sequence = this.#state.next_sequence;
+    if (!Number.isSafeInteger(sequence) || sequence >= Number.MAX_SAFE_INTEGER) {
+      throw new RangeError("The contribution retry sequence is exhausted.");
     }
     this.#state.next_sequence += 1;
-    const timestamp = Math.max(0, Math.floor(Number(this.#clock()) || 0))
-      .toString(36);
-    const token = String(this.#idFactory())
-      .replace(/[^A-Za-z0-9._:-]/g, "")
-      .slice(0, 64);
-    const id = `event:${origin}:${timestamp}:${
-      this.#state.next_sequence.toString(36)
-    }:${
-      token || "local"
-    }`;
+    const id = [
+      this.#state.client_id,
+      kind,
+      sequence.toString(36),
+      ...(suffix ? [suffix] : []),
+    ].join(":");
     if (!SAFE_ID_PATTERN.test(id)) {
-      throw new TypeError("A contribution event identifier is invalid.");
+      throw new RangeError("The contribution request identity is exhausted.");
     }
     return id;
   }
 
-  #persistCapture(value) {
-    const persisted = this.#write();
-    if (persisted && typeof persisted.then === "function") {
-      return persisted.then(
-        (saved) => saved ? value : 0,
-        () => 0,
+  #persistCapture(count) {
+    const persisted = this.#persist();
+    if (this.#journal) {
+      return persisted.then(() => count);
+    }
+    void persisted.catch(() => undefined);
+    return count;
+  }
+
+  #persist() {
+    if (!this.#journal && !this.#storage) {
+      this.#persistenceFailed = true;
+      return Promise.resolve(false);
+    }
+    const raw = JSON.stringify(this.#state);
+    if (utf8Length(raw) > MAX_PERSISTED_STATE_BYTES) {
+      this.#persistenceFailed = true;
+      return Promise.reject(
+        new RangeError("Contribution retry state is too large."),
       );
     }
-    return persisted ? value : 0;
-  }
-
-  #withLock(operation) {
-    if (!this.#journal) {
-      return operation();
-    }
-    return this.#lockManager.request(this.#lockName, async () => {
-      // Retain an unsaved in-memory transition after a rejected IDB write so
-      // this open WebView can still drain it. Re-reading the older durable
-      // checkpoint here would silently discard the mutation. The contributor
-      // continues to see persistenceFailed until a later checkpoint commits.
-      if (!this.#persistenceFailed) {
-        this.#initialRaw = await this.#journal.read();
-        this.#state = this.#read();
-      }
-      return operation();
-    });
-  }
-
-  #withStatusLock(operation) {
     if (this.#journal) {
-      return this.#lockManager.request(this.#statusLockName, operation);
+      const write = () => this.#journal.write(raw).then(() => {
+        this.#persistenceFailed = false;
+        return true;
+      });
+      const result = this.#persistTail.then(write, write);
+      this.#persistTail = result.catch(() => undefined);
+      return result.catch((error) => {
+        this.#persistenceFailed = true;
+        throw error;
+      });
     }
-    // localStorage has no cross-document transaction primitive, but one open
-    // client still needs request-order authority: hold this lane across both
-    // the network response and its state commit.
-    const run = () => Promise.resolve().then(operation);
-    const result = this.#statusTail.then(run, run);
-    this.#statusTail = result.catch(() => undefined);
-    return result;
-  }
-
-  #suspendContributionsLocked() {
-    return this.#withLock(async () => {
-      this.#state.approved = false;
-      await this.#write();
-    });
+    try {
+      this.#storage.setItem(this.#key, raw);
+      this.#persistenceFailed = false;
+      return Promise.resolve(true);
+    } catch {
+      this.#persistenceFailed = true;
+      return Promise.resolve(false);
+    }
   }
 
   #read() {
-    const fresh = freshState();
+    const fresh = freshState(this.#idFactory);
+    let raw = this.#initialRaw;
+    this.#initialRaw = undefined;
+    if (raw === undefined) {
+      try {
+        raw = this.#storage?.getItem(this.#key) ?? null;
+      } catch {
+        raw = null;
+        this.#storage = null;
+      }
+    }
+    if (!raw) {
+      return fresh;
+    }
     try {
-      const raw = this.#initialRaw !== undefined
-        ? this.#initialRaw
-        : this.#storage?.getItem(this.#key);
-      this.#initialRaw = undefined;
-      if (!raw) {
-        return fresh;
+      const parsed = JSON.parse(raw);
+      if (validV2State(parsed)) {
+        return cloneState(parsed);
       }
-      const value = JSON.parse(raw);
-      if (!validState(value)) {
-        throw new TypeError("Contribution sync state is invalid.");
+      if (parsed?.version === 1) {
+        return migrateV1State(parsed, fresh);
       }
-      return {
-        ...fresh,
-        approved: value.approved,
-        baseline_complete: value.baseline_complete,
-        baseline_cursor: value.baseline_cursor,
-        baseline_fingerprint: value.baseline_fingerprint,
-        contributor_state: value.contributor_state,
-        disclosure_required: value.disclosure_required,
-        next_sequence: value.next_sequence,
-        outbox: value.outbox.map(cloneEvent),
-        overflowed: value.overflowed === true,
-        recovery_base: cloneCompactSnapshot(value.recovery_base),
-        recovery_target: cloneCompactSnapshot(value.recovery_target),
-        recovery_latest: cloneCompactSnapshot(value.recovery_latest),
-        recovery_cursor: value.recovery_cursor,
-        recovery_fingerprint: value.recovery_fingerprint,
-        recovery_sequence: value.recovery_sequence,
-        recovery_external: cloneRecoveryExternal(value.recovery_external),
-        recovery_external_latest: cloneRecoveryExternal(
-          value.recovery_external_latest,
-        ),
-      };
+      throw new TypeError("Contribution retry state is invalid.");
     } catch {
       if (this.#journal) {
         void this.#journal.remove().catch(() => undefined);
@@ -885,50 +561,12 @@ export class ContributionSync {
       return fresh;
     }
   }
-
-  #write() {
-    if (!this.#journal && !this.#storage) {
-      this.#persistenceFailed = true;
-      return false;
-    }
-    const raw = JSON.stringify(this.#state);
-    if (utf8Length(raw) > MAX_PERSISTED_STATE_BYTES) {
-      this.#persistenceFailed = true;
-      if (this.#journal) {
-        return Promise.reject(new RangeError(
-          "The contribution journal is too large.",
-        ));
-      }
-      return false;
-    }
-    if (this.#journal) {
-      return this.#journal.write(raw).then(
-        () => {
-          this.#persistenceFailed = false;
-          return true;
-        },
-        (error) => {
-          this.#persistenceFailed = true;
-          throw error;
-        },
-      );
-    }
-    try {
-      this.#storage.setItem(this.#key, raw);
-      this.#persistenceFailed = false;
-      return true;
-    } catch {
-      // A quota failure may become recoverable after sent events drain. Keep
-      // the storage adapter and retry every later checkpoint.
-      this.#persistenceFailed = true;
-      return false;
-    }
-  }
 }
 
+/** Compatibility helpers retained for importers and focused diff tests. */
 export function contributionEventsForDiff(before, after) {
-  const left = normalizeSnapshot(before);
-  const right = normalizeSnapshot(after);
+  const left = normalizeBookmarkSnapshot(before);
+  const right = normalizeBookmarkSnapshot(after);
   const beforeTopics = new Map(left.topics.map((topic) => [topic.id, topic]));
   const afterTopics = new Map(right.topics.map((topic) => [topic.id, topic]));
   const events = [];
@@ -942,7 +580,6 @@ export function contributionEventsForDiff(before, after) {
       events.push(topicUpsertEvent(topic));
     }
   }
-
   const beforeAssignments = assignmentMap(left, beforeTopics);
   const afterAssignments = assignmentMap(right, afterTopics);
   for (const [key, assignment] of beforeAssignments) {
@@ -967,17 +604,17 @@ export function contributionEventsForDiff(before, after) {
 }
 
 export function baselineContributionEvents(snapshot, coreTopicIds = new Set()) {
-  const normalized = normalizeSnapshot(snapshot);
+  const normalized = normalizeBookmarkSnapshot(snapshot);
   const topics = new Map(normalized.topics.map((topic) => [topic.id, topic]));
   const assignments = assignmentMap(normalized, topics);
-  const referencedTopicIds = new Set(
+  const referenced = new Set(
     [...assignments.values()].map((assignment) => assignment.topic.id),
   );
   const events = [];
   for (const topic of normalized.topics) {
     if (
       isEnglishContributionTopicName(topic.name) &&
-      (!coreTopicIds.has(topic.id) || referencedTopicIds.has(topic.id))
+      (!coreTopicIds.has(topic.id) || referenced.has(topic.id))
     ) {
       events.push(withBaselineId(topicUpsertEvent(topic)));
     }
@@ -992,166 +629,76 @@ export function isEnglishContributionTopicName(value) {
   if (typeof value !== "string") {
     return false;
   }
-  const name = value.trim().normalize("NFC");
-  return ENGLISH_TOPIC_PATTERN.test(name);
+  return ENGLISH_TOPIC_PATTERN.test(value.trim().normalize("NFC"));
 }
 
 export const CONTRIBUTION_STORAGE_PREFIX = STORAGE_PREFIX;
 export const CONTRIBUTION_BATCH_MAXIMUM = MAX_BATCH_SIZE;
-export const CONTRIBUTION_OUTBOX_MAXIMUM = MAX_OUTBOX_EVENTS;
+export const CONTRIBUTION_OUTBOX_MAXIMUM = MAX_EXPLICIT_OPERATIONS;
+export const CONTRIBUTION_ASSIGNMENT_MAXIMUM = MAX_SNAPSHOT_ASSIGNMENTS;
 
-function topicUpsertEvent(topic) {
-  return {
-    type: "topic_upsert",
-    topic: {
-      local_topic_id: topic.id,
-      name: topic.name,
-      color: topic.color,
-    },
-  };
-}
-
-function verseEvent(type, assignment) {
-  return {
-    type,
-    // Verse events carry source context so a first use of an untouched bundled
-    // topic is immediately reviewable without proposing a metadata change.
-    topic: {
-      local_topic_id: assignment.topic.id,
-      name: assignment.topic.name,
-      color: assignment.topic.color,
-    },
-    verse: { ...assignment.verse },
-  };
-}
-
-function withBaselineId(event) {
-  return {
-    client_event_id: `baseline:${event.type}:${eventFingerprint(event)}`,
-    ...event,
-  };
-}
-
-function recoveryContributionEvents(before, after, sequence, external = []) {
-  const events = new Map();
-  for (const event of [...contributionEventsForDiff(before, after), ...external]) {
-    // An assignment may temporarily exist in both the personal and global
-    // layers. The later explicit global action is the user's final intent;
-    // identical removals collapse to one server event/client id.
-    events.set(semanticEventKey(event), event);
-  }
-  return [...events.values()].map((event) => ({
-    client_event_id: `recovery:${sequence.toString(36)}:${event.type}:${eventFingerprint(event)}`,
-    ...event,
-  }));
-}
-
-function baselineFingerprint(events) {
-  return eventFingerprint(events.map((event) => event.client_event_id));
-}
-
-function semanticEventKey(event) {
-  if (event.type === "topic_upsert" || event.type === "topic_delete") {
-    return `topic:${event.topic.local_topic_id}`;
-  }
-  return `verse:${event.topic.local_topic_id}:${event.verse.book}:${
-    event.verse.chapter
-  }:${event.verse.verse}`;
-}
-
-function reconcilePersonalOutbox(outbox, baseline) {
-  const currentKeys = new Set(baseline.map(semanticEventKey));
-  const retained = outbox.filter((event) => {
-    if (!event.client_event_id.startsWith(`event:${PERSONAL_EVENT_ORIGIN}:`)) {
-      // Legacy and explicit global-preference events have no authoritative
-      // representation in BookmarkStore, so preserve them without guessing.
-      return true;
+function normalizeDesiredSnapshot(value, coreTopics, coreTopicIds) {
+  const normalized = normalizeBookmarkSnapshot(value);
+  const referencedIds = new Set();
+  for (const bookmark of normalized.bookmarks) {
+    if (!isCanonicalVerseCoordinate(bookmark)) {
+      continue;
     }
-    if (["topic_upsert", "verse_add"].includes(event.type)) {
-      // A fresh baseline will send a still-current positive; otherwise this
-      // queued positive was undone while the Mini App journal was closed.
-      return false;
+    for (const id of bookmark.topic_ids) {
+      referencedIds.add(id);
     }
-    // Keep a negative only while the current personal snapshot still lacks
-    // that topic/assignment. A restored item supersedes the stale inverse.
-    return !currentKeys.has(semanticEventKey(event));
-  });
-  if (retained.length === outbox.length) {
-    return false;
   }
-  outbox.splice(0, outbox.length, ...retained);
-  return true;
-}
 
-function pruneBaselineOutcomes(outbox, baseline) {
-  const represented = new Map(
-    baseline
-      .filter((event) => ["topic_upsert", "verse_add"].includes(event.type))
-      .map((event) => [semanticEventKey(event), eventPayload(event)]),
-  );
-  const retained = outbox.filter((event) => {
-    if (!["topic_upsert", "verse_add"].includes(event.type)) {
-      return true;
+  const topics = new Map();
+  for (const local of normalized.topics) {
+    const authoritative = coreTopics.get(local.id);
+    if (coreTopicIds.has(local.id)) {
+      // Never turn a locally selected color for a global topic into a proposal.
+      if (authoritative && referencedIds.has(local.id)) {
+        topics.set(local.id, authoritative);
+      }
+      continue;
     }
-    return represented.get(semanticEventKey(event)) !== eventPayload(event);
-  });
-  outbox.splice(0, outbox.length, ...retained);
-}
-
-function eventPayload(event) {
-  return JSON.stringify({
-    type: event.type,
-    topic: event.topic,
-    ...(event.verse ? { verse: event.verse } : {}),
-  });
-}
-
-function eventFingerprint(value) {
-  const input = JSON.stringify(value);
-  let left = 0x811c9dc5;
-  let right = 0x9e3779b9;
-  for (let index = 0; index < input.length; index += 1) {
-    const unit = input.charCodeAt(index);
-    left = Math.imul(left ^ unit, 0x01000193) >>> 0;
-    right = Math.imul(right ^ unit, 0x85ebca6b) >>> 0;
+    if (isEnglishContributionTopicName(local.name)) {
+      topics.set(local.id, local);
+    }
   }
-  return `${left.toString(16).padStart(8, "0")}${
-    right.toString(16).padStart(8, "0")
-  }`;
-}
 
-function assignmentMap(snapshot, topics) {
   const assignments = new Map();
-  for (const bookmark of snapshot.bookmarks) {
+  for (const bookmark of normalized.bookmarks) {
     if (!isCanonicalVerseCoordinate(bookmark)) {
       continue;
     }
     for (const topicId of bookmark.topic_ids) {
-      const topic = topics.get(topicId);
-      if (!topic || !isEnglishContributionTopicName(topic.name)) {
+      if (!topics.has(topicId)) {
         continue;
       }
-      const verse = {
+      const assignment = {
+        topic_id: topicId,
         book: bookmark.book,
         chapter: bookmark.chapter,
         verse: bookmark.verse,
       };
-      assignments.set(
-        `${topicId}:${verse.book}:${verse.chapter}:${verse.verse}`,
-        { topic, verse },
-      );
+      assignments.set(topicId + ":" + assignmentKey(assignment), assignment);
+      if (assignments.size > MAX_SNAPSHOT_ASSIGNMENTS) {
+        throw new RangeError("Too many contribution assignments are present.");
+      }
     }
   }
-  return assignments;
+  return {
+    topics: [...topics.values()]
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((topic) => ({ ...topic })),
+    assignments: [...assignments.values()].sort(compareAssignments),
+  };
 }
 
-function normalizeSnapshot(value) {
+function normalizeBookmarkSnapshot(value) {
   if (
     !value ||
     typeof value !== "object" ||
     Array.isArray(value) ||
     !Array.isArray(value.topics) ||
-    value.topics.length < 1 ||
     value.topics.length > 100 ||
     !Array.isArray(value.bookmarks) ||
     value.bookmarks.length > 800
@@ -1177,13 +724,13 @@ function normalizeSnapshot(value) {
     throw new TypeError("A bookmark topic is invalid.");
   }
   const bookmarks = value.bookmarks.map((bookmark) => {
-    const topicIdsForBookmark = Array.isArray(bookmark?.topic_ids)
+    const ids = Array.isArray(bookmark?.topic_ids)
       ? [...new Set(bookmark.topic_ids)]
       : [bookmark?.topic_id];
     if (
-      !topicIdsForBookmark.length ||
-      topicIdsForBookmark.length > 100 ||
-      topicIdsForBookmark.some((id) => !topicIds.has(id)) ||
+      ids.length < 1 ||
+      ids.length > 100 ||
+      ids.some((id) => !topicIds.has(id)) ||
       !boundedInteger(bookmark?.book, 1, 200) ||
       !boundedInteger(bookmark?.chapter, 1, 1_000) ||
       !boundedInteger(bookmark?.verse, 1, 2_000)
@@ -1191,7 +738,7 @@ function normalizeSnapshot(value) {
       throw new TypeError("A bookmark assignment is invalid.");
     }
     return {
-      topic_ids: topicIdsForBookmark,
+      topic_ids: ids,
       book: bookmark.book,
       chapter: bookmark.chapter,
       verse: bookmark.verse,
@@ -1200,253 +747,356 @@ function normalizeSnapshot(value) {
   return { topics, bookmarks };
 }
 
-function statusFromState(state) {
-  return normalizeContributionStatus({
-    enabled: state.contributor_state !== "unavailable",
-    state: state.contributor_state,
-    can_contribute: state.approved,
-    disclosure_required: state.disclosure_required,
-  });
-}
-
-function cloneContributionStatus(status) {
-  return normalizeContributionStatus(status);
-}
-
-function synchronizationReport(result, status) {
-  const normalizedStatus = cloneContributionStatus(status);
-  return {
-    sent: result.sent,
-    pending: result.pending,
-    review_details_available:
-      contributionReviewDetailsAvailable(normalizedStatus),
-    status: normalizedStatus,
-    topic_outcomes: normalizedStatus.topics.map((topic) => ({
-      ...topic,
-      ...(topic.canonical_topic
-        ? {
-            canonical_topic: {
-              ...topic.canonical_topic,
-              aliases: [...topic.canonical_topic.aliases],
-            },
-          }
-        : {}),
-    })),
-  };
-}
-
-function isContributionDenied(error) {
-  return error?.code === "contribution_not_allowed";
-}
-
-function validState(value) {
-  const recoverySnapshots = [
-    value?.recovery_base,
-    value?.recovery_target,
-    value?.recovery_latest,
-  ];
-  const recoveryExternals = [
-    value?.recovery_external,
-    value?.recovery_external_latest,
-  ];
-  const snapshotsValid = recoverySnapshots.every((snapshot) =>
-    snapshot === null || validCompactSnapshot(snapshot)
-  );
-  const externalsValid = recoveryExternals.every((external) =>
-    external === null || validRecoveryExternal(external)
-  );
-  const recoveryShapeValid = value?.overflowed === true
-    ? value.recovery_base !== null &&
-      value.recovery_target !== null &&
-      recoveryExternals.every((external) => external !== null)
-    : recoverySnapshots.every((snapshot) => snapshot === null) &&
-      recoveryExternals.every((external) => external === null) &&
-      value?.recovery_cursor === 0 &&
-      value?.recovery_fingerprint === null;
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    value.version === STORAGE_VERSION &&
-    typeof value.approved === "boolean" &&
-    typeof value.baseline_complete === "boolean" &&
-    Number.isSafeInteger(value.baseline_cursor) &&
-    value.baseline_cursor >= 0 &&
-    (
-      value.baseline_fingerprint === null ||
-      /^[a-f0-9]{16}$/.test(value.baseline_fingerprint)
-    ) &&
-    typeof value.disclosure_required === "boolean" &&
-    typeof value.contributor_state === "string" &&
-    Number.isSafeInteger(value.next_sequence) &&
-    value.next_sequence >= 0 &&
-    Array.isArray(value.outbox) &&
-    value.outbox.length <= MAX_OUTBOX_EVENTS &&
-    value.outbox.every(validEvent) &&
-    typeof value.overflowed === "boolean" &&
-    snapshotsValid &&
-    externalsValid &&
-    recoveryShapeValid &&
-    Number.isSafeInteger(value.recovery_cursor) &&
-    value.recovery_cursor >= 0 &&
-    (
-      value.recovery_fingerprint === null ||
-      /^[a-f0-9]{16}$/.test(value.recovery_fingerprint)
-    ) &&
-    Number.isSafeInteger(value.recovery_sequence) &&
-    value.recovery_sequence >= 0
-  );
-}
-
-function validRawState(raw) {
-  if (typeof raw !== "string" || utf8Length(raw) > MAX_PERSISTED_STATE_BYTES) {
-    return false;
-  }
-  try {
-    return validState(JSON.parse(raw));
-  } catch {
-    return false;
-  }
-}
-
-function validEvent(event) {
-  if (
-    !event ||
-    typeof event !== "object" ||
-    !SAFE_ID_PATTERN.test(event.client_event_id) ||
-    !["topic_upsert", "topic_delete", "verse_add", "verse_remove"].includes(
-      event.type,
-    ) ||
-    !event.topic ||
-    !SAFE_ID_PATTERN.test(event.topic.local_topic_id)
-  ) {
-    return false;
-  }
-  if (event.type === "topic_upsert") {
-    return hasExactKeys(event, ["client_event_id", "type", "topic"]) &&
-      hasExactKeys(event.topic, ["local_topic_id", "name", "color"]) &&
-      isEnglishContributionTopicName(event.topic.name) &&
-      COLOR_PATTERN.test(event.topic.color);
-  }
-  if (event.type === "topic_delete") {
-    return hasExactKeys(event, ["client_event_id", "type", "topic"]) &&
-      hasExactKeys(event.topic, ["local_topic_id"]);
-  }
-  return Boolean(
-    hasExactKeys(event, ["client_event_id", "type", "topic", "verse"]) &&
-    hasExactKeys(event.topic, ["local_topic_id", "name", "color"]) &&
-    isEnglishContributionTopicName(event.topic.name) &&
-    COLOR_PATTERN.test(event.topic.color) &&
-    event.verse &&
-    hasExactKeys(event.verse, ["book", "chapter", "verse"]) &&
-    isCanonicalVerseCoordinate(event.verse),
-  );
-}
-
-function cloneEvent(event) {
-  return {
-    ...event,
-    topic: { ...event.topic },
-    ...(event.verse ? { verse: { ...event.verse } } : {}),
-  };
-}
-
-function freshState() {
-  return {
-    version: STORAGE_VERSION,
-    approved: false,
-    baseline_complete: false,
-    baseline_cursor: 0,
-    baseline_fingerprint: null,
-    contributor_state: "not_applied",
-    disclosure_required: false,
-    next_sequence: 0,
-    outbox: [],
-    overflowed: false,
-    recovery_base: null,
-    recovery_target: null,
-    recovery_latest: null,
-    recovery_cursor: 0,
-    recovery_fingerprint: null,
-    recovery_sequence: 0,
-    recovery_external: null,
-    recovery_external_latest: null,
-  };
-}
-
-function compactRecoverySnapshot(value) {
-  const snapshot = normalizeSnapshot(value);
-  const topicIndexes = new Map(
-    snapshot.topics.map((topic, index) => [topic.id, index]),
-  );
-  const compact = {
-    t: snapshot.topics.map((topic) => [topic.id, topic.name, topic.color]),
-    b: snapshot.bookmarks.map((bookmark) => [
-      bookmark.book,
-      bookmark.chapter,
-      bookmark.verse,
-      bookmark.topic_ids.map((topicId) => topicIndexes.get(topicId)),
-    ]),
-  };
-  if (utf8Length(JSON.stringify(compact)) > MAX_RECOVERY_SNAPSHOT_BYTES) {
-    throw new RangeError("The contribution recovery snapshot is too large.");
-  }
-  return compact;
-}
-
-function expandRecoverySnapshot(value) {
+function normalizeSyncResponse(value, expectedSyncId) {
+  const receipt = value?.receipt;
   if (
     !value ||
     typeof value !== "object" ||
     Array.isArray(value) ||
-    !Array.isArray(value.t) ||
-    !Array.isArray(value.b) ||
-    Object.keys(value).length !== 2
+    !sameKeys(value, ["catalog", "protocol_version", "receipt", "status"]) ||
+    value.protocol_version !== PROTOCOL_VERSION ||
+    !receipt ||
+    typeof receipt !== "object" ||
+    Array.isArray(receipt) ||
+    !sameKeys(receipt, [
+      "accepted",
+      "event_ids",
+      "outcome",
+      "replayed",
+      "snapshot_digest",
+      "sync_id",
+    ]) ||
+    receipt.sync_id !== expectedSyncId ||
+    !/^[a-f0-9]{64}$/.test(receipt.snapshot_digest ?? "") ||
+    !["accepted", "replayed"].includes(receipt.outcome) ||
+    !boundedInteger(receipt.accepted, 0, 12_100) ||
+    !boundedInteger(receipt.replayed, 0, 12_100) ||
+    !validReceiptEventIds(receipt.event_ids)
   ) {
-    throw new TypeError("The contribution recovery snapshot is invalid.");
+    throw new TypeError("Invalid contribution sync response.");
   }
-  const topics = value.t.map((row) => {
-    if (!Array.isArray(row) || row.length !== 3) {
-      throw new TypeError("The contribution recovery snapshot is invalid.");
-    }
-    return { id: row[0], name: row[1], color: row[2] };
-  });
-  const bookmarks = value.b.map((row) => {
-    if (
-      !Array.isArray(row) ||
-      row.length !== 4 ||
-      !Array.isArray(row[3]) ||
-      row[3].some((index) =>
-        !Number.isInteger(index) || index < 0 || index >= topics.length
-      )
-    ) {
-      throw new TypeError("The contribution recovery snapshot is invalid.");
-    }
-    return {
-      book: row[0],
-      chapter: row[1],
-      verse: row[2],
-      topic_ids: row[3].map((index) => topics[index].id),
-    };
-  });
-  return normalizeSnapshot({ topics, bookmarks });
+  const status = normalizeContributionStatus(value.status);
+  const catalog = normalizeSyncCatalog(value.catalog);
+  return {
+    protocol_version: PROTOCOL_VERSION,
+    receipt: jsonClone(receipt),
+    status,
+    catalog,
+  };
 }
 
-function validCompactSnapshot(value) {
+function validReceiptEventIds(value) {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).length <= MAX_EXPLICIT_OPERATIONS &&
+    Object.entries(value).every(([key, receiptId]) =>
+      SAFE_ID_PATTERN.test(key) &&
+      boundedInteger(receiptId, 1, Number.MAX_SAFE_INTEGER)
+    ),
+  );
+}
+
+function normalizeSyncCatalog(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Invalid contribution sync response.");
+  }
+  if (
+    sameKeys(value, ["checksum", "revision"]) &&
+    boundedInteger(value.revision, 0, Number.MAX_SAFE_INTEGER) &&
+    /^[a-f0-9]{64}$/.test(value.checksum ?? "")
+  ) {
+    return { revision: value.revision, checksum: value.checksum };
+  }
+  if (
+    sameKeys(value, ["available", "checksum", "revision"]) &&
+    value.available === false &&
+    value.revision === null &&
+    value.checksum === null
+  ) {
+    return { revision: null, checksum: null, available: false };
+  }
+  throw new TypeError("Invalid contribution sync response.");
+}
+
+function sameKeys(value, expected) {
+  const actual = Object.keys(value).sort();
+  return actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index]);
+}
+
+function synchronizationReport(response, pending) {
+  const status = cloneContributionStatus(response.status);
+  return {
+    sent: response.receipt.accepted,
+    pending,
+    review_details_available: contributionReviewDetailsAvailable(status),
+    status,
+    topic_outcomes: status.topics.map(cloneTopicOutcome),
+    catalog: response.catalog,
+    receipt: response.receipt,
+  };
+}
+
+function inflightMatchesDescriptor(envelope, descriptor) {
+  // Shapes are canonicalized and ordered before this comparison. The hash is
+  // only a compact ID suffix; exact equality decides whether a body is safe to
+  // replay after a lost response.
+  return JSON.stringify({
+    snapshot: envelope.snapshot,
+    operations: envelope.operations,
+    disclosure_acknowledged: envelope.disclosure_acknowledged,
+  }) === JSON.stringify(descriptor);
+}
+
+function freshState(idFactory) {
+  return {
+    version: STORAGE_VERSION,
+    client_id: normalizeGeneratedId(idFactory()),
+    next_sequence: 0,
+    dirty: true,
+    revision: 0,
+    operations: [],
+    inflight: null,
+    status: unavailableStatus(),
+  };
+}
+
+function migrateV1State(value, fresh) {
+  fresh.status = normalizeContributionStatus({
+    enabled: value.contributor_state !== "unavailable",
+    state: typeof value.contributor_state === "string"
+      ? value.contributor_state
+      : "not_applied",
+    can_contribute: value.approved === true,
+    disclosure_required:
+      value.approved === true && value.disclosure_required === true,
+  });
+  const candidates = [];
+  if (Array.isArray(value.outbox)) {
+    candidates.push(...value.outbox.filter((event) =>
+      typeof event?.client_event_id === "string" &&
+      event.client_event_id.startsWith("event:g:")
+    ));
+  }
+  candidates.push(...legacyRecoveryOperations(value.recovery_external));
+  candidates.push(...legacyRecoveryOperations(value.recovery_external_latest));
+  for (const candidate of candidates) {
+    const operation = normalizeLegacyOperation(candidate, fresh);
+    if (!operation) {
+      continue;
+    }
+    const key = operationKey(operation.topic.local_topic_id, operation.verse);
+    const index = fresh.operations.findIndex((current) =>
+      operationKey(current.topic.local_topic_id, current.verse) === key
+    );
+    if (index >= 0) {
+      fresh.operations[index] = operation;
+    } else if (fresh.operations.length < MAX_EXPLICIT_OPERATIONS) {
+      fresh.operations.push(operation);
+    }
+  }
+  return fresh;
+}
+
+function legacyRecoveryOperations(value) {
+  if (!value || !Array.isArray(value.t) || !Array.isArray(value.e)) {
+    return [];
+  }
+  return value.e.flatMap((row) => {
+    const legacy = Array.isArray(row) && row.length === 4;
+    const operation = legacy ? 0 : row?.[0];
+    const topicIndex = legacy ? row?.[0] : row?.[1];
+    const topic = value.t[topicIndex];
+    const offset = legacy ? 1 : 2;
+    return Array.isArray(topic) && topic.length === 3
+      ? [{
+          type: operation === 1 ? "verse_add" : "verse_remove",
+          topic: {
+            local_topic_id: topic[0],
+            name: topic[1],
+            color: topic[2],
+          },
+          verse: {
+            book: row?.[offset],
+            chapter: row?.[offset + 1],
+            verse: row?.[offset + 2],
+          },
+        }]
+      : [];
+  });
+}
+
+function normalizeLegacyOperation(value, state) {
   try {
-    expandRecoverySnapshot(value);
-    return utf8Length(JSON.stringify(value)) <= MAX_RECOVERY_SNAPSHOT_BYTES;
+    if (!["verse_add", "verse_remove"].includes(value?.type)) {
+      return null;
+    }
+    const topic = normalizeContributionTopic({
+      id: value.topic?.local_topic_id,
+      name: value.topic?.name,
+      color: value.topic?.color,
+    });
+    if (!isCanonicalVerseCoordinate(value.verse)) {
+      return null;
+    }
+    let clientEventId = value.client_event_id;
+    if (typeof clientEventId !== "string" || !SAFE_ID_PATTERN.test(clientEventId)) {
+      clientEventId = [
+        state.client_id,
+        "e",
+        state.next_sequence.toString(36),
+      ].join(":");
+      state.next_sequence += 1;
+    }
+    return {
+      client_event_id: clientEventId,
+      type: value.type,
+      topic: {
+        local_topic_id: topic.id,
+        name: topic.name,
+        color: topic.color,
+      },
+      verse: {
+        book: value.verse.book,
+        chapter: value.verse.chapter,
+        verse: value.verse.verse,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function validV2State(value) {
+  try {
+    return Boolean(
+      value &&
+      value.version === STORAGE_VERSION &&
+      CLIENT_ID_PATTERN.test(value.client_id) &&
+      Number.isSafeInteger(value.next_sequence) &&
+      value.next_sequence >= 0 &&
+      typeof value.dirty === "boolean" &&
+      Number.isSafeInteger(value.revision) &&
+      value.revision >= 0 &&
+      Array.isArray(value.operations) &&
+      value.operations.length <= MAX_EXPLICIT_OPERATIONS &&
+      value.operations.every(validOperation) &&
+      (value.inflight === null || validInflight(value.inflight)) &&
+      (
+        value.inflight === null ||
+        value.inflight.envelope.client_id === value.client_id
+      ) &&
+      Boolean(normalizeContributionStatus(value.status))
+    );
   } catch {
     return false;
   }
 }
 
-function cloneCompactSnapshot(value) {
-  if (value === null) {
-    return null;
-  }
+function validInflight(value) {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    /^[a-f0-9]{16}$/.test(value.fingerprint) &&
+    value.envelope?.protocol_version === PROTOCOL_VERSION &&
+    SAFE_ID_PATTERN.test(value.envelope?.sync_id ?? "") &&
+    CLIENT_ID_PATTERN.test(value.envelope?.client_id ?? "") &&
+    Array.isArray(value.envelope?.snapshot?.topics) &&
+    Array.isArray(value.envelope?.snapshot?.assignments) &&
+    Array.isArray(value.envelope?.operations) &&
+    typeof value.envelope?.disclosure_acknowledged === "boolean"
+  );
+}
+
+function validOperation(value) {
+  return Boolean(
+    value &&
+    SAFE_ID_PATTERN.test(value.client_event_id ?? "") &&
+    normalizeLegacyOperation(value, {
+      client_id: "validation",
+      next_sequence: 0,
+    }),
+  );
+}
+
+function cloneState(value) {
   return {
-    t: value.t.map((row) => [...row]),
-    b: value.b.map((row) => [row[0], row[1], row[2], [...row[3]]]),
+    version: STORAGE_VERSION,
+    client_id: value.client_id,
+    next_sequence: value.next_sequence,
+    dirty: value.dirty,
+    revision: value.revision,
+    operations: value.operations.map(cloneOperation),
+    inflight: value.inflight === null
+      ? null
+      : {
+          fingerprint: value.inflight.fingerprint,
+          envelope: cloneEnvelope(value.inflight.envelope),
+        },
+    status: cloneContributionStatus(value.status),
+  };
+}
+
+function migratableRawState(raw) {
+  if (typeof raw !== "string" || utf8Length(raw) > MAX_PERSISTED_STATE_BYTES) {
+    return false;
+  }
+  try {
+    const value = JSON.parse(raw);
+    return value?.version === 1 || validV2State(value);
+  } catch {
+    return false;
+  }
+}
+
+function assignmentMap(snapshot, topics) {
+  const assignments = new Map();
+  for (const bookmark of snapshot.bookmarks) {
+    if (!isCanonicalVerseCoordinate(bookmark)) {
+      continue;
+    }
+    for (const topicId of bookmark.topic_ids) {
+      const topic = topics.get(topicId);
+      if (!topic || !isEnglishContributionTopicName(topic.name)) {
+        continue;
+      }
+      const verse = {
+        book: bookmark.book,
+        chapter: bookmark.chapter,
+        verse: bookmark.verse,
+      };
+      assignments.set(topicId + ":" + assignmentKey(verse), { topic, verse });
+    }
+  }
+  return assignments;
+}
+
+function topicUpsertEvent(topic) {
+  return {
+    type: "topic_upsert",
+    topic: { local_topic_id: topic.id, name: topic.name, color: topic.color },
+  };
+}
+
+function verseEvent(type, assignment) {
+  return {
+    type,
+    topic: {
+      local_topic_id: assignment.topic.id,
+      name: assignment.topic.name,
+      color: assignment.topic.color,
+    },
+    verse: { ...assignment.verse },
+  };
+}
+
+function withBaselineId(event) {
+  return {
+    client_event_id:
+      "baseline:" + event.type + ":" + valueFingerprint(event),
+    ...event,
   };
 }
 
@@ -1464,191 +1114,115 @@ function normalizeContributionTopic(value) {
   return { id, name, color };
 }
 
-function emptyRecoveryExternal() {
-  return { t: [], e: [] };
+function cloneContributionStatus(value) {
+  return normalizeContributionStatus(value);
 }
 
-function addRecoveryExternalEvents(value, events) {
-  if (
-    !value ||
-    !Array.isArray(value.t) ||
-    !Array.isArray(value.e) ||
-    !Array.isArray(events)
-  ) {
-    throw new TypeError("The external contribution recovery is invalid.");
-  }
-  // Canonicalize persisted v1 removal-only rows before merging the newest
-  // intent. The five-column form adds an operation bit while still accepting
-  // an interrupted four-column recovery written by an earlier client.
-  expandRecoveryExternal(value);
-  const topicIndexes = new Map(value.t.map((row, index) => [row[0], index]));
-  const merged = new Map();
-  for (const row of value.e) {
-    const normalized = row.length === 4
-      ? [0, row[0], row[1], row[2], row[3]]
-      : [...row];
-    const topic = value.t[normalized[1]];
-    merged.set(
-      [topic[0], normalized[2], normalized[3], normalized[4]].join(":"),
-      normalized,
-    );
-  }
-  for (const event of events) {
-    if (
-      !["verse_add", "verse_remove"].includes(event?.type) ||
-      !isEnglishContributionTopicName(event.topic?.name) ||
-      !COLOR_PATTERN.test(event.topic?.color ?? "") ||
-      !SAFE_ID_PATTERN.test(event.topic?.local_topic_id ?? "") ||
-      !isCanonicalVerseCoordinate(event.verse)
-    ) {
-      throw new TypeError("The external contribution recovery is invalid.");
-    }
-    let topicIndex = topicIndexes.get(event.topic.local_topic_id);
-    if (topicIndex === undefined) {
-      if (value.t.length >= 100) {
-        throw new RangeError("Too many external recovery topics are pending.");
-      }
-      topicIndex = value.t.length;
-      topicIndexes.set(event.topic.local_topic_id, topicIndex);
-      value.t.push([
-        event.topic.local_topic_id,
-        event.topic.name,
-        event.topic.color,
-      ]);
-    } else {
-      value.t[topicIndex] = [
-        event.topic.local_topic_id,
-        event.topic.name,
-        event.topic.color,
-      ];
-    }
-    const key = [
-      event.topic.local_topic_id,
-      event.verse.book,
-      event.verse.chapter,
-      event.verse.verse,
-    ].join(":");
-    merged.set(key, [
-      event.type === "verse_add" ? 1 : 0,
-      topicIndex,
-      event.verse.book,
-      event.verse.chapter,
-      event.verse.verse,
-    ]);
-  }
-  if (merged.size > MAX_RECOVERY_EXTERNAL_EVENTS) {
-    throw new RangeError("Too many external recovery events are pending.");
-  }
-  value.e = [...merged.values()];
-  if (utf8Length(JSON.stringify(value)) > MAX_RECOVERY_SNAPSHOT_BYTES) {
-    throw new RangeError("The external contribution recovery is too large.");
-  }
-}
-
-function expandRecoveryExternal(value) {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    Object.keys(value).length !== 2 ||
-    !Array.isArray(value.t) ||
-    value.t.length > 100 ||
-    !Array.isArray(value.e) ||
-    value.e.length > MAX_RECOVERY_EXTERNAL_EVENTS
-  ) {
-    throw new TypeError("The external contribution recovery is invalid.");
-  }
-  const topicIds = new Set();
-  const topics = value.t.map((row) => {
-    if (!Array.isArray(row) || row.length !== 3) {
-      throw new TypeError("The external contribution recovery is invalid.");
-    }
-    const topic = normalizeContributionTopic({
-      id: row[0],
-      name: row[1],
-      color: row[2],
-    });
-    if (topicIds.has(topic.id)) {
-      throw new TypeError("The external contribution recovery is invalid.");
-    }
-    topicIds.add(topic.id);
-    return topic;
-  });
-  const seen = new Set();
-  return value.e.map((row) => {
-    const legacy = row?.length === 4;
-    const operation = legacy ? 0 : row?.[0];
-    const topicIndex = legacy ? row?.[0] : row?.[1];
-    const book = legacy ? row?.[1] : row?.[2];
-    const chapter = legacy ? row?.[2] : row?.[3];
-    const verse = legacy ? row?.[3] : row?.[4];
-    if (
-      !Array.isArray(row) ||
-      (!legacy && row.length !== 5) ||
-      ![0, 1].includes(operation) ||
-      !Number.isInteger(topicIndex) ||
-      topicIndex < 0 ||
-      topicIndex >= topics.length ||
-      !isCanonicalVerseCoordinate({
-        book,
-        chapter,
-        verse,
-      })
-    ) {
-      throw new TypeError("The external contribution recovery is invalid.");
-    }
-    const key = [topicIndex, book, chapter, verse].join(":");
-    if (seen.has(key)) {
-      throw new TypeError("The external contribution recovery is invalid.");
-    }
-    seen.add(key);
-    return verseEvent(operation === 1 ? "verse_add" : "verse_remove", {
-      topic: topics[topicIndex],
-      verse: { book, chapter, verse },
-    });
-  });
-}
-
-function validRecoveryExternal(value) {
-  try {
-    expandRecoveryExternal(value);
-    return utf8Length(JSON.stringify(value)) <= MAX_RECOVERY_SNAPSHOT_BYTES;
-  } catch {
-    return false;
-  }
-}
-
-function cloneRecoveryExternal(value) {
-  if (value === null) {
-    return null;
-  }
+function cloneTopicOutcome(topic) {
   return {
-    t: value.t.map((row) => [...row]),
-    e: value.e.map((row) => [...row]),
+    ...topic,
+    ...(topic.canonical_topic
+      ? {
+          canonical_topic: {
+            ...topic.canonical_topic,
+            aliases: [...topic.canonical_topic.aliases],
+          },
+        }
+      : {}),
   };
+}
+
+function cloneOperation(operation) {
+  return {
+    client_event_id: operation.client_event_id,
+    type: operation.type,
+    topic: { ...operation.topic },
+    verse: { ...operation.verse },
+  };
+}
+
+function cloneEnvelope(envelope) {
+  return {
+    protocol_version: envelope.protocol_version,
+    sync_id: envelope.sync_id,
+    client_id: envelope.client_id,
+    snapshot: {
+      topics: envelope.snapshot.topics.map((topic) => ({ ...topic })),
+      assignments: envelope.snapshot.assignments.map((assignment) => ({
+        ...assignment,
+      })),
+    },
+    operations: envelope.operations.map(cloneOperation),
+    disclosure_acknowledged: envelope.disclosure_acknowledged,
+  };
+}
+
+function sameOperationPayload(operation, value) {
+  return operation.topic.name === value.topic.name &&
+    operation.topic.color === value.topic.color;
+}
+
+function operationKey(topicId, verse) {
+  return topicId + ":" + assignmentKey(verse);
+}
+
+function assignmentKey(value) {
+  return value.book + ":" + value.chapter + ":" + value.verse;
+}
+
+function compareAssignments(left, right) {
+  return left.topic_id.localeCompare(right.topic_id) ||
+    left.book - right.book ||
+    left.chapter - right.chapter ||
+    left.verse - right.verse;
+}
+
+function valueFingerprint(value) {
+  const input = JSON.stringify(value);
+  let left = 0x811c9dc5;
+  let right = 0x9e3779b9;
+  for (let index = 0; index < input.length; index += 1) {
+    const unit = input.charCodeAt(index);
+    left = Math.imul(left ^ unit, 0x01000193) >>> 0;
+    right = Math.imul(right ^ unit, 0x85ebca6b) >>> 0;
+  }
+  return left.toString(16).padStart(8, "0") +
+    right.toString(16).padStart(8, "0");
+}
+
+function normalizeGeneratedId(value) {
+  const token = String(value ?? "")
+    .replace(/[^A-Za-z0-9._:-]/g, "")
+    .slice(0, 80);
+  if (!CLIENT_ID_PATTERN.test(token)) {
+    throw new TypeError("The contribution client identity is invalid.");
+  }
+  return token;
+}
+
+function defaultToken() {
+  return globalThis.crypto?.randomUUID?.() ??
+    Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function unavailableStatus() {
+  return normalizeContributionStatus(undefined);
+}
+
+function isContributionDenied(error) {
+  return error?.code === "contribution_not_allowed";
+}
+
+function jsonClone(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 function utf8Length(value) {
   return new TextEncoder().encode(value).byteLength;
 }
 
-function defaultEventToken() {
-  return globalThis.crypto?.randomUUID?.() ??
-    `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
-}
-
 function boundedInteger(value, minimum, maximum) {
   return Number.isInteger(value) && value >= minimum && value <= maximum;
-}
-
-function hasExactKeys(value, expected) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const actual = Object.keys(value).sort();
-  const wanted = [...expected].sort();
-  return actual.length === wanted.length &&
-    actual.every((key, index) => key === wanted[index]);
 }
 
 function storageLike(value) {
@@ -1684,5 +1258,5 @@ function contributionStorageKey(scope, instanceScope) {
   ) {
     throw new TypeError("A contribution storage scope is required.");
   }
-  return `${STORAGE_PREFIX}:${instanceScope}:${scope}`;
+  return STORAGE_PREFIX + ":" + instanceScope + ":" + scope;
 }

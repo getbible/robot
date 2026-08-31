@@ -437,15 +437,24 @@ test("offers one-click contributor sync with lossless personal-to-global present
   assert.match(css, /\.contributor-sync\[data-state="success"\]/);
   assert.match(css, /\.bookmark-contribution-badge/);
 
-  assert.match(app, /contributionSync\.synchronizeNow\([\s\S]*?bookmarkStore\.snapshot\(\)/);
+  const manualSync = app.slice(
+    app.indexOf("async function synchronizeContributionsNow()"),
+    app.indexOf("function contributionInactivePresentation"),
+  );
+  assert.match(
+    manualSync,
+    /contributionSync\.synchronizeNow\([\s\S]*?bookmarkStore\.snapshot\(\)[\s\S]*?disclosureAcknowledged/,
+  );
+  assert.equal(manualSync.match(/\.synchronizeNow\(/g)?.length, 1);
+  assert.doesNotMatch(manualSync, /refreshLiveGlobalBookmarkCatalog/);
+  assert.doesNotMatch(app, /contributionSync\.acknowledgeDisclosure\(/);
+  assert.doesNotMatch(app, /ensureContributionDisclosure/);
+  assert.match(app, /coreTopics: globalBookmarkCatalog\.topicDefinitions\(\)/);
+  assert.match(app, /api\?\.contributionTransportReady/);
   assert.match(app, /refreshLiveGlobalBookmarkCatalog\(\{ requireNetwork: true \}\)/);
   assert.match(
     app,
-    /initializeContributionSync\(\)[\s\S]*?scheduleContributionSync\(\);[\s\S]*?stageContributionTopicOutcomes[\s\S]*?refreshLiveGlobalBookmarkCatalog\(\{ requireNetwork: true \}\)/,
-  );
-  assert.match(
-    app,
-    /synchronizeWhenApproved: false,\s*refreshCatalog: false/,
+    /initializeContributionSync\(\)[\s\S]*?stageContributionTopicOutcomes[\s\S]*?refreshLiveGlobalBookmarkCatalog\(\)/,
   );
   assert.match(
     app,
@@ -500,22 +509,22 @@ test("offers one-click contributor sync with lossless personal-to-global present
   );
   assert.match(
     app,
-    /if \(contributionDisclosureTask\)[\s\S]*?return contributionDisclosureTask/,
-  );
-  assert.match(
-    app,
     /globalBookmarkCatalogRefreshQueue\.then\([\s\S]*?performLiveGlobalBookmarkCatalogRefresh/,
   );
   assert.match(
     app,
     /pendingContributionOutcomeRefresh\?\.version === stagedOutcomes\.version/,
   );
-  assert.match(app, /scheduleContributionRetry\(error\)/);
-  assert.match(app, /scheduleContributionRetry\(error, \{ mode: "manual" \}\)/);
-  assert.match(
-    app.match(/function scheduleContributionRetry[\s\S]*?\n\}/)?.[0] ?? "",
-    /retryMode === "manual"[\s\S]*?synchronizeContributionsNow\(\)/,
+  assert.doesNotMatch(
+    app,
+    /function scheduleContribution(?:Sync|Retry)/,
   );
+  const personalCapture = app.slice(
+    app.indexOf("function capturePersonalBookmarkMutation"),
+    app.indexOf("function captureGlobalBookmarkRemoval"),
+  );
+  assert.match(personalCapture, /captureMutation/);
+  assert.doesNotMatch(personalCapture, /synchronize|scheduleContribution/);
   assert.match(app, /let globalBookmarkCatalogRetryNotBefore = 0/);
   assert.match(
     app,

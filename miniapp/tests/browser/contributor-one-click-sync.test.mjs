@@ -11,19 +11,13 @@ const miniappRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const mainApiPattern = /^https:\/\/api\.getbible\.net\/v2\/.+/;
 const queryApiPattern = /^https:\/\/query\.getbible\.net\/v2\/.+/;
 const corsHeaders = { "access-control-allow-origin": "*" };
-const acceptedTopic = Object.freeze({
-  id: "steadfast-hope",
-  name: "Steadfast Hope",
-  color: "#fde68a",
-  aliases: [],
-});
-const acceptedVerses = Object.freeze([2, 3, 4]);
-const waitingVerse = 5;
+const contributionToken = `gbc_${"A".repeat(43)}`;
 const browserName = process.env.PLAYWRIGHT_BROWSER ?? "chromium";
 const browserType = { chromium, webkit }[browserName];
 if (!browserType) {
   throw new TypeError("PLAYWRIGHT_BROWSER must be chromium or webkit.");
 }
+
 const bookNames = [
   "Genesis", "Exodus", "Leviticus", "Numbers", "Deuteronomy", "Joshua",
   "Judges", "Ruth", "1 Samuel", "2 Samuel", "1 Kings", "2 Kings",
@@ -129,14 +123,6 @@ function sha1(value) {
   return createHash("sha1").update(value, "utf8").digest("hex");
 }
 
-async function waitForCondition(predicate, message, timeoutMs = 15_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline) assert.fail(message);
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-  }
-}
-
 function chapterPayload() {
   return {
     abbreviation: "kjv",
@@ -149,6 +135,54 @@ function chapterPayload() {
       verse: index + 1,
       text: `KJV John 3 test verse ${index + 1}`,
     })),
+  };
+}
+
+function contributionSummary({ submitted = false } = {}) {
+  return {
+    topics: {
+      pending: submitted ? 1 : 0,
+      mapped: 0,
+      published: 0,
+      rejected: 0,
+      deferred: 0,
+    },
+    events: {
+      pending: submitted ? 2 : 0,
+      approved: 0,
+      rejected: 0,
+      deferred: 0,
+      applied: 0,
+    },
+  };
+}
+
+function contributionStatus({ approved, localTopicId = null, submitted = false }) {
+  return {
+    enabled: true,
+    state: approved ? "approved" : "pending",
+    can_contribute: approved,
+    disclosure_required: false,
+    topics: localTopicId && submitted
+      ? [{
+          local_topic_id: localTopicId,
+          state: "pending",
+          published: false,
+        }]
+      : [],
+    summary: contributionSummary({ submitted }),
+  };
+}
+
+function emptyCatalog() {
+  return {
+    revision: 0,
+    checksum: "0".repeat(64),
+    catalog: {
+      schema_version: 1,
+      topics: [],
+      associations: { add: [], remove: [] },
+    },
   };
 }
 
@@ -167,86 +201,9 @@ async function serveStatic(route) {
   return route.fulfill({ status: 200, contentType: mime, body: await readFile(file) });
 }
 
-function contributionSummary({ published = false, submitted = false } = {}) {
-  return {
-    topics: {
-      pending: submitted && !published ? 1 : 0,
-      mapped: published ? 1 : 0,
-      published: published ? 1 : 0,
-      rejected: 0,
-      deferred: 0,
-    },
-    events: {
-      pending: submitted && !published ? 5 : published ? 1 : 0,
-      approved: published ? 4 : 0,
-      rejected: 0,
-      deferred: 0,
-      applied: published ? 4 : 0,
-    },
-  };
-}
-
-function contributionStatus({ contributorState, localTopicId, published, submitted }) {
-  const mappedTopic = localTopicId && published
-    ? [{
-        local_topic_id: localTopicId,
-        // A later metadata edit may reopen review while the already-published
-        // canonical topic and associations remain globally authoritative.
-        state: "pending",
-        published: true,
-        canonical_topic_id: acceptedTopic.id,
-        canonical_topic: acceptedTopic,
-      }]
-    : localTopicId && submitted
-      ? [{
-          local_topic_id: localTopicId,
-          state: "pending",
-          published: false,
-        }]
-      : [];
-  return {
-    enabled: contributorState !== "unavailable",
-    state: contributorState,
-    can_contribute: contributorState === "approved",
-    disclosure_required: false,
-    topics: mappedTopic,
-    summary: contributionSummary({ published, submitted }),
-  };
-}
-
-function catalogEnvelope(published) {
-  return published
-    ? {
-        revision: 1,
-        checksum: "a".repeat(64),
-        catalog: {
-          schema_version: 1,
-          topics: [acceptedTopic],
-          associations: {
-            add: acceptedVerses.map((verse) => ({
-              topic_id: acceptedTopic.id,
-              book: 43,
-              chapter: 3,
-              verse,
-            })),
-            remove: [],
-          },
-        },
-      }
-    : {
-        revision: 0,
-        checksum: "0".repeat(64),
-        catalog: {
-          schema_version: 1,
-          topics: [],
-          associations: { add: [], remove: [] },
-        },
-      };
-}
-
 async function createBrowserFixture(
   context,
-  { initialContributorState = "pending" } = {},
+  { approved = true, issueCapability = true, failFirstSync = false } = {},
 ) {
   const executablePath = browserName === "chromium"
     ? process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
@@ -262,28 +219,16 @@ async function createBrowserFixture(
 
   const pageErrors = [];
   const failedRequests = [];
+  const sessionRequests = [];
+  const syncRequests = [];
+  const requestSequence = [];
+  let statusRequests = 0;
+  let catalogRequests = 0;
+  let shouldFailSync = failFirstSync;
   page.on("pageerror", (error) => pageErrors.push(error.message));
   page.on("requestfailed", (request) => {
     failedRequests.push(`${request.url()}: ${request.failure()?.errorText ?? "failed"}`);
   });
-
-  let contributorState = initialContributorState;
-  let statusPublished = false;
-  let catalogPublished = false;
-  let submitted = false;
-  let conflictNextEventRoute = false;
-  let denyNextEventRoute = false;
-  let failNextEventRoute = false;
-  let failNextStatusRoute = false;
-  let failNextCatalogRoute = false;
-  let revokeAfterNextEventRoute = false;
-  let localTopicId = null;
-  let receiptSequence = 0;
-  const eventAttempts = [];
-  const acceptedEvents = [];
-  const catalogRequests = [];
-  const requestSequence = [];
-  const statusRequests = [];
 
   const chapterBody = jsonBody(chapterPayload());
   const chapterSha = sha1(chapterBody);
@@ -340,6 +285,11 @@ async function createBrowserFixture(
     const apiPath = url.pathname.split("/api/v1/")[1];
     if (!apiPath) return serveStatic(route);
     if (apiPath === "session") {
+      sessionRequests.push({
+        body: request.postDataJSON(),
+        headers: request.headers(),
+        method: request.method(),
+      });
       return fulfillJson(route, {
         session_token: "ContributorBrowserSession123",
         expires_in: 10_800,
@@ -358,169 +308,94 @@ async function createBrowserFixture(
         },
         entrypoint: { route: "bible", query: "" },
         basket: { items: [], count: 0, maximum: 100 },
-        contributions: contributionStatus({
-          contributorState,
-          localTopicId,
-          published: statusPublished,
-          submitted,
-        }),
-      }, 201);
+        contributions: contributionStatus({ approved }),
+      }, 201, approved && issueCapability
+        ? { "X-Contribution-Token": contributionToken }
+        : {});
     }
-    if (apiPath === "cleanup") return fulfillJson(route, {});
+    if (apiPath === "cleanup") {
+      return route.fulfill({ status: 204, body: "" });
+    }
     if (apiPath === "preferences") {
       return fulfillJson(route, { preferences: request.postDataJSON() });
     }
-    if (apiPath === "basket") {
-      return fulfillJson(route, { items: [], count: 0, maximum: 100 });
-    }
     if (apiPath === "contributions/status") {
+      statusRequests += 1;
       requestSequence.push("status");
-      statusRequests.push({
+      return fulfillJson(
+        route,
+        contributionStatus({ approved }),
+        200,
+        approved && issueCapability
+          ? { "X-Contribution-Token": contributionToken }
+          : {},
+      );
+    }
+    if (apiPath === "contributions/sync") {
+      const body = request.postDataJSON();
+      syncRequests.push({
+        body,
+        headers: request.headers(),
         method: request.method(),
-        contributorState,
-        details: url.searchParams.get("details"),
-        published: statusPublished,
       });
-      if (failNextStatusRoute) {
-        failNextStatusRoute = false;
+      requestSequence.push("sync");
+      if (shouldFailSync) {
+        shouldFailSync = false;
         return fulfillJson(route, {
           error: "contributions_unavailable",
-          message: "Contributor status is temporarily unavailable.",
+          message: "Contribution sync is temporarily unavailable.",
           retryable: true,
-          retry_after: 0.01,
+          retry_after: 0,
         }, 503);
       }
-      return fulfillJson(route, contributionStatus({
-        contributorState,
-        localTopicId,
-        published: statusPublished,
-        submitted,
-      }));
+      const localTopicId = body.snapshot.topics.find((topic) =>
+        topic.name === "Community Hope"
+      )?.id ?? null;
+      const accepted = body.snapshot.topics.length +
+        body.snapshot.assignments.length + body.operations.length;
+      return fulfillJson(route, {
+        protocol_version: 1,
+        receipt: {
+          sync_id: body.sync_id,
+          snapshot_digest: "a".repeat(64),
+          outcome: "accepted",
+          accepted,
+          replayed: 0,
+          event_ids: {},
+        },
+        status: contributionStatus({
+          approved,
+          localTopicId,
+          submitted: true,
+        }),
+        catalog: { revision: 0, checksum: "0".repeat(64) },
+      });
     }
     if (apiPath === "contributions/events") {
       requestSequence.push("events");
-      const events = request.postDataJSON().events;
-      eventAttempts.push(events);
-      if (conflictNextEventRoute) {
-        conflictNextEventRoute = false;
-        return fulfillJson(route, {
-          error: "idempotency_conflict",
-          message: "A private conflicting event detail.",
-          retryable: false,
-        }, 409);
-      }
-      if (denyNextEventRoute) {
-        denyNextEventRoute = false;
-        contributorState = "revoked";
-        failNextStatusRoute = true;
-        return fulfillJson(route, {
-          error: "contribution_not_allowed",
-          message: "This Telegram user is not an approved contributor.",
-        }, 403);
-      }
-      if (failNextEventRoute) {
-        failNextEventRoute = false;
-        return fulfillJson(route, {
-          error: "not_found",
-          message: "The contribution route is temporarily unavailable.",
-          request_id: "deploy_0123456789abcdef",
-          retryable: false,
-        }, 404);
-      }
-      const customTopicEvent = events.find((event) =>
-        event.topic?.name === "Community Hope"
-      );
-      localTopicId ??= customTopicEvent?.topic?.local_topic_id ?? null;
-      submitted = true;
-      acceptedEvents.push(...events);
-      const eventIds = Object.fromEntries(events.map((event) => [
-        event.client_event_id,
-        ++receiptSequence,
-      ]));
-      if (revokeAfterNextEventRoute) {
-        revokeAfterNextEventRoute = false;
-        contributorState = "revoked";
-      }
       return fulfillJson(route, {
-        accepted: events.length,
-        replayed: 0,
-        event_ids: eventIds,
-      });
+        error: "retired_route",
+        message: "The legacy contribution event route is retired.",
+      }, 410);
     }
     if (apiPath === "bookmarks/catalog") {
+      catalogRequests += 1;
       requestSequence.push("catalog");
-      const requestEtag = request.headers()["if-none-match"] ?? null;
-      catalogRequests.push({ published: catalogPublished, requestEtag });
-      if (failNextCatalogRoute) {
-        failNextCatalogRoute = false;
-        return fulfillJson(route, {
-          error: "upstream_error",
-          message: "The live catalog route is temporarily unavailable.",
-          retryable: true,
-        }, 503);
-      }
-      const currentEtag = catalogPublished ? '"catalog-1"' : '"catalog-0"';
-      // Chromium reports Playwright-intercepted 304 revalidation responses as
-      // requestfailed/net::ERR_ABORTED. The API and live-catalog unit suites
-      // cover conditional 304 handling; keep this real-browser workflow on a
-      // full 200 response so any request failure remains an actual failure.
-      return fulfillJson(route, catalogEnvelope(catalogPublished), 200, {
-        ETag: currentEtag,
-      });
+      return fulfillJson(route, emptyCatalog(), 200, { ETag: '"catalog-0"' });
     }
     return fulfillJson(route, { error: { code: "not_found" } }, 404);
   });
 
   return {
-    acceptedEvents,
-    catalogRequests,
-    eventAttempts,
+    catalogRequestCount: () => catalogRequests,
     failedRequests,
     page,
     pageErrors,
     requestSequence,
-    statusRequests,
-    approve() { contributorState = "approved"; },
-    conflictNextEventRoute() { conflictNextEventRoute = true; },
-    denyNextEventRouteAndFailRecoveryStatus() { denyNextEventRoute = true; },
-    failNextCatalogRoute() { failNextCatalogRoute = true; },
-    failNextEventRoute() { failNextEventRoute = true; },
-    revokeAfterNextEventRoute() { revokeAfterNextEventRoute = true; },
-    publishCatalog() {
-      assert.ok(localTopicId, "the submitted topic must exist before publication");
-      catalogPublished = true;
-    },
-    publishStatus() {
-      assert.ok(localTopicId, "the submitted topic must exist before publication");
-      statusPublished = true;
-    },
-    localTopicId() { return localTopicId; },
+    sessionRequests,
+    statusRequestCount: () => statusRequests,
+    syncRequests,
   };
-}
-
-async function applyActiveTopicToVerse(page, verse) {
-  await page.locator(`[data-reader-verse="${verse}"]`).click();
-  await page.waitForFunction((expectedVerse) => (
-    document.querySelector(
-      `[data-bookmark-trigger="gbd_kjv_043_0003_${String(expectedVerse).padStart(4, "0")}"]`,
-    )?.textContent === "•••"
-  ), verse);
-}
-
-async function assignPersonalTopicToVerse(page, verse, topicId) {
-  await applyActiveTopicToVerse(page, verse);
-  await page.locator(
-    `[data-bookmark-trigger="gbd_kjv_043_0003_${String(verse).padStart(4, "0")}"]`,
-  ).click();
-  await page.waitForFunction(() => (
-    !document.querySelector("#bookmark-popover")?.hidden
-  ));
-  await page.locator("#bookmark-topic-picker").selectOption(topicId);
-  await page.locator(
-    '#bookmark-assigned-topics [data-bookmark-source="personal"]' +
-      `[data-bookmark-topic="${topicId}"]`,
-  ).waitFor();
-  await page.locator("#close-bookmark-popover").click();
 }
 
 async function openBookmarksRoute(page) {
@@ -537,640 +412,167 @@ async function openBookmarksRoute(page) {
   ));
 }
 
-async function openTopicCreator(page) {
+async function createPersonalTopicWithVerse(page) {
+  await openBookmarksRoute(page);
   const manager = page.locator("#bookmark-topic-manager");
   if (!await manager.evaluate((element) => element.open)) {
     await page.locator("#bookmark-topic-manager > summary").click();
   }
-}
-
-async function topicIdForName(page, name) {
-  await page.waitForFunction((expectedName) => (
-    [...document.querySelectorAll("#bookmark-group-list .bookmark-group-card")]
-      .some((card) => card.querySelector("strong")?.textContent?.trim() === expectedName)
-  ), name);
-  return page.locator("#bookmark-group-list .bookmark-group-card")
-    .evaluateAll((cards, expectedName) => cards.find((card) => (
-      card.querySelector("strong")?.textContent?.trim() === expectedName
-    ))?.dataset.bookmarkTopic ?? null, name);
-}
-
-async function createPersonalTopic(page, name) {
-  await openBookmarksRoute(page);
-  await openTopicCreator(page);
-  await page.locator("#bookmark-topic-name").fill(name);
+  await page.locator("#bookmark-topic-name").fill("Community Hope");
   await page.locator("#bookmark-topic-form button[type=submit]").click();
-  const localTopicId = await topicIdForName(page, name);
+  await page.waitForFunction(() => (
+    [...document.querySelectorAll("#bookmark-group-list .bookmark-group-card")]
+      .some((card) => card.querySelector("strong")?.textContent?.trim() ===
+        "Community Hope")
+  ));
+  const localTopicId = await page.locator("#bookmark-group-list .bookmark-group-card")
+    .evaluateAll((cards) => cards.find((card) => (
+      card.querySelector("strong")?.textContent?.trim() === "Community Hope"
+    ))?.dataset.bookmarkTopic ?? null);
   assert.ok(localTopicId);
+
+  await page.locator('[data-route="bible"]').click();
+  await page.waitForSelector('[data-reader-verse="2"]');
+  await page.locator('[data-reader-verse="2"]').click();
+  const bookmarkId = "gbd_kjv_043_0003_0002";
+  await page.waitForFunction((id) => (
+    document.querySelector(`[data-bookmark-trigger="${id}"]`)?.textContent === "•••"
+  ), bookmarkId);
+  await page.locator(`[data-bookmark-trigger="${bookmarkId}"]`).click();
+  await page.waitForFunction(() => !document.querySelector("#bookmark-popover")?.hidden);
+  await page.locator("#bookmark-topic-picker").selectOption(localTopicId);
+  await page.locator(
+    `#bookmark-assigned-topics [data-bookmark-topic="${localTopicId}"]`,
+  ).waitFor();
+  await page.locator("#close-bookmark-popover").click();
   return localTopicId;
 }
 
 async function openContributorManager(page) {
-  await page.waitForFunction(() => {
-    const manager = document.querySelector("#contributor-manager");
-    return manager && !manager.hidden;
-  });
+  await openBookmarksRoute(page);
+  await page.waitForFunction(() => !document.querySelector("#contributor-manager")?.hidden);
   const manager = page.locator("#contributor-manager");
   if (!await manager.evaluate((element) => element.open)) {
     await page.locator("#contributor-manager > summary").click();
   }
-  await page.locator("#contributor-sync-button").waitFor({ state: "visible" });
 }
 
-async function createPersonalTopicWithVerses(page, name, verses) {
-  const localTopicId = await createPersonalTopic(page, name);
-
-  await page.locator('[data-route="bible"]').click();
-  await page.waitForSelector('#bible-verses [data-reader-verse="1"]');
-  for (const verse of verses) {
-    await assignPersonalTopicToVerse(page, verse, localTopicId);
-  }
-  return localTopicId;
-}
-
-async function dispatchContributionRecheckEvents(page) {
-  await page.evaluate(() => {
-    window.dispatchEvent(new Event("focus"));
-    window.dispatchEvent(new Event("online"));
-  });
-  await page.waitForTimeout(100);
-}
-
-async function readContributionPersistence(page) {
-  return page.evaluate(async () => ({
-    databases: typeof indexedDB.databases === "function"
-      ? (await indexedDB.databases()).map((database) => database.name)
-      : [],
-    localKeys: Object.keys(localStorage).filter((key) =>
-      key.startsWith("getbible.miniapp.contributions.v1")
-    ),
-  }));
-}
-
-test("inactive contributor states show no manager and create no traffic or journal", async (context) => {
-  for (const contributorState of [
-    "not_applied", "rejected", "revoked", "unavailable",
-  ]) {
-    const fixture = await createBrowserFixture(context, {
-      initialContributorState: contributorState,
-    });
-    const { eventAttempts, page, statusRequests } = fixture;
-    await page.goto("https://app.local/miniapp/index.html?launch=contributor-test", {
-      waitUntil: "domcontentloaded",
-    });
-    await page.waitForSelector('#bible-verses [data-reader-verse="1"]', {
-      timeout: 15_000,
-    });
-    await applyActiveTopicToVerse(page, 1);
-    // Exercise every automatic recheck path available without waiting for the
-    // periodic timer. An ineligible session is terminal: it must not probe
-    // contribution routes or allocate private retry storage.
-    await dispatchContributionRecheckEvents(page);
-    assert.deepEqual(statusRequests, [], `${contributorState} polled contributor status`);
-    assert.deepEqual(eventAttempts, [], `${contributorState} posted contribution events`);
-    assert.equal(
-      await page.locator("#contributor-manager").evaluate((manager) => manager.hidden),
-      true,
-    );
-    assert.equal(await page.locator("#contributor-sync-button").isVisible(), false);
-    const contributionPersistence = await readContributionPersistence(page);
-    assert.equal(
-      contributionPersistence.databases.includes("getbible-miniapp-contributions"),
-      false,
-    );
-    assert.deepEqual(contributionPersistence.localKeys, []);
-  }
-});
-
-test("a deferred application has no contributor manager or automatic traffic", async (context) => {
-  const fixture = await createBrowserFixture(context, {
-    initialContributorState: "deferred",
-  });
-  const { eventAttempts, page, statusRequests } = fixture;
-  await page.goto("https://app.local/miniapp/index.html?launch=contributor-test", {
-    waitUntil: "domcontentloaded",
-  });
-  await page.waitForSelector('#bible-verses [data-reader-verse="1"]', {
-    timeout: 15_000,
-  });
-  await applyActiveTopicToVerse(page, 1);
-  await openBookmarksRoute(page);
-  assert.equal(
-    await page.locator("#contributor-manager").evaluate((manager) => manager.hidden),
-    true,
-  );
-  assert.equal(await page.locator("#contributor-sync-button").isVisible(), false);
-
-  // Focus and reconnect must stay free, and an unapproved applicant has no
-  // contribution control to invoke.
-  await dispatchContributionRecheckEvents(page);
-  assert.deepEqual(statusRequests, []);
-  assert.deepEqual(eventAttempts, []);
-  const contributionPersistence = await readContributionPersistence(page);
-  assert.equal(
-    contributionPersistence.databases.includes("getbible-miniapp-contributions"),
-    false,
-  );
-  assert.deepEqual(contributionPersistence.localKeys, []);
-});
-
-test("a final revoked status cannot be presented as a successful sync", async (context) => {
+test("Sync Now sends one capability-authenticated snapshot without fanout", async (context) => {
   const fixture = await createBrowserFixture(context);
   const {
-    acceptedEvents,
-    eventAttempts,
-    page,
-    requestSequence,
-    statusRequests,
-  } = fixture;
-  await page.goto("https://app.local/miniapp/index.html?launch=contributor-test", {
-    waitUntil: "domcontentloaded",
-  });
-  await page.waitForSelector('#bible-verses [data-reader-verse="1"]', {
-    timeout: 15_000,
-  });
-  const localTopicId = await createPersonalTopicWithVerses(
-    page,
-    "Community Hope",
-    [2],
-  );
-  assert.equal(eventAttempts.length, 0);
-
-  await openBookmarksRoute(page);
-  assert.equal(
-    await page.locator("#contributor-manager").evaluate((manager) => manager.hidden),
-    true,
-  );
-  const requestStart = requestSequence.length;
-  fixture.approve();
-  fixture.revokeAfterNextEventRoute();
-  // The applicant has no visible contribution UI. This test-only event drives
-  // the existing manual status transition after the fixture grants authority.
-  await page.locator("#contributor-sync-button").dispatchEvent("click");
-  await waitForCondition(
-    () => eventAttempts.length === 1,
-    "manual sync never uploaded the approved contribution",
-  );
-  await waitForCondition(
-    () => statusRequests.at(-1)?.contributorState === "revoked",
-    "manual sync did not observe the final revoked status",
-  );
-  await page.waitForFunction(() => (
-    document.querySelector("#contributor-manager")?.hidden === true
-  ));
-
-  assert.equal(fixture.localTopicId(), localTopicId);
-  assert.equal(acceptedEvents.some((event) => (
-    event.type === "topic_upsert" && event.topic.local_topic_id === localTopicId
-  )), true);
-  assert.equal(acceptedEvents.some((event) => (
-    event.type === "verse_add" &&
-    event.topic.local_topic_id === localTopicId &&
-    event.verse.verse === 2
-  )), true);
-  assert.equal(statusRequests.at(-1)?.contributorState, "revoked");
-  assert.equal(
-    await page.locator("#contributor-manager").evaluate((manager) => manager.hidden),
-    true,
-  );
-  assert.equal(
-    await page.evaluate(() => window.__telegramState.notifications.includes("success")),
-    false,
-  );
-  const manualOrder = requestSequence.slice(requestStart);
-  const uploadIndex = manualOrder.indexOf("events");
-  assert.ok(uploadIndex > 0, `unexpected manual request order: ${manualOrder}`);
-  assert.equal(manualOrder.slice(0, uploadIndex).includes("status"), true);
-  assert.equal(manualOrder.slice(uploadIndex + 1).includes("status"), true);
-
-  const statusCountAfterRevocation = statusRequests.length;
-  await dispatchContributionRecheckEvents(page);
-  assert.equal(statusRequests.length, statusCountAfterRevocation);
-  assert.equal(eventAttempts.length, 1);
-});
-
-test("a denied contribution POST automatically resumes after authority recovers", async (context) => {
-  const fixture = await createBrowserFixture(context);
-  const {
-    acceptedEvents,
-    eventAttempts,
-    page,
-    requestSequence,
-    statusRequests,
-  } = fixture;
-  await page.goto("https://app.local/miniapp/index.html?launch=contributor-test", {
-    waitUntil: "domcontentloaded",
-  });
-  await page.waitForSelector('#bible-verses [data-reader-verse="1"]', {
-    timeout: 15_000,
-  });
-  await createPersonalTopicWithVerses(page, "Community Hope", [2]);
-  await openBookmarksRoute(page);
-  assert.equal(
-    await page.locator("#contributor-manager").evaluate((manager) => manager.hidden),
-    true,
-  );
-
-  const firstRequest = requestSequence.length;
-  fixture.approve();
-  fixture.denyNextEventRouteAndFailRecoveryStatus();
-  await page.locator("#contributor-sync-button").dispatchEvent("click");
-  await waitForCondition(
-    () => eventAttempts.length === 1,
-    "manual sync never reached the denied contribution route",
-  );
-  await waitForCondition(
-    () => requestSequence.slice(firstRequest).join(",") ===
-      "status,status,events,status" &&
-      statusRequests.at(-1)?.contributorState === "revoked",
-    "the denied upload did not finish its guarded authority recheck",
-  );
-  await page.waitForFunction(() => {
-    const manager = document.querySelector("#contributor-manager");
-    return manager?.hidden === true;
-  });
-
-  assert.deepEqual(
-    requestSequence.slice(firstRequest),
-    ["status", "status", "events", "status"],
-  );
-  const deniedIds = eventAttempts[0].map((event) => event.client_event_id);
-  assert.equal(statusRequests.at(-1)?.details, "1");
-  const statusCountAfterRecoveryFailure = statusRequests.length;
-  await dispatchContributionRecheckEvents(page);
-  assert.equal(statusRequests.length, statusCountAfterRecoveryFailure);
-  assert.equal(eventAttempts.length, 1);
-
-  fixture.approve();
-  await waitForCondition(
-    () => eventAttempts.length === 2,
-    "authority recovery did not automatically resume the preserved journal",
-  );
-  assert.deepEqual(
-    eventAttempts[1].map((event) => event.client_event_id),
-    deniedIds,
-  );
-  assert.equal(acceptedEvents.length, eventAttempts[1].length);
-  await page.waitForFunction(() => (
-    document.querySelector("#contributor-manager")?.hidden === false
-  ));
-});
-
-test("a normal user's personal core-topic bookmark remains personal with globals off", async (context) => {
-  const fixture = await createBrowserFixture(context, {
-    initialContributorState: "not_applied",
-  });
-  const { eventAttempts, page, statusRequests } = fixture;
-
-  await page.goto("https://app.local/miniapp/index.html?launch=contributor-test", {
-    waitUntil: "domcontentloaded",
-  });
-  await page.waitForSelector('#bible-verses [data-reader-verse="3"]', {
-    timeout: 15_000,
-  });
-
-  // John 3:3 already exists in the bundled global catalog for Spiritual
-  // Rebirth. The user has not enabled global topics, so their own assignment
-  // at the same coordinate must retain personal provenance and remain visible.
-  await applyActiveTopicToVerse(page, 3);
-  await page.locator(
-    '[data-bookmark-trigger="gbd_kjv_043_0003_0003"]',
-  ).click();
-  await page.waitForFunction(() => (
-    !document.querySelector("#bookmark-popover")?.hidden
-  ));
-  await page.locator("#bookmark-topic-picker").selectOption("spiritual-rebirth");
-  await page.waitForFunction(() => (
-    document.querySelector(
-      '#bookmark-assigned-topics [data-bookmark-source="personal"]' +
-        '[data-bookmark-topic="spiritual-rebirth"]',
-    )
-  ));
-  await page.locator("#close-bookmark-popover").click();
-
-  await openBookmarksRoute(page);
-  assert.match(await page.locator("#bookmarks-summary").innerText(), /^One personal verse$/);
-  assert.equal(await page.locator("#global-bookmark-status").innerText(), "");
-
-  await page.locator(
-    '.bookmark-group-card[data-bookmark-topic="spiritual-rebirth"]',
-  ).click();
-  await page.waitForFunction(() => (
-    document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 1
-  ));
-  const displayedBookmark = await page.locator(
-    "#bookmark-list .bookmark-list__item",
-  ).evaluate((row) => ({
-    contributionMarker: row.querySelector(".bookmark-contribution-badge")?.textContent ?? null,
-    global: Boolean(row.querySelector(".bookmark-list__global-badge")),
-    openAriaLabel: row.querySelector("[data-bookmark-open]")?.getAttribute("aria-label"),
-    openId: row.querySelector("[data-bookmark-open]")?.dataset.bookmarkOpen,
-    reference: row.querySelector(".bookmark-list__reference")?.textContent,
-  }));
-  assert.equal(typeof displayedBookmark.openId, "string");
-  assert.ok(displayedBookmark.openId.length > 0);
-  assert.match(displayedBookmark.reference, /John 3:3/);
-  assert.equal(displayedBookmark.global, false);
-  assert.equal(displayedBookmark.contributionMarker, null);
-  assert.doesNotMatch(displayedBookmark.openAriaLabel, /global/i);
-
-  await page.evaluate(() => {
-    window.dispatchEvent(new Event("focus"));
-    window.dispatchEvent(new Event("online"));
-  });
-  await page.waitForTimeout(100);
-  assert.equal(await page.locator("#contributor-manager").isHidden(), true);
-  assert.deepEqual(statusRequests, []);
-  assert.deepEqual(eventAttempts, []);
-});
-
-test("a contributor can retry one-click sync and receive published G mappings without reloading", async (context) => {
-  const fixture = await createBrowserFixture(context);
-  const {
-    acceptedEvents,
-    catalogRequests,
-    eventAttempts,
     failedRequests,
     page,
     pageErrors,
     requestSequence,
-    statusRequests,
+    sessionRequests,
+    syncRequests,
   } = fixture;
-
   await page.goto("https://app.local/miniapp/index.html?launch=contributor-test", {
     waitUntil: "domcontentloaded",
   });
-  await page.waitForSelector('#bible-verses [data-reader-verse="1"]', {
-    timeout: 15_000,
-  });
-  assert.equal(await page.evaluate(() => window.__telegramState.readyCalls), 1);
+  await page.waitForSelector('[data-reader-verse="2"]', { timeout: 15_000 });
+  const localTopicId = await createPersonalTopicWithVerse(page);
 
-  // The user builds the local topic while their application is still pending.
-  // The topic exists among the ordinary cards, but contribution management is
-  // absent until the authenticated status actually grants authority.
-  const localTopicId = await createPersonalTopic(page, "Community Hope");
-  assert.equal(
-    await page.locator("#contributor-manager").evaluate((manager) => manager.hidden),
-    true,
-  );
+  // Local edits are deliberately quiet. They mark the desired snapshot dirty
+  // but cannot race the user's explicit transport request.
+  await page.waitForTimeout(300);
+  assert.equal(syncRequests.length, 0);
 
-  await page.locator('[data-route="bible"]').click();
-  await page.waitForSelector('#bible-verses [data-reader-verse="2"]');
-  for (const verse of [...acceptedVerses, waitingVerse]) {
-    await assignPersonalTopicToVerse(page, verse, localTopicId);
-  }
-  assert.equal(eventAttempts.length, 0, "a pending applicant must never POST events");
-  await dispatchContributionRecheckEvents(page);
-  assert.deepEqual(
-    statusRequests,
-    [],
-    "a pending applicant must not be checked by focus or reconnect",
-  );
-  assert.equal(eventAttempts.length, 0);
-
-  await openBookmarksRoute(page);
-  assert.equal(await page.locator("#contributor-manager").isHidden(), true);
-  assert.equal(await page.locator("#contributor-sync-button").isVisible(), false);
-
-  // Approval changes on the server while this exact Mini App instance remains
-  // open. Dispatching the existing control is test-only: the applicant still
-  // has no visible button, and the first authenticated status response is what
-  // reveals the manager. A missing upgraded route remains retryable there.
-  fixture.approve();
-  fixture.failNextEventRoute();
-  await page.locator("#contributor-sync-button").dispatchEvent("click");
-  await page.waitForFunction(() => (
-    document.querySelector("#contributor-manager")?.hidden === false &&
-    document.querySelector("#contributor-sync")?.dataset.state === "error"
-  ));
   await openContributorManager(page);
-  assert.equal(
-    await page.locator("#contributor-manager #contributor-sync").count(),
-    1,
-  );
-  assert.equal(
-    await page.locator("#contributor-manager #contributor-sync-button").count(),
-    1,
-  );
-  assert.equal(
-    await page.locator("#contributor-manager #contributor-sync-status").count(),
-    1,
-  );
-  assert.equal(
-    await page.locator("#contributor-manager #contributor-sync-details").count(),
-    1,
-  );
-  assert.equal(eventAttempts.length, 1);
-  const missingRouteStatus = await page.locator(
-    "#contributor-sync-status",
-  ).innerText();
-  assert.match(missingRouteStatus, /server version|server update/i);
-  assert.match(missingRouteStatus, /Reference: deploy_012345678/i);
-  assert.doesNotMatch(missingRouteStatus, /temporarily unavailable/i);
-  assert.equal(await page.locator("#contributor-sync-button").isEnabled(), true);
-
-  // A deterministic idempotency conflict is not a session-expiry signal. It
-  // must leave the durable journal intact and return the button to an
-  // actionable error state instead of remaining permanently aria-busy.
-  fixture.conflictNextEventRoute();
-  await page.locator("#contributor-sync-button").click();
-  await waitForCondition(
-    () => eventAttempts.length === 2,
-    "manual sync never reached the conflicting contribution route",
-  );
-  await page.waitForFunction(() => {
-    const section = document.querySelector("#contributor-sync");
-    const button = document.querySelector("#contributor-sync-button");
-    return section?.dataset.state === "error" &&
-      section.getAttribute("aria-busy") === "false" &&
-      button && !button.disabled;
-  });
-  assert.match(
-    await page.locator("#contributor-sync-status").innerText(),
-    /could not finish|personal|safe|sync again/i,
-  );
-
-  // The next click retries the durable baseline. The events route accepts the
-  // complete upload before the strict live-catalog pull fails with a 503, so
-  // the UI must distinguish reconciliation failure from upload failure.
-  const catalogFailureOrderStart = requestSequence.length;
-  fixture.failNextCatalogRoute();
-  await page.locator("#contributor-sync-button").click();
-  await page.waitForFunction(() => (
-    document.querySelector("#contributor-sync")?.dataset.state === "error"
-  ));
-  assert.equal(eventAttempts.length, 3);
-  assert.deepEqual(
-    requestSequence.slice(catalogFailureOrderStart),
-    ["status", "events", "status", "catalog"],
-  );
-  assert.match(
-    await page.locator("#contributor-sync-status").innerText(),
-    /catalog|refresh|reconciliation/i,
-  );
-
-  // A later click retries only status/catalog reconciliation. The accepted
-  // durable baseline must never be resent because its catalog pull failed.
-  const acceptedCountAfterCatalogFailure = acceptedEvents.length;
+  // Let independent bootstrap catalogue work settle before measuring the
+  // click. The action itself must have exactly one network dependency.
+  await page.waitForTimeout(200);
+  const sequenceStart = requestSequence.length;
+  const statusStart = fixture.statusRequestCount();
+  const catalogStart = fixture.catalogRequestCount();
   await page.locator("#contributor-sync-button").click();
   await page.waitForFunction(() => (
     document.querySelector("#contributor-sync")?.dataset.state === "success"
   ));
-  assert.equal(eventAttempts.length, 3);
-  assert.equal(acceptedEvents.length, acceptedCountAfterCatalogFailure);
-  assert.equal(fixture.localTopicId(), localTopicId);
-  const submittedTopicCreates = acceptedEvents.filter((event) => (
-    event.type === "topic_upsert" &&
-    event.topic.local_topic_id === localTopicId &&
-    event.topic.name === "Community Hope"
-  ));
-  const submittedVerseAdds = acceptedEvents.filter((event) => (
-    event.type === "verse_add" && event.topic.local_topic_id === localTopicId
-  ));
-  assert.equal(submittedTopicCreates.length, 1);
-  assert.deepEqual(
-    submittedVerseAdds.map((event) => event.verse.verse).sort((left, right) => left - right),
-    [...acceptedVerses, waitingVerse],
+
+  assert.equal(syncRequests.length, 1);
+  assert.deepEqual(requestSequence.slice(sequenceStart), ["sync"]);
+  assert.equal(fixture.statusRequestCount(), statusStart);
+  assert.equal(fixture.catalogRequestCount(), catalogStart);
+  const sync = syncRequests[0];
+  assert.equal(sync.method, "POST");
+  assert.equal(sync.headers.authorization, `Bearer ${contributionToken}`);
+  assert.equal(sync.headers["x-telegram-init-data"], undefined);
+  assert.equal(sync.body.protocol_version, 1);
+  assert.match(sync.body.sync_id, /^[A-Za-z0-9._:-]+$/);
+  assert.match(sync.body.client_id, /^[A-Za-z0-9._:-]+$/);
+  assert.equal(sync.body.disclosure_acknowledged, false);
+  assert.deepEqual(sync.body.operations, []);
+  assert.deepEqual(sync.body.snapshot.topics, [{
+    id: localTopicId,
+    name: "Community Hope",
+    color: "#fde68a",
+  }]);
+  assert.deepEqual(sync.body.snapshot.assignments, [{
+    topic_id: localTopicId,
+    book: 43,
+    chapter: 3,
+    verse: 2,
+  }]);
+  assert.equal(
+    JSON.stringify(sync.body).includes("KJV John 3 test verse"),
+    false,
   );
   assert.equal(
-    submittedVerseAdds.every((event) => !Object.hasOwn(event.verse, "text")),
+    await page.evaluate(() => window.__telegramState.notifications.includes("success")),
     true,
   );
-  assert.match(
-    await page.locator("#contributor-sync-status").innerText(),
-    /pending|review|waiting|sent|submitted/i,
-  );
-  assert.equal(
-    await page.locator(
-      `.bookmark-group-card[data-bookmark-topic="${localTopicId}"] ` +
-        ".bookmark-contribution-badge",
-    ).innerText(),
-    "P",
-  );
 
-  // Review status can become visible before the independently cached catalog
-  // revision arrives. A fresh but older catalog must not promote or suppress
-  // personal links merely because status already says "published".
-  fixture.publishStatus();
-  const staleCatalogOrderStart = requestSequence.length;
-  await page.locator("#contributor-sync-button").click();
-  await page.waitForFunction(() => (
-    document.querySelector("#contributor-sync")?.dataset.state === "error"
-  ));
-  assert.deepEqual(
-    requestSequence.slice(staleCatalogOrderStart),
-    ["status", "status", "catalog"],
-  );
-  assert.equal(catalogRequests.at(-1)?.published, false);
-  assert.equal(
-    await page.locator(
-      `.bookmark-group-card[data-bookmark-topic="${localTopicId}"] ` +
-        ".bookmark-contribution-badge",
-    ).innerText(),
-    "P",
-  );
-
-  // The independently scheduled catalog-only retry receives the newer
-  // revision and completes the pull half of the same Sync action. It must not
-  // resend accepted events or require another click. Three reviewed links
-  // become G; the link still absent from the catalog remains personal.
-  fixture.publishCatalog();
-  const attemptsBeforeCatalogRetry = eventAttempts.length;
-  await page.waitForFunction((topicId) => {
-    const card = document.querySelector(
-      `.bookmark-group-card[data-bookmark-topic="${topicId}"]`,
-    );
-    return document.querySelector("#contributor-sync")?.dataset.state === "success" &&
-      card?.querySelector("strong")?.textContent === "Steadfast Hope" &&
-      card?.querySelector(".bookmark-contribution-badge")?.textContent === "G";
-  }, localTopicId);
-  assert.equal(eventAttempts.length, attemptsBeforeCatalogRetry);
-  assert.match(
-    await page.locator("#contributor-sync-status").innerText(),
-    /accepted|global|published|synced|up to date/i,
-  );
-
-  const publishedTopicCard = page.locator(
-    `.bookmark-group-card[data-bookmark-topic="${localTopicId}"]`,
-  );
-  assert.equal(
-    await publishedTopicCard.locator(".bookmark-contribution-badge").innerText(),
-    "G",
-  );
-  await publishedTopicCard.click();
-  await page.waitForFunction(() => (
-    document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 4
-  ));
-  const displayedLinks = await page.locator("#bookmark-list .bookmark-list__item")
-    .evaluateAll((rows) => rows.map((row) => ({
-      global: Boolean(row.querySelector(".bookmark-list__global-badge")),
-      marker: row.querySelector(".bookmark-contribution-badge")?.textContent,
-      openId: row.querySelector("[data-bookmark-open]")?.dataset.bookmarkOpen,
-      reference: row.querySelector(".bookmark-list__reference")?.textContent,
-    })));
-  for (const verse of acceptedVerses) {
-    const link = displayedLinks.find((item) => item.openId ===
-      `global_${acceptedTopic.id}_43_3_${verse}`
-    );
-    assert.equal(link?.global, true, `John 3:${verse} did not become global`);
-  }
-  const stillPersonal = displayedLinks.find((item) =>
-    item.reference?.includes(`John 3:${waitingVerse}`)
-  );
-  assert.equal(stillPersonal?.global, false);
-  assert.equal(stillPersonal?.marker, "P");
-  assert.equal(displayedLinks.filter((item) => item.global).length, 3);
-
-  // A user's explicit exclusion remains authoritative. Re-syncing a mapped
-  // topic must neither re-enable the hidden global row nor reveal the latent
-  // personal copy of that same coordinate.
-  const hiddenGlobalId = `global_${acceptedTopic.id}_43_3_${acceptedVerses[0]}`;
-  await page.locator(
-    `#bookmark-list [data-bookmark-remove="${hiddenGlobalId}"]`,
-  ).click();
-  await page.waitForFunction((bookmarkId) => (
-    document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 3 &&
-    !document.querySelector(`[data-bookmark-open="${bookmarkId}"]`)
-  ), hiddenGlobalId);
-  await page.locator("#bookmark-all-topics").click();
-  const statusCountBeforeRepeatedSync = statusRequests.length;
-  await page.locator("#contributor-sync-button").click();
-  await waitForCondition(
-    () => statusRequests.length >= statusCountBeforeRepeatedSync + 2,
-    "repeated manual sync did not refresh its status",
-  );
-  await page.waitForFunction(() => (
-    document.querySelector("#contributor-sync")?.dataset.state === "success"
-  ));
-  await page.locator(
-    `.bookmark-group-card[data-bookmark-topic="${localTopicId}"]`,
-  ).click();
-  await page.waitForFunction((bookmarkId) => (
-    document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 3 &&
-    document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length === 2 &&
-    !document.querySelector(`[data-bookmark-open="${bookmarkId}"]`)
-  ), hiddenGlobalId);
-
-  // A status refresh alone is not enough to claim success. The explicit action
-  // must remain visibly failed when its authoritative catalog pull fails.
-  await page.locator("#bookmark-all-topics").click();
-  fixture.failNextCatalogRoute();
-  await page.locator("#contributor-sync-button").click();
-  await page.waitForFunction(() => (
-    document.querySelector("#contributor-sync")?.dataset.state === "error"
-  ));
-  assert.match(
-    await page.locator("#contributor-sync-status").innerText(),
-    /catalog|failed|refresh|try again|could not|unavailable/i,
-  );
-
-  assert.ok(statusRequests.length >= 4);
-  assert.equal(
-    statusRequests.filter((request) => request.method === "GET")
-      .every((request) => request.details === "1"),
-    true,
-  );
-  assert.equal(catalogRequests.some((request) => request.published), true);
+  assert.equal(sessionRequests.length, 1);
+  assert.equal(sessionRequests[0].body.init_data, windowInitData());
+  assert.equal(sessionRequests[0].headers.authorization, undefined);
+  assert.equal(sessionRequests[0].headers["x-telegram-init-data"], undefined);
   assert.deepEqual(pageErrors, []);
   assert.deepEqual(failedRequests, []);
 });
+
+test("a lost sync attempt retries the identical durable envelope", async (context) => {
+  const fixture = await createBrowserFixture(context, { failFirstSync: true });
+  const { page, syncRequests } = fixture;
+  await page.goto("https://app.local/miniapp/index.html?launch=contributor-test", {
+    waitUntil: "domcontentloaded",
+  });
+  await page.waitForSelector('[data-reader-verse="2"]', { timeout: 15_000 });
+  await createPersonalTopicWithVerse(page);
+  await openContributorManager(page);
+
+  await page.locator("#contributor-sync-button").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#contributor-sync")?.dataset.state === "error"
+  ));
+  assert.equal(syncRequests.length, 1);
+  const firstBody = syncRequests[0].body;
+
+  // The client honors the server's retry guard while keeping the button and
+  // exact idempotency identity actionable for the next explicit click.
+  await page.waitForTimeout(300);
+  await page.locator("#contributor-sync-button").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#contributor-sync")?.dataset.state === "success"
+  ));
+  assert.equal(syncRequests.length, 2);
+  assert.deepEqual(syncRequests[1].body, firstBody);
+  assert.equal(syncRequests[1].headers.authorization, `Bearer ${contributionToken}`);
+});
+
+test("approved status without a capability exposes no contribution control", async (context) => {
+  const fixture = await createBrowserFixture(context, { issueCapability: false });
+  const { page, syncRequests } = fixture;
+  await page.goto("https://app.local/miniapp/index.html?launch=contributor-test", {
+    waitUntil: "domcontentloaded",
+  });
+  await page.waitForSelector('[data-reader-verse="2"]', { timeout: 15_000 });
+  await openBookmarksRoute(page);
+  assert.equal(await page.locator("#contributor-manager").isHidden(), true);
+  assert.equal(await page.locator("#contributor-sync-button").isVisible(), false);
+  assert.deepEqual(syncRequests, []);
+});
+
+function windowInitData() {
+  return "query_id=contributor-browser-test&user=%7B%22id%22%3A42%7D";
+}

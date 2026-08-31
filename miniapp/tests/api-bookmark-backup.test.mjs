@@ -98,6 +98,6 @@ test("backs up to the private bot chat and restores with explicit acknowledgemen
   );
   for (const { options } of [backupRequest, ...restoreRequests]) {
     assert.equal(options.headers.Authorization, `Bearer ${SESSION.session_token}`);
-    assert.equal(options.headers["X-Telegram-Init-Data"], "signed-init-data");
+    assert.equal(options.headers["X-Telegram-Init-Data"], undefined);
   }
 });
