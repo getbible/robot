@@ -4,7 +4,7 @@ import test from "node:test";
 import { ApiError, MiniAppApi } from "../lib/api.js";
 
 const SESSION_TOKEN = "abcdefghijklmnop";
-const CONTRIBUTION_TOKEN = `gbc_${"A".repeat(43)}`;
+const LEGACY_CONTRIBUTION_TOKEN = `gbc_${"A".repeat(43)}`;
 const SESSION = {
   session_token: SESSION_TOKEN,
   limits: { search_timeout_seconds: 30 },
@@ -16,43 +16,18 @@ const STATUS = {
   can_contribute: true,
   disclosure_required: false,
 };
-const ENVELOPE = {
-  protocol_version: 1,
-  sync_id: "sync_0123456789abcdef",
-  client_id: "client_0123456789abcdef",
-  snapshot: {
-    topics: [{
-      local_topic_id: "grace",
-      name: "Grace",
-      color: "#bbf7d0",
-    }],
-    assignments: [{
-      local_topic_id: "grace",
-      book: 43,
-      chapter: 3,
-      verse: 16,
-    }],
-  },
-  operations: [],
-  disclosure_acknowledged: false,
-};
-const SYNC_RESPONSE = {
-  protocol_version: 1,
+const SYNC_ID = "sync:push.0123456789abcdef";
+const RECEIPT_RESPONSE = {
+  found: true,
   receipt: {
-    sync_id: ENVELOPE.sync_id,
-    snapshot_digest: "a".repeat(64),
-    outcome: "accepted",
+    sync_id: SYNC_ID,
     accepted: 2,
     replayed: 0,
+    snapshot_digest: "a".repeat(64),
     event_ids: {
       "snapshot:topic:grace": 1,
       "snapshot:verse:grace:43:3:16": 2,
     },
-  },
-  status: STATUS,
-  catalog: {
-    revision: 4,
-    checksum: "b".repeat(64),
   },
 };
 
@@ -74,145 +49,137 @@ function testApi(fetchImplementation) {
   });
 }
 
-test("uses one capability-authenticated request for a contribution sync", async () => {
+test("reads contribution status over GET with the session bearer only", async () => {
   const requests = [];
   const api = testApi(async (url, options) => {
-    const path = new URL(url).pathname;
-    requests.push({ path, options });
-    if (path.endsWith("/session")) {
-      return json(SESSION, 201, {
-        "X-Contribution-Token": CONTRIBUTION_TOKEN,
-      });
-    }
-    if (path.endsWith("/cleanup")) {
+    const parsed = new URL(url);
+    requests.push({ path: parsed.pathname, search: parsed.search, options });
+    if (parsed.pathname.endsWith("/session")) return json(SESSION, 201);
+    if (parsed.pathname.endsWith("/cleanup")) {
       return new Response(null, { status: 204 });
     }
-    if (path.endsWith("/contributions/status")) return json(STATUS);
-    if (path.endsWith("/contributions/sync")) return json(SYNC_RESPONSE);
-    if (path.endsWith("/bookmarks/catalog")) {
-      return json({
-        revision: 4,
-        checksum: "b".repeat(64),
-        catalog: {
-          schema_version: 1,
-          topics: [],
-          associations: { add: [], remove: [] },
-        },
-      }, 200, { ETag: '"catalog-4"' });
+    if (parsed.pathname.endsWith("/contributions/status")) return json(STATUS);
+    return json({ error: { code: "not_found" } }, 404);
+  });
+
+  await api.createSession("OwnerBoundLaunch1");
+  assert.deepEqual(await api.contributionStatus(), STATUS);
+
+  const statusRequests = requests.filter(({ path }) =>
+    path.endsWith("/contributions/status")
+  );
+  assert.equal(statusRequests.length, 1);
+  const [{ search, options }] = statusRequests;
+  assert.equal(search, "?details=1");
+  assert.equal(options.method, "GET");
+  assert.equal(options.body, undefined);
+  assert.equal(options.headers.Authorization, `Bearer ${SESSION_TOKEN}`);
+  assert.equal(options.headers["X-Telegram-Init-Data"], undefined);
+});
+
+test("fetches a push receipt by encoded sync identity with the session bearer", async () => {
+  const requests = [];
+  const api = testApi(async (url, options) => {
+    const parsed = new URL(url);
+    requests.push({ url: parsed, options });
+    if (parsed.pathname.endsWith("/session")) return json(SESSION, 201);
+    if (parsed.pathname.endsWith("/cleanup")) {
+      return new Response(null, { status: 204 });
+    }
+    if (parsed.pathname.endsWith("/contributions/receipt")) {
+      return json(RECEIPT_RESPONSE);
     }
     return json({ error: { code: "not_found" } }, 404);
   });
 
   await api.createSession("OwnerBoundLaunch1");
-  assert.equal(api.contributionTransportReady, true);
-  assert.deepEqual(await api.contributionStatus(), STATUS);
-  assert.deepEqual(await api.syncContributions(ENVELOPE), SYNC_RESPONSE);
-  await api.bookmarkCatalog();
+  assert.deepEqual(await api.contributionReceipt(SYNC_ID), RECEIPT_RESPONSE);
 
-  const sessionRequest = requests.find(({ path }) => path.endsWith("/session"));
-  assert.deepEqual(JSON.parse(sessionRequest.options.body), {
-    init_data: "signed-init-data",
-    launch_token: "OwnerBoundLaunch1",
+  const receiptRequests = requests.filter(({ url }) =>
+    url.pathname.endsWith("/contributions/receipt")
+  );
+  assert.equal(receiptRequests.length, 1);
+  const [{ url, options }] = receiptRequests;
+  assert.equal(options.method, "GET");
+  assert.equal(options.body, undefined);
+  assert.equal(options.headers.Authorization, `Bearer ${SESSION_TOKEN}`);
+  assert.equal(options.headers["X-Telegram-Init-Data"], undefined);
+  // The colon must ride percent-encoded on the wire yet round-trip intact.
+  assert.equal(url.search, "?sync_id=sync%3Apush.0123456789abcdef");
+  assert.equal(url.searchParams.get("sync_id"), SYNC_ID);
+});
+
+test("rejects invalid sync identities before any network request", async () => {
+  let fetchCalls = 0;
+  const api = testApi(async () => {
+    fetchCalls += 1;
+    return json({ error: { code: "not_found" } }, 404);
   });
-  assert.equal(sessionRequest.options.headers.Authorization, undefined);
 
-  const authenticated = requests.filter(({ path }) =>
-    /\/(?:contributions|bookmarks\/catalog)/u.test(path)
-  );
-  assert.equal(authenticated.length, 3);
-  assert.ok(authenticated.every(({ options }) =>
-    options.headers["X-Telegram-Init-Data"] === undefined
-  ));
-  const syncRequests = authenticated.filter(({ path }) =>
-    path.endsWith("/contributions/sync")
-  );
-  assert.equal(syncRequests.length, 1);
-  assert.equal(
-    syncRequests[0].options.headers.Authorization,
-    `Bearer ${CONTRIBUTION_TOKEN}`,
-  );
-  assert.deepEqual(JSON.parse(syncRequests[0].options.body), ENVELOPE);
-
-  for (const { path, options } of authenticated) {
-    if (!path.endsWith("/contributions/sync")) {
-      assert.equal(options.headers.Authorization, `Bearer ${SESSION_TOKEN}`);
-    }
+  const invalidSyncIds = [
+    "",
+    "sync|0123456789abcdef",
+    "a".repeat(129),
+  ];
+  for (const syncId of invalidSyncIds) {
+    assert.throws(
+      () => api.contributionReceipt(syncId),
+      (error) => {
+        assert.equal(error instanceof TypeError, true);
+        assert.match(error.message, /sync identity/iu);
+        return true;
+      },
+    );
   }
+  assert.equal(fetchCalls, 0);
 });
 
-test("will not send a contribution snapshot without a server capability", async () => {
-  const requests = [];
-  const api = testApi(async (url) => {
-    const path = new URL(url).pathname;
-    requests.push(path);
-    if (path.endsWith("/session")) return json(SESSION, 201);
-    if (path.endsWith("/cleanup")) return new Response(null, { status: 204 });
-    return json({ error: "not_found" }, 404);
-  });
-
-  await api.createSession("OwnerBoundLaunch1");
-  assert.equal(api.contributionTransportReady, false);
-  assert.throws(
-    () => api.syncContributions(ENVELOPE),
-    (error) => {
-      assert.equal(error instanceof ApiError, true);
-      assert.equal(error.code, "contribution_transport_not_ready");
-      assert.equal(error.status, 403);
-      assert.equal(error.retryable, false);
-      return true;
-    },
-  );
-  assert.equal(
-    requests.filter((path) => path.endsWith("/contributions/sync")).length,
-    0,
-  );
-  assert.throws(() => api.syncContributions(null), /sync envelope/i);
-});
-
-test("accepts a capability issued when an application becomes approved", async () => {
-  let statusCalls = 0;
+test("surfaces receipt outages with bounded Retry-After preference", async () => {
+  let receiptCalls = 0;
   const api = testApi(async (url) => {
     const path = new URL(url).pathname;
     if (path.endsWith("/session")) return json(SESSION, 201);
     if (path.endsWith("/cleanup")) return new Response(null, { status: 204 });
-    if (path.endsWith("/contributions/status")) {
-      statusCalls += 1;
-      return json(STATUS, 200, {
-        "X-Contribution-Token": CONTRIBUTION_TOKEN,
-      });
+    if (path.endsWith("/contributions/receipt")) {
+      receiptCalls += 1;
+      if (receiptCalls === 1) {
+        return json({
+          error: "contributions_unavailable",
+          message: "Contributions are paused.",
+          retry_after: 7,
+        }, 503, { "Retry-After": "20" });
+      }
+      if (receiptCalls === 2) {
+        return json({ error: "contributions_unavailable" }, 503, {
+          "Retry-After": "11",
+        });
+      }
+      return json({
+        error: "contributions_unavailable",
+        retry_after: 999_999,
+      }, 503);
     }
-    if (path.endsWith("/contributions/sync")) return json(SYNC_RESPONSE);
     return json({ error: "not_found" }, 404);
   });
 
   await api.createSession("OwnerBoundLaunch1");
-  assert.equal(api.contributionTransportReady, false);
-  await api.contributionStatus();
-  assert.equal(statusCalls, 1);
-  assert.equal(api.contributionTransportReady, true);
-  await api.syncContributions(ENVELOPE);
-  api.clearSession();
-  assert.equal(api.contributionTransportReady, false);
-});
-
-test("rejects malformed contribution capabilities", async () => {
-  const api = testApi(async (url) => {
-    const path = new URL(url).pathname;
-    if (path.endsWith("/session")) {
-      return json(SESSION, 201, {
-        "X-Contribution-Token": "gbc_not-a-32-byte-token",
-      });
-    }
-    return json({ error: "not_found" }, 404);
-  });
-
-  await assert.rejects(api.createSession("OwnerBoundLaunch1"), (error) => {
+  await assert.rejects(api.contributionReceipt(SYNC_ID), (error) => {
     assert.equal(error instanceof ApiError, true);
-    assert.equal(error.code, "invalid_response");
+    assert.equal(error.code, "contributions_unavailable");
+    assert.equal(error.status, 503);
     assert.equal(error.retryable, true);
+    assert.equal(error.retryAfter, 7);
     return true;
   });
-  assert.equal(api.contributionTransportReady, false);
+  await assert.rejects(api.contributionReceipt(SYNC_ID), (error) => {
+    assert.equal(error.code, "contributions_unavailable");
+    assert.equal(error.retryAfter, 11);
+    return true;
+  });
+  await assert.rejects(api.contributionReceipt(SYNC_ID), (error) => {
+    assert.equal(error.retryAfter, 3_600);
+    return true;
+  });
 });
 
 test("preserves bounded Retry-After guidance from error bodies and headers", async () => {
@@ -248,4 +215,44 @@ test("preserves bounded Retry-After guidance from error bodies and headers", asy
     assert.equal(error.retryAfter, 11);
     return true;
   });
+});
+
+test("ignores legacy contribution capability headers harmlessly", async () => {
+  const requests = [];
+  const api = testApi(async (url, options) => {
+    const path = new URL(url).pathname;
+    requests.push({ path, options });
+    if (path.endsWith("/session")) {
+      return json(SESSION, 201, {
+        "X-Contribution-Token": LEGACY_CONTRIBUTION_TOKEN,
+      });
+    }
+    if (path.endsWith("/cleanup")) return new Response(null, { status: 204 });
+    if (path.endsWith("/contributions/status")) {
+      // A malformed legacy token would have failed the old client; the new
+      // client must not even look at it.
+      return json(STATUS, 200, {
+        "X-Contribution-Token": "gbc_not-a-32-byte-token",
+      });
+    }
+    return json({ error: "not_found" }, 404);
+  });
+
+  await api.createSession("OwnerBoundLaunch1");
+  assert.deepEqual(await api.contributionStatus(), STATUS);
+  // The capability transport is gone entirely, not merely dormant.
+  assert.equal(api.contributionTransportReady, undefined);
+  assert.equal(api.syncContributions, undefined);
+  assert.equal(api.acknowledgeContributionDisclosure, undefined);
+
+  // Every authenticated request keeps the plain session bearer even after
+  // responses dangled capability tokens.
+  assert.deepEqual(await api.contributionStatus(), STATUS);
+  const authenticated = requests.filter(({ path }) =>
+    path.endsWith("/contributions/status")
+  );
+  assert.equal(authenticated.length, 2);
+  for (const { options } of authenticated) {
+    assert.equal(options.headers.Authorization, `Bearer ${SESSION_TOKEN}`);
+  }
 });
