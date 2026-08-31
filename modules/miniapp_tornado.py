@@ -29,7 +29,6 @@ from .bookmark_backup import (
 )
 from .contributions import ContributionStore
 from .miniapp_api import (
-    MAX_CONTRIBUTION_SYNC_REQUEST_BYTES,
     MiniAppApi,
     MiniAppHttpRequest,
     MiniAppIngressLimiter,
@@ -124,12 +123,6 @@ class MiniAppApiHandler(RequestHandler):
             and self.path_args[0] == "bookmarks/backup"
         ):
             self._body_limit = MAX_BOOKMARK_BACKUP_REQUEST_BYTES
-        elif (
-            self.request.method == "POST"
-            and self.path_args
-            and self.path_args[0] == "contributions/sync"
-        ):
-            self._body_limit = MAX_CONTRIBUTION_SYNC_REQUEST_BYTES
         set_max_body_size = getattr(
             self.request.connection,
             "set_max_body_size",

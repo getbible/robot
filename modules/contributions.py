@@ -57,9 +57,11 @@ MAX_CONTRIBUTION_STATUS_TOPICS = 1000
 MAX_PUBLIC_OVERLAY_TOPICS = 39
 MAX_PUBLIC_OVERLAY_ASSOCIATIONS = 10_000
 MAX_PUBLIC_OVERLAY_BYTES = 2 * 1024 * 1024
-MAX_ACTIVE_CONTRIBUTOR_CAPABILITIES = 16
-CONTRIBUTOR_CAPABILITY_TTL_SECONDS = 24 * 60 * 60
-DATABASE_SCHEMA_VERSION = 5
+MAX_PUSH_CHUNKS = 64
+MAX_PUSH_CHUNK_PAYLOAD_CHARS = 3584
+MAX_PENDING_PUSH_BUNDLES = 4
+PUSH_BUNDLE_TTL_SECONDS = 24 * 60 * 60
+DATABASE_SCHEMA_VERSION = 6
 
 # The browser contribution journal accepts this complete separator-safe
 # alphabet in every position. Personal bookmark IDs are a subset, but imported
@@ -69,7 +71,8 @@ _SAFE_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _CANONICAL_TOPIC_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,79}\Z")
 _COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}\Z")
 _CHECKSUM_RE = re.compile(r"[0-9a-f]{64}\Z")
-_CONTRIBUTOR_CAPABILITY_RE = re.compile(r"gbc_[A-Za-z0-9_-]{43}\Z")
+_BASE64URL_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
+PUSH_ENCODINGS = frozenset({"d", "j"})
 _ENGLISH_TOPIC_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]\Z")
 # Protestant canon order used by the bundled global bookmark catalogue and its
 # repository CSV. Contributions outside this catalogue are rejected before
@@ -322,6 +325,20 @@ class SnapshotSyncResult:
     event_ids: dict[str, int]
     snapshot_digest: str
     replayed_sync: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PushChunkResult:
+    """Outcome of durably staging one numbered contribution push chunk."""
+
+    complete: bool
+    received: int
+    chunk_count: int
+    encoding: str
+    digest: str
+    payload: str | None
+    progress_message_id: int | None
+    restarted: bool
 
 
 NormalizedEvent: TypeAlias = tuple[
@@ -766,12 +783,21 @@ class ContributionStore:
                 (state, now, now, state, state, identity),
             )
             if state != "approved":
-                # Capabilities are deliberately server-revocable.  Removing
-                # them here makes a moderator decision effective immediately;
-                # authenticate_capability also rechecks the application state
-                # so an older process can never retain authority by accident.
+                # The legacy HTTPS capability table is retained only for
+                # schema stability.  Clearing it here keeps any dormant rows
+                # from surviving a non-approved decision, and staged push
+                # chunks lose their authority the same moment because every
+                # staging and synchronization write rechecks approval.
                 connection.execute(
                     "DELETE FROM contributor_capabilities WHERE contributor_id = ?",
+                    (identity,),
+                )
+                connection.execute(
+                    "DELETE FROM contribution_push_chunks WHERE contributor_id = ?",
+                    (identity,),
+                )
+                connection.execute(
+                    "DELETE FROM contribution_push_bundles WHERE contributor_id = ?",
                     (identity,),
                 )
             connection.execute(
@@ -811,128 +837,270 @@ class ContributionStore:
             assert row is not None
             return _application(row)
 
-    def issue_capability(
+    def stage_push_chunk(
         self,
-        user_id: int,
+        contributor_id: int,
         *,
-        ttl_seconds: int = CONTRIBUTOR_CAPABILITY_TTL_SECONDS,
-    ) -> str:
-        """Issue a restart-safe, revocable bearer capability to one contributor.
+        bundle_id: str,
+        index: int,
+        count: int,
+        encoding: str,
+        digest: str,
+        payload: str,
+    ) -> PushChunkResult:
+        """Durably stage one numbered push chunk and assemble a complete bundle.
 
-        Only the SHA-256 digest is retained.  Issuance intentionally creates a
-        fresh capability on every successful exchange: if an HTTP response is
-        lost the caller can retry safely, while the per-user active-token bound
-        prevents unbounded state growth.
+        Chunks arrive as Telegram ``web_app_data`` messages and may be
+        redelivered or interleaved.  Staging is idempotent per chunk index,
+        and exactly one caller observes a completed bundle: assembly removes
+        the staged rows in the same transaction that detects completion.
         """
-        identity = _telegram_user_id(user_id)
-        ttl = _positive_integer(
-            ttl_seconds,
-            "ttl_seconds",
-            CONTRIBUTOR_CAPABILITY_TTL_SECONDS,
-        )
+        identity = _telegram_user_id(contributor_id)
+        checked_bundle_id = _safe_id(bundle_id, "bundle_id")
+        checked_count = _positive_integer(count, "chunk count", MAX_PUSH_CHUNKS)
+        checked_index = _positive_integer(index, "chunk index", checked_count)
+        if encoding not in PUSH_ENCODINGS:
+            raise ContributionError("Push encoding is invalid.")
+        if not valid_checksum(digest):
+            raise ContributionError("Push digest is invalid.")
+        if (
+            not isinstance(payload, str)
+            or not 1 <= len(payload) <= MAX_PUSH_CHUNK_PAYLOAD_CHARS
+            or _BASE64URL_RE.fullmatch(payload) is None
+        ):
+            raise ContributionError("Push chunk payload is invalid.")
         now = time.time_ns()
-        expires_at = now + ttl * 1_000_000_000
+        cutoff = now - PUSH_BUNDLE_TTL_SECONDS * 1_000_000_000
         with self._guard, self._transaction() as connection:
-            application = connection.execute(
-                "SELECT state FROM contributor_applications WHERE user_id = ?",
-                (identity,),
-            ).fetchone()
-            if application is None or application[0] != "approved":
-                raise ContributionNotAllowed(
-                    "This Telegram user is not an approved contributor."
+            self._require_contributor_locked(connection, identity, require_disclosure=False)
+            connection.execute(
+                "DELETE FROM contribution_push_bundles WHERE updated_at <= ?",
+                (cutoff,),
+            )
+            connection.execute(
+                """
+                DELETE FROM contribution_push_chunks
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM contribution_push_bundles AS bundle
+                    WHERE bundle.contributor_id = contribution_push_chunks.contributor_id
+                      AND bundle.bundle_id = contribution_push_chunks.bundle_id
                 )
-            connection.execute(
-                "DELETE FROM contributor_capabilities WHERE expires_at <= ?",
-                (now,),
-            )
-            active = connection.execute(
                 """
-                SELECT token_digest
-                FROM contributor_capabilities
-                WHERE contributor_id = ?
-                ORDER BY last_used_at, issued_at, token_digest
-                """,
-                (identity,),
-            ).fetchall()
-            overflow = len(active) - MAX_ACTIVE_CONTRIBUTOR_CAPABILITIES + 1
-            if overflow > 0:
-                connection.executemany(
-                    "DELETE FROM contributor_capabilities WHERE token_digest = ?",
-                    ((bytes(row[0]),) for row in active[:overflow]),
-                )
-
-            token: str | None = None
-            digest: bytes | None = None
-            for _ in range(4):
-                candidate = f"gbc_{secrets.token_urlsafe(32)}"
-                candidate_digest = hashlib.sha256(candidate.encode("ascii")).digest()
-                exists = connection.execute(
-                    "SELECT 1 FROM contributor_capabilities WHERE token_digest = ?",
-                    (candidate_digest,),
-                ).fetchone()
-                if exists is None:
-                    token = candidate
-                    digest = candidate_digest
-                    break
-            if token is None or digest is None:
-                raise RuntimeError("Could not allocate a unique contributor capability.")
-            connection.execute(
+            )
+            existing = connection.execute(
                 """
-                INSERT INTO contributor_capabilities (
-                    token_digest, contributor_id, issued_at, expires_at, last_used_at
-                ) VALUES (?, ?, ?, ?, ?)
+                SELECT chunk_count, encoding, digest, progress_message_id
+                FROM contribution_push_bundles
+                WHERE contributor_id = ? AND bundle_id = ?
                 """,
-                (digest, identity, now, expires_at, now),
-            )
-            self._audit_locked(
-                connection,
-                actor=f"telegram:{identity}",
-                action="capability_issued",
-                contributor_id=identity,
-                subject_type="capability",
-                subject_id=digest.hex(),
-                detail={"expires_at": expires_at},
-                now=now,
-            )
-        return token
-
-    def authenticate_capability(self, token: str) -> int:
-        """Resolve an unexpired capability and recheck current approval."""
-        if not isinstance(token, str) or _CONTRIBUTOR_CAPABILITY_RE.fullmatch(token) is None:
-            raise ContributionNotAllowed("The contributor capability is invalid or expired.")
-        digest = hashlib.sha256(token.encode("ascii")).digest()
-        now = time.time_ns()
-        identity: int | None = None
-        with self._guard, self._transaction() as connection:
-            connection.execute(
-                "DELETE FROM contributor_capabilities WHERE expires_at <= ?",
-                (now,),
-            )
-            row = connection.execute(
-                """
-                SELECT capability.contributor_id
-                FROM contributor_capabilities AS capability
-                JOIN contributor_applications AS application
-                  ON application.user_id = capability.contributor_id
-                WHERE capability.token_digest = ?
-                  AND capability.expires_at > ?
-                  AND application.state = 'approved'
-                """,
-                (digest, now),
+                (identity, checked_bundle_id),
             ).fetchone()
-            if row is not None:
-                identity = int(row[0])
+            restarted = False
+            progress_message_id: int | None = None
+            if existing is not None:
+                progress_message_id = (
+                    int(existing[3]) if existing[3] is not None else None
+                )
+                if (
+                    int(existing[0]) != checked_count
+                    or str(existing[1]) != encoding
+                    or str(existing[2]) != digest
+                ):
+                    # The same bundle identity re-arrived with different
+                    # metadata.  The client rebuilt its outbox; adopt the
+                    # fresh transfer instead of wedging this bundle forever.
+                    restarted = True
+                    connection.execute(
+                        """
+                        DELETE FROM contribution_push_chunks
+                        WHERE contributor_id = ? AND bundle_id = ?
+                        """,
+                        (identity, checked_bundle_id),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE contribution_push_bundles
+                        SET chunk_count = ?, encoding = ?, digest = ?, updated_at = ?
+                        WHERE contributor_id = ? AND bundle_id = ?
+                        """,
+                        (checked_count, encoding, digest, now, identity, checked_bundle_id),
+                    )
+                    self._audit_locked(
+                        connection,
+                        actor=f"telegram:{identity}",
+                        action="push_bundle_restarted",
+                        contributor_id=identity,
+                        subject_type="push_bundle",
+                        subject_id=checked_bundle_id,
+                        detail={"chunk_count": checked_count},
+                        now=now,
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE contribution_push_bundles
+                        SET updated_at = ?
+                        WHERE contributor_id = ? AND bundle_id = ?
+                        """,
+                        (now, identity, checked_bundle_id),
+                    )
+            else:
+                pending = connection.execute(
+                    """
+                    SELECT bundle_id FROM contribution_push_bundles
+                    WHERE contributor_id = ?
+                    ORDER BY updated_at, bundle_id
+                    """,
+                    (identity,),
+                ).fetchall()
+                overflow = len(pending) - MAX_PENDING_PUSH_BUNDLES + 1
+                if overflow > 0:
+                    for stale in pending[:overflow]:
+                        connection.execute(
+                            """
+                            DELETE FROM contribution_push_chunks
+                            WHERE contributor_id = ? AND bundle_id = ?
+                            """,
+                            (identity, str(stale[0])),
+                        )
+                        connection.execute(
+                            """
+                            DELETE FROM contribution_push_bundles
+                            WHERE contributor_id = ? AND bundle_id = ?
+                            """,
+                            (identity, str(stale[0])),
+                        )
                 connection.execute(
                     """
-                    UPDATE contributor_capabilities
-                    SET last_used_at = ?
-                    WHERE token_digest = ? AND expires_at > ?
+                    INSERT INTO contribution_push_bundles (
+                        contributor_id, bundle_id, chunk_count, encoding,
+                        digest, progress_message_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
                     """,
-                    (now, digest, now),
+                    (
+                        identity,
+                        checked_bundle_id,
+                        checked_count,
+                        encoding,
+                        digest,
+                        now,
+                        now,
+                    ),
                 )
-        if identity is None:
-            raise ContributionNotAllowed("The contributor capability is invalid or expired.")
-        return identity
+            connection.execute(
+                """
+                INSERT INTO contribution_push_chunks (
+                    contributor_id, bundle_id, chunk_index, payload, received_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(contributor_id, bundle_id, chunk_index) DO UPDATE SET
+                    payload = excluded.payload,
+                    received_at = excluded.received_at
+                """,
+                (identity, checked_bundle_id, checked_index, payload, now),
+            )
+            rows = connection.execute(
+                """
+                SELECT chunk_index, payload FROM contribution_push_chunks
+                WHERE contributor_id = ? AND bundle_id = ?
+                ORDER BY chunk_index
+                """,
+                (identity, checked_bundle_id),
+            ).fetchall()
+            received = len(rows)
+            if received < checked_count:
+                return PushChunkResult(
+                    complete=False,
+                    received=received,
+                    chunk_count=checked_count,
+                    encoding=encoding,
+                    digest=digest,
+                    payload=None,
+                    progress_message_id=progress_message_id,
+                    restarted=restarted,
+                )
+            assembled = "".join(str(row[1]) for row in rows)
+            connection.execute(
+                """
+                DELETE FROM contribution_push_chunks
+                WHERE contributor_id = ? AND bundle_id = ?
+                """,
+                (identity, checked_bundle_id),
+            )
+            connection.execute(
+                """
+                DELETE FROM contribution_push_bundles
+                WHERE contributor_id = ? AND bundle_id = ?
+                """,
+                (identity, checked_bundle_id),
+            )
+            return PushChunkResult(
+                complete=True,
+                received=received,
+                chunk_count=checked_count,
+                encoding=encoding,
+                digest=digest,
+                payload=assembled,
+                progress_message_id=progress_message_id,
+                restarted=restarted,
+            )
+
+    def set_push_progress_message(
+        self,
+        contributor_id: int,
+        bundle_id: str,
+        message_id: int,
+    ) -> None:
+        """Remember the one chat message that reports this bundle's progress."""
+        identity = _telegram_user_id(contributor_id)
+        checked_bundle_id = _safe_id(bundle_id, "bundle_id")
+        checked_message_id = _positive_integer(
+            message_id,
+            "message_id",
+            9_007_199_254_740_991,
+        )
+        with self._guard, self._transaction() as connection:
+            connection.execute(
+                """
+                UPDATE contribution_push_bundles
+                SET progress_message_id = ?, updated_at = ?
+                WHERE contributor_id = ? AND bundle_id = ?
+                """,
+                (checked_message_id, time.time_ns(), identity, checked_bundle_id),
+            )
+
+    def sync_receipt(
+        self,
+        contributor_id: int,
+        sync_id: str,
+    ) -> dict[str, object] | None:
+        """Return one stored synchronization receipt for pull-side confirmation."""
+        identity = _telegram_user_id(contributor_id)
+        checked_sync_id = _safe_id(sync_id, "sync_id")
+        with self._guard:
+            row = (
+                self._connection_required()
+                .execute(
+                    """
+                SELECT accepted, replayed, event_ids_json, snapshot_digest
+                FROM contribution_sync_receipts
+                WHERE contributor_id = ? AND sync_id = ?
+                """,
+                    (identity, checked_sync_id),
+                )
+                .fetchone()
+            )
+        if row is None:
+            return None
+        return {
+            "sync_id": checked_sync_id,
+            "accepted": int(row[0]),
+            "replayed": int(row[1]),
+            "event_ids": {
+                str(key): int(value)
+                for key, value in json.loads(str(row[2])).items()
+            },
+            "snapshot_digest": str(row[3]),
+        }
 
     def record_events(
         self,
@@ -2382,15 +2550,21 @@ class ContributionStore:
                 self._migrate_v2_to_v3(connection)
                 self._migrate_v3_to_v4(connection)
                 self._migrate_v4_to_v5(connection)
+                self._migrate_v5_to_v6(connection)
             elif user_version == 2:
                 self._migrate_v2_to_v3(connection)
                 self._migrate_v3_to_v4(connection)
                 self._migrate_v4_to_v5(connection)
+                self._migrate_v5_to_v6(connection)
             elif user_version == 3:
                 self._migrate_v3_to_v4(connection)
                 self._migrate_v4_to_v5(connection)
+                self._migrate_v5_to_v6(connection)
             elif user_version == 4:
                 self._migrate_v4_to_v5(connection)
+                self._migrate_v5_to_v6(connection)
+            elif user_version == 5:
+                self._migrate_v5_to_v6(connection)
             self._ensure_seed_state(connection)
         except BaseException:
             connection.close()
@@ -2598,7 +2772,33 @@ class ContributionStore:
             );
             CREATE INDEX IF NOT EXISTS contributor_capabilities_owner
                 ON contributor_capabilities (contributor_id, expires_at, last_used_at);
-            PRAGMA user_version=5;
+
+            CREATE TABLE IF NOT EXISTS contribution_push_bundles (
+                contributor_id INTEGER NOT NULL,
+                bundle_id TEXT NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                encoding TEXT NOT NULL CHECK (encoding IN ('d','j')),
+                digest TEXT NOT NULL,
+                progress_message_id INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (contributor_id, bundle_id),
+                FOREIGN KEY (contributor_id)
+                    REFERENCES contributor_applications(user_id)
+            );
+            CREATE INDEX IF NOT EXISTS contribution_push_bundles_expiry
+                ON contribution_push_bundles (updated_at);
+            CREATE TABLE IF NOT EXISTS contribution_push_chunks (
+                contributor_id INTEGER NOT NULL,
+                bundle_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                received_at INTEGER NOT NULL,
+                PRIMARY KEY (contributor_id, bundle_id, chunk_index),
+                FOREIGN KEY (contributor_id, bundle_id)
+                    REFERENCES contribution_push_bundles(contributor_id, bundle_id)
+            );
+            PRAGMA user_version=6;
             COMMIT;
             """
         )
@@ -2741,6 +2941,42 @@ class ContributionStore:
             CREATE INDEX IF NOT EXISTS contributor_capabilities_owner
                 ON contributor_capabilities (contributor_id, expires_at, last_used_at);
             PRAGMA user_version=5;
+            COMMIT;
+            """
+        )
+
+    @staticmethod
+    def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
+        """Add durable staging for chunked Telegram web_app_data push bundles."""
+        connection.executescript(
+            """
+            BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS contribution_push_bundles (
+                contributor_id INTEGER NOT NULL,
+                bundle_id TEXT NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                encoding TEXT NOT NULL CHECK (encoding IN ('d','j')),
+                digest TEXT NOT NULL,
+                progress_message_id INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (contributor_id, bundle_id),
+                FOREIGN KEY (contributor_id)
+                    REFERENCES contributor_applications(user_id)
+            );
+            CREATE INDEX IF NOT EXISTS contribution_push_bundles_expiry
+                ON contribution_push_bundles (updated_at);
+            CREATE TABLE IF NOT EXISTS contribution_push_chunks (
+                contributor_id INTEGER NOT NULL,
+                bundle_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                received_at INTEGER NOT NULL,
+                PRIMARY KEY (contributor_id, bundle_id, chunk_index),
+                FOREIGN KEY (contributor_id, bundle_id)
+                    REFERENCES contribution_push_bundles(contributor_id, bundle_id)
+            );
+            PRAGMA user_version=6;
             COMMIT;
             """
         )

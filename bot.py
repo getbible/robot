@@ -65,6 +65,7 @@ from modules.commands import (
     start_command,
     unknown_command,
 )
+from modules.contribution_intake import contribution_push_message
 from modules.contributions import ContributionStore
 from modules.contributor_command import (
     CONTRIBUTION_STORE_SLOT,
@@ -445,6 +446,11 @@ def build_application(settings: Settings) -> Application:
         )
     )
     application.add_handler(CallbackQueryHandler(interaction_callback, pattern=r"^gb:"))
+    # Contribution push bundles arrive as web_app_data service messages on
+    # the ordinary update channel; no extra listener or route exists for them.
+    application.add_handler(
+        MessageHandler(filters.StatusUpdate.WEB_APP_DATA, contribution_push_message)
+    )
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, interaction_reply)
     )
