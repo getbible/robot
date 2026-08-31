@@ -346,9 +346,6 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   const consoleMessages = [];
   const pageErrors = [];
   const failedRequests = [];
-  const mockedRateLimitConsoleMessage =
-    "error: Failed to load resource: the server responded with a status of 429 " +
-    "(Too Many Requests)";
   page.on("console", (message) => {
     if (["error", "warning"].includes(message.type())) {
       consoleMessages.push(`${message.type()}: ${message.text()}`);
@@ -451,8 +448,8 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     reader_location: { translation: "kjv", book: 43, chapter: 3, verse: 1 },
   };
   let bookmarkBackupRequest = null;
-  const contributionBatches = [];
-  let contributionAttempts = 0;
+  const contributionCapability = `gbc_${"A".repeat(43)}`;
+  const contributionSyncRequests = [];
   const contributionStatus = {
     enabled: true,
     state: "approved",
@@ -471,38 +468,49 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       `public Bible data must not be proxied through Robot: ${apiPath}`,
     );
     if (apiPath === "session") {
-      return fulfillJson(route, {
-        session_token: "BrowserTestSessionToken123",
-        expires_in: 10_800,
-        user: { id: 42 },
-        preferences,
-        entrypoint: { route: "bible", query: "" },
-        basket: { items: [], count: 0, maximum: 100 },
-        contributions: contributionStatus,
-      }, 201);
+      return route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        headers: { "X-Contribution-Token": contributionCapability },
+        body: jsonBody({
+          session_token: "BrowserTestSessionToken123",
+          expires_in: 10_800,
+          user: { id: 42 },
+          preferences,
+          entrypoint: { route: "bible", query: "" },
+          basket: { items: [], count: 0, maximum: 100 },
+          contributions: contributionStatus,
+        }),
+      });
     }
     if (apiPath === "cleanup") return fulfillJson(route, {});
     if (apiPath === "contributions/status") {
       return fulfillJson(route, contributionStatus);
     }
-    if (apiPath === "contributions/events") {
-      const events = request.postDataJSON().events;
-      contributionAttempts += 1;
-      if (contributionAttempts === 1) {
-        return fulfillJson(route, {
-          error: "rate_limited",
-          message: "Please wait.",
-          retryable: true,
-          retry_after: 0.01,
-        }, 429);
-      }
-      contributionBatches.push(events);
+    if (apiPath === "contributions/sync") {
+      assert.equal(
+        request.headers().authorization,
+        `Bearer ${contributionCapability}`,
+      );
+      const sync = request.postDataJSON();
+      contributionSyncRequests.push(sync);
       return fulfillJson(route, {
-        accepted: events.length,
-        replayed: 0,
-        event_ids: Object.fromEntries(
-          events.map((event, index) => [event.client_event_id, index + 1]),
-        ),
+        protocol_version: 1,
+        receipt: {
+          sync_id: sync.sync_id,
+          snapshot_digest: "0".repeat(64),
+          outcome: "accepted",
+          accepted:
+            sync.snapshot.topics.length +
+            sync.snapshot.assignments.length +
+            sync.operations.length,
+          replayed: 0,
+          event_ids: Object.fromEntries(
+            sync.operations.map((event, index) => [event.client_event_id, index + 1]),
+          ),
+        },
+        status: contributionStatus,
+        catalog: { revision: 0, checksum: "0".repeat(64) },
       });
     }
     if (apiPath === "bookmarks/catalog") {
@@ -640,21 +648,6 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   assert.deepEqual(storedBookmark?.topic_ids, ["grace", "biblical-love"]);
   assert.equal(storedBookmark?.chapter, 3);
   assert.equal(storedBookmark?.verse, 2);
-  await waitForCondition(
-    () => contributionBatches.flat().filter((event) => (
-      event.type === "verse_add" && event.verse.verse === 2
-    )).length === 2,
-    "contribution queue did not resume after Retry-After",
-    15_000,
-  );
-  assert.ok(contributionAttempts >= 2);
-  // Chromium logs an HTTP error for the deliberately mocked first retry,
-  // even though fetch handles the response and the journal later succeeds.
-  await waitForCondition(
-    () => consoleMessages.includes(mockedRateLimitConsoleMessage),
-    "intentional contribution 429 was not reported by Chromium",
-  );
-  assert.deepEqual(consoleMessages.splice(0), [mockedRateLimitConsoleMessage]);
 
   await page.locator("#close-bookmark-popover").click();
   await page.locator('[data-reader-verse="3"]').click();
@@ -944,31 +937,10 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     storageKey: globalBookmarkPreferencesMirrorKey,
     expectedCount: graceGlobalCount - 1,
   });
-  const hiddenCoordinate = hiddenGlobalId.split("_").slice(-3).map(Number);
-  await waitForCondition(
-    () => contributionBatches.flat().some((event) => (
-      event.type === "verse_remove" &&
-      event.topic.local_topic_id === "grace" &&
-      event.verse.book === hiddenCoordinate[0] &&
-      event.verse.chapter === hiddenCoordinate[1] &&
-      event.verse.verse === hiddenCoordinate[2]
-    )),
-    "global list removal was not mirrored for review",
-    15_000,
-  );
   assert.match(
     await page.locator("#load-topic-global-bookmarks-label").innerText(),
     /Reload global verses/,
   );
-  const matchingGlobalAddsBeforeRestore = contributionBatches.flat().filter(
-    (event) => (
-      event.type === "verse_add" &&
-      event.topic.local_topic_id === "grace" &&
-      event.verse.book === hiddenCoordinate[0] &&
-      event.verse.chapter === hiddenCoordinate[1] &&
-      event.verse.verse === hiddenCoordinate[2]
-    ),
-  ).length;
   await page.locator("#load-topic-global-bookmarks").click();
   await page.waitForFunction(({ bookmarkId, storageKey, expectedCount }) => {
     const envelope = JSON.parse(window.localStorage.getItem(storageKey));
@@ -980,17 +952,6 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     storageKey: globalBookmarkPreferencesMirrorKey,
     expectedCount: graceGlobalCount,
   });
-  await waitForCondition(
-    () => contributionBatches.flat().filter((event) => (
-      event.type === "verse_add" &&
-      event.topic.local_topic_id === "grace" &&
-      event.verse.book === hiddenCoordinate[0] &&
-      event.verse.chapter === hiddenCoordinate[1] &&
-      event.verse.verse === hiddenCoordinate[2]
-    )).length > matchingGlobalAddsBeforeRestore,
-    "restored global list assignment was not mirrored for review",
-    15_000,
-  );
   assert.equal(await page.locator("#clear-topic-global-bookmarks").isVisible(), true);
   await page.locator("#clear-topic-global-bookmarks").click();
   await page.waitForFunction(() => (
@@ -1132,17 +1093,6 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   ).first();
   assert.equal(await globalPopoverRemove.isVisible(), true);
   await globalPopoverRemove.click();
-  await waitForCondition(
-    () => contributionBatches.flat().some((event) => (
-      event.type === "verse_remove" &&
-      event.topic.local_topic_id === "spiritual-rebirth" &&
-      event.verse.book === 43 &&
-      event.verse.chapter === 3 &&
-      event.verse.verse === 3
-    )),
-    "global popover removal was not mirrored for review",
-    15_000,
-  );
   await page.waitForFunction(() => (
     document.querySelector("#bookmark-popover")?.hidden === true &&
     !document.querySelector(
@@ -1364,17 +1314,6 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     !document.querySelector("#bookmark-detail")?.hidden &&
     document.querySelector("#bookmark-detail-title")?.textContent?.trim() === "Genade"
   ));
-  const personalGraceRemovalsBefore = contributionBatches.flat().filter(
-    (event) => event.type === "verse_remove" &&
-      event.topic.local_topic_id === "grace" &&
-      event.verse.book === 43 &&
-      event.verse.chapter === 3 &&
-      event.verse.verse === 2,
-  ).length;
-  const globalGraceDeletesBefore = contributionBatches.flat().filter(
-    (event) => event.type === "topic_delete" &&
-      event.topic.local_topic_id === "grace",
-  ).length;
   await page.locator("#delete-bookmark-topic").click();
   await page.waitForFunction(() => (
     !document.querySelector(
@@ -1382,24 +1321,6 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     ) &&
     !document.querySelector("#bookmark-groups-panel")?.hidden
   ));
-  await waitForCondition(
-    () => contributionBatches.flat().filter((event) => (
-      event.type === "verse_remove" &&
-      event.topic.local_topic_id === "grace" &&
-      event.verse.book === 43 &&
-      event.verse.chapter === 3 &&
-      event.verse.verse === 2
-    )).length > personalGraceRemovalsBefore,
-    "global topic deletion did not journal its personal verse removal",
-    15_000,
-  );
-  assert.equal(
-    contributionBatches.flat().filter((event) => (
-      event.type === "topic_delete" &&
-      event.topic.local_topic_id === "grace"
-    )).length,
-    globalGraceDeletesBefore,
-  );
   await page.locator("#load-global-bookmarks").click();
   await page.waitForFunction(() => (
     document.querySelector(
@@ -1694,6 +1615,12 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     [],
   );
   assert.equal(robotRequests.some((path) => path.includes("history")), false);
+  assert.equal(
+    contributionSyncRequests.length,
+    0,
+    "browser-local bookmark edits must wait for an explicit contributor sync",
+  );
+  assert.equal(robotRequests.includes("contributions/events"), false);
   assert.deepEqual(consoleMessages, []);
   assert.deepEqual(pageErrors, []);
   assert.deepEqual(failedRequests, []);

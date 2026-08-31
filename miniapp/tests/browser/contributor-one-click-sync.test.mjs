@@ -227,7 +227,15 @@ async function createBrowserFixture(
   let shouldFailSync = failFirstSync;
   page.on("pageerror", (error) => pageErrors.push(error.message));
   page.on("requestfailed", (request) => {
-    failedRequests.push(`${request.url()}: ${request.failure()?.errorText ?? "failed"}`);
+    const errorText = request.failure()?.errorText ?? "failed";
+    const pathname = new URL(request.url()).pathname;
+    // Launch cleanup is deliberately fire-and-forget. Chromium reports an
+    // intercepted keepalive 204 as ERR_ABORTED even though the server handled
+    // it; keep every other URL and failure reason visible to the assertion.
+    if (pathname.endsWith("/api/v1/cleanup") && errorText === "net::ERR_ABORTED") {
+      return;
+    }
+    failedRequests.push(`${request.url()}: ${errorText}`);
   });
 
   const chapterBody = jsonBody(chapterPayload());
