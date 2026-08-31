@@ -253,15 +253,14 @@ class MiniAppCleanupRequestTestCase(unittest.IsolatedAsyncioTestCase):
         self,
         origin: str = "https://robot.example",
         *,
-        init_data: str | None = None,
+        token: str | None = None,
     ) -> MiniAppHttpRequest:
         return MiniAppHttpRequest(
             method="POST",
             target="/getbible/api/v1/cleanup",
             headers={
                 "Origin": origin,
-                "Authorization": f"Bearer {self.session.token}",
-                "X-Telegram-Init-Data": init_data or self.init_data,
+                "Authorization": f"Bearer {token or self.session.token}",
             },
             client_key="192.0.2.1",
         )
@@ -282,7 +281,7 @@ class MiniAppCleanupRequestTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_ready_signal_hides_authentication_failures(self) -> None:
         status = await self.server._cleanup_session_request(
-            self.request(init_data="invalid-init-data")
+            self.request(token="missing-session-token")
         )
 
         self.assertEqual(status, 401)

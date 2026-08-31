@@ -400,6 +400,12 @@ class MiniAppSession:
     translation: str
     launch: MiniAppLaunch
     init_data_digest: bytes
+    # The raw contributor capability is retained only in this bounded,
+    # in-memory session.  Keeping it here lets an exact session-exchange retry
+    # recover a response that was lost after the capability was committed,
+    # without returning the capability in JSON or persisting it in plaintext.
+    contribution_capability_token: str | None = field(default=None, repr=False)
+    contribution_capability_issued: bool = False
     searches: OrderedDict[str, MiniAppSearch] = field(default_factory=OrderedDict)
     available_selections: OrderedDict[str, MiniAppSelection] = field(default_factory=OrderedDict)
     basket: list[MiniAppSelection] = field(default_factory=list)
@@ -552,6 +558,36 @@ class MiniAppSessionStore:
                 if (
                     session.user_id == user_id
                     and session.launch.token == launch_token
+                ):
+                    return session
+            return None
+
+    def find_by_init_data(
+        self,
+        init_data_digest: bytes,
+        *,
+        user_id: int,
+    ) -> MiniAppSession | None:
+        """Find the active session created by one exact authenticated exchange.
+
+        This lookup makes ``POST /session`` response-loss retries idempotent.
+        It is deliberately bound to both the validated Telegram user and the
+        SHA-256 digest of the complete signed initData payload.
+        """
+        if not isinstance(init_data_digest, bytes) or len(init_data_digest) != 32:
+            raise ValueError("init_data_digest must be a SHA-256 digest.")
+        if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+            raise ValueError("user_id must be a positive Telegram user ID.")
+        with self._guard:
+            now = self._clock()
+            for session in reversed(tuple(self._sessions.values())):
+                if (
+                    session.user_id == user_id
+                    and now - session.created_at < self._ttl
+                    and secrets.compare_digest(
+                        session.init_data_digest,
+                        init_data_digest,
+                    )
                 ):
                     return session
             return None

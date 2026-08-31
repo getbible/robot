@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
@@ -30,7 +28,12 @@ from .bookmark_backup import (
     BookmarkRestoreFile,
 )
 from .contributions import ContributionStore
-from .miniapp_api import MiniAppApi, MiniAppHttpRequest, MiniAppIngressLimiter
+from .miniapp_api import (
+    MAX_CONTRIBUTION_SYNC_REQUEST_BYTES,
+    MiniAppApi,
+    MiniAppHttpRequest,
+    MiniAppIngressLimiter,
+)
 from .miniapp_auth import TelegramInitDataReplayGuard, TelegramInitDataValidator
 from .miniapp_cleanup import MiniAppLaunchCleanup
 from .miniapp_sessions import (
@@ -121,6 +124,12 @@ class MiniAppApiHandler(RequestHandler):
             and self.path_args[0] == "bookmarks/backup"
         ):
             self._body_limit = MAX_BOOKMARK_BACKUP_REQUEST_BYTES
+        elif (
+            self.request.method == "POST"
+            and self.path_args
+            and self.path_args[0] == "contributions/sync"
+        ):
+            self._body_limit = MAX_CONTRIBUTION_SYNC_REQUEST_BYTES
         set_max_body_size = getattr(
             self.request.connection,
             "set_max_body_size",
@@ -483,7 +492,7 @@ class MiniAppServer:
         return remembered
 
     async def _cleanup_session_request(self, request: MiniAppHttpRequest) -> int:
-        """Authenticate one browser-ready signal without blocking cleanup on rate limits."""
+        """Authenticate one browser-ready signal with its server-issued session."""
         if _header_value(request.headers, "origin") != self._public_origin:
             return 403
         authorization = _header_value(request.headers, "authorization") or ""
@@ -493,26 +502,11 @@ class MiniAppServer:
         session = self.sessions.get(match.group(1), touch=False)
         if session is None:
             return 401
-        raw_init_data = _header_value(request.headers, "x-telegram-init-data")
-        if raw_init_data is None:
-            return 401
-        try:
-            principal = self._validator.validate(
-                raw_init_data,
-                check_freshness=False,
-            )
-        except Exception:
-            return 401
-        digest = hashlib.sha256(raw_init_data.encode("utf-8")).digest()
-        if (
-            not hmac.compare_digest(digest, session.init_data_digest)
-            or principal.user_id != session.user_id
-            or (
-                session.query_id is not None
-                and principal.query_id != session.query_id
-            )
-            or not self.sessions.touch(session)
-        ):
+        # Telegram initData was already validated before this opaque session
+        # was issued. Requiring the browser to replay that large launch proof
+        # on every request adds no independent authority and makes ordinary
+        # same-origin calls depend on a fragile custom header.
+        if not self.sessions.touch(session):
             return 401
         await self._cleanup.cleanup_now(session.launch)
         return 204

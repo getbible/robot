@@ -405,7 +405,12 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.limiter.details[-1][2:], (1.0, "192.0.2.1"))
 
         response = await self.api.handle(
-            self.request("GET", "/getbible/api/v1/translations", token=token)
+            self.request(
+                "GET",
+                "/getbible/api/v1/translations",
+                token=token,
+                include_init_data=False,
+            )
         )
         self.assertEqual(response.status, 200)
         self.assertEqual(self.limiter.details[-1][2:], (0.25, "192.0.2.1"))
@@ -898,6 +903,225 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("contributor_id", reconciled.body.decode())
 
+    async def test_capability_is_issued_only_after_approval_and_repeated_safely(self) -> None:
+        self.contributions.submit_application(42, first_name="Grace")
+        self.active_init_data = _init_data()
+        bootstrap = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": self.active_init_data},
+            )
+        )
+        self.assertEqual(bootstrap.status, 201)
+        self.assertNotIn("X-Contribution-Token", bootstrap.headers)
+        session_token = json.loads(bootstrap.body)["session_token"]
+
+        pending = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/contributions/status",
+                token=session_token,
+                include_init_data=False,
+            )
+        )
+        self.assertNotIn("X-Contribution-Token", pending.headers)
+
+        self.contributions.decide_application(42, "approved", actor="admin")
+        approved = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/contributions/status",
+                token=session_token,
+                include_init_data=False,
+            )
+        )
+        capability = approved.headers["X-Contribution-Token"]
+        self.assertTrue(capability.startswith("gbc_"))
+        repeated = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/session",
+                token=session_token,
+                include_init_data=False,
+            )
+        )
+        self.assertEqual(
+            repeated.headers["X-Contribution-Token"],
+            capability,
+        )
+        self.assertNotIn("X-Contribution-Token", json.loads(repeated.body))
+
+        self.contributions.decide_application(42, "rejected", actor="admin")
+        rejected = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/contributions/status",
+                token=session_token,
+                include_init_data=False,
+            )
+        )
+        self.assertNotIn("X-Contribution-Token", rejected.headers)
+
+    async def test_snapshot_sync_is_one_durable_idempotent_capability_request(self) -> None:
+        self.contributions.submit_application(42, first_name="Grace")
+        self.contributions.decide_application(42, "approved", actor="admin")
+        session_token = await self.exchange()
+        session = self.sessions.get(session_token, touch=False)
+        self.assertIsNotNone(session)
+        assert session is not None
+        capability = session.contribution_capability_token
+        self.assertIsNotNone(capability)
+        assert capability is not None
+
+        # The contributor capability is durable and intentionally independent
+        # of the volatile Scripture-reading session.
+        self.sessions.revoke(session_token)
+        body = {
+            "protocol_version": 1,
+            "sync_id": "sync.snapshot.0001",
+            "client_id": "browser.installation.0001",
+            "snapshot": {
+                "topics": [
+                    {
+                        "id": "local.grace",
+                        "name": "Grace",
+                        "color": "#bbf7d0",
+                    }
+                ],
+                "assignments": [
+                    {
+                        "topic_id": "local.grace",
+                        "book": 43,
+                        "chapter": 3,
+                        "verse": 16,
+                    }
+                ],
+            },
+            "operations": [],
+            "disclosure_acknowledged": True,
+        }
+        first = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/sync",
+                token=capability,
+                include_init_data=False,
+                body=body,
+            )
+        )
+        replay = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/sync",
+                token=capability,
+                include_init_data=False,
+                body=body,
+            )
+        )
+
+        self.assertEqual(first.status, 200)
+        self.assertEqual(replay.status, 200)
+        payload = json.loads(first.body)
+        replay_payload = json.loads(replay.body)
+        self.assertEqual(payload["protocol_version"], 1)
+        self.assertEqual(payload["receipt"]["sync_id"], body["sync_id"])
+        self.assertEqual(payload["receipt"]["outcome"], "accepted")
+        self.assertEqual(payload["receipt"]["accepted"], 2)
+        self.assertEqual(payload["receipt"]["event_ids"], {})
+        self.assertEqual(replay_payload["receipt"]["outcome"], "replayed")
+        self.assertEqual(
+            replay_payload["receipt"]["snapshot_digest"],
+            payload["receipt"]["snapshot_digest"],
+        )
+        self.assertEqual(payload["status"]["state"], "approved")
+        self.assertEqual(set(payload["catalog"]), {"revision", "checksum"})
+        self.assertEqual(len(self.contributions.list_events()), 2)
+        self.assertEqual(self.limiter.details[-1][2], 1.0)
+
+        body["sync_id"] = "sync.snapshot.0001.enrichment"
+        with patch.object(
+            self.contributions,
+            "current_catalog",
+            side_effect=OSError("catalog temporarily unavailable"),
+        ):
+            enriched = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/contributions/sync",
+                    token=capability,
+                    include_init_data=False,
+                    body=body,
+                )
+            )
+        self.assertEqual(enriched.status, 200)
+        self.assertEqual(json.loads(enriched.body)["receipt"]["outcome"], "accepted")
+        self.assertFalse(json.loads(enriched.body)["catalog"]["available"])
+
+    async def test_snapshot_sync_capability_failures_and_body_limit_fail_closed(self) -> None:
+        body = {
+            "protocol_version": 1,
+            "sync_id": "sync.snapshot.0002",
+            "client_id": "browser.installation.0001",
+            "snapshot": {"topics": [], "assignments": []},
+            "operations": [],
+            "disclosure_acknowledged": True,
+        }
+        missing = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/sync",
+                include_init_data=False,
+                body=body,
+            )
+        )
+        self.assertEqual(missing.status, 401)
+
+        self.contributions.submit_application(42, first_name="Grace")
+        self.contributions.decide_application(42, "approved", actor="admin")
+        session_token = await self.exchange()
+        session = self.sessions.get(session_token, touch=False)
+        assert session is not None
+        capability = session.contribution_capability_token
+        assert capability is not None
+        replacement = "A" if capability[-1] != "A" else "B"
+        tampered = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/sync",
+                token=f"{capability[:-1]}{replacement}",
+                include_init_data=False,
+                body=body,
+            )
+        )
+        self.assertEqual(tampered.status, 403)
+
+        self.contributions.decide_application(42, "rejected", actor="admin")
+        revoked = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/sync",
+                token=capability,
+                include_init_data=False,
+                body=body,
+            )
+        )
+        self.assertEqual(revoked.status, 403)
+
+        too_large = await self.api.handle(
+            MiniAppHttpRequest(
+                method="POST",
+                target="/getbible/api/v1/contributions/sync",
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": ORIGIN,
+                },
+                body=b"x" * (1024 * 1024 + 1),
+                client_key="192.0.2.1",
+            )
+        )
+        self.assertEqual(too_large.status, 413)
+
     async def test_contributor_store_failure_never_blocks_scripture_session(self) -> None:
         self.contributions.close()
         self.active_init_data = _init_data()
@@ -1286,6 +1510,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         token: str | None = None,
         origin: str | None = ORIGIN,
         init_data: str | None = None,
+        include_init_data: bool = True,
         extra_headers: dict[str, str] | None = None,
     ) -> MiniAppHttpRequest:
         headers = {"Content-Type": "application/json"}
@@ -1293,9 +1518,10 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             headers["Origin"] = origin
         if token is not None:
             headers["Authorization"] = f"Bearer {token}"
-            headers["X-Telegram-Init-Data"] = (
-                self.active_init_data if init_data is None else init_data
-            )
+            if include_init_data:
+                headers["X-Telegram-Init-Data"] = (
+                    self.active_init_data if init_data is None else init_data
+                )
         if extra_headers is not None:
             headers.update(extra_headers)
         return MiniAppHttpRequest(
@@ -1489,7 +1715,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                     body={"init_data": limited_init_data},
                 )
             )
-            self.assertEqual(replayed.status, 409)
+            self.assertEqual(replayed.status, 200)
             observer.assert_called_once()
 
     async def test_command_launch_is_owner_bound_and_sets_initial_route(self) -> None:
@@ -1518,7 +1744,11 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 body={"init_data": _init_data(start_param=launch.token)},
             )
         )
-        self.assertEqual(replay.status, 409)
+        self.assertEqual(replay.status, 200)
+        self.assertEqual(
+            json.loads(replay.body)["session_token"],
+            payload["session_token"],
+        )
 
     async def test_session_declares_the_search_budget_the_page_must_wait_out(
         self,
@@ -1639,7 +1869,9 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 401)
         self.assertEqual(self.cleaned_launches, [launch])
 
-    async def test_valid_init_data_cannot_be_exchanged_twice(self) -> None:
+    async def test_exact_session_exchange_retry_returns_the_same_session(self) -> None:
+        self.contributions.submit_application(42, first_name="Grace")
+        self.contributions.decide_application(42, "approved", actor="admin")
         raw = _init_data()
         first = await self.api.handle(
             self.request(
@@ -1656,7 +1888,15 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(first.status, 201)
-        self.assertEqual(second.status, 409)
+        self.assertEqual(second.status, 200)
+        self.assertEqual(
+            json.loads(second.body)["session_token"],
+            json.loads(first.body)["session_token"],
+        )
+        self.assertEqual(
+            second.headers["X-Contribution-Token"],
+            first.headers["X-Contribution-Token"],
+        )
 
     async def test_invalid_launch_and_bootstrap_failure_do_not_burn_init_data(
         self,
@@ -1731,7 +1971,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(second.status, 201)
 
-    async def test_session_rejects_a_different_valid_init_data_for_same_user(self) -> None:
+    async def test_session_bearer_does_not_require_repeated_init_data(self) -> None:
         token = await self.exchange()
         self.active_init_data = _init_data(user_id=42, start_param="different-launch")
         response = await self.api.handle(
@@ -1740,9 +1980,10 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 "/getbible/api/v1/session",
                 token=token,
                 origin=None,
+                include_init_data=False,
             )
         )
-        self.assertEqual(response.status, 401)
+        self.assertEqual(response.status, 200)
 
     async def test_api_path_tracks_public_url_and_returns_security_headers(self) -> None:
         token = await self.exchange()

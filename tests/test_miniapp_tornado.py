@@ -1,14 +1,26 @@
 import hashlib
+import hmac
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from urllib.parse import urlencode
 
 from tornado.testing import AsyncHTTPTestCase
 from tornado.web import Application, URLSpec
 
-from modules.miniapp_api import MiniAppHttpRequest, MiniAppHttpResponse
+from modules.catalog import TranslationOption
+from modules.contributions import ContributionStore
+from modules.miniapp_api import (
+    MAX_CONTRIBUTION_SYNC_REQUEST_BYTES,
+    MiniAppApi,
+    MiniAppHttpRequest,
+    MiniAppHttpResponse,
+)
+from modules.miniapp_auth import TelegramInitDataValidator
+from modules.miniapp_sessions import MiniAppLaunchStore, MiniAppSessionStore
 from modules.miniapp_tornado import (
     MAX_MINI_APP_REQUEST_BYTES,
     ClientAddressResolver,
@@ -16,6 +28,60 @@ from modules.miniapp_tornado import (
     MiniAppStaticHandler,
     miniapp_api_handlers,
 )
+from modules.preferences import SearchDefaults, UserPreferences
+
+_INTEGRATION_TOKEN = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+_INTEGRATION_ORIGIN = "https://robot.example"
+
+
+def _signed_init_data(user_id: int) -> str:
+    fields = {
+        "auth_date": "1700000000",
+        "query_id": "transport-integration-query",
+        "user": json.dumps(
+            {"id": user_id, "first_name": "Grace"},
+            separators=(",", ":"),
+        ),
+    }
+    check = "\n".join(f"{key}={value}" for key, value in sorted(fields.items()))
+    secret = hmac.new(
+        b"WebAppData",
+        _INTEGRATION_TOKEN.encode(),
+        hashlib.sha256,
+    ).digest()
+    fields["hash"] = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    return urlencode(fields)
+
+
+class _TransportService:
+    settings = SimpleNamespace(
+        mini_app_max_selections=50,
+        search_timeout=150.0,
+    )
+
+    async def translations(self) -> tuple[TranslationOption, ...]:
+        return (TranslationOption("kjv", "King James Version", "English"),)
+
+
+class _TransportPreferences:
+    def translation_for(self, user_id: int) -> str:
+        return "kjv"
+
+    def preferences_for(self, user_id: int) -> UserPreferences:
+        return UserPreferences("kjv", SearchDefaults(), None)
+
+    def update_preferences(
+        self,
+        user_id: int,
+        *,
+        translation: str,
+    ) -> UserPreferences:
+        return UserPreferences(translation, SearchDefaults(), None)
+
+
+class _TransportLimiter:
+    async def acquire(self, **kwargs: object) -> None:
+        return None
 
 
 class _RecordingApi:
@@ -131,7 +197,7 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
         self.assertEqual(self.cleanup_requests[0].method, "POST")
         self.assertEqual(self.api.requests, [])
 
-    def test_streaming_body_limit_is_large_only_for_bookmark_backup(self) -> None:
+    def test_streaming_body_limits_are_route_specific(self) -> None:
         oversized_ordinary = self.fetch(
             "/app/api/v1/preferences",
             method="POST",
@@ -152,6 +218,16 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
             method="POST",
             body=b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
         )
+        allowed_sync = self.fetch(
+            "/app/api/v1/contributions/sync",
+            method="POST",
+            body=b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
+        )
+        oversized_sync = self.fetch(
+            "/app/api/v1/contributions/sync",
+            method="POST",
+            body=b"x" * (MAX_CONTRIBUTION_SYNC_REQUEST_BYTES + 1),
+        )
 
         # Tornado rejects an over-limit Content-Length at the HTTP transport
         # boundary with 400; a chunked overrun raised by the handler is 413.
@@ -159,7 +235,13 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
         self.assertIn(oversized_lookalike.code, (400, 413))
         self.assertIn(oversized_wrong_method.code, (400, 413))
         self.assertEqual(allowed_backup.code, 202)
-        self.assertEqual(len(self.api.requests), 1)
+        self.assertEqual(allowed_sync.code, 202)
+        self.assertIn(oversized_sync.code, (400, 413))
+        self.assertEqual(len(self.api.requests), 2)
+        self.assertEqual(
+            self.api.requests[-2].body,
+            b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
+        )
         self.assertEqual(
             self.api.requests[-1].body,
             b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
@@ -179,6 +261,147 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
         self.assertEqual(
             asset.headers["Cache-Control"],
             "no-cache, max-age=0, must-revalidate",
+        )
+
+
+class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
+    """Exercise the real HTTP, API, capability, and SQLite sync boundary."""
+
+    def setUp(self) -> None:
+        self.database_directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.database_directory.name) / "contributions.sqlite3"
+        self.contributions = ContributionStore(path=str(self.database_path))
+        self.contributions.submit_application(42, first_name="Grace")
+        self.contributions.decide_application(42, "approved", actor="admin")
+        self.api = MiniAppApi(
+            service=_TransportService(),  # type: ignore[arg-type]
+            preferences=_TransportPreferences(),  # type: ignore[arg-type]
+            limiter=_TransportLimiter(),  # type: ignore[arg-type]
+            sessions=MiniAppSessionStore(max_sessions=10, ttl_seconds=600),
+            launches=MiniAppLaunchStore(max_launches=10, ttl_seconds=300),
+            validator=TelegramInitDataValidator(
+                _INTEGRATION_TOKEN,
+                wall_clock=lambda: 1_700_000_000,
+            ),
+            public_url=f"{_INTEGRATION_ORIGIN}/getbible",
+            post_scripture=AsyncMock(return_value=(101,)),
+            contributions=self.contributions,
+        )
+        super().setUp()
+
+    def tearDown(self) -> None:
+        try:
+            super().tearDown()
+        finally:
+            self.contributions.close()
+            self.database_directory.cleanup()
+
+    def get_app(self) -> Application:
+        return Application(
+            miniapp_api_handlers(
+                self.api,
+                public_path="/getbible",
+                address_resolver=ClientAddressResolver(("127.0.0.1/32", "::1/128")),
+            ),
+            serve_traceback=False,
+        )
+
+    def test_signed_exchange_snapshot_and_restart_safe_replay(self) -> None:
+        session_response = self.fetch(
+            "/getbible/api/v1/session",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": _INTEGRATION_ORIGIN,
+            },
+            body=json.dumps({"init_data": _signed_init_data(42)}).encode(),
+        )
+
+        self.assertEqual(session_response.code, 201)
+        capability = session_response.headers.get("X-Contribution-Token")
+        self.assertIsNotNone(capability)
+        assert capability is not None
+        self.assertRegex(capability, r"\Agbc_[A-Za-z0-9_-]{43}\Z")
+        self.assertTrue(
+            json.loads(session_response.body)["contributions"]["can_contribute"]
+        )
+
+        sync_document = {
+            "protocol_version": 1,
+            "sync_id": "transport.integration.0001",
+            "client_id": "transport.integration.browser",
+            "snapshot": {
+                "topics": [
+                    {
+                        "id": "local.grace",
+                        "name": "Grace",
+                        "color": "#bbf7d0",
+                    }
+                ],
+                "assignments": [
+                    {
+                        "topic_id": "local.grace",
+                        "book": 43,
+                        "chapter": 3,
+                        "verse": 16,
+                    }
+                ],
+            },
+            "operations": [],
+            "disclosure_acknowledged": True,
+        }
+        sync_body = json.dumps(sync_document, separators=(",", ":")).encode()
+        sync_headers = {
+            "Authorization": f"Bearer {capability}",
+            "Content-Type": "application/json",
+            "Origin": _INTEGRATION_ORIGIN,
+        }
+
+        first_response = self.fetch(
+            "/getbible/api/v1/contributions/sync",
+            method="POST",
+            headers=sync_headers,
+            body=sync_body,
+        )
+        self.assertEqual(first_response.code, 200)
+        first_receipt = json.loads(first_response.body)["receipt"]
+        self.assertEqual(first_receipt["outcome"], "accepted")
+        self.assertEqual(first_receipt["accepted"], 2)
+
+        # Model a process restart: discard the live connection and make the API
+        # use a fresh store. Both the bearer capability and exact sync receipt
+        # must survive because they are durable SQLite state.
+        self.contributions.close()
+        self.contributions = ContributionStore(path=str(self.database_path))
+        self.api._contributions = self.contributions
+
+        replay_response = self.fetch(
+            "/getbible/api/v1/contributions/sync",
+            method="POST",
+            headers=sync_headers,
+            body=sync_body,
+        )
+        self.assertEqual(replay_response.code, 200)
+        replay_receipt = json.loads(replay_response.body)["receipt"]
+        self.assertEqual(replay_receipt["outcome"], "replayed")
+        self.assertEqual(
+            replay_receipt["snapshot_digest"],
+            first_receipt["snapshot_digest"],
+        )
+
+        events = self.contributions.list_events()
+        self.assertEqual(
+            [event.event_type for event in events],
+            ["topic_upsert", "verse_add"],
+        )
+        self.assertEqual(len({event.id for event in events}), 2)
+        self.assertEqual(events[0].local_topic_id, "local.grace")
+        self.assertEqual(
+            (events[1].book, events[1].chapter, events[1].verse),
+            (43, 3, 16),
+        )
+        self.assertFalse(
+            self.contributions.contribution_status(42)["disclosure_required"]
         )
 
 
@@ -382,22 +605,13 @@ class MiniAppServerLifecycleTestCase(unittest.IsolatedAsyncioTestCase):
         headers = {
             "Origin": "https://robot.example",
             "Authorization": f"Bearer {token}",
-            "X-Telegram-Init-Data": init_data,
         }
         server.sessions.get.return_value = None
         self.assertEqual(await server._cleanup_session_request(request(headers)), 401)
 
         server.sessions.get.return_value = session
-        server._validator.validate.side_effect = ValueError("invalid")
-        self.assertEqual(await server._cleanup_session_request(request(headers)), 401)
-
-        server._validator.validate.side_effect = None
-        server._validator.validate.return_value = principal
         self.assertEqual(await server._cleanup_session_request(request(headers)), 204)
-        server._validator.validate.assert_called_with(
-            init_data,
-            check_freshness=False,
-        )
+        server._validator.validate.assert_not_called()
         server._cleanup.cleanup_now.assert_awaited_once_with(launch)
 
 

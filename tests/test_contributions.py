@@ -68,6 +68,27 @@ def _empty_catalog() -> dict[str, object]:
     }
 
 
+def _snapshot(
+    *,
+    topic_id: str = "local.grace",
+    name: str = "Grace",
+    color: str = "#BBF7D0",
+    assignments: tuple[tuple[int, int, int], ...] = ((43, 3, 16),),
+) -> dict[str, object]:
+    return {
+        "topics": [{"id": topic_id, "name": name, "color": color}],
+        "assignments": [
+            {
+                "topic_id": topic_id,
+                "book": book,
+                "chapter": chapter,
+                "verse": verse,
+            }
+            for book, chapter, verse in assignments
+        ],
+    }
+
+
 class ContributionStoreTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -255,7 +276,7 @@ class ContributionStoreTestCase(unittest.TestCase):
 
         with sqlite3.connect(self.path) as connection:
             self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
 
         self.store = ContributionStore(path=str(self.path))
         application = self.store.application_for(42)
@@ -287,7 +308,7 @@ class ContributionStoreTestCase(unittest.TestCase):
 
         self.store = ContributionStore(path=str(self.path))
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
         self.assertEqual(self.store.current_catalog().checksum, first.checksum)
 
     def test_v3_notification_schema_migrates_and_recovers_unclaimable_leases(
@@ -337,7 +358,7 @@ class ContributionStoreTestCase(unittest.TestCase):
 
         self.store = ContributionStore(path=str(self.path))
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
             columns = {
                 str(row[1])
                 for row in connection.execute("PRAGMA table_info(contribution_notifications)")
@@ -346,6 +367,35 @@ class ContributionStoreTestCase(unittest.TestCase):
         recovered = self.store.claim_notifications(lease_seconds=60)
         self.assertEqual(len(recovered), 1)
         self.assertNotEqual(recovered[0].claim_token, claimed.claim_token)
+
+    def test_v4_schema_migrates_snapshot_receipts_and_capabilities(self) -> None:
+        self.store.close()
+        with sqlite3.connect(self.path) as connection:
+            connection.executescript(
+                """
+                DROP TABLE contribution_sync_receipts;
+                DROP TABLE contribution_client_snapshots;
+                DROP TABLE contributor_capabilities;
+                PRAGMA user_version=4;
+                """
+            )
+
+        self.store = ContributionStore(path=str(self.path))
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        self.assertTrue(
+            {
+                "contribution_sync_receipts",
+                "contribution_client_snapshots",
+                "contributor_capabilities",
+            }.issubset(tables)
+        )
 
     def test_open_repairs_missing_catalogue_seeds_for_v3_and_current_schema(
         self,
@@ -554,6 +604,234 @@ class ContributionStoreTestCase(unittest.TestCase):
                 [_verse_event(verse=17)],
             )
         self.assertEqual(len(self.store.list_events()), 2)
+
+    def test_snapshot_sync_baseline_and_deletion_diff_are_atomic(self) -> None:
+        self.approve()
+
+        baseline = self.store.synchronize_snapshot(
+            42,
+            sync_id="sync.baseline",
+            client_id="browser.primary",
+            snapshot=_snapshot(),
+        )
+        self.assertEqual(baseline.accepted, 2)
+        self.assertFalse(baseline.replayed_sync)
+        self.assertEqual(
+            [event.event_type for event in self.store.list_events()],
+            ["topic_upsert", "verse_add"],
+        )
+
+        deletion = self.store.synchronize_snapshot(
+            42,
+            sync_id="sync.deletion",
+            client_id="browser.primary",
+            snapshot={"topics": [], "assignments": []},
+        )
+        self.assertEqual(deletion.accepted, 2)
+        self.assertEqual(
+            [event.event_type for event in self.store.list_events()][-2:],
+            ["verse_remove", "topic_delete"],
+        )
+
+    def test_snapshot_sync_exact_receipt_replays_after_reopen(self) -> None:
+        self.approve()
+        first = self.store.synchronize_snapshot(
+            42,
+            sync_id="sync.durable",
+            client_id="browser.primary",
+            snapshot=_snapshot(),
+        )
+        self.store.close()
+        self.store = ContributionStore(path=str(self.path))
+
+        replay = self.store.synchronize_snapshot(
+            42,
+            sync_id="sync.durable",
+            client_id="browser.primary",
+            snapshot=_snapshot(),
+        )
+        self.assertTrue(replay.replayed_sync)
+        self.assertEqual(replay.accepted, first.accepted)
+        self.assertEqual(replay.replayed, first.replayed)
+        self.assertEqual(replay.event_ids, first.event_ids)
+        self.assertEqual(replay.snapshot_digest, first.snapshot_digest)
+        self.assertEqual(len(self.store.list_events()), 2)
+        self.assertEqual([event.replay_count for event in self.store.list_events()], [0, 0])
+
+    def test_snapshot_sync_idempotency_conflict_has_no_mutation(self) -> None:
+        self.approve()
+        first = self.store.synchronize_snapshot(
+            42,
+            sync_id="sync.conflict",
+            client_id="browser.primary",
+            snapshot={"topics": [], "assignments": []},
+            operations=[_topic_event("explicit.first")],
+        )
+        events_before = self.store.list_events()
+
+        with self.assertRaises(ContributionIdempotencyConflict):
+            self.store.synchronize_snapshot(
+                42,
+                sync_id="sync.conflict",
+                client_id="browser.primary",
+                snapshot={"topics": [], "assignments": []},
+                operations=[_topic_event("explicit.changed")],
+            )
+
+        self.assertEqual(self.store.list_events(), events_before)
+        self.assertEqual(first.accepted, 1)
+
+    def test_snapshot_sync_validation_and_disclosure_are_all_or_nothing(self) -> None:
+        self.store.submit_application(42, first_name="Grace")
+        self.store.decide_application(42, "approved", actor="admin")
+        invalid = _snapshot()
+        invalid["assignments"] = [
+            {
+                "topic_id": "local.grace",
+                "book": 67,
+                "chapter": 1,
+                "verse": 1,
+            }
+        ]
+        with self.assertRaises(ContributionError):
+            self.store.synchronize_snapshot(
+                42,
+                sync_id="sync.invalid",
+                client_id="browser.primary",
+                snapshot=invalid,
+                disclosure_acknowledged=True,
+            )
+        application = self.store.application_for(42)
+        assert application is not None
+        self.assertIsNone(application.disclosure_acknowledged_at)
+        self.assertEqual(self.store.list_events(), ())
+
+        accepted = self.store.synchronize_snapshot(
+            42,
+            sync_id="sync.acknowledged",
+            client_id="browser.primary",
+            snapshot=_snapshot(),
+            disclosure_acknowledged=True,
+        )
+        self.assertEqual(accepted.accepted, 2)
+        application = self.store.application_for(42)
+        assert application is not None
+        self.assertIsNotNone(application.disclosure_acknowledged_at)
+        self.assertEqual(
+            len(
+                [
+                    entry
+                    for entry in self.store.list_audit()
+                    if entry["action"] == "disclosure_acknowledged"
+                ]
+            ),
+            1,
+        )
+
+    def test_snapshot_sync_enforces_distinct_verse_limit_without_writes(self) -> None:
+        self.approve()
+        oversized = _snapshot(
+            assignments=tuple((1, 1, verse) for verse in range(1, 802))
+        )
+        with self.assertRaisesRegex(ContributionError, "800 unique verses"):
+            self.store.synchronize_snapshot(
+                42,
+                sync_id="sync.too-many-verses",
+                client_id="browser.primary",
+                snapshot=oversized,
+            )
+        self.assertEqual(self.store.list_events(), ())
+
+    def test_first_snapshot_reconstructs_legacy_journal_before_diffing(self) -> None:
+        self.approve()
+        self.store.record_events(42, [_topic_event(), _verse_event()])
+
+        result = self.store.synchronize_snapshot(
+            42,
+            sync_id="sync.legacy-delete",
+            client_id="browser.primary",
+            snapshot={"topics": [], "assignments": []},
+        )
+
+        self.assertEqual(result.accepted, 2)
+        self.assertEqual(
+            [event.event_type for event in self.store.list_events()],
+            ["topic_upsert", "verse_add", "verse_remove", "topic_delete"],
+        )
+
+    def test_second_client_first_snapshot_is_additive_not_legacy_reconstructed(self) -> None:
+        self.approve()
+        first = self.store.synchronize_snapshot(
+            42,
+            sync_id="sync.first-client",
+            client_id="browser.primary",
+            snapshot=_snapshot(),
+        )
+        second = self.store.synchronize_snapshot(
+            42,
+            sync_id="sync.second-client",
+            client_id="browser.secondary",
+            snapshot=_snapshot(
+                topic_id="local.mercy",
+                name="Mercy",
+                color="#123456",
+                assignments=(),
+            ),
+        )
+
+        self.assertEqual(first.accepted, 2)
+        self.assertEqual(second.accepted, 1)
+        self.assertNotIn("topic_delete", [event.event_type for event in self.store.list_events()])
+
+    def test_contributor_capability_persists_without_storing_raw_token(self) -> None:
+        self.approve()
+        token = self.store.issue_capability(42)
+        self.assertRegex(token, r"\Agbc_[A-Za-z0-9_-]{43}\Z")
+        with sqlite3.connect(self.path) as connection:
+            stored = connection.execute(
+                "SELECT token_digest FROM contributor_capabilities"
+            ).fetchone()
+            assert stored is not None
+            self.assertNotIn(token.encode("ascii"), bytes(stored[0]))
+
+        self.store.close()
+        self.store = ContributionStore(path=str(self.path))
+        self.assertEqual(self.store.authenticate_capability(token), 42)
+
+    def test_contributor_capability_expires_and_is_pruned(self) -> None:
+        self.approve()
+        token = self.store.issue_capability(42)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("UPDATE contributor_capabilities SET expires_at = 0")
+
+        with self.assertRaises(ContributionNotAllowed):
+            self.store.authenticate_capability(token)
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM contributor_capabilities").fetchone()[0],
+                0,
+            )
+
+    def test_contributor_capabilities_are_bounded_and_revoked_with_application(self) -> None:
+        self.approve()
+        tokens = [self.store.issue_capability(42) for _ in range(20)]
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM contributor_capabilities").fetchone()[0],
+                16,
+            )
+        with self.assertRaises(ContributionNotAllowed):
+            self.store.authenticate_capability(tokens[0])
+        self.assertEqual(self.store.authenticate_capability(tokens[-1]), 42)
+
+        self.store.decide_application(42, "revoked", actor="admin")
+        with self.assertRaises(ContributionNotAllowed):
+            self.store.authenticate_capability(tokens[-1])
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM contributor_capabilities").fetchone()[0],
+                0,
+            )
 
     def test_private_sync_status_tracks_publication_without_leaking_contributors(
         self,
