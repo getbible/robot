@@ -91,12 +91,22 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   be removed; removing a global topic is user-local and **Add all** restores
   it. Approved contributors alone see the collapsible **Manage Contribution**
   panel immediately below Global topics.
-- **Sync now** uses one bounded same-origin HTTPS request with a revocable
-  server-issued contributor capability. Robot atomically accepts the current
-  topic/assignment snapshot and pending explicit operations, then returns a
-  durable idempotent receipt, current status, and catalogue checksum in the
-  same response. It requires no WebSocket, additional port, or repeated raw
-  Telegram `initData` header.
+- **Push** hands a contribution to Telegram itself. Launched from the bot's
+  persistent **Push contribution** reply-keyboard button, the Mini App
+  serializes one bounded snapshot envelope, compresses and base64url-encodes
+  it, and sends numbered `GBC1` chunks of at most 4096 bytes through
+  `Telegram.WebApp.sendData()`. Telegram delivers each chunk to the bot as a
+  `web_app_data` service message on the ordinary update channel, so a push
+  needs no inbound port, extra route, WebSocket, or bearer token. The bot
+  stages the chunks durably, verifies the SHA-256 digest, commits the
+  snapshot atomically with a durable idempotent receipt, and confirms in the
+  chat.
+- **Pull** uses the existing authenticated HTTPS reads: it refreshes
+  contributor status, confirms any pending push receipt, strictly
+  revalidates the reviewed global catalogue, and re-adds it. Published
+  contributor topics reclassify from personal (**P**) to global (**G**)
+  without touching personal verses outside the global set. Status refreshes
+  at session bootstrap and on Pull; there is no background polling.
 - Personal bookmark aggregate version 3, topics, the clearable recently-used
   topic order, the active topic, and the compact last-read coordinate reconcile
   by timestamp across scoped
@@ -126,7 +136,8 @@ Robot protects actions with:
 - fresh Telegram-signed `initData` at the initial session exchange;
 - owner-bound, one-time launch tokens;
 - bounded opaque sessions with a three-hour default absolute lifetime;
-- a separate revocable capability for approved-contributor synchronization;
+- contributor pushes accepted only from Telegram's own `web_app_data` uplink,
+  rechecked against current approval on every staging and commit write;
 - user/chat/topic binding;
 - bounded request bodies and output;
 - per-user, per-chat, and trusted-client rate limits;
@@ -279,8 +290,8 @@ The permanent release gate requires:
 - scoped durable reading-history move-to-front/reopen/remove/clear and persistence tests;
 - bookmark topic/domain, Telegram storage reconciliation, bounded JSON, and
   private-chat backup/restore tests;
-- one-request contribution snapshot, atomic receipt, capability revocation,
-  and exact-replay tests;
+- chunked contribution push staging, digest and decompression bounds, atomic
+  receipt, and exact-replay tests;
 - no pre-Post Robot selection mutation;
 - authoritative idempotent Post tests;
 - Bandit, dependency audit, secret scan, systemd verification, and CodeQL.
@@ -315,9 +326,10 @@ After deploying one exact green commit, verify:
 18. the unified topic list identifies global links with **G**, supports
     per-link hide and per-topic/all-catalog reset, and never includes those
     links in personal sync or backup;
-19. approved-contributor Sync now completes through one request, exact retries
-    return the same durable receipt, and an ordinary or revoked user cannot
-    submit;
+19. an approved contributor's Push is confirmed by the bot in the chat,
+    resending the identical transfer returns the same durable receipt without
+    duplicates, Pull reclassifies published topics from personal to global,
+    and an ordinary or revoked user cannot submit;
 20. private command and launcher cleanup still works.
 
 Record the deployed commit SHA and permanent CI/CodeQL run links with release evidence.
