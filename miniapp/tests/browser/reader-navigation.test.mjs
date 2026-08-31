@@ -1228,15 +1228,16 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     ).innerText(),
     "Genade",
   );
+  assert.equal(
+    await page.locator(
+      '.bookmark-group-card[data-bookmark-topic="grace"] ' +
+        ".bookmark-contribution-badge",
+    ).innerText(),
+    "G",
+  );
   await page.locator("#bookmark-topic-manager summary").click();
   const coreGraceEditor = page.locator('[data-topic-editor="grace"]');
-  assert.equal(
-    await coreGraceEditor.locator(".bookmark-topic-editor__name--core").innerText(),
-    "Genade",
-  );
-  assert.equal(await coreGraceEditor.locator('[data-topic-name="grace"]').count(), 0);
-  assert.equal(await coreGraceEditor.locator('[data-topic-color="grace"]').count(), 1);
-  assert.equal(await coreGraceEditor.locator('[data-topic-delete="grace"]').count(), 1);
+  assert.equal(await coreGraceEditor.count(), 0);
   await ensureBottomNavigationExpanded(page);
 
   await page.setViewportSize({ width: 320, height: 844 });

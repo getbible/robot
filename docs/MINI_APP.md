@@ -149,15 +149,16 @@ and Telegram `DeviceStorage`, surviving a discarded Desktop WebView store.
 They never consume personal records, enter `CloudStorage`, or enter backups.
 
 Personal records are bounded to 800 canonical verses, and each may belong to
-multiple topics without consuming another verse slot. Built-in topic names are
-localized constants and cannot be renamed, though their colors can be changed
-and they can be removed. Custom topics remain user-named and support add,
-rename, recolor, and removal. Topic removal warns that its personal assignments
-will also be removed. **Restore default tags** adds only missing defaults and
-preserves recolors, custom topics, and personal bookmarks. The global catalogue
-provider merges a validated, reviewed per-instance overlay over the bundled
-catalogue. The bundled source remains available when the overlay request,
-validation, or local cache fails.
+multiple topics without consuming another verse slot. Global topic definitions
+are reviewed server-owned metadata and do not appear in the personal topic
+editor; their visibility and verse exclusions use the separate global controls.
+Custom topics remain user-named and support add, rename, recolor, and removal.
+Personal topic removal warns that its personal assignments will also be
+removed. **Restore default tags** adds only missing defaults and preserves
+custom topics and personal bookmarks. The global catalogue provider merges a
+validated, reviewed per-instance overlay over the bundled catalogue. The
+bundled source remains available when the overlay request, validation, or local
+cache fails.
 
 `BookmarkStore` writes personal aggregate version 3 immediately to scoped
 `localStorage`. `TelegramBookmarkStorage` compares timestamped candidates from

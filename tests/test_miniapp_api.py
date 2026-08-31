@@ -1099,6 +1099,47 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(rejected.body)["error"], "invalid_contribution")
         self.assertEqual(len(self.contributions.list_events()), 2)
 
+    async def test_contribution_failure_access_log_records_only_safe_error_code(
+        self,
+    ) -> None:
+        self.contributions.submit_application(42, first_name="Grace")
+        self.contributions.decide_application(42, "approved", actor="admin")
+        self.contributions.acknowledge_disclosure(42)
+        token = await self.exchange()
+        self.api._audit_settings = SimpleNamespace(
+            audit_log_mode="metadata",
+            audit_identity_mode="disabled",
+            telegram_api_token=TOKEN,
+        )
+        private_message = "book must be between 1 and 66."
+
+        with patch("modules.miniapp_api.audit_event") as record:
+            rejected = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/contributions/events",
+                    token=token,
+                    body={
+                        "events": [
+                            {
+                                "client_event_id": "verse.invalid.book",
+                                "type": "verse_add",
+                                "topic": {"local_topic_id": "local.grace"},
+                                "verse": {"book": 67, "chapter": 1, "verse": 1},
+                            }
+                        ]
+                    },
+                )
+            )
+
+        self.assertEqual(rejected.status, 400)
+        self.assertIn(private_message, rejected.body.decode())
+        metadata = record.call_args.kwargs["metadata"]
+        self.assertEqual(metadata["error_code"], "invalid_contribution")
+        self.assertEqual(metadata["route"], "contributions/events")
+        self.assertNotIn("message", metadata)
+        self.assertNotIn(private_message, json.dumps(metadata))
+
     async def test_contribution_receipts_are_stable_scoped_and_opaque(self) -> None:
         payload = {
             "events": [

@@ -118,8 +118,8 @@ chosen topic.
 3. From Home, choose **Manage** in the Bookmarks summary.
 4. Search localized built-in topic names or custom topic names, open a topic to
    review its verses, or add, rename, recolor, and remove custom topics.
-   Built-in names are translated and read-only, while their colors can be
-   changed and the topics can be removed.
+   Global definitions are server-owned and stay outside the personal topic
+   editor; use their global controls to change visibility or verse exclusions.
 5. Open a bookmarked verse in Bible or remove it from the topic detail view.
 
 Above topic search, **Add all** and **Remove all** control the complete bundled

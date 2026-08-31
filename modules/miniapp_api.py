@@ -78,6 +78,7 @@ from .service import ScriptureQuery, ScriptureService
 LOGGER = logging.getLogger(__name__)
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
 _BEARER_RE = re.compile(r"Bearer ([A-Za-z0-9_-]{16,128})\Z")
+_ERROR_CODE_RE = re.compile(r"[a-z0-9_]{1,64}\Z")
 _DIRECT_SELECTION_RE = re.compile(
     r"gbd_([a-z0-9][a-z0-9._-]{0,63})_([0-9]{3})_([0-9]{4})_([0-9]{4})\Z"
 )
@@ -958,16 +959,28 @@ class MiniAppApi:
         settings = self._audit_settings
         if settings is None or (not self._access_log and response.status < 400):
             return
+        metadata: dict[str, str | int | float | bool | None] = {
+            "method": request.method.upper()[:8],
+            "route": self._route_name(request.target),
+            "status": response.status,
+            "duration_ms": round(duration_seconds * 1000, 3),
+        }
+        if response.status >= 400:
+            try:
+                payload = json.loads(response.body)
+            except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+                payload = None
+            error_code = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error_code, str) and _ERROR_CODE_RE.fullmatch(error_code):
+                # Error codes are a bounded protocol enum. Messages and bodies
+                # may contain private user or implementation data and are never
+                # copied into the access audit record.
+                metadata["error_code"] = error_code
         audit_event(
             LOGGER,
             settings,
             "mini_app_request",
-            metadata={
-                "method": request.method.upper()[:8],
-                "route": self._route_name(request.target),
-                "status": response.status,
-                "duration_ms": round(duration_seconds * 1000, 3),
-            },
+            metadata=metadata,
             identity=audit_identity(
                 settings,
                 user_id=session.user_id if session is not None else None,
