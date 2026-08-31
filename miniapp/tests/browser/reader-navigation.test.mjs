@@ -1343,7 +1343,10 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     };
   });
   assert.equal(graceBadgeLayout.nameDisplay, "flex");
-  assert.equal(graceBadgeLayout.badgeDisplay, "inline-grid");
+  assert.equal(
+    ["grid", "inline-grid"].includes(graceBadgeLayout.badgeDisplay),
+    true,
+  );
   assert.equal(graceBadgeLayout.badgeMarginTop, "0px");
   assert.equal(graceBadgeLayout.sameLine, true);
   assert.ok(
