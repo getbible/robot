@@ -783,17 +783,81 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       left.localeCompare(right, "en", { sensitivity: "base" })
     ),
   );
-  await page.locator("#bookmark-topic-manager summary").click();
-  const managedTopicNames = await page.locator(
-    "#bookmark-topic-editor .bookmark-topic-editor__name",
-  ).evaluateAll((items) => items.map((item) => item.value || item.textContent));
-  assert.deepEqual(
-    managedTopicNames,
-    [...managedTopicNames].sort((left, right) =>
-      left.localeCompare(right, "en", { sensitivity: "base" })
-    ),
+  const addTopicTile = page.locator("#bookmark-topic-manager");
+  assert.equal(await addTopicTile.isVisible(), true);
+  assert.match(
+    await addTopicTile.locator("summary").innerText(),
+    /Add (?:a )?topic/i,
   );
-  await page.locator("#bookmark-topic-manager summary").click();
+  assert.equal(await page.locator("#restore-default-bookmark-topics").count(), 0);
+  await addTopicTile.locator("summary").click();
+  assert.equal(await page.locator("#bookmark-topic-form").isVisible(), true);
+  await page.locator("#bookmark-topic-name").fill("Field Notes");
+  await page.locator("#bookmark-topic-color").evaluate((input) => {
+    input.value = "#fca5a5";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.locator("#bookmark-topic-form button[type=submit]").click();
+  const personalTopicCard = page.locator(".bookmark-group-card").filter({
+    has: page.getByText("Field Notes", { exact: true }),
+  });
+  await personalTopicCard.waitFor();
+  const personalTopicId = await personalTopicCard.getAttribute(
+    "data-bookmark-topic",
+  );
+  assert.ok(personalTopicId);
+  await personalTopicCard.click();
+  await page.waitForFunction(() => (
+    !document.querySelector("#bookmark-detail")?.hidden &&
+    document.querySelector("#bookmark-detail-title")?.textContent ===
+      "Field Notes"
+  ));
+
+  const detailColor = page.locator("#bookmark-detail-color");
+  const detailTitle = page.locator("#bookmark-detail-title");
+  const detailNameEdit = page.locator("#bookmark-detail-name-edit");
+  const detailNameForm = page.locator("#bookmark-detail-name-form");
+  const detailNameInput = page.locator("#bookmark-detail-name-input");
+  assert.equal(await detailColor.getAttribute("type"), "color");
+  assert.equal(await detailColor.isVisible(), true);
+  assert.equal(await page.locator("#delete-bookmark-topic").isVisible(), true);
+  assert.equal(await detailTitle.evaluate((element) => element.tagName), "H2");
+  assert.equal(await detailNameEdit.isVisible(), true);
+
+  await detailNameEdit.click();
+  assert.equal(await detailNameForm.isVisible(), true);
+  assert.equal(await detailNameInput.inputValue(), "Field Notes");
+  await detailNameInput.fill("Discard this edit");
+  await page.locator("#bookmark-detail-name-cancel").click();
+  assert.equal(await detailNameForm.isVisible(), false);
+  assert.equal(await detailTitle.innerText(), "Field Notes");
+
+  await detailNameEdit.click();
+  await detailNameInput.fill("Study Notes");
+  await detailNameInput.press("Enter");
+  await page.waitForFunction(() => (
+    document.querySelector("#bookmark-detail-title")?.textContent ===
+      "Study Notes"
+  ));
+  await detailNameForm.waitFor({ state: "hidden" });
+  await detailColor.evaluate((input) => {
+    input.value = "#a5b4fc";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.waitForFunction(() => (
+    document.querySelector("#bookmark-detail")?.dataset.bookmarkColor ===
+      "a5b4fc"
+  ));
+  await page.locator("#delete-bookmark-topic").click();
+  await page.waitForFunction((topicId) => (
+    !document.querySelector(
+      `.bookmark-group-card[data-bookmark-topic="${topicId}"]`,
+    ) &&
+    !document.querySelector("#bookmark-groups-panel")?.hidden
+  ), personalTopicId);
+  assert.equal(await page.locator(".bookmark-group-card").count(), globalTopicCount);
   const globalControlsLayout = await page.evaluate(() => {
     const section = document.querySelector(".bookmark-global").getBoundingClientRect();
     const search = document.querySelector(".bookmark-search").getBoundingClientRect();
@@ -825,6 +889,20 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   await page.waitForFunction(() => (
     !document.querySelector("#bookmark-detail")?.hidden &&
     document.querySelectorAll("#bookmark-list .bookmark-list__item").length === 1
+  ));
+  assert.equal(await page.locator("#bookmark-detail-color").isVisible(), true);
+  assert.equal(await page.locator("#delete-bookmark-topic").isVisible(), true);
+  assert.equal(await page.locator("#bookmark-detail-name-edit").isVisible(), false);
+  assert.equal(await page.locator("#bookmark-detail-name-form").isVisible(), false);
+  assert.equal(await page.locator("#bookmark-detail-title").innerText(), "Grace");
+  await page.locator("#bookmark-detail-color").evaluate((input) => {
+    input.value = "#fca5a5";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.waitForFunction(() => (
+    document.querySelector("#bookmark-detail")?.dataset.bookmarkColor ===
+      "fca5a5"
   ));
   assert.match(await page.locator("#bookmark-list").innerText(), /John 3:2/);
   assert.equal(await page.locator("#load-topic-global-bookmarks").isVisible(), true);
@@ -1235,9 +1313,96 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     ).innerText(),
     "G",
   );
-  await page.locator("#bookmark-topic-manager summary").click();
-  const coreGraceEditor = page.locator('[data-topic-editor="grace"]');
-  assert.equal(await coreGraceEditor.count(), 0);
+  const graceBadgeLayout = await page.locator(
+    '.bookmark-group-card[data-bookmark-topic="grace"] ' +
+      ".bookmark-contribution-badge",
+  ).evaluate((badge) => {
+    const nameRow = badge.closest(".bookmark-group-card__name");
+    const name = nameRow?.querySelector("strong");
+    const badgeBounds = badge.getBoundingClientRect();
+    const nameBounds = name?.getBoundingClientRect();
+    const labelRange = document.createRange();
+    labelRange.selectNodeContents(badge);
+    const labelBounds = labelRange.getBoundingClientRect();
+    const center = (bounds, axis) => axis === "x"
+      ? bounds.left + bounds.width / 2
+      : bounds.top + bounds.height / 2;
+    return {
+      badgeDisplay: getComputedStyle(badge).display,
+      badgeMarginTop: getComputedStyle(badge).marginTop,
+      horizontalCenterOffset: Math.abs(
+        center(badgeBounds, "x") - center(labelBounds, "x"),
+      ),
+      nameDisplay: nameRow ? getComputedStyle(nameRow).display : null,
+      sameLine: Boolean(nameBounds) &&
+        Math.max(nameBounds.top, badgeBounds.top) <
+          Math.min(nameBounds.bottom, badgeBounds.bottom),
+      verticalCenterOffset: Math.abs(
+        center(badgeBounds, "y") - center(labelBounds, "y"),
+      ),
+    };
+  });
+  assert.equal(graceBadgeLayout.nameDisplay, "flex");
+  assert.equal(graceBadgeLayout.badgeDisplay, "inline-grid");
+  assert.equal(graceBadgeLayout.badgeMarginTop, "0px");
+  assert.equal(graceBadgeLayout.sameLine, true);
+  assert.ok(
+    graceBadgeLayout.horizontalCenterOffset <= 2,
+    `G badge is not horizontally centered: ${JSON.stringify(graceBadgeLayout)}`,
+  );
+  assert.ok(
+    graceBadgeLayout.verticalCenterOffset <= 2,
+    `G badge is not vertically centered: ${JSON.stringify(graceBadgeLayout)}`,
+  );
+  await page.locator(
+    '.bookmark-group-card[data-bookmark-topic="grace"]',
+  ).click();
+  await page.waitForFunction(() => (
+    !document.querySelector("#bookmark-detail")?.hidden &&
+    document.querySelector("#bookmark-detail-title")?.textContent === "Genade"
+  ));
+  const personalGraceRemovalsBefore = contributionBatches.flat().filter(
+    (event) => event.type === "verse_remove" &&
+      event.topic.local_topic_id === "grace" &&
+      event.verse.book === 43 &&
+      event.verse.chapter === 3 &&
+      event.verse.verse === 2,
+  ).length;
+  const globalGraceDeletesBefore = contributionBatches.flat().filter(
+    (event) => event.type === "topic_delete" &&
+      event.topic.local_topic_id === "grace",
+  ).length;
+  await page.locator("#delete-bookmark-topic").click();
+  await page.waitForFunction(() => (
+    !document.querySelector(
+      '.bookmark-group-card[data-bookmark-topic="grace"]',
+    ) &&
+    !document.querySelector("#bookmark-groups-panel")?.hidden
+  ));
+  await waitForCondition(
+    () => contributionBatches.flat().filter((event) => (
+      event.type === "verse_remove" &&
+      event.topic.local_topic_id === "grace" &&
+      event.verse.book === 43 &&
+      event.verse.chapter === 3 &&
+      event.verse.verse === 2
+    )).length > personalGraceRemovalsBefore,
+    "global topic deletion did not journal its personal verse removal",
+    15_000,
+  );
+  assert.equal(
+    contributionBatches.flat().filter((event) => (
+      event.type === "topic_delete" &&
+      event.topic.local_topic_id === "grace"
+    )).length,
+    globalGraceDeletesBefore,
+  );
+  await page.locator("#load-global-bookmarks").click();
+  await page.waitForFunction(() => (
+    document.querySelector(
+      '.bookmark-group-card[data-bookmark-topic="grace"] strong',
+    )?.textContent === "Genade"
+  ));
   await ensureBottomNavigationExpanded(page);
 
   await page.setViewportSize({ width: 320, height: 844 });

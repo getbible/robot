@@ -328,23 +328,31 @@ test("keeps global and personal bookmarks in one controllable topic list", async
   const globalControls = html.indexOf('class="bookmark-global"');
   const loadAll = html.indexOf('id="load-global-bookmarks"');
   const removeAll = html.indexOf('id="clear-global-bookmarks"');
+  const contributorManager = html.indexOf('id="contributor-manager"');
   const search = html.indexOf('id="bookmark-topic-search"');
   const groupList = html.indexOf('id="bookmark-group-list"');
   const topicManager = html.indexOf('id="bookmark-topic-manager"');
+  const groupsEmpty = html.indexOf('id="bookmark-groups-empty"');
   const backup = html.indexOf('id="bookmark-backup-title"');
   assert.ok(
     globalControls >= 0 &&
     globalControls < loadAll &&
     loadAll < removeAll &&
-    removeAll < search &&
+    removeAll < contributorManager &&
+    contributorManager < search &&
     search < groupList &&
     groupList < topicManager &&
-    topicManager < backup,
+    topicManager < groupsEmpty &&
+    groupsEmpty < backup,
   );
   assert.match(html, /class="bookmark-global__info"/);
   assert.match(html, /data-i18n-aria-label="bookmarks\.global_info_aria"/);
-  assert.match(html, /id="restore-default-bookmark-topics"/);
-  assert.match(app, /bookmarkStore\.ensureTopics\([\s\S]*?defaultsOnly: true/);
+  assert.match(
+    html,
+    /id="bookmark-group-list"[\s\S]*?<details id="bookmark-topic-manager" class="bookmark-topic-add">[\s\S]*?<summary>[\s\S]*?class="bookmark-topic-add__icon"[^>]*>\+<\/span>[\s\S]*?data-i18n="bookmarks\.add_topic"[\s\S]*?<\/summary>[\s\S]*?id="bookmark-topic-form"[\s\S]*?id="bookmark-groups-empty"/,
+  );
+  assert.doesNotMatch(html, /id="bookmark-topic-editor"/);
+  assert.doesNotMatch(html, /id="restore-default-bookmark-topics"/);
   assert.match(
     app,
     /async function clearGlobalBookmarks[\s\S]*?globalBookmarkPreferences\.clear\(\)/,
@@ -359,6 +367,25 @@ test("keeps global and personal bookmarks in one controllable topic list", async
   assert.match(html, /id="load-topic-global-bookmarks"/);
   assert.match(html, /id="clear-topic-global-bookmarks"/);
   assert.match(html, /id="bookmark-back-to-verse"/);
+  assert.match(html, /id="bookmark-detail-color"[^>]*type="color"/);
+  assert.match(
+    html,
+    /<h2 id="bookmark-detail-title"[^>]*>[\s\S]*?id="bookmark-detail-name-edit"[\s\S]*?id="bookmark-detail-name-static"[\s\S]*?<\/h2>/,
+  );
+  assert.match(html, /id="bookmark-detail-name-form"/);
+  assert.match(html, /id="bookmark-detail-name-input"/);
+  assert.match(
+    html,
+    /id="bookmark-detail-name-cancel"[\s\S]*?data-i18n-aria-label="bookmarks\.cancel_topic_edit"/,
+  );
+  assert.match(
+    html,
+    /id="bookmark-detail-name-form"[\s\S]*?data-i18n-aria-label="bookmarks\.save_topic_edit"/,
+  );
+  assert.match(
+    html,
+    /id="delete-bookmark-topic"[\s\S]*?data-i18n="bookmarks\.delete_topic"/,
+  );
   assert.match(html, /id="bookmark-assigned-topics"/);
   assert.match(app, /marker\.textContent = "G"/);
   assert.match(app, /bookmark\.source === GLOBAL_BOOKMARK_SOURCE/);
@@ -374,6 +401,13 @@ test("keeps global and personal bookmarks in one controllable topic list", async
   assert.match(css, /data-bookmark-color="a16207"[\s\S]*?bookmark-topic-foreground: #ffffff/);
   assert.match(css, /bookmark-detail__actions \.button[\s\S]*?min-height: 44px/);
   assert.equal(UI_CATALOGS.en["bookmarks.clear"], "Clear personal");
+  assert.equal(
+    UI_CATALOGS.en["bookmarks.manage_contribution"],
+    "Manage contribution",
+  );
+  assert.equal(UI_CATALOGS.en["bookmarks.cancel_topic_edit"], "Cancel editing");
+  assert.equal(UI_CATALOGS.en["bookmarks.save_topic_edit"], "Save topic name");
+  assert.equal(UI_CATALOGS.en["bookmarks.delete_topic"], "Delete topic");
   assert.match(UI_CATALOGS.en["bookmarks.imported"], /skipped ranges/);
 });
 
@@ -382,10 +416,21 @@ test("offers one-click contributor sync with lossless personal-to-global present
   const app = await readFile(new URL("app.js", root), "utf8");
   const css = await readFile(new URL("styles.css", root), "utf8");
 
-  const manager = html.indexOf('id="bookmark-topic-manager"');
+  const globalControls = html.indexOf('class="bookmark-global"');
+  const manager = html.indexOf('id="contributor-manager"');
   const sync = html.indexOf('id="contributor-sync"');
-  const editor = html.indexOf('id="bookmark-topic-editor"');
-  assert.ok(manager >= 0 && manager < sync && sync < editor);
+  const search = html.indexOf('id="bookmark-topic-search"');
+  assert.ok(
+    globalControls >= 0 &&
+    globalControls < manager &&
+    manager < sync &&
+    sync < search,
+  );
+  assert.match(
+    html,
+    /<details[^>]*id="contributor-manager"[^>]*hidden[\s\S]*?<summary[^>]*data-i18n="bookmarks\.manage_contribution"[\s\S]*?id="contributor-sync"[\s\S]*?<\/details>/,
+  );
+  assert.doesNotMatch(html, /id="bookmark-topic-editor"/);
   assert.match(html, /id="contributor-sync-button"/);
   assert.match(html, /id="contributor-sync-status"[\s\S]*?aria-live="polite"/);
   assert.match(html, /id="contributor-sync-details"/);

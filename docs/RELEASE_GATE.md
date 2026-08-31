@@ -90,9 +90,10 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - Whole-verse bookmark identity is canonical book/chapter/verse across
   translations; reassignment updates the existing bookmark rather than
   duplicating it.
-- Topic search/detail, localized read-only built-in names, custom
-  add/rename, recolor/removal, and bookmark assign/move/reopen/remove/clear
-  behavior derive from `BookmarkStore`.
+- Topic search/detail, the add-topic plus-card, localized read-only built-in
+  names, detail-level built-in/custom recoloring, custom inline rename with
+  confirm/cancel, topic removal warnings, and bookmark
+  assign/move/reopen/remove/clear behavior derive from `BookmarkStore`.
 - The newest valid timestamped bookmark aggregate reconciles deterministically
   across scoped browser `localStorage`, Telegram `DeviceStorage`, and Telegram
   `CloudStorage`; writes are coalesced and partial API failure preserves an
@@ -101,9 +102,13 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
   version, and timestamp, or a timestamped cleared marker, and uses the same
   local/device/cloud strategy without stale-position resurrection.
 - Compact global-topic add-all/remove-all controls precede topic search, while
-  per-topic controls remain available. Their scoped preferences restore from
-  Telegram `DeviceStorage` after local WebView storage loss and never access
+  per-topic controls remain available and whole-topic removal is recoverable
+  through **Add all**. Their scoped preferences restore from Telegram
+  `DeviceStorage` after local WebView storage loss and never access
   `CloudStorage`, personal bookmark sync, or backup documents.
+- The **G** marker is visually centered, and an approved-contributor-only
+  **Manage Contribution** panel appears directly below Global topics,
+  separate from the add-topic form.
 - History, selections, translation catalogs, chapters, and public cache entries
   never enter Telegram user storage.
 

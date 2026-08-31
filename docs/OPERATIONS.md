@@ -187,9 +187,12 @@ Application decisions queue a private Telegram notification. Approval also
 causes the Mini App to show a one-time disclosure before any baseline is sent.
 After acknowledgement, the user's existing assigned topics/coordinates are
 submitted once and later successful local changes are journalled automatically.
-The contributor-only Topic Manager control pushes the durable journal, checks
-review outcomes, and pulls the current global catalogue in one Sync action;
-pending and deferred applicants can use the same control to check status.
+The collapsible, approved-contributor-only **Manage Contribution** panel sits
+immediately below Global topics. Its Sync action pushes the durable journal,
+checks review outcomes, and pulls the current global catalogue. Sessions
+without contribution authority do not receive that panel; application
+decisions continue to arrive through the private bot notification and bounded
+authority refresh.
 Personal bookmark writes remain local-first: a network or moderation-server
 failure cannot undo them, and the bounded outbox retries on a later
 synchronization.
