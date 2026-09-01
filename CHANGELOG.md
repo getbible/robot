@@ -26,6 +26,20 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Search-style contribution synchronization
 
+- A batch refused with `403 contribution_not_allowed` now gets one token
+  recovery — an ordinary status request that re-mints the contributor
+  token — before the refusal is believed, because an expired or superseded
+  token is refused with exactly the same code as a real revocation and
+  first-sight suspension locked out contributors whose approval never
+  changed. A genuinely revoked contributor receives no fresh token, so the
+  single retry fails again and the denial stands.
+- A contribution-layer 403 no longer tears down the whole Mini App session.
+  The client's own `contribution_transport_not_ready` error, a refused
+  contributor token, and any proxy-generated 403 on the events POST were all
+  funnelled into the session-expired gate — sign-out and a full-screen
+  relaunch prompt — even though search kept working on the same session
+  bearer seconds later. Only a genuine session rejection (HTTP 401 or an
+  explicit session error code) ends the session now.
 - An explicit **Sync now** tap now always performs a real attempt. The
   client's exponential failure backoff (which grows to five minutes) paces
   only automatic retries: previously it also blocked manual taps and showed

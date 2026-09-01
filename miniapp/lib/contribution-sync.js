@@ -490,9 +490,16 @@ export class ContributionSync {
         // The contributor token rides inside status payloads, so a missing or
         // rotated token is recovered with one ordinary status request before
         // the batch is retried; a second refusal is a real authority loss.
+        // A server-side contribution_not_allowed gets the same one recovery:
+        // an expired or superseded token is refused with exactly that code,
+        // and treating it as revocation on first sight suspended contributors
+        // whose approval never changed. A genuinely revoked contributor gets
+        // no fresh token from the status request, so the retry fails again
+        // and the denial stands.
         if (
           !tokenRecoveryAttempted &&
-          error?.code === "contribution_transport_not_ready" &&
+          ["contribution_transport_not_ready", "contribution_not_allowed"]
+            .includes(error?.code) &&
           typeof this.#api.contributionStatus === "function"
         ) {
           tokenRecoveryAttempted = true;

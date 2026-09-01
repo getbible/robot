@@ -1366,7 +1366,14 @@ async function reconcilePublishedContributionTopics(
 }
 
 function handleContributionSyncError(error, { catalog = false } = {}) {
-  if (handleSessionError(error)) {
+  // A 403 on the contribution layer — the client's own
+  // contribution_transport_not_ready, a refused contributor token, or a
+  // middlebox rejecting the events POST — says nothing about the session:
+  // search keeps working on the same bearer seconds later. Tearing the
+  // session down for it replaced one failed sync with a full "session
+  // expired" gate. Only a genuine session rejection (401, or an explicit
+  // session error code) may end the session from here.
+  if (isSessionAuthenticationError(error) && handleSessionError(error)) {
     return;
   }
   if (contributionControlVisible()) {
@@ -6975,6 +6982,15 @@ function setCheckedRadio(name, value) {
 
 function updateConnectionState() {
   elements.offlineBanner.hidden = navigator.onLine;
+}
+
+function isSessionAuthenticationError(error) {
+  return (
+    error instanceof ApiError &&
+    (error.status === 401 ||
+      ["session_not_ready", "invalid_session_token", "unauthorized"]
+        .includes(error.code))
+  );
 }
 
 function handleSessionError(error) {
