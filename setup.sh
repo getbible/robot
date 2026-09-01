@@ -3038,6 +3038,7 @@ cmd_doctor() {
     local mini_app_listen
     local mini_app_port
     local reverse_proxy_mode
+    local local_surface_ok
     service=$(service_name_for "$ACTIVE_INSTANCE")
     app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
     env_file=$(environment_file_for "$ACTIVE_INSTANCE")
@@ -3135,13 +3136,28 @@ cmd_doctor() {
                     ((failures += 1))
                 }
             fi
+            local_surface_ok=1
             verify_mini_app_local "$app_dir" "$env_file" 1 || {
+                local_surface_ok=0
                 warn "The local Mini App shell or contribution API did not pass its route check."
                 ((failures += 1))
             }
-            verify_mini_app_public "$app_dir" "$env_file" 1 || {
-                warn "The public Mini App shell or contribution API route failed HTTPS verification."
-                ((failures += 1))
+            verify_mini_app_public "$app_dir" "$env_file" 3 || {
+                if ((local_surface_ok)); then
+                    # The application and managed proxy answered every route on
+                    # loopback, so this is the server failing to reach its own
+                    # public address from inside the network — typically a
+                    # firewall that does not reflect the public IP back to the
+                    # host (hairpin NAT). Outside devices are unaffected.
+                    warn "The server could not reach its own public Mini App URL from inside the network."
+                    printf '  The local application and proxy routes are healthy, so this is\n'
+                    printf '  usually the firewall not reflecting the public address back to\n'
+                    printf '  this host (hairpin NAT), not an outage. Confirm real reachability\n'
+                    printf '  by opening the Mini App from a phone on mobile data.\n'
+                else
+                    warn "The public Mini App shell or contribution API route failed HTTPS verification."
+                    ((failures += 1))
+                fi
             }
         fi
     fi
