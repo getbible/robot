@@ -46,6 +46,7 @@ const englishFallbackKeys = Object.freeze([
   "bookmarks.contribution_sync_now",
   "bookmarks.contribution_check_status",
   "bookmarks.contribution_syncing",
+  "bookmarks.contribution_sync_progress",
   "bookmarks.contribution_sync_idle",
   "bookmarks.contribution_sync_pending",
   "bookmarks.contribution_application_deferred",

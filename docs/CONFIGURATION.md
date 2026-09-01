@@ -179,6 +179,8 @@ their manager-owned paths in the environment file.
 | `CONTRIBUTION_STORE_FILE` | empty | Empty or an absolute path | Private SQLite application, event, decision, notification, audit, and live-catalogue store; an empty value disables contribution enrolment and synchronization |
 | `CONTRIBUTION_CONTRIBUTOR_LIMIT` | `10000` | `100`–`1000000` | Maximum contributor application records accepted by one instance |
 | `CONTRIBUTION_EVENT_LIMIT` | `250000` | `1000`–`5000000` | Maximum immutable contribution events retained by one instance |
+| `CONTRIBUTION_RATE_CAPACITY` | `60` | `1`–`100000` | Token-bucket capacity of the dedicated contributor synchronization budget for `POST /api/v1/contributions/events`, separate from the public search and user limits |
+| `CONTRIBUTION_RATE_REFILL_PER_SECOND` | `5.0` | `0.01`–`1000.0` | Refill rate of that contribution budget; requests beyond it wait behind `429` and `Retry-After` pacing instead of failing permanently |
 | `CONTRIBUTION_GIT_CHECKOUT` | empty | Empty or an absolute, clean checkout of `getbible/robot` owned by the publisher | Setup-manager-only repository publication checkout |
 | `CONTRIBUTION_GIT_USER` | empty | Existing dedicated non-root operating-system user; must differ from the bot service account | Setup-manager-only identity used for Git import, commit, and push |
 
@@ -188,6 +190,12 @@ The container supervisor always assigns
 `/data/<instance>/state/contributions.sqlite3`, ignoring an externally supplied
 store path so instances cannot accidentally share private identities or review
 state. The contributor and event limits remain configurable per instance.
+
+Contributors are a small, individually approved group whose personal datasets
+can be large, so their event batches use the dedicated rate budget above
+rather than competing with the public search limits: a long drip can neither
+be starved by public traffic nor starve it, and an over-budget batch waits
+for the announced `Retry-After` rather than failing.
 
 The hidden private `/contributor` command submits the signed numeric Telegram
 user ID for review. It is intentionally absent from Telegram's command menu.

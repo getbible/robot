@@ -21,6 +21,7 @@ const MAX_SEARCH_TIMEOUT_MS = 900_000;
 // deadline, so a server that gives up first can say why.
 const SEARCH_TIMEOUT_GRACE_MS = 10_000;
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+const CONTRIBUTION_TOKEN_PATTERN = /^gbc_[A-Za-z0-9_-]{43}$/;
 const CONTRIBUTION_EVENTS_MAXIMUM = 50;
 
 export class ApiError extends Error {
@@ -44,6 +45,7 @@ export class ApiError extends Error {
 export class MiniAppApi {
   #initData;
   #sessionToken = null;
+  #contributionToken = null;
   #searchTimeoutMs = DEFAULT_SEARCH_TIMEOUT_MS;
   #timeoutMs;
   #cleanupAttempted = false;
@@ -117,6 +119,7 @@ export class MiniAppApi {
     });
     this.#acceptSession(payload);
     this.#acceptLimits(payload);
+    this.#acceptContributionToken(payload?.contributions);
     this.#selections.setMaximum(Number(payload?.basket?.maximum));
     this.#cleanupLaunch();
     return { ...payload, basket: this.#selections.snapshot() };
@@ -136,6 +139,7 @@ export class MiniAppApi {
     this.#cleanupAttempted = false;
     const payload = await this.#request("session");
     this.#acceptLimits(payload);
+    this.#acceptContributionToken(payload?.contributions);
     this.#selections.setMaximum(Number(payload?.basket?.maximum));
     this.#cleanupLaunch();
     return { ...payload, basket: this.#selections.snapshot() };
@@ -143,6 +147,7 @@ export class MiniAppApi {
 
   clearSession() {
     this.#sessionToken = null;
+    this.#contributionToken = null;
     this.#cleanupAttempted = false;
   }
 
@@ -246,8 +251,10 @@ export class MiniAppApi {
     });
   }
 
-  contributionStatus() {
-    return this.#request("contributions/status?details=1");
+  async contributionStatus() {
+    const payload = await this.#request("contributions/status?details=1");
+    this.#acceptContributionToken(payload);
+    return payload;
   }
 
   submitContributionEvents(events, { disclosureAcknowledged = false } = {}) {
@@ -262,16 +269,42 @@ export class MiniAppApi {
     if (typeof disclosureAcknowledged !== "boolean") {
       throw new TypeError("disclosureAcknowledged must be a boolean.");
     }
+    if (!this.#contributionToken) {
+      // Only approved contributors ever receive the second token, and it
+      // arrives inside ordinary JSON payloads. Without it the server would
+      // refuse the batch anyway, so fail closed before any transport.
+      throw new ApiError("Contribution sync is not available for this session.", {
+        code: "contribution_transport_not_ready",
+        status: 403,
+      });
+    }
     // Contribution batches ride the exact same session-authenticated,
     // same-origin request path as search: a small JSON POST with the plain
-    // session bearer, no separate capability and no special body budget.
-    return this.#request("contributions/events", {
-      method: "POST",
-      body: {
-        events,
-        ...(disclosureAcknowledged ? { disclosure_acknowledged: true } : {}),
-      },
-    });
+    // session bearer plus the contributor token in the body — never a custom
+    // header, never a special body budget.
+    return (async () => {
+      const payload = await this.#request("contributions/events", {
+        method: "POST",
+        body: {
+          events,
+          contribution_token: this.#contributionToken,
+          ...(disclosureAcknowledged ? { disclosure_acknowledged: true } : {}),
+        },
+      });
+      this.#acceptContributionToken(payload?.status);
+      return payload;
+    })();
+  }
+
+  get contributionTransportReady() {
+    return this.#contributionToken !== null;
+  }
+
+  #acceptContributionToken(payload) {
+    const token = payload?.contribution_token;
+    if (typeof token === "string" && CONTRIBUTION_TOKEN_PATTERN.test(token)) {
+      this.#contributionToken = token;
+    }
   }
 
   bookmarkCatalog(etag = null) {

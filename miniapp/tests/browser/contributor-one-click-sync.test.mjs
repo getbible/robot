@@ -12,6 +12,7 @@ const mainApiPattern = /^https:\/\/api\.getbible\.net\/v2\/.+/;
 const queryApiPattern = /^https:\/\/query\.getbible\.net\/v2\/.+/;
 const corsHeaders = { "access-control-allow-origin": "*" };
 const sessionToken = "ContributorBrowserSession123";
+const contributionToken = `gbc_${"A".repeat(43)}`;
 const browserName = process.env.PLAYWRIGHT_BROWSER ?? "chromium";
 const browserType = { chromium, webkit }[browserName];
 if (!browserType) {
@@ -168,6 +169,7 @@ function contributionStatus({
     state: approved ? "approved" : "pending",
     can_contribute: approved,
     disclosure_required: disclosureRequired,
+    ...(approved ? { contribution_token: contributionToken } : {}),
     topics: localTopicId && submitted
       ? [{
           local_topic_id: localTopicId,
@@ -359,6 +361,12 @@ async function createBrowserFixture(
           retry_after: 0,
         }, 503);
       }
+      if (body.contribution_token !== contributionToken) {
+        return fulfillJson(route, {
+          error: "contribution_not_allowed",
+          message: "This Telegram user is not an approved contributor.",
+        }, 403);
+      }
       if (body.disclosure_acknowledged === true) {
         disclosurePending = false;
       }
@@ -505,7 +513,12 @@ test("Sync Now drips session-authenticated event batches without fanout", async 
   // The drip uses the exact same plain session bearer the search flow uses.
   assert.equal(sync.headers.authorization, `Bearer ${sessionToken}`);
   assert.equal(sync.headers["x-telegram-init-data"], undefined);
-  assert.deepEqual(Object.keys(sync.body), ["events"]);
+  assert.deepEqual(
+    Object.keys(sync.body).sort(),
+    ["contribution_token", "events"],
+  );
+  assert.equal(sync.body.contribution_token, contributionToken);
+  assert.equal(sync.headers["x-contribution-token"], undefined);
   assert.deepEqual(
     sync.body.events.map((event) => event.type),
     ["topic_upsert", "verse_add"],
@@ -547,7 +560,7 @@ test("a lost batch retries the identical deterministic events", async (context) 
     waitUntil: "domcontentloaded",
   });
   await page.waitForSelector('[data-reader-verse="2"]', { timeout: 15_000 });
-  await createPersonalTopicWithVerse(page);
+  const localTopicId = await createPersonalTopicWithVerse(page);
   await openContributorManager(page);
 
   await page.locator("#contributor-sync-button").click();
@@ -556,6 +569,11 @@ test("a lost batch retries the identical deterministic events", async (context) 
   ));
   assert.equal(syncRequests.length, 1);
   const firstBody = syncRequests[0].body;
+
+  // The inviolable law: a failed synchronization never touches the personal
+  // topic or its bookmarks. Everything stays exactly as the user made it
+  // until the server confirms the topic is part of the published core.
+  await assertPersonalTopicIntact(page, localTopicId);
 
   // The client honors the server's retry guard while keeping the button and
   // exact idempotency identity actionable for the next explicit click.
@@ -567,6 +585,9 @@ test("a lost batch retries the identical deterministic events", async (context) 
   assert.equal(syncRequests.length, 2);
   assert.deepEqual(syncRequests[1].body, firstBody);
   assert.equal(syncRequests[1].headers.authorization, `Bearer ${sessionToken}`);
+
+  // A merely submitted (still pending) contribution is equally untouchable.
+  await assertPersonalTopicIntact(page, localTopicId);
 });
 
 test("disclosure consent rides inside the first synchronized batch", async (context) => {
@@ -592,9 +613,24 @@ test("disclosure consent rides inside the first synchronized batch", async (cont
   assert.equal(syncRequests[0].body.disclosure_acknowledged, true);
   assert.deepEqual(
     Object.keys(syncRequests[0].body).sort(),
-    ["disclosure_acknowledged", "events"],
+    ["contribution_token", "disclosure_acknowledged", "events"],
   );
 });
+
+async function assertPersonalTopicIntact(page, localTopicId) {
+  await openBookmarksRoute(page);
+  const card = await page.evaluate((topicId) => {
+    const found = [...document.querySelectorAll(
+      "#bookmark-group-list .bookmark-group-card",
+    )].find((element) => element.dataset.bookmarkTopic === topicId);
+    return found
+      ? { text: found.textContent.replace(/\s+/g, " ").trim() }
+      : null;
+  }, localTopicId);
+  assert.ok(card, "the personal topic card must still exist");
+  assert.match(card.text, /Community Hope/);
+  assert.match(card.text, /(?:One|1) bookmark/);
+}
 
 function windowInitData() {
   return "query_id=contributor-browser-test&user=%7B%22id%22%3A42%7D";

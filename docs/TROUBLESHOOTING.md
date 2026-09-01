@@ -140,8 +140,11 @@ approved contributor with a live session. One click produces one or more
 sequential `POST .../api/v1/contributions/events` requests; it must not open
 a WebSocket or target another port. A lost response is safe to retry: every
 event carries a stable `client_event_id` and Robot replays it without
-duplicating moderation events. HTTP `401` means the session is invalid, `403`
-means current approval/disclosure policy refused it, `409` means an event ID
+duplicating moderation events. HTTP `401` means the session is invalid. `403`
+means the user is not an approved contributor, current approval/disclosure
+policy refused the batch, or the batch carried a stale `contribution_token`;
+the app recovers a fresh token automatically with one ordinary status
+refresh. `409` means an event ID
 was reused with different content, `429` paces the drip through
 `Retry-After`, and `413` means the general 64 KiB API bound was exceeded.
 

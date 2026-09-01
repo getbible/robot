@@ -274,7 +274,12 @@ topic/assignment state into bounded idempotent contribution events with
 deterministic content-derived IDs, appends its queued explicit global
 add/remove intents, and posts them to the same-origin
 `POST /api/v1/contributions/events` endpoint in sequential
-session-authenticated batches of at most 50 events. Contributor authority and
+session-authenticated batches of at most 50 events. Every batch body also
+carries the short-lived `contribution_token` that only approved contributors
+receive inside JSON payloads — alongside the session bearer, never as a
+header — and the drip draws on a dedicated contribution rate budget
+(`CONTRIBUTION_RATE_CAPACITY`, `CONTRIBUTION_RATE_REFILL_PER_SECOND`)
+separate from the public search limits. Contributor authority and
 disclosure are rechecked in the durable SQLite store on every batch. A
 redelivered event replays idempotently per contributor and `client_event_id`;
 a reused ID with different content fails closed. Every response returns the

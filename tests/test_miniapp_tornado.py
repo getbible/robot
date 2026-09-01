@@ -313,6 +313,10 @@ class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
         session_payload = json.loads(session_response.body)
         self.assertTrue(session_payload["contributions"]["can_contribute"])
         session_token = session_payload["session_token"]
+        # The contributor token rides only inside the JSON payload, and only
+        # approved contributors ever receive one.
+        contribution_token = session_payload["contributions"]["contribution_token"]
+        self.assertRegex(contribution_token, r"\Agbc_[A-Za-z0-9_-]{43}\Z")
 
         # The drip transport sends the same plain session bearer search uses.
         batch_document = {
@@ -338,6 +342,7 @@ class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
                 },
             ],
             "disclosure_acknowledged": True,
+            "contribution_token": contribution_token,
         }
         batch_body = json.dumps(batch_document, separators=(",", ":")).encode()
         batch_headers = {
@@ -427,6 +432,8 @@ class MiniAppServerLifecycleTestCase(unittest.IsolatedAsyncioTestCase):
             "mini_app_session_exchange_rate_capacity": 10,
             "mini_app_session_exchange_rate_refill_per_second": 0.2,
             "rate_limit_cache_size": 100,
+            "contribution_rate_capacity": 60,
+            "contribution_rate_refill_per_second": 5.0,
             "mini_app_navigation_rate_cost": 0.25,
             "mini_app_access_log": True,
             "mini_app_max_header_bytes": 16 * 1024,

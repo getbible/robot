@@ -787,8 +787,16 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(detailed.status, 200)
-        self.assertEqual(json.loads(detailed.body)["topics"], [])
-        self.assertEqual(json.loads(detailed.body)["summary"]["events"]["pending"], 0)
+        detailed_payload = json.loads(detailed.body)
+        self.assertEqual(detailed_payload["topics"], [])
+        self.assertEqual(detailed_payload["summary"]["events"]["pending"], 0)
+        # Approved contributors receive their token only inside the JSON
+        # payload; the legacy shape and non-approved statuses never carry one.
+        self.assertRegex(
+            detailed_payload["contribution_token"],
+            r"\Agbc_[A-Za-z0-9_-]{43}\Z",
+        )
+        self.assertNotIn("contribution_token", json.loads(resumed.body))
         invalid_query = await self.api.handle(
             self.request(
                 "GET",
@@ -821,6 +829,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                         }
                     ],
                     "disclosure_acknowledged": True,
+                    "contribution_token": detailed_payload["contribution_token"],
                 },
             )
         )
@@ -995,7 +1004,8 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                                 "color": "#bbf7d0",
                             },
                         }
-                    ]
+                    ],
+                    "contribution_token": f"gbc_{'A' * 43}",
                 },
             )
         )
@@ -1058,6 +1068,8 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 },
             ]
         }
+        # A pending applicant holds no contributor token, so the request is
+        # refused before any store write is even attempted.
         denied = await self.api.handle(
             self.request(
                 "POST",
@@ -1068,8 +1080,36 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(denied.status, 403)
         self.assertEqual(json.loads(denied.body)["error"], "contribution_not_allowed")
+        pending_status = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/contributions/status?details=1",
+                token=token,
+            )
+        )
+        self.assertNotIn("contribution_token", json.loads(pending_status.body))
 
         self.contributions.decide_application(42, "approved", actor="admin")
+        contribution_token = await self.contribution_token(token)
+        tampered = f"{contribution_token[:-1]}{'B' if contribution_token[-1] != 'B' else 'C'}"
+        for bad_body in (
+            payload,
+            {**payload, "contribution_token": tampered},
+        ):
+            refused = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/contributions/events",
+                    token=token,
+                    body=bad_body,
+                )
+            )
+            self.assertEqual(refused.status, 403)
+            self.assertEqual(
+                json.loads(refused.body)["error"],
+                "contribution_not_allowed",
+            )
+        payload = {**payload, "contribution_token": contribution_token}
         awaiting_disclosure = await self.api.handle(
             self.request(
                 "POST",
@@ -1171,7 +1211,8 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                     "topic": {"local_topic_id": "local.grace"},
                     "verse": {"book": 67, "chapter": 1, "verse": 1},
                 }
-            ]
+            ],
+            "contribution_token": contribution_token,
         }
         rejected = await self.api.handle(
             self.request(
@@ -1198,6 +1239,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             telegram_api_token=TOKEN,
         )
         private_message = "book must be between 1 and 66."
+        contribution_token = await self.contribution_token(token)
 
         with patch("modules.miniapp_api.audit_event") as record:
             rejected = await self.api.handle(
@@ -1213,7 +1255,8 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                                 "topic": {"local_topic_id": "local.grace"},
                                 "verse": {"book": 67, "chapter": 1, "verse": 1},
                             }
-                        ]
+                        ],
+                        "contribution_token": contribution_token,
                     },
                 )
             )
@@ -1261,13 +1304,15 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
 
         receipts: dict[int, int] = {}
         for user_id, (token, init_data) in sessions.items():
+            self.active_init_data = init_data
+            contribution_token = await self.contribution_token(token)
             submitted = await self.api.handle(
                 self.request(
                     "POST",
                     "/getbible/api/v1/contributions/events",
                     token=token,
                     init_data=init_data,
-                    body=payload,
+                    body={**payload, "contribution_token": contribution_token},
                 )
             )
             self.assertEqual(submitted.status, 200)
@@ -1281,13 +1326,17 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(set(receipts.values()).isdisjoint(internal_ids))
 
         token, init_data = sessions[42]
+        self.active_init_data = init_data
         replayed = await self.api.handle(
             self.request(
                 "POST",
                 "/getbible/api/v1/contributions/events",
                 token=token,
                 init_data=init_data,
-                body=payload,
+                body={
+                    **payload,
+                    "contribution_token": await self.contribution_token(token),
+                },
             )
         )
         self.assertEqual(replayed.status, 200)
@@ -1434,6 +1483,20 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status, 201)
         return json.loads(response.body)["session_token"]
+
+    async def contribution_token(self, session_token: str) -> str:
+        """Harvest the JSON-borne contributor token from the detailed status."""
+        response = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/contributions/status?details=1",
+                token=session_token,
+            )
+        )
+        self.assertEqual(response.status, 200)
+        value = json.loads(response.body)["contribution_token"]
+        self.assertRegex(value, r"\Agbc_[A-Za-z0-9_-]{43}\Z")
+        return value
 
     async def test_session_mutation_errors_preserve_safe_domain_messages(
         self,

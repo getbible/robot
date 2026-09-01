@@ -97,8 +97,13 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   content-derived IDs, so a redelivered event replays safely, and every
   response returns the complete result set: receipt counts, the full
   contributor status, and the live catalogue revision/checksum. The final
-  batch settles the panel in one round trip. It requires no capability token,
-  WebSocket, additional port, or repeated raw Telegram `initData` header.
+  batch settles the panel in one round trip. Alongside the session bearer,
+  every batch body carries the short-lived `contribution_token` that only
+  approved contributors receive inside JSON payloads — never a custom
+  header — and the drip runs on its own contribution rate budget
+  (`CONTRIBUTION_RATE_CAPACITY`, `CONTRIBUTION_RATE_REFILL_PER_SECOND`)
+  separate from the public search limits. It requires no WebSocket,
+  additional port, or repeated raw Telegram `initData` header.
 - Personal bookmark aggregate version 3, topics, the clearable recently-used
   topic order, the active topic, and the compact last-read coordinate reconcile
   by timestamp across scoped

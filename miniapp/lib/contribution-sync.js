@@ -344,26 +344,26 @@ export class ContributionSync {
     return this.#persistCapture(changed);
   }
 
-  synchronizeNow(snapshot, { disclosureAcknowledged = false } = {}) {
-    return this.#singleFlight(snapshot, disclosureAcknowledged === true);
+  synchronizeNow(snapshot, { disclosureAcknowledged = false, onProgress = null } = {}) {
+    return this.#singleFlight(snapshot, disclosureAcknowledged === true, onProgress);
   }
 
   synchronize(snapshot) {
-    return this.#singleFlight(snapshot, false);
+    return this.#singleFlight(snapshot, false, null);
   }
 
-  #singleFlight(snapshot, disclosureAcknowledged) {
+  #singleFlight(snapshot, disclosureAcknowledged, onProgress) {
     if (this.#syncPromise) {
       return this.#syncPromise;
     }
-    this.#syncPromise = this.#synchronize(snapshot, disclosureAcknowledged)
+    this.#syncPromise = this.#synchronize(snapshot, disclosureAcknowledged, onProgress)
       .finally(() => {
         this.#syncPromise = null;
       });
     return this.#syncPromise;
   }
 
-  async #synchronize(snapshot, disclosureAcknowledged) {
+  async #synchronize(snapshot, disclosureAcknowledged, onProgress = null) {
     const desired = normalizeDesiredSnapshot(
       snapshot,
       this.#coreTopics,
@@ -389,7 +389,18 @@ export class ContributionSync {
           normalizeContributionStatus(await this.#api.contributionStatus()),
         );
       }
+      const total = Math.ceil(events.length / MAX_BATCH_SIZE);
       for (let index = 0; index < events.length; index += MAX_BATCH_SIZE) {
+        if (typeof onProgress === "function") {
+          try {
+            onProgress({
+              batch: Math.floor(index / MAX_BATCH_SIZE) + 1,
+              total,
+            });
+          } catch {
+            // Progress display must never interrupt the transfer itself.
+          }
+        }
         const batch = events.slice(index, index + MAX_BATCH_SIZE);
         const response = normalizeEventsResponse(
           await this.#submitBatch(batch, {
@@ -435,12 +446,25 @@ export class ContributionSync {
   }
 
   async #submitBatch(events, { disclosureAcknowledged }) {
+    let tokenRecoveryAttempted = false;
     for (let attempt = 0; ; attempt += 1) {
       try {
         return await this.#api.submitContributionEvents(events, {
           disclosureAcknowledged,
         });
       } catch (error) {
+        // The contributor token rides inside status payloads, so a missing or
+        // rotated token is recovered with one ordinary status request before
+        // the batch is retried; a second refusal is a real authority loss.
+        if (
+          !tokenRecoveryAttempted &&
+          error?.code === "contribution_transport_not_ready" &&
+          typeof this.#api.contributionStatus === "function"
+        ) {
+          tokenRecoveryAttempted = true;
+          await this.#api.contributionStatus();
+          continue;
+        }
         const rateLimited =
           error?.code === "rate_limited" || error?.status === 429;
         if (!rateLimited || attempt >= MAX_RATE_LIMIT_RETRIES) {

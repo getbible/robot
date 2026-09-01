@@ -747,7 +747,7 @@
     "/contributions/events": {
       "post": {
         "summary": "Submit one session-authenticated bounded idempotent contribution event batch",
-        "description": "The synchronization endpoint. Sync converts the personal topic/assignment state into bounded idempotent events with deterministic content-derived client_event_ids, appends queued explicit global intents, and drips them here in sequential batches of at most 50 events under the ordinary 64 KiB API budget. Contributor authority and disclosure are rechecked in the durable store on every batch; replays are idempotent per contributor and client_event_id, and a reused ID with different content fails closed. The one-time disclosure acknowledgement rides the first batch as disclosure_acknowledged. Scripture text and Telegram identity fields are never accepted from the browser.",
+        "description": "The synchronization endpoint. Sync converts the personal topic/assignment state into bounded idempotent events with deterministic content-derived client_event_ids, appends queued explicit global intents, and drips them here in sequential batches of at most 50 events under the ordinary 64 KiB API budget. Every batch requires both the ordinary session bearer and a valid contribution_token in the request body; a request without both is refused with 403 contribution_not_allowed before any store work. Contributor authority and disclosure are still rechecked in the durable store on every batch; replays are idempotent per contributor and client_event_id, and a reused ID with different content fails closed. The one-time disclosure acknowledgement rides the first batch as disclosure_acknowledged. Batches draw on a dedicated contribution rate budget separate from the public search limits; over-budget requests receive 429 with Retry-After. Scripture text and Telegram identity fields are never accepted from the browser.",
         "requestBody": {
           "required": true,
           "content": {
@@ -755,7 +755,7 @@
               "schema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["events"],
+                "required": ["events", "contribution_token"],
                 "properties": {
                   "events": {
                     "type": "array",
@@ -764,6 +764,11 @@
                     "items": {
                       "$ref": "#/components/schemas/ContributionEvent"
                     }
+                  },
+                  "contribution_token": {
+                    "type": "string",
+                    "pattern": "^gbc_[A-Za-z0-9_-]{43}$",
+                    "description": "Short-lived contributor credential required alongside the session bearer. Issued only to approved contributors, delivered only inside JSON payloads, and validated server-side against its stored digest before any store work."
                   },
                   "disclosure_acknowledged": {
                     "type": "boolean",
@@ -1662,6 +1667,11 @@
           },
           "can_contribute": { "type": "boolean" },
           "disclosure_required": { "type": "boolean" },
+          "contribution_token": {
+            "type": "string",
+            "pattern": "^gbc_[A-Za-z0-9_-]{43}$",
+            "description": "Present only for approved contributors in detailed status payloads: the session bootstrap's contributions object, GET /contributions/status?details=1, and the status of every events response. It travels only in JSON payloads, never a header, and must accompany every POST /contributions/events body."
+          },
           "topics": {
             "$ref": "#/components/schemas/ContributionTopicOutcomes"
           },

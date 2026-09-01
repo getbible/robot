@@ -52,6 +52,8 @@ MAX_CONTRIBUTION_STATUS_TOPICS = 1000
 MAX_PUBLIC_OVERLAY_TOPICS = 39
 MAX_PUBLIC_OVERLAY_ASSOCIATIONS = 10_000
 MAX_PUBLIC_OVERLAY_BYTES = 2 * 1024 * 1024
+MAX_ACTIVE_CONTRIBUTOR_CAPABILITIES = 16
+CONTRIBUTOR_CAPABILITY_TTL_SECONDS = 24 * 60 * 60
 DATABASE_SCHEMA_VERSION = 5
 
 # The browser contribution journal accepts this complete separator-safe
@@ -62,6 +64,7 @@ _SAFE_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _CANONICAL_TOPIC_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,79}\Z")
 _COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}\Z")
 _CHECKSUM_RE = re.compile(r"[0-9a-f]{64}\Z")
+_CONTRIBUTOR_CAPABILITY_RE = re.compile(r"gbc_[A-Za-z0-9_-]{43}\Z")
 _ENGLISH_TOPIC_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]\Z")
 # Protestant canon order used by the bundled global bookmark catalogue and its
 # repository CSV. Contributions outside this catalogue are rejected before
@@ -748,6 +751,16 @@ class ContributionStore:
                 """,
                 (state, now, now, state, state, identity),
             )
+            if state != "approved":
+                # Contribution tokens are deliberately server-revocable.
+                # Removing them here makes a moderator decision effective
+                # immediately; authenticate_capability also rechecks the
+                # application state so an older token can never retain
+                # authority by accident.
+                connection.execute(
+                    "DELETE FROM contributor_capabilities WHERE contributor_id = ?",
+                    (identity,),
+                )
             connection.execute(
                 """
                 INSERT INTO contribution_decisions (
@@ -784,6 +797,129 @@ class ContributionStore:
             ).fetchone()
             assert row is not None
             return _application(row)
+
+    def issue_capability(
+        self,
+        user_id: int,
+        *,
+        ttl_seconds: int = CONTRIBUTOR_CAPABILITY_TTL_SECONDS,
+    ) -> str:
+        """Issue a restart-safe, revocable bearer capability to one contributor.
+
+        Only the SHA-256 digest is retained.  Issuance intentionally creates a
+        fresh capability on every successful exchange: if an HTTP response is
+        lost the caller can retry safely, while the per-user active-token bound
+        prevents unbounded state growth.
+        """
+        identity = _telegram_user_id(user_id)
+        ttl = _positive_integer(
+            ttl_seconds,
+            "ttl_seconds",
+            CONTRIBUTOR_CAPABILITY_TTL_SECONDS,
+        )
+        now = time.time_ns()
+        expires_at = now + ttl * 1_000_000_000
+        with self._guard, self._transaction() as connection:
+            application = connection.execute(
+                "SELECT state FROM contributor_applications WHERE user_id = ?",
+                (identity,),
+            ).fetchone()
+            if application is None or application[0] != "approved":
+                raise ContributionNotAllowed(
+                    "This Telegram user is not an approved contributor."
+                )
+            connection.execute(
+                "DELETE FROM contributor_capabilities WHERE expires_at <= ?",
+                (now,),
+            )
+            active = connection.execute(
+                """
+                SELECT token_digest
+                FROM contributor_capabilities
+                WHERE contributor_id = ?
+                ORDER BY last_used_at, issued_at, token_digest
+                """,
+                (identity,),
+            ).fetchall()
+            overflow = len(active) - MAX_ACTIVE_CONTRIBUTOR_CAPABILITIES + 1
+            if overflow > 0:
+                connection.executemany(
+                    "DELETE FROM contributor_capabilities WHERE token_digest = ?",
+                    ((bytes(row[0]),) for row in active[:overflow]),
+                )
+
+            token: str | None = None
+            digest: bytes | None = None
+            for _ in range(4):
+                candidate = f"gbc_{secrets.token_urlsafe(32)}"
+                candidate_digest = hashlib.sha256(candidate.encode("ascii")).digest()
+                exists = connection.execute(
+                    "SELECT 1 FROM contributor_capabilities WHERE token_digest = ?",
+                    (candidate_digest,),
+                ).fetchone()
+                if exists is None:
+                    token = candidate
+                    digest = candidate_digest
+                    break
+            if token is None or digest is None:
+                raise RuntimeError("Could not allocate a unique contributor capability.")
+            connection.execute(
+                """
+                INSERT INTO contributor_capabilities (
+                    token_digest, contributor_id, issued_at, expires_at, last_used_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (digest, identity, now, expires_at, now),
+            )
+            self._audit_locked(
+                connection,
+                actor=f"telegram:{identity}",
+                action="capability_issued",
+                contributor_id=identity,
+                subject_type="capability",
+                subject_id=digest.hex(),
+                detail={"expires_at": expires_at},
+                now=now,
+            )
+        return token
+
+    def authenticate_capability(self, token: str) -> int:
+        """Resolve an unexpired capability and recheck current approval."""
+        if not isinstance(token, str) or _CONTRIBUTOR_CAPABILITY_RE.fullmatch(token) is None:
+            raise ContributionNotAllowed("The contributor capability is invalid or expired.")
+        digest = hashlib.sha256(token.encode("ascii")).digest()
+        now = time.time_ns()
+        identity: int | None = None
+        with self._guard, self._transaction() as connection:
+            connection.execute(
+                "DELETE FROM contributor_capabilities WHERE expires_at <= ?",
+                (now,),
+            )
+            row = connection.execute(
+                """
+                SELECT capability.contributor_id
+                FROM contributor_capabilities AS capability
+                JOIN contributor_applications AS application
+                  ON application.user_id = capability.contributor_id
+                WHERE capability.token_digest = ?
+                  AND capability.expires_at > ?
+                  AND application.state = 'approved'
+                """,
+                (digest, now),
+            ).fetchone()
+            if row is not None:
+                identity = int(row[0])
+                connection.execute(
+                    """
+                    UPDATE contributor_capabilities
+                    SET last_used_at = ?
+                    WHERE token_digest = ? AND expires_at > ?
+                    """,
+                    (now, digest, now),
+                )
+        if identity is None:
+            raise ContributionNotAllowed("The contributor capability is invalid or expired.")
+        return identity
 
     def record_events(
         self,

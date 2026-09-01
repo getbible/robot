@@ -236,6 +236,8 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "bookmarks.contribution_sync_now": "Sync now",
   "bookmarks.contribution_check_status": "Check status",
   "bookmarks.contribution_syncing": "Syncing…",
+  "bookmarks.contribution_sync_progress":
+    "Syncing… sending part {batch} of {total}. Your data stays safely on this device until the server confirms it.",
   "bookmarks.contribution_sync_idle":
     "Ready to sync your topics and verse links.",
   "bookmarks.contribution_sync_pending":
