@@ -114,22 +114,21 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 
 ## Contribution synchronization
 
-- Only an approved session receives the separate `gbc_` contributor
-  capability, and every write rechecks its numeric Telegram owner against
-  current approval and revocation state.
-- **Sync now** makes one same-origin `POST /api/v1/contributions/sync`; it does
-  not orchestrate status, event-batch, or catalogue requests and does not use a
-  WebSocket or another port.
-- Version 1 accepts at most 100 topics, 10,000 flattened assignments across at
-  most 800 verse coordinates, 2,000 explicit operations, and a 1 MiB body.
-- Snapshot derivation, disclosure acknowledgement, explicit operations,
-  moderation events, and the durable receipt commit in one SQLite transaction.
-- Exact `sync_id` replay returns the stored receipt without duplicate events;
-  reuse with changed content fails closed and transaction failure stores
-  neither snapshot nor receipt.
-- The response returns its receipt, complete contributor status, and catalogue
-  revision/checksum together; a later catalogue fetch cannot turn a committed
-  synchronization into a reported failure.
+- **Sync now** submits session-authenticated bounded idempotent batches of at
+  most 50 contribution events to the same-origin
+  `POST /api/v1/contributions/events` endpoint, sequentially, and the drip
+  obeys the server's `Retry-After` pacing on `429`.
+- Every response returns the complete result set: receipt counts, the full
+  detailed contributor status, and the live catalogue revision/checksum, so
+  the final batch settles the panel in one round trip. Unavailable catalogue
+  enrichment cannot turn a committed batch into a reported failure.
+- A redelivered event replays idempotently per contributor and
+  `client_event_id`; a reused ID with different content fails closed.
+- Contributor authority and the acknowledged disclosure are rechecked in the
+  durable SQLite store on every batch; the acknowledgement itself rides the
+  first batch of the synchronization.
+- No WebSocket, extra port, capability token, or special body budget
+  participates; every batch fits the ordinary 64 KiB API bound.
 
 ## Bookmark portability and chat recovery
 
@@ -202,8 +201,8 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - Host Mini App, webhook, and health listeners remain separate and loopback/private behind ingress.
 - Caddy/systemd setup remains transactional and rollback-safe.
 - Managed Caddy forwards the bounded Mini App `/api/v1/*` namespace for both
-  root and nested public URLs, applies the 5 MiB backup and 1 MiB sync
-  exceptions before the general 64 KiB matcher, and leaves the backend router
+  root and nested public URLs, applies the single 5 MiB bookmark-backup
+  exception before the general 64 KiB matcher, and leaves the backend router
   deny-by-default.
 - One bot token has one active polling/webhook workload.
 - Production container build and smoke test pass.

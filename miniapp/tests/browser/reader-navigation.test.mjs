@@ -448,7 +448,6 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     reader_location: { translation: "kjv", book: 43, chapter: 3, verse: 1 },
   };
   let bookmarkBackupRequest = null;
-  const contributionCapability = `gbc_${"A".repeat(43)}`;
   const contributionSyncRequests = [];
   const contributionStatus = {
     enabled: true,
@@ -471,7 +470,6 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
       return route.fulfill({
         status: 201,
         contentType: "application/json",
-        headers: { "X-Contribution-Token": contributionCapability },
         body: jsonBody({
           session_token: "BrowserTestSessionToken123",
           expires_in: 10_800,
@@ -487,28 +485,19 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     if (apiPath === "contributions/status") {
       return fulfillJson(route, contributionStatus);
     }
-    if (apiPath === "contributions/sync") {
+    if (apiPath === "contributions/events") {
       assert.equal(
         request.headers().authorization,
-        `Bearer ${contributionCapability}`,
+        "Bearer BrowserTestSessionToken123",
       );
-      const sync = request.postDataJSON();
-      contributionSyncRequests.push(sync);
+      const batch = request.postDataJSON();
+      contributionSyncRequests.push(batch);
       return fulfillJson(route, {
-        protocol_version: 1,
-        receipt: {
-          sync_id: sync.sync_id,
-          snapshot_digest: "0".repeat(64),
-          outcome: "accepted",
-          accepted:
-            sync.snapshot.topics.length +
-            sync.snapshot.assignments.length +
-            sync.operations.length,
-          replayed: 0,
-          event_ids: Object.fromEntries(
-            sync.operations.map((event, index) => [event.client_event_id, index + 1]),
-          ),
-        },
+        accepted: batch.events.length,
+        replayed: 0,
+        event_ids: Object.fromEntries(
+          batch.events.map((event, index) => [event.client_event_id, index + 1]),
+        ),
         status: contributionStatus,
         catalog: { revision: 0, checksum: "0".repeat(64) },
       });
@@ -1620,7 +1609,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     0,
     "browser-local bookmark edits must wait for an explicit contributor sync",
   );
-  assert.equal(robotRequests.includes("contributions/events"), false);
+  assert.equal(robotRequests.includes("contributions/sync"), false);
   assert.deepEqual(consoleMessages, []);
   assert.deepEqual(pageErrors, []);
   assert.deepEqual(failedRequests, []);

@@ -4,7 +4,6 @@ import test from "node:test";
 import { ApiError, MiniAppApi } from "../lib/api.js";
 
 const SESSION_TOKEN = "abcdefghijklmnop";
-const CONTRIBUTION_TOKEN = `gbc_${"A".repeat(43)}`;
 const SESSION = {
   session_token: SESSION_TOKEN,
   limits: { search_timeout_seconds: 30 },
@@ -16,38 +15,25 @@ const STATUS = {
   can_contribute: true,
   disclosure_required: false,
 };
-const ENVELOPE = {
-  protocol_version: 1,
-  sync_id: "sync_0123456789abcdef",
-  client_id: "client_0123456789abcdef",
-  snapshot: {
-    topics: [{
-      local_topic_id: "grace",
-      name: "Grace",
-      color: "#bbf7d0",
-    }],
-    assignments: [{
-      local_topic_id: "grace",
-      book: 43,
-      chapter: 3,
-      verse: 16,
-    }],
+const EVENTS = [
+  {
+    client_event_id: "baseline:topic_upsert:0011223344556677",
+    type: "topic_upsert",
+    topic: { local_topic_id: "grace", name: "Grace", color: "#bbf7d0" },
   },
-  operations: [],
-  disclosure_acknowledged: false,
-};
-const SYNC_RESPONSE = {
-  protocol_version: 1,
-  receipt: {
-    sync_id: ENVELOPE.sync_id,
-    snapshot_digest: "a".repeat(64),
-    outcome: "accepted",
-    accepted: 2,
-    replayed: 0,
-    event_ids: {
-      "snapshot:topic:grace": 1,
-      "snapshot:verse:grace:43:3:16": 2,
-    },
+  {
+    client_event_id: "baseline:verse_add:8899aabbccddeeff",
+    type: "verse_add",
+    topic: { local_topic_id: "grace", name: "Grace", color: "#bbf7d0" },
+    verse: { book: 43, chapter: 3, verse: 16 },
+  },
+];
+const EVENTS_RESPONSE = {
+  accepted: 2,
+  replayed: 0,
+  event_ids: {
+    "baseline:topic_upsert:0011223344556677": 1,
+    "baseline:verse_add:8899aabbccddeeff": 2,
   },
   status: STATUS,
   catalog: {
@@ -74,21 +60,17 @@ function testApi(fetchImplementation) {
   });
 }
 
-test("uses one capability-authenticated request for a contribution sync", async () => {
+test("submits contribution batches with the plain session bearer like search", async () => {
   const requests = [];
   const api = testApi(async (url, options) => {
     const path = new URL(url).pathname;
     requests.push({ path, options });
-    if (path.endsWith("/session")) {
-      return json(SESSION, 201, {
-        "X-Contribution-Token": CONTRIBUTION_TOKEN,
-      });
-    }
+    if (path.endsWith("/session")) return json(SESSION, 201);
     if (path.endsWith("/cleanup")) {
       return new Response(null, { status: 204 });
     }
     if (path.endsWith("/contributions/status")) return json(STATUS);
-    if (path.endsWith("/contributions/sync")) return json(SYNC_RESPONSE);
+    if (path.endsWith("/contributions/events")) return json(EVENTS_RESPONSE);
     if (path.endsWith("/bookmarks/catalog")) {
       return json({
         revision: 4,
@@ -104,9 +86,12 @@ test("uses one capability-authenticated request for a contribution sync", async 
   });
 
   await api.createSession("OwnerBoundLaunch1");
-  assert.equal(api.contributionTransportReady, true);
   assert.deepEqual(await api.contributionStatus(), STATUS);
-  assert.deepEqual(await api.syncContributions(ENVELOPE), SYNC_RESPONSE);
+  assert.deepEqual(
+    await api.submitContributionEvents(EVENTS, { disclosureAcknowledged: true }),
+    EVENTS_RESPONSE,
+  );
+  assert.deepEqual(await api.submitContributionEvents(EVENTS), EVENTS_RESPONSE);
   await api.bookmarkCatalog();
 
   const sessionRequest = requests.find(({ path }) => path.endsWith("/session"));
@@ -119,28 +104,31 @@ test("uses one capability-authenticated request for a contribution sync", async 
   const authenticated = requests.filter(({ path }) =>
     /\/(?:contributions|bookmarks\/catalog)/u.test(path)
   );
-  assert.equal(authenticated.length, 3);
+  assert.equal(authenticated.length, 4);
   assert.ok(authenticated.every(({ options }) =>
     options.headers["X-Telegram-Init-Data"] === undefined
   ));
-  const syncRequests = authenticated.filter(({ path }) =>
-    path.endsWith("/contributions/sync")
-  );
-  assert.equal(syncRequests.length, 1);
-  assert.equal(
-    syncRequests[0].options.headers.Authorization,
-    `Bearer ${CONTRIBUTION_TOKEN}`,
-  );
-  assert.deepEqual(JSON.parse(syncRequests[0].options.body), ENVELOPE);
+  assert.ok(authenticated.every(({ options }) =>
+    options.headers.Authorization === `Bearer ${SESSION_TOKEN}`
+  ));
 
-  for (const { path, options } of authenticated) {
-    if (!path.endsWith("/contributions/sync")) {
-      assert.equal(options.headers.Authorization, `Bearer ${SESSION_TOKEN}`);
-    }
-  }
+  const batchRequests = requests.filter(({ path }) =>
+    path.endsWith("/contributions/events")
+  );
+  assert.equal(batchRequests.length, 2);
+  assert.equal(batchRequests[0].options.method, "POST");
+  // The first batch carries the inline disclosure consent; later batches
+  // stay minimal so an already-acknowledged consent is never re-stated.
+  assert.deepEqual(JSON.parse(batchRequests[0].options.body), {
+    events: EVENTS,
+    disclosure_acknowledged: true,
+  });
+  assert.deepEqual(JSON.parse(batchRequests[1].options.body), {
+    events: EVENTS,
+  });
 });
 
-test("will not send a contribution snapshot without a server capability", async () => {
+test("bounds contribution batches locally before any transport", async () => {
   const requests = [];
   const api = testApi(async (url) => {
     const path = new URL(url).pathname;
@@ -151,68 +139,72 @@ test("will not send a contribution snapshot without a server capability", async 
   });
 
   await api.createSession("OwnerBoundLaunch1");
-  assert.equal(api.contributionTransportReady, false);
+  assert.throws(() => api.submitContributionEvents([]), TypeError);
+  assert.throws(() => api.submitContributionEvents(null), TypeError);
   assert.throws(
-    () => api.syncContributions(ENVELOPE),
-    (error) => {
-      assert.equal(error instanceof ApiError, true);
-      assert.equal(error.code, "contribution_transport_not_ready");
-      assert.equal(error.status, 403);
-      assert.equal(error.retryable, false);
-      return true;
-    },
+    () => api.submitContributionEvents(Array.from({ length: 51 }, () => EVENTS[0])),
+    RangeError,
+  );
+  assert.throws(
+    () => api.submitContributionEvents(EVENTS, { disclosureAcknowledged: "yes" }),
+    TypeError,
   );
   assert.equal(
-    requests.filter((path) => path.endsWith("/contributions/sync")).length,
+    requests.filter((path) => path.endsWith("/contributions/events")).length,
     0,
   );
-  assert.throws(() => api.syncContributions(null), /sync envelope/i);
 });
 
-test("accepts a capability issued when an application becomes approved", async () => {
-  let statusCalls = 0;
+test("requires a live session before a contribution batch is sent", async () => {
+  const requests = [];
+  const api = testApi(async (url) => {
+    const path = new URL(url).pathname;
+    requests.push(path);
+    return json({ error: "not_found" }, 404);
+  });
+
+  await assert.rejects(api.submitContributionEvents(EVENTS), (error) => {
+    assert.equal(error instanceof ApiError, true);
+    assert.equal(error.code, "session_not_ready");
+    return true;
+  });
+  assert.equal(requests.length, 0);
+});
+
+test("surfaces contribution batch failures with their declared error codes", async () => {
+  let batchCalls = 0;
   const api = testApi(async (url) => {
     const path = new URL(url).pathname;
     if (path.endsWith("/session")) return json(SESSION, 201);
     if (path.endsWith("/cleanup")) return new Response(null, { status: 204 });
-    if (path.endsWith("/contributions/status")) {
-      statusCalls += 1;
-      return json(STATUS, 200, {
-        "X-Contribution-Token": CONTRIBUTION_TOKEN,
-      });
+    if (path.endsWith("/contributions/events")) {
+      batchCalls += 1;
+      if (batchCalls === 1) {
+        return json({
+          error: "contribution_not_allowed",
+          message: "This Telegram user is not an approved contributor.",
+        }, 403);
+      }
+      return json({
+        error: "idempotency_conflict",
+        message: "A contribution event ID was reused with different data.",
+      }, 409);
     }
-    if (path.endsWith("/contributions/sync")) return json(SYNC_RESPONSE);
     return json({ error: "not_found" }, 404);
   });
 
   await api.createSession("OwnerBoundLaunch1");
-  assert.equal(api.contributionTransportReady, false);
-  await api.contributionStatus();
-  assert.equal(statusCalls, 1);
-  assert.equal(api.contributionTransportReady, true);
-  await api.syncContributions(ENVELOPE);
-  api.clearSession();
-  assert.equal(api.contributionTransportReady, false);
-});
-
-test("rejects malformed contribution capabilities", async () => {
-  const api = testApi(async (url) => {
-    const path = new URL(url).pathname;
-    if (path.endsWith("/session")) {
-      return json(SESSION, 201, {
-        "X-Contribution-Token": "gbc_not-a-32-byte-token",
-      });
-    }
-    return json({ error: "not_found" }, 404);
-  });
-
-  await assert.rejects(api.createSession("OwnerBoundLaunch1"), (error) => {
+  await assert.rejects(api.submitContributionEvents(EVENTS), (error) => {
     assert.equal(error instanceof ApiError, true);
-    assert.equal(error.code, "invalid_response");
-    assert.equal(error.retryable, true);
+    assert.equal(error.code, "contribution_not_allowed");
+    assert.equal(error.status, 403);
     return true;
   });
-  assert.equal(api.contributionTransportReady, false);
+  await assert.rejects(api.submitContributionEvents(EVENTS), (error) => {
+    assert.equal(error.code, "idempotency_conflict");
+    assert.equal(error.status, 409);
+    return true;
+  });
 });
 
 test("preserves bounded Retry-After guidance from error bodies and headers", async () => {

@@ -45,13 +45,16 @@ class SyncApiMock {
   failures = 0;
   status = approvedStatus();
 
-  async syncContributions(envelope) {
-    this.calls.push(structuredClone(envelope));
+  async submitContributionEvents(events, options = {}) {
+    this.calls.push({
+      events: structuredClone(events),
+      options: structuredClone(options),
+    });
     if (this.failures > 0) {
       this.failures -= 1;
       throw Object.assign(new Error("response lost"), { code: "network_error" });
     }
-    return syncResponse(envelope, this.status);
+    return eventsResponse(events, this.status);
   }
 
   async contributionStatus() {
@@ -86,22 +89,13 @@ function approvedStatus(overrides = {}) {
   };
 }
 
-function syncResponse(envelope, status = approvedStatus()) {
+function eventsResponse(events, status = approvedStatus()) {
   return {
-    protocol_version: 1,
-    receipt: {
-      sync_id: envelope.sync_id,
-      snapshot_digest: "a".repeat(64),
-      outcome: "accepted",
-      accepted: envelope.operations.length + envelope.snapshot.assignments.length,
-      replayed: 0,
-      event_ids: Object.fromEntries(
-        envelope.operations.map((operation, index) => [
-          operation.client_event_id,
-          index + 1,
-        ]),
-      ),
-    },
+    accepted: events.length,
+    replayed: 0,
+    event_ids: Object.fromEntries(
+      events.map((event, index) => [event.client_event_id, index + 1]),
+    ),
     status: structuredClone(status),
     catalog: {
       revision: 7,
@@ -159,11 +153,12 @@ function createSync(api, options = {}) {
     storage: new MemoryStorage(),
     idFactory: () => "stable-client",
     initialStatus: approvedStatus(),
+    waitImplementation: () => Promise.resolve(),
     ...options,
   });
 }
 
-test("first snapshot uses one request and returns status, receipt, and catalog", async () => {
+test("one Sync drips the snapshot as idempotent events and returns the result set", async () => {
   const api = new SyncApiMock();
   const sync = createSync(api);
 
@@ -172,26 +167,23 @@ test("first snapshot uses one request and returns status, receipt, and catalog",
   });
 
   assert.equal(api.calls.length, 1);
-  assert.deepEqual(Object.keys(api.calls[0]).sort(), [
-    "client_id",
-    "disclosure_acknowledged",
-    "operations",
-    "protocol_version",
-    "snapshot",
-    "sync_id",
-  ]);
-  assert.equal(api.calls[0].protocol_version, 1);
-  assert.equal(api.calls[0].disclosure_acknowledged, true);
-  assert.deepEqual(api.calls[0].snapshot, {
-    topics: [personalTopic()],
-    assignments: [{
-      topic_id: "my-grace",
-      book: 43,
-      chapter: 3,
-      verse: 16,
-    }],
+  const { events, options } = api.calls[0];
+  assert.deepEqual(options, { disclosureAcknowledged: true });
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ["topic_upsert", "verse_add"],
+  );
+  assert.ok(events.every((event) =>
+    /^baseline:(?:topic_upsert|verse_add):[a-f0-9]{16}$/.test(event.client_event_id)
+  ));
+  assert.deepEqual(events[0].topic, {
+    local_topic_id: "my-grace",
+    name: "My Grace",
+    color: "#bbf7d0",
   });
-  assert.equal(report.sent, 1);
+  assert.deepEqual(events[1].verse, { book: 43, chapter: 3, verse: 16 });
+  assert.equal(report.sent, 2);
+  assert.equal(report.replayed, 0);
   assert.equal(report.pending, 0);
   assert.equal(report.status.can_contribute, true);
   assert.equal(report.review_details_available, true);
@@ -201,12 +193,98 @@ test("first snapshot uses one request and returns status, receipt, and catalog",
   assert.equal(sync.recovering, false);
 });
 
+test("a large contribution is dripped in ordered batches of at most fifty", async () => {
+  const api = new SyncApiMock();
+  const sync = createSync(api);
+  const topics = Array.from({ length: 60 }, (_, index) =>
+    personalTopic({ id: `topic-${index}`, name: `Topic ${index + 1}` })
+  );
+  const bookmarks = Array.from({ length: 30 }, (_, index) =>
+    bookmark([`topic-${index}`], { verse: index + 1 })
+  );
+
+  const report = await sync.synchronizeNow(
+    snapshot({ topics, bookmarks }),
+    { disclosureAcknowledged: true },
+  );
+
+  assert.deepEqual(api.calls.map(({ events }) => events.length), [50, 40]);
+  assert.deepEqual(
+    api.calls.map(({ options }) => options.disclosureAcknowledged),
+    [true, false],
+  );
+  const identifiers = api.calls.flatMap(({ events }) =>
+    events.map((event) => event.client_event_id)
+  );
+  assert.equal(new Set(identifiers).size, identifiers.length);
+  const types = api.calls.flatMap(({ events }) =>
+    events.map((event) => event.type)
+  );
+  assert.equal(types.lastIndexOf("topic_upsert") < types.indexOf("verse_add"), true);
+  assert.equal(report.sent, 90);
+  assert.equal(report.pending, 0);
+});
+
+test("rate limiting paces the drip and retries the same batch", async () => {
+  const waits = [];
+  const api = new SyncApiMock();
+  let limited = true;
+  const submit = api.submitContributionEvents.bind(api);
+  api.submitContributionEvents = async (events, options) => {
+    if (limited) {
+      limited = false;
+      throw Object.assign(new Error("Please wait."), {
+        code: "rate_limited",
+        status: 429,
+        retryAfter: 7,
+      });
+    }
+    return submit(events, options);
+  };
+  const sync = createSync(api, {
+    waitImplementation: (milliseconds) => {
+      waits.push(milliseconds);
+      return Promise.resolve();
+    },
+  });
+
+  const report = await sync.synchronizeNow(snapshot());
+
+  assert.deepEqual(waits, [7_000]);
+  assert.equal(api.calls.length, 1);
+  assert.equal(report.sent, 2);
+});
+
+test("a persistent rate limit surfaces after bounded pacing attempts", async () => {
+  const waits = [];
+  const api = new SyncApiMock();
+  let attempts = 0;
+  api.submitContributionEvents = async () => {
+    attempts += 1;
+    throw Object.assign(new Error("Please wait."), {
+      code: "rate_limited",
+      status: 429,
+    });
+  };
+  const sync = createSync(api, {
+    waitImplementation: (milliseconds) => {
+      waits.push(milliseconds);
+      return Promise.resolve();
+    },
+  });
+
+  await assert.rejects(sync.synchronizeNow(snapshot()), /wait/i);
+  assert.equal(attempts, 6);
+  assert.deepEqual(waits, [2_000, 2_000, 2_000, 2_000, 2_000]);
+  assert.equal(sync.pendingCount, 1);
+});
+
 test("a committed sync accepts only the documented catalog fallback", async () => {
   const api = new SyncApiMock();
-  api.syncContributions = async function (envelope) {
-    this.calls.push(structuredClone(envelope));
+  api.submitContributionEvents = async function (events, options = {}) {
+    this.calls.push({ events: structuredClone(events), options });
     return {
-      ...syncResponse(envelope),
+      ...eventsResponse(events),
       catalog: { revision: null, checksum: null, available: false },
     };
   };
@@ -221,12 +299,12 @@ test("a committed sync accepts only the documented catalog fallback", async () =
   });
 });
 
-test("an invalid receipt cannot clear the durable retry envelope", async () => {
+test("an invalid response cannot mark local work as synchronized", async () => {
   const api = new SyncApiMock();
-  api.syncContributions = async function (envelope) {
-    this.calls.push(structuredClone(envelope));
-    const response = syncResponse(envelope);
-    response.receipt.event_ids = { invalid: 0 };
+  api.submitContributionEvents = async function (events, options = {}) {
+    this.calls.push({ events: structuredClone(events), options });
+    const response = eventsResponse(events);
+    response.event_ids = { invalid: 0 };
     return response;
   };
   const sync = createSync(api);
@@ -239,104 +317,48 @@ test("an invalid receipt cannot clear the durable retry envelope", async () => {
   assert.equal(sync.pendingCount, 1);
 });
 
-test("a lost response retries the exact same persisted ID and body", async () => {
+test("a lost response retries the exact same deterministic events", async () => {
   const api = new SyncApiMock();
   api.failures = 1;
   const sync = createSync(api);
   const current = snapshot();
 
   await assert.rejects(sync.synchronizeNow(current), /response lost/);
+  assert.equal(sync.pendingCount, 1);
   const report = await sync.synchronizeNow(current);
 
   assert.equal(api.calls.length, 2);
-  assert.deepEqual(api.calls[1], api.calls[0]);
+  assert.deepEqual(api.calls[1].events, api.calls[0].events);
   assert.equal(report.pending, 0);
 });
 
-test("a changed snapshot after failure receives a new sync ID", async () => {
+test("changed content mints new identities while unchanged events keep theirs", async () => {
   const api = new SyncApiMock();
-  api.failures = 1;
   const sync = createSync(api);
+  const current = snapshot();
+  await sync.synchronizeNow(current);
 
-  await assert.rejects(sync.synchronizeNow(snapshot()), /response lost/);
   const changed = snapshot({
     bookmarks: [
       bookmark(["my-grace"]),
       bookmark(["my-grace"], { verse: 17 }),
     ],
   });
-  await sync.captureMutation(snapshot(), changed);
+  await sync.captureMutation(current, changed);
   await sync.synchronizeNow(changed);
 
-  assert.equal(api.calls.length, 2);
-  assert.notEqual(api.calls[0].sync_id, api.calls[1].sync_id);
-  assert.equal(api.calls[1].snapshot.assignments.length, 2);
-});
-
-test("an artificial fingerprint collision cannot replay a stale body", async () => {
-  const firstJournal = new MemoryJournal();
-  const firstApi = new SyncApiMock();
-  firstApi.failures = 1;
-  const options = {
-    scope: SCOPE,
-    instanceScope: INSTANCE_SCOPE,
-    initialStatus: approvedStatus(),
-    idFactory: () => "stable-client",
-  };
-  const first = await ContributionSync.open({
-    ...options,
-    journal: firstJournal,
-    api: firstApi,
-  });
-  await assert.rejects(first.synchronizeNow(snapshot()), /response lost/);
-
-  const changed = snapshot({
-    bookmarks: [
-      bookmark(["my-grace"]),
-      bookmark(["my-grace"], { verse: 17 }),
-    ],
-  });
-  const probeJournal = new MemoryJournal();
-  const probeApi = new SyncApiMock();
-  probeApi.failures = 1;
-  const probe = await ContributionSync.open({
-    ...options,
-    journal: probeJournal,
-    api: probeApi,
-  });
-  await assert.rejects(probe.synchronizeNow(changed), /response lost/);
-  const changedFingerprint = probeApi.calls[0].sync_id.split(":").at(-1);
-
-  // Simulate the theoretically possible case where the compact hashes match
-  // even though the stored canonical body does not.
-  const stored = JSON.parse(firstJournal.raw);
-  stored.inflight.fingerprint = changedFingerprint;
-  firstJournal.raw = JSON.stringify(stored);
-
-  const retryApi = new SyncApiMock();
-  const reopened = await ContributionSync.open({
-    ...options,
-    initialStatus: undefined,
-    journal: firstJournal,
-    api: retryApi,
-  });
-  await reopened.synchronizeNow(changed);
-
-  assert.notEqual(retryApi.calls[0].sync_id, firstApi.calls[0].sync_id);
-  assert.deepEqual(retryApi.calls[0].snapshot.assignments, [
-    {
-      topic_id: "my-grace",
-      book: 43,
-      chapter: 3,
-      verse: 16,
-    },
-    {
-      topic_id: "my-grace",
-      book: 43,
-      chapter: 3,
-      verse: 17,
-    },
-  ]);
+  const firstIds = api.calls[0].events.map((event) => event.client_event_id);
+  const secondIds = api.calls[1].events.map((event) => event.client_event_id);
+  assert.equal(secondIds.length, 3);
+  // The untouched topic and verse keep their content-derived identities, so
+  // the server replays them; only the new verse creates a new event.
+  for (const id of firstIds) {
+    assert.ok(secondIds.includes(id));
+  }
+  assert.equal(
+    secondIds.filter((id) => !firstIds.includes(id)).length,
+    1,
+  );
 });
 
 test("explicit global operations coalesce to the newest stable intent", async () => {
@@ -353,13 +375,15 @@ test("explicit global operations coalesce to the newest stable intent", async ()
   assert.equal(sync.pendingCount, 2);
 
   await sync.synchronizeNow(snapshot());
-  assert.equal(api.calls[0].operations.length, 1);
-  assert.equal(api.calls[0].operations[0].type, "verse_add");
-  assert.match(api.calls[0].operations[0].client_event_id, /:e:/);
+  const explicit = api.calls[0].events.filter((event) =>
+    /:e:/.test(event.client_event_id)
+  );
+  assert.equal(explicit.length, 1);
+  assert.equal(explicit[0].type, "verse_add");
   assert.equal(sync.pendingCount, 0);
 });
 
-test("reopening retains explicit operations and an exact in-flight envelope", async () => {
+test("reopening retains explicit operations with their exact identities", async () => {
   const journal = new MemoryJournal();
   const firstApi = new SyncApiMock();
   firstApi.failures = 1;
@@ -370,6 +394,7 @@ test("reopening retains explicit operations and an exact in-flight envelope", as
     coreTopics: [coreTopic()],
     idFactory: () => "stable-client",
     initialStatus: approvedStatus(),
+    waitImplementation: () => Promise.resolve(),
   };
   const first = await ContributionSync.open({ ...options, api: firstApi });
   await first.captureGlobalRemoval(
@@ -378,7 +403,7 @@ test("reopening retains explicit operations and an exact in-flight envelope", as
     snapshot(),
   );
   await assert.rejects(first.synchronizeNow(snapshot()), /response lost/);
-  const sent = structuredClone(firstApi.calls[0]);
+  const sent = structuredClone(firstApi.calls[0].events);
 
   const secondApi = new SyncApiMock();
   const reopened = await ContributionSync.open({
@@ -388,7 +413,7 @@ test("reopening retains explicit operations and an exact in-flight envelope", as
   });
   await reopened.synchronizeNow(snapshot());
 
-  assert.deepEqual(secondApi.calls[0], sent);
+  assert.deepEqual(secondApi.calls[0].events, sent);
   assert.equal(reopened.pendingCount, 0);
 });
 
@@ -399,7 +424,7 @@ test("status clones are isolated and a denied transport suspends local authority
   exposed.topics.push({ broken: true });
   assert.deepEqual(sync.topicOutcomes, []);
 
-  api.syncContributions = async () => {
+  api.submitContributionEvents = async () => {
     throw Object.assign(new Error("revoked"), {
       code: "contribution_not_allowed",
     });
@@ -409,7 +434,7 @@ test("status clones are isolated and a denied transport suspends local authority
   assert.equal(sync.disclosureRequired, false);
 });
 
-test("server status from the one sync response updates review outcomes", async () => {
+test("server status from the drip responses updates review outcomes", async () => {
   const api = new SyncApiMock();
   api.status = approvedStatus({
     can_contribute: false,
@@ -464,16 +489,20 @@ test("core metadata is authoritative and noncanonical data is filtered", async (
 
   await sync.synchronizeNow(current);
 
-  assert.deepEqual(api.calls[0].snapshot.topics, [authoritative]);
-  assert.deepEqual(api.calls[0].snapshot.assignments, [{
-    topic_id: "authority",
-    book: 43,
-    chapter: 3,
-    verse: 16,
-  }]);
+  const { events } = api.calls[0];
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ["topic_upsert", "verse_add"],
+  );
+  assert.deepEqual(events[0].topic, {
+    local_topic_id: "authority",
+    name: "Authority of the Bible",
+    color: "#93c5fd",
+  });
+  assert.deepEqual(events[1].verse, { book: 43, chapter: 3, verse: 16 });
 });
 
-test("fallback core IDs cannot leak local metadata or orphan assignments", async () => {
+test("an empty contribution refreshes standing without sending events", async () => {
   const api = new SyncApiMock();
   const sync = createSync(api, { coreTopicIds: ["authority"] });
   const current = snapshot({
@@ -481,12 +510,12 @@ test("fallback core IDs cannot leak local metadata or orphan assignments", async
     bookmarks: [bookmark(["authority"])],
   });
 
-  await sync.synchronizeNow(current);
+  const report = await sync.synchronizeNow(current);
 
-  assert.deepEqual(api.calls[0].snapshot, {
-    topics: [],
-    assignments: [],
-  });
+  assert.equal(api.calls.length, 0);
+  assert.equal(report.sent, 0);
+  assert.equal(report.pending, 0);
+  assert.equal(report.status.state, "approved");
 });
 
 test("invalid snapshot data fails before transport", async () => {
@@ -543,19 +572,20 @@ test("v1 migration keeps global intent and discards reconstructible personal eve
     api,
     coreTopics: [coreTopic()],
     idFactory: () => "migrated-client",
+    waitImplementation: () => Promise.resolve(),
   });
 
   assert.equal(sync.pendingCount, 2);
   await sync.synchronizeNow(snapshot());
-  assert.equal(api.calls[0].operations.length, 1);
-  assert.equal(
-    api.calls[0].operations[0].client_event_id,
-    "event:g:remove-one",
+  const explicit = api.calls[0].events.filter((event) =>
+    !event.client_event_id.startsWith("baseline:")
   );
+  assert.equal(explicit.length, 1);
+  assert.equal(explicit[0].client_event_id, "event:g:remove-one");
   assert.equal(JSON.parse(journal.raw).version, 2);
 });
 
-test("the retry envelope must persist before network I/O", async () => {
+test("capturing an explicit intent fails loudly when the journal cannot persist", async () => {
   const journal = new MemoryJournal();
   const api = new SyncApiMock();
   const sync = await ContributionSync.open({
@@ -563,44 +593,31 @@ test("the retry envelope must persist before network I/O", async () => {
     instanceScope: INSTANCE_SCOPE,
     journal,
     api,
+    coreTopics: [coreTopic()],
     idFactory: () => "stable-client",
     initialStatus: approvedStatus(),
+    waitImplementation: () => Promise.resolve(),
   });
   journal.rejectWrites = true;
 
-  await assert.rejects(sync.synchronizeNow(snapshot()), /journal write failed/);
-  assert.equal(api.calls.length, 0);
-  assert.equal(sync.persistenceFailed, true);
-});
-
-test("fallback storage failure also prevents ambiguous network I/O", async () => {
-  const storage = new MemoryStorage();
-  const api = new SyncApiMock();
-  const sync = new ContributionSync({
-    scope: SCOPE,
-    instanceScope: INSTANCE_SCOPE,
-    storage,
-    api,
-    idFactory: () => "stable-client",
-    initialStatus: approvedStatus(),
-  });
-  storage.rejectWrites = true;
-
   await assert.rejects(
-    sync.synchronizeNow(snapshot()),
-    /retry storage is unavailable/i,
+    Promise.resolve(sync.captureGlobalRemoval(
+      coreTopic(),
+      { book: 1, chapter: 1, verse: 1 },
+      snapshot(),
+    )),
+    /journal write failed/,
   );
-  assert.equal(api.calls.length, 0);
   assert.equal(sync.persistenceFailed, true);
 });
 
-test("cleanup storage failure cannot relabel a confirmed commit", async () => {
+test("a persistence failure cannot relabel a committed drip", async () => {
   const journal = new MemoryJournal();
   const api = new SyncApiMock();
-  api.syncContributions = async function (envelope) {
-    this.calls.push(structuredClone(envelope));
+  const submit = api.submitContributionEvents.bind(api);
+  api.submitContributionEvents = async (events, options) => {
     journal.rejectWrites = true;
-    return syncResponse(envelope);
+    return submit(events, options);
   };
   const sync = await ContributionSync.open({
     scope: SCOPE,
@@ -609,11 +626,12 @@ test("cleanup storage failure cannot relabel a confirmed commit", async () => {
     api,
     idFactory: () => "stable-client",
     initialStatus: approvedStatus(),
+    waitImplementation: () => Promise.resolve(),
   });
 
   const report = await sync.synchronizeNow(snapshot());
 
-  assert.equal(report.sent, 1);
+  assert.equal(report.sent, 2);
   assert.equal(api.calls.length, 1);
   assert.equal(sync.persistenceFailed, true);
 });
@@ -658,6 +676,7 @@ test("legacy localStorage values migrate into the transactional journal", async 
     legacyStorage: storage,
     api: new SyncApiMock(),
     idFactory: () => "migrated-client",
+    waitImplementation: () => Promise.resolve(),
   });
 
   assert.equal(sync.canContribute, true);

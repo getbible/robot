@@ -13,12 +13,15 @@ import {
 // would strand an unacknowledged v1 global-preference operation.
 const STORAGE_PREFIX = "getbible.miniapp.contributions.v1";
 const STORAGE_VERSION = 2;
-const PROTOCOL_VERSION = 1;
-const MAX_BATCH_SIZE = 50; // Compatibility export; snapshot sync is unbatched.
+// Retained only to validate persisted v2 journal entries written by the
+// retired snapshot transport; new state never stores an inflight envelope.
+const LEGACY_PROTOCOL_VERSION = 1;
+const MAX_BATCH_SIZE = 50; // One drip-fed request, mirroring the server bound.
+const MAX_RATE_LIMIT_RETRIES = 5;
+const MAX_RATE_LIMIT_WAIT_SECONDS = 60;
 const MAX_EXPLICIT_OPERATIONS = 2_000;
 const MAX_SNAPSHOT_ASSIGNMENTS = 10_000;
 const MAX_PERSISTED_STATE_BYTES = 1024 * 1024;
-const MAX_SYNC_ENVELOPE_BYTES = 1024 * 1024;
 const SCOPE_PATTERN = /^[a-f0-9]{64}$/;
 const SAFE_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const CLIENT_ID_PATTERN = /^[A-Za-z0-9._:-]{1,80}$/;
@@ -27,11 +30,16 @@ const ENGLISH_TOPIC_PATTERN =
   /^(?=[A-Za-z0-9 &'():?-]{2,80}$)(?=.*[A-Za-z])(?!.* {2})[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]$/;
 
 /**
- * Durable adapter for the single-request contribution snapshot endpoint.
+ * The contribution counterpart to search: it owns the user's personal topics
+ * and verse assignments in the browser and, on an explicit Sync, drips them to
+ * the server in small session-authenticated event batches over the same
+ * ordinary request path search uses. Every response returns the contributor's
+ * current standing, so the final batch settles the panel in one round trip.
  *
  * BookmarkStore is the source of truth for personal topics. This class only
- * persists an exact retry envelope and explicit global add/remove intents
- * which cannot be reconstructed from BookmarkStore.
+ * persists explicit global add/remove intents which cannot be reconstructed
+ * from BookmarkStore; snapshot-derived events are re-created deterministically
+ * on every run and deduplicated server-side by their content-derived IDs.
  */
 export class ContributionSync {
   #api;
@@ -46,6 +54,7 @@ export class ContributionSync {
   #state;
   #storage;
   #syncPromise = null;
+  #wait;
 
   static async open(options = {}) {
     const instanceScope = options.instanceScope ?? defaultInstanceScope();
@@ -118,13 +127,18 @@ export class ContributionSync {
     journal = null,
     initialRaw = undefined,
     initialStatus = undefined,
+    waitImplementation = defaultWait,
   } = {}) {
     if (typeof scope !== "string" || !SCOPE_PATTERN.test(scope)) {
       throw new TypeError("An authenticated contribution scope is required.");
     }
-    if (!api || typeof api.syncContributions !== "function") {
-      throw new TypeError("A contribution snapshot API client is required.");
+    if (!api || typeof api.submitContributionEvents !== "function") {
+      throw new TypeError("A contribution event API client is required.");
     }
+    if (typeof waitImplementation !== "function") {
+      throw new TypeError("A wait implementation is required.");
+    }
+    this.#wait = waitImplementation;
     if (
       !Array.isArray(coreTopics) ||
       !Array.isArray(coreTopicIds) ||
@@ -225,27 +239,6 @@ export class ContributionSync {
     }
     try {
       return await this.seedStatus(await this.#api.contributionStatus());
-    } catch (error) {
-      if (isContributionDenied(error)) {
-        await this.#suspendAfterDenial();
-      }
-      throw error;
-    }
-  }
-
-  /** Compatibility path; new manual flows acknowledge in synchronizeNow. */
-  async acknowledgeDisclosure() {
-    if (!this.disclosureRequired) {
-      return false;
-    }
-    if (typeof this.#api.acknowledgeContributionDisclosure !== "function") {
-      throw new TypeError("Disclosure must be acknowledged with snapshot sync.");
-    }
-    try {
-      await this.seedStatus(
-        await this.#api.acknowledgeContributionDisclosure(),
-      );
-      return true;
     } catch (error) {
       if (isContributionDenied(error)) {
         await this.#suspendAfterDenial();
@@ -377,71 +370,89 @@ export class ContributionSync {
       this.#coreTopicIds,
     );
     const operations = this.#state.operations.map(cloneOperation);
-    const descriptor = {
-      snapshot: desired,
-      operations,
-      disclosure_acknowledged: disclosureAcknowledged,
-    };
-    const fingerprint = valueFingerprint(descriptor);
-    let envelope;
-    if (
-      this.#state.inflight?.fingerprint === fingerprint &&
-      inflightMatchesDescriptor(this.#state.inflight.envelope, descriptor)
-    ) {
-      envelope = cloneEnvelope(this.#state.inflight.envelope);
-    } else {
-      envelope = {
-        protocol_version: PROTOCOL_VERSION,
-        sync_id: this.#nextId("s", fingerprint),
-        client_id: this.#state.client_id,
-        snapshot: desired,
-        operations,
-        disclosure_acknowledged: disclosureAcknowledged,
-      };
-      this.#state.inflight = {
-        fingerprint,
-        envelope: cloneEnvelope(envelope),
-      };
-    }
-    if (utf8Length(JSON.stringify(envelope)) > MAX_SYNC_ENVELOPE_BYTES) {
-      throw new RangeError("The contribution snapshot is too large to synchronize.");
-    }
-
-    // The exact idempotency identity and body commit before transport.
+    const events = contributionUploadEvents(desired, operations);
     const revision = this.#state.revision;
-    if (!await this.#persist()) {
-      throw new Error(
-        "Contribution retry storage is unavailable; synchronization was not sent.",
-      );
-    }
+    // No durable pre-send envelope is needed here: snapshot events are
+    // re-derived deterministically from the bookmarks on every run, explicit
+    // operations were persisted when captured, and the server replays any
+    // redelivered client_event_id without duplicating it. A crash mid-drip
+    // therefore loses nothing — the next Sync resends and the server settles.
     try {
-      const response = normalizeSyncResponse(
-        await this.#api.syncContributions(cloneEnvelope(envelope)),
-        envelope.sync_id,
-      );
-      const sentIds = new Set(
-        envelope.operations.map((operation) => operation.client_event_id),
-      );
-      this.#state.operations = this.#state.operations.filter(
-        (operation) => !sentIds.has(operation.client_event_id),
-      );
+      let sent = 0;
+      let replayed = 0;
+      let catalog = { revision: null, checksum: null, available: false };
+      if (
+        events.length === 0 &&
+        typeof this.#api.contributionStatus === "function"
+      ) {
+        this.#applyStatus(
+          normalizeContributionStatus(await this.#api.contributionStatus()),
+        );
+      }
+      for (let index = 0; index < events.length; index += MAX_BATCH_SIZE) {
+        const batch = events.slice(index, index + MAX_BATCH_SIZE);
+        const response = normalizeEventsResponse(
+          await this.#submitBatch(batch, {
+            disclosureAcknowledged: disclosureAcknowledged && index === 0,
+          }),
+        );
+        sent += response.accepted;
+        replayed += response.replayed;
+        catalog = response.catalog;
+        const sentIds = new Set(batch.map((event) => event.client_event_id));
+        const remaining = this.#state.operations.filter(
+          (operation) => !sentIds.has(operation.client_event_id),
+        );
+        if (remaining.length !== this.#state.operations.length) {
+          this.#state.operations = remaining;
+          // A committed batch is authoritative; a persistence failure only
+          // means a later launch replays the same idempotent events.
+          await this.#persist().catch(() => false);
+        }
+        this.#applyStatus(response.status);
+      }
       if (this.#state.revision === revision) {
         this.#state.dirty = false;
       }
-      if (this.#state.inflight?.envelope.sync_id === envelope.sync_id) {
-        this.#state.inflight = null;
-      }
-      this.#applyStatus(response.status);
-      // The server receipt is authoritative. If local cleanup cannot persist,
-      // the pre-request envelope remains durable and a later launch will make
-      // the same safe replay; never relabel the confirmed commit as a failure.
+      this.#state.inflight = null;
       await this.#persist().catch(() => false);
-      return synchronizationReport(response, this.pendingCount);
+      const status = this.status;
+      return {
+        sent,
+        replayed,
+        pending: this.pendingCount,
+        review_details_available: contributionReviewDetailsAvailable(status),
+        status,
+        topic_outcomes: status.topics.map(cloneTopicOutcome),
+        catalog,
+      };
     } catch (error) {
       if (isContributionDenied(error)) {
         await this.#suspendAfterDenial();
       }
       throw error;
+    }
+  }
+
+  async #submitBatch(events, { disclosureAcknowledged }) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.#api.submitContributionEvents(events, {
+          disclosureAcknowledged,
+        });
+      } catch (error) {
+        const rateLimited =
+          error?.code === "rate_limited" || error?.status === 429;
+        if (!rateLimited || attempt >= MAX_RATE_LIMIT_RETRIES) {
+          throw error;
+        }
+        // Seep the data slowly: the server names its pace and the drip obeys.
+        const seconds = Math.min(
+          MAX_RATE_LIMIT_WAIT_SECONDS,
+          Math.max(1, Number(error?.retryAfter) || 2),
+        );
+        await this.#wait(seconds * 1_000);
+      }
     }
   }
 
@@ -747,41 +758,57 @@ function normalizeBookmarkSnapshot(value) {
   return { topics, bookmarks };
 }
 
-function normalizeSyncResponse(value, expectedSyncId) {
-  const receipt = value?.receipt;
+function contributionUploadEvents(desired, operations) {
+  // Everything the panel promises to share, expressed as bounded idempotent
+  // events: the snapshot's topics and assignments under deterministic
+  // content-derived IDs, then the queued explicit global intents. A queued
+  // intent supersedes the snapshot's view of the same topic/verse pair so an
+  // explicit removal is never contradicted by a stale re-addition.
+  const topics = new Map(desired.topics.map((topic) => [topic.id, topic]));
+  const explicitKeys = new Set(
+    operations.map((operation) =>
+      operationKey(operation.topic.local_topic_id, operation.verse)
+    ),
+  );
+  const events = [];
+  for (const topic of desired.topics) {
+    events.push(withBaselineId(topicUpsertEvent(topic)));
+  }
+  for (const assignment of desired.assignments) {
+    if (explicitKeys.has(operationKey(assignment.topic_id, assignment))) {
+      continue;
+    }
+    events.push(withBaselineId(verseEvent("verse_add", {
+      topic: topics.get(assignment.topic_id),
+      verse: {
+        book: assignment.book,
+        chapter: assignment.chapter,
+        verse: assignment.verse,
+      },
+    })));
+  }
+  events.push(...operations);
+  return events;
+}
+
+function normalizeEventsResponse(value) {
   if (
     !value ||
     typeof value !== "object" ||
     Array.isArray(value) ||
-    !sameKeys(value, ["catalog", "protocol_version", "receipt", "status"]) ||
-    value.protocol_version !== PROTOCOL_VERSION ||
-    !receipt ||
-    typeof receipt !== "object" ||
-    Array.isArray(receipt) ||
-    !sameKeys(receipt, [
-      "accepted",
-      "event_ids",
-      "outcome",
-      "replayed",
-      "snapshot_digest",
-      "sync_id",
-    ]) ||
-    receipt.sync_id !== expectedSyncId ||
-    !/^[a-f0-9]{64}$/.test(receipt.snapshot_digest ?? "") ||
-    !["accepted", "replayed"].includes(receipt.outcome) ||
-    !boundedInteger(receipt.accepted, 0, 12_100) ||
-    !boundedInteger(receipt.replayed, 0, 12_100) ||
-    !validReceiptEventIds(receipt.event_ids)
+    !sameKeys(value, ["accepted", "catalog", "event_ids", "replayed", "status"]) ||
+    !boundedInteger(value.accepted, 0, MAX_BATCH_SIZE) ||
+    !boundedInteger(value.replayed, 0, MAX_BATCH_SIZE) ||
+    !validReceiptEventIds(value.event_ids)
   ) {
     throw new TypeError("Invalid contribution sync response.");
   }
-  const status = normalizeContributionStatus(value.status);
-  const catalog = normalizeSyncCatalog(value.catalog);
   return {
-    protocol_version: PROTOCOL_VERSION,
-    receipt: jsonClone(receipt),
-    status,
-    catalog,
+    accepted: value.accepted,
+    replayed: value.replayed,
+    event_ids: jsonClone(value.event_ids),
+    status: normalizeContributionStatus(value.status),
+    catalog: normalizeSyncCatalog(value.catalog),
   };
 }
 
@@ -824,30 +851,6 @@ function sameKeys(value, expected) {
   const actual = Object.keys(value).sort();
   return actual.length === expected.length &&
     actual.every((key, index) => key === expected[index]);
-}
-
-function synchronizationReport(response, pending) {
-  const status = cloneContributionStatus(response.status);
-  return {
-    sent: response.receipt.accepted,
-    pending,
-    review_details_available: contributionReviewDetailsAvailable(status),
-    status,
-    topic_outcomes: status.topics.map(cloneTopicOutcome),
-    catalog: response.catalog,
-    receipt: response.receipt,
-  };
-}
-
-function inflightMatchesDescriptor(envelope, descriptor) {
-  // Shapes are canonicalized and ordered before this comparison. The hash is
-  // only a compact ID suffix; exact equality decides whether a body is safe to
-  // replay after a lost response.
-  return JSON.stringify({
-    snapshot: envelope.snapshot,
-    operations: envelope.operations,
-    disclosure_acknowledged: envelope.disclosure_acknowledged,
-  }) === JSON.stringify(descriptor);
 }
 
 function freshState(idFactory) {
@@ -1000,7 +1003,7 @@ function validInflight(value) {
     value &&
     typeof value === "object" &&
     /^[a-f0-9]{16}$/.test(value.fingerprint) &&
-    value.envelope?.protocol_version === PROTOCOL_VERSION &&
+    value.envelope?.protocol_version === LEGACY_PROTOCOL_VERSION &&
     SAFE_ID_PATTERN.test(value.envelope?.sync_id ?? "") &&
     CLIENT_ID_PATTERN.test(value.envelope?.client_id ?? "") &&
     Array.isArray(value.envelope?.snapshot?.topics) &&
@@ -1203,6 +1206,10 @@ function normalizeGeneratedId(value) {
 function defaultToken() {
   return globalThis.crypto?.randomUUID?.() ??
     Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function defaultWait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function unavailableStatus() {

@@ -11,7 +11,7 @@ const miniappRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const mainApiPattern = /^https:\/\/api\.getbible\.net\/v2\/.+/;
 const queryApiPattern = /^https:\/\/query\.getbible\.net\/v2\/.+/;
 const corsHeaders = { "access-control-allow-origin": "*" };
-const contributionToken = `gbc_${"A".repeat(43)}`;
+const sessionToken = "ContributorBrowserSession123";
 const browserName = process.env.PLAYWRIGHT_BROWSER ?? "chromium";
 const browserType = { chromium, webkit }[browserName];
 if (!browserType) {
@@ -157,12 +157,17 @@ function contributionSummary({ submitted = false } = {}) {
   };
 }
 
-function contributionStatus({ approved, localTopicId = null, submitted = false }) {
+function contributionStatus({
+  approved,
+  localTopicId = null,
+  submitted = false,
+  disclosureRequired = false,
+}) {
   return {
     enabled: true,
     state: approved ? "approved" : "pending",
     can_contribute: approved,
-    disclosure_required: false,
+    disclosure_required: disclosureRequired,
     topics: localTopicId && submitted
       ? [{
           local_topic_id: localTopicId,
@@ -203,7 +208,7 @@ async function serveStatic(route) {
 
 async function createBrowserFixture(
   context,
-  { approved = true, issueCapability = true, failFirstSync = false } = {},
+  { approved = true, disclosureRequired = false, failFirstSync = false } = {},
 ) {
   const executablePath = browserName === "chromium"
     ? process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
@@ -225,6 +230,7 @@ async function createBrowserFixture(
   let statusRequests = 0;
   let catalogRequests = 0;
   let shouldFailSync = failFirstSync;
+  let disclosurePending = disclosureRequired;
   page.on("pageerror", (error) => pageErrors.push(error.message));
   page.on("requestfailed", (request) => {
     const errorText = request.failure()?.errorText ?? "failed";
@@ -316,10 +322,11 @@ async function createBrowserFixture(
         },
         entrypoint: { route: "bible", query: "" },
         basket: { items: [], count: 0, maximum: 100 },
-        contributions: contributionStatus({ approved }),
-      }, 201, approved && issueCapability
-        ? { "X-Contribution-Token": contributionToken }
-        : {});
+        contributions: contributionStatus({
+          approved,
+          disclosureRequired: disclosurePending,
+        }),
+      }, 201);
     }
     if (apiPath === "cleanup") {
       return route.fulfill({ status: 204, body: "" });
@@ -332,14 +339,10 @@ async function createBrowserFixture(
       requestSequence.push("status");
       return fulfillJson(
         route,
-        contributionStatus({ approved }),
-        200,
-        approved && issueCapability
-          ? { "X-Contribution-Token": contributionToken }
-          : {},
+        contributionStatus({ approved, disclosureRequired: disclosurePending }),
       );
     }
-    if (apiPath === "contributions/sync") {
+    if (apiPath === "contributions/events") {
       const body = request.postDataJSON();
       syncRequests.push({
         body,
@@ -356,35 +359,30 @@ async function createBrowserFixture(
           retry_after: 0,
         }, 503);
       }
-      const localTopicId = body.snapshot.topics.find((topic) =>
-        topic.name === "Community Hope"
-      )?.id ?? null;
-      const accepted = body.snapshot.topics.length +
-        body.snapshot.assignments.length + body.operations.length;
+      if (body.disclosure_acknowledged === true) {
+        disclosurePending = false;
+      }
+      const localTopicId = body.events.find((event) =>
+        event.type === "topic_upsert" && event.topic.name === "Community Hope"
+      )?.topic.local_topic_id ?? null;
       return fulfillJson(route, {
-        protocol_version: 1,
-        receipt: {
-          sync_id: body.sync_id,
-          snapshot_digest: "a".repeat(64),
-          outcome: "accepted",
-          accepted,
-          replayed: 0,
-          event_ids: {},
-        },
+        accepted: body.events.length,
+        replayed: 0,
+        event_ids: Object.fromEntries(
+          body.events.map((event, index) => [event.client_event_id, index + 1]),
+        ),
         status: contributionStatus({
           approved,
           localTopicId,
           submitted: true,
+          disclosureRequired: disclosurePending,
         }),
         catalog: { revision: 0, checksum: "0".repeat(64) },
       });
     }
-    if (apiPath === "contributions/events") {
-      requestSequence.push("events");
-      return fulfillJson(route, {
-        error: "retired_route",
-        message: "The legacy contribution event route is retired.",
-      }, 410);
+    if (apiPath === "contributions/sync") {
+      requestSequence.push("retired-sync");
+      return fulfillJson(route, { error: "not_found" }, 404);
     }
     if (apiPath === "bookmarks/catalog") {
       catalogRequests += 1;
@@ -465,7 +463,7 @@ async function openContributorManager(page) {
   }
 }
 
-test("Sync Now sends one capability-authenticated snapshot without fanout", async (context) => {
+test("Sync Now drips session-authenticated event batches without fanout", async (context) => {
   const fixture = await createBrowserFixture(context);
   const {
     failedRequests,
@@ -504,24 +502,27 @@ test("Sync Now sends one capability-authenticated snapshot without fanout", asyn
   assert.equal(fixture.catalogRequestCount(), catalogStart);
   const sync = syncRequests[0];
   assert.equal(sync.method, "POST");
-  assert.equal(sync.headers.authorization, `Bearer ${contributionToken}`);
+  // The drip uses the exact same plain session bearer the search flow uses.
+  assert.equal(sync.headers.authorization, `Bearer ${sessionToken}`);
   assert.equal(sync.headers["x-telegram-init-data"], undefined);
-  assert.equal(sync.body.protocol_version, 1);
-  assert.match(sync.body.sync_id, /^[A-Za-z0-9._:-]+$/);
-  assert.match(sync.body.client_id, /^[A-Za-z0-9._:-]+$/);
-  assert.equal(sync.body.disclosure_acknowledged, false);
-  assert.deepEqual(sync.body.operations, []);
-  assert.deepEqual(sync.body.snapshot.topics, [{
-    id: localTopicId,
+  assert.deepEqual(Object.keys(sync.body), ["events"]);
+  assert.deepEqual(
+    sync.body.events.map((event) => event.type),
+    ["topic_upsert", "verse_add"],
+  );
+  assert.ok(sync.body.events.every((event) =>
+    /^baseline:(?:topic_upsert|verse_add):[a-f0-9]{16}$/.test(event.client_event_id)
+  ));
+  assert.deepEqual(sync.body.events[0].topic, {
+    local_topic_id: localTopicId,
     name: "Community Hope",
     color: "#fde68a",
-  }]);
-  assert.deepEqual(sync.body.snapshot.assignments, [{
-    topic_id: localTopicId,
+  });
+  assert.deepEqual(sync.body.events[1].verse, {
     book: 43,
     chapter: 3,
     verse: 2,
-  }]);
+  });
   assert.equal(
     JSON.stringify(sync.body).includes("KJV John 3 test verse"),
     false,
@@ -539,7 +540,7 @@ test("Sync Now sends one capability-authenticated snapshot without fanout", asyn
   assert.deepEqual(failedRequests, []);
 });
 
-test("a lost sync attempt retries the identical durable envelope", async (context) => {
+test("a lost batch retries the identical deterministic events", async (context) => {
   const fixture = await createBrowserFixture(context, { failFirstSync: true });
   const { page, syncRequests } = fixture;
   await page.goto("https://app.local/miniapp/index.html?launch=contributor-test", {
@@ -565,20 +566,34 @@ test("a lost sync attempt retries the identical durable envelope", async (contex
   ));
   assert.equal(syncRequests.length, 2);
   assert.deepEqual(syncRequests[1].body, firstBody);
-  assert.equal(syncRequests[1].headers.authorization, `Bearer ${contributionToken}`);
+  assert.equal(syncRequests[1].headers.authorization, `Bearer ${sessionToken}`);
 });
 
-test("approved status without a capability exposes no contribution control", async (context) => {
-  const fixture = await createBrowserFixture(context, { issueCapability: false });
+test("disclosure consent rides inside the first synchronized batch", async (context) => {
+  const fixture = await createBrowserFixture(context, { disclosureRequired: true });
   const { page, syncRequests } = fixture;
   await page.goto("https://app.local/miniapp/index.html?launch=contributor-test", {
     waitUntil: "domcontentloaded",
   });
   await page.waitForSelector('[data-reader-verse="2"]', { timeout: 15_000 });
-  await openBookmarksRoute(page);
-  assert.equal(await page.locator("#contributor-manager").isHidden(), true);
-  assert.equal(await page.locator("#contributor-sync-button").isVisible(), false);
-  assert.deepEqual(syncRequests, []);
+  await createPersonalTopicWithVerse(page);
+  await openContributorManager(page);
+
+  await page.locator("#contributor-sync-button").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#contributor-sync")?.dataset.state === "success"
+  ));
+
+  assert.equal(
+    await page.evaluate(() => window.__telegramState.alerts.length),
+    1,
+  );
+  assert.equal(syncRequests.length, 1);
+  assert.equal(syncRequests[0].body.disclosure_acknowledged, true);
+  assert.deepEqual(
+    Object.keys(syncRequests[0].body).sort(),
+    ["disclosure_acknowledged", "events"],
+  );
 });
 
 function windowInitData() {

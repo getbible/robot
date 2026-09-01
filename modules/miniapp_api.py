@@ -77,13 +77,11 @@ from .service import ScriptureQuery, ScriptureService
 LOGGER = logging.getLogger(__name__)
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
 _BEARER_RE = re.compile(r"Bearer ([A-Za-z0-9_-]{16,128})\Z")
-_CONTRIBUTION_BEARER_RE = re.compile(r"Bearer (gbc_[A-Za-z0-9_-]{16,252})\Z")
 _ERROR_CODE_RE = re.compile(r"[a-z0-9_]{1,64}\Z")
 _DIRECT_SELECTION_RE = re.compile(
     r"gbd_([a-z0-9][a-z0-9._-]{0,63})_([0-9]{3})_([0-9]{4})_([0-9]{4})\Z"
 )
 MAX_MINIAPP_CHAPTER_VERSES = 250
-MAX_CONTRIBUTION_SYNC_REQUEST_BYTES = 1024 * 1024
 _MAX_JAVASCRIPT_SAFE_INTEGER = (1 << 53) - 1
 _PREFERENCE_UNCHANGED = object()
 _SEARCH_ENUMS: dict[str, frozenset[str]] = {
@@ -401,8 +399,6 @@ class MiniAppApi:
         request_body_limit = self._max_body
         if parts.path == f"{self._api_prefix}/bookmarks/backup":
             request_body_limit = MAX_BOOKMARK_BACKUP_REQUEST_BYTES
-        elif parts.path == f"{self._api_prefix}/contributions/sync":
-            request_body_limit = MAX_CONTRIBUTION_SYNC_REQUEST_BYTES
         if len(request.body) > request_body_limit:
             return self._error_response(
                 413,
@@ -421,11 +417,6 @@ class MiniAppApi:
                     session = await self._authenticated(request)
                     return await self._revoke_session(session)
                 return self._method_not_allowed("GET, POST, DELETE, OPTIONS")
-
-            if parts.path == f"{self._api_prefix}/contributions/sync":
-                if method != "POST":
-                    return self._method_not_allowed("POST, OPTIONS")
-                return await self._synchronize_contributions(request)
 
             session = await self._authenticated(request)
             if parts.path == f"{self._api_prefix}/translations":
@@ -484,19 +475,13 @@ class MiniAppApi:
                     return self._method_not_allowed("PUT, OPTIONS")
                 return await self._update_preferences(session, request)
             if parts.path == f"{self._api_prefix}/contributions/status":
-                if method == "GET":
-                    return self._contribution_status(session, parts.query)
-                if method == "PATCH":
-                    return self._acknowledge_contribution_disclosure(
-                        session,
-                        request,
-                        parts.query,
-                    )
-                return self._method_not_allowed("GET, PATCH, OPTIONS")
+                if method != "GET":
+                    return self._method_not_allowed("GET, OPTIONS")
+                return self._contribution_status(session, parts.query)
             if parts.path == f"{self._api_prefix}/contributions/events":
                 if method != "POST":
                     return self._method_not_allowed("POST, OPTIONS")
-                return self._submit_contribution_events(session, request)
+                return await self._submit_contribution_events(session, request)
             if parts.path == f"{self._api_prefix}/bookmarks/catalog":
                 if method != "GET":
                     return self._method_not_allowed("GET, OPTIONS")
@@ -627,9 +612,8 @@ class MiniAppApi:
             f"{self._api_prefix}/basket/items": ("POST",),
             f"{self._api_prefix}/basket/order": ("PATCH",),
             f"{self._api_prefix}/preferences": ("PUT",),
-            f"{self._api_prefix}/contributions/status": ("GET", "PATCH"),
+            f"{self._api_prefix}/contributions/status": ("GET",),
             f"{self._api_prefix}/contributions/events": ("POST",),
-            f"{self._api_prefix}/contributions/sync": ("POST",),
             f"{self._api_prefix}/bookmarks/catalog": ("GET",),
             f"{self._api_prefix}/bookmarks/backup": ("POST",),
             f"{self._api_prefix}/bookmarks/restore": ("GET", "DELETE"),
@@ -867,11 +851,6 @@ class MiniAppApi:
                     "search_timeout_seconds": self._service.settings.search_timeout,
                 },
             },
-            extra_headers=self._contribution_capability_headers(
-                session,
-                contribution_status,
-                fail_open=True,
-            ),
         )
         if (
             principal is not None
@@ -1055,7 +1034,6 @@ class MiniAppApi:
             f"{self._api_prefix}/bookmarks/backup",
             f"{self._api_prefix}/bookmarks/restore",
             f"{self._api_prefix}/contributions/events",
-            f"{self._api_prefix}/contributions/sync",
         }
         if request.method.upper() != "DELETE" and path in expensive:
             return 1.0
@@ -1084,7 +1062,6 @@ class MiniAppApi:
             "preferences",
             "contributions/status",
             "contributions/events",
-            "contributions/sync",
             "bookmarks/catalog",
             "bookmarks/backup",
             "bookmarks/restore",
@@ -1420,50 +1397,6 @@ class MiniAppApi:
             )
             return _unavailable_contribution_status()
 
-    def _contribution_capability_headers(
-        self,
-        session: MiniAppSession,
-        status: Mapping[str, object],
-        *,
-        fail_open: bool = False,
-    ) -> dict[str, str]:
-        """Issue one durable capability and repeat it on approved responses.
-
-        Repeating the same in-memory token lets an HTTP response-loss retry
-        recover it.  The capability is never placed in JSON, a URL, or a log.
-        Current contributor authority is still rechecked by the durable store
-        on every synchronization request.
-        """
-        if status.get("state") != "approved":
-            if status.get("state") != "unavailable":
-                session.contribution_capability_token = None
-                session.contribution_capability_issued = False
-            return {}
-        store = self._contributions
-        if store is None:
-            return {}
-        if session.contribution_capability_token is None:
-            try:
-                token = store.issue_capability(session.user_id)
-            except (
-                ContributionNotAllowed,
-                OSError,
-                sqlite3.Error,
-                RuntimeError,
-            ):
-                if not fail_open:
-                    raise
-                LOGGER.warning(
-                    "Contributor capability could not be issued during bootstrap",
-                    exc_info=True,
-                )
-                return {}
-            session.contribution_capability_token = token
-            session.contribution_capability_issued = True
-        return {
-            "X-Contribution-Token": session.contribution_capability_token,
-        }
-
     def _contribution_status(
         self,
         session: MiniAppSession,
@@ -1475,10 +1408,6 @@ class MiniAppApi:
             return self._contributions_unavailable_response()
         try:
             status = store.contribution_status(session.user_id)
-            capability_headers = self._contribution_capability_headers(
-                session,
-                status,
-            )
         except (OSError, sqlite3.Error, RuntimeError):
             LOGGER.warning(
                 "Explicit contributor status is temporarily unavailable",
@@ -1488,40 +1417,6 @@ class MiniAppApi:
         return self._response(
             200,
             status if details else _legacy_contribution_status(status),
-            extra_headers=capability_headers,
-        )
-
-    def _acknowledge_contribution_disclosure(
-        self,
-        session: MiniAppSession,
-        request: MiniAppHttpRequest,
-        query: str,
-    ) -> MiniAppHttpResponse:
-        details = _contribution_details_requested(query)
-        payload = self._json_body(request)
-        if payload != {"disclosure_acknowledged": True}:
-            raise MiniAppApiInputError(
-                "Contribution status update must acknowledge the disclosure."
-            )
-        store = self._contributions
-        if store is None:
-            return self._contributions_unavailable_response()
-        try:
-            status = store.acknowledge_disclosure(session.user_id)
-            capability_headers = self._contribution_capability_headers(
-                session,
-                status,
-            )
-        except (OSError, sqlite3.Error, RuntimeError):
-            LOGGER.warning(
-                "Contributor disclosure acknowledgement is temporarily unavailable",
-                exc_info=True,
-            )
-            return self._contributions_unavailable_response()
-        return self._response(
-            200,
-            status if details else _legacy_contribution_status(status),
-            extra_headers=capability_headers,
         )
 
     def _contributions_unavailable_response(self) -> MiniAppHttpResponse:
@@ -1532,105 +1427,58 @@ class MiniAppApi:
             details={"retryable": True},
         )
 
-    async def _synchronize_contributions(
+    async def _submit_contribution_events(
         self,
+        session: MiniAppSession,
         request: MiniAppHttpRequest,
     ) -> MiniAppHttpResponse:
-        """Atomically reconcile one complete contributor snapshot."""
+        """Accept one bounded contribution batch and answer with the result set.
+
+        This is the whole synchronization transport: the Mini App sends its
+        contribution as small ordinary session-authenticated batches — the
+        same request shape the working search flow uses — and every response
+        carries the contributor's current standing so the final batch settles
+        the panel in one round trip.
+        """
         store = self._contributions
         if store is None:
-            return self._contributions_unavailable_response()
-
-        authorization = _header(request.headers, "authorization") or ""
-        match = _CONTRIBUTION_BEARER_RE.fullmatch(authorization)
-        if match is None:
-            raise MiniAppAuthenticationError("Invalid contribution capability.")
-        # Capability verification reaches durable SQLite state, so bound
-        # unauthenticated attempts by client before doing that work.
-        await self._ingress.acquire(request.client_key)
-        try:
-            contributor_id = await asyncio.to_thread(
-                store.authenticate_capability,
-                match.group(1),
+            return self._error_response(
+                503,
+                "contributions_unavailable",
+                "Contributor synchronization is not configured on this instance.",
+                details={"retryable": True},
             )
-        except ContributionNotAllowed:
-            raise
-        except (OSError, sqlite3.Error, RuntimeError):
-            LOGGER.warning(
-                "Contributor capability authentication is temporarily unavailable",
-                exc_info=True,
-            )
-            return self._contributions_unavailable_response()
-
-        await self._limiter.acquire(
-            user_id=contributor_id,
-            chat_id=contributor_id,
-            cost=1.0,
-            client_key=request.client_key,
-        )
         payload = self._json_body(request)
-        required_fields = {
-            "protocol_version",
-            "sync_id",
-            "client_id",
-            "snapshot",
-            "operations",
-            "disclosure_acknowledged",
-        }
-        if set(payload) != required_fields:
+        if set(payload) - {"events", "disclosure_acknowledged"} or "events" not in payload:
+            raise MiniAppApiInputError("Contribution request must contain events.")
+        events = payload.get("events")
+        if not isinstance(events, list):
+            raise MiniAppApiInputError("events must be an array.")
+        if len(events) > MAX_CONTRIBUTION_BATCH:
             raise MiniAppApiInputError(
-                "Contribution sync request does not match protocol version 1."
+                f"events cannot contain more than {MAX_CONTRIBUTION_BATCH} items."
             )
-        if type(payload["protocol_version"]) is not int or payload["protocol_version"] != 1:
-            raise MiniAppApiInputError("protocol_version must be 1.")
-        sync_id = payload["sync_id"]
-        client_id = payload["client_id"]
-        snapshot = payload["snapshot"]
-        operations = payload["operations"]
-        disclosure_acknowledged = payload["disclosure_acknowledged"]
-        if not isinstance(sync_id, str) or not sync_id:
-            raise MiniAppApiInputError("sync_id must be non-empty text.")
-        if not isinstance(client_id, str) or not client_id:
-            raise MiniAppApiInputError("client_id must be non-empty text.")
-        if not isinstance(snapshot, dict):
-            raise MiniAppApiInputError("snapshot must be an object.")
-        if not isinstance(operations, list) or any(
-            not isinstance(operation, dict) for operation in operations
-        ):
-            raise MiniAppApiInputError("operations must be an array of objects.")
+        disclosure_acknowledged = payload.get("disclosure_acknowledged", False)
         if not isinstance(disclosure_acknowledged, bool):
-            raise MiniAppApiInputError(
-                "disclosure_acknowledged must be a boolean."
-            )
-
+            raise MiniAppApiInputError("disclosure_acknowledged must be a boolean.")
         try:
-            result = await asyncio.to_thread(
-                store.synchronize_snapshot,
-                contributor_id,
-                sync_id=sync_id,
-                client_id=client_id,
-                snapshot=snapshot,
-                operations=operations,
-                disclosure_acknowledged=disclosure_acknowledged,
-            )
+            if disclosure_acknowledged:
+                await asyncio.to_thread(store.acknowledge_disclosure, session.user_id)
+            result = await asyncio.to_thread(store.record_events, session.user_id, events)
         except (OSError, sqlite3.Error, RuntimeError):
             LOGGER.warning(
-                "Contributor snapshot could not be committed",
+                "Contribution events could not be committed",
                 exc_info=True,
             )
             return self._contributions_unavailable_response()
-        explicit_event_ids = {
-            str(operation["client_event_id"])
-            for operation in operations
-        }
 
-        # The snapshot is durably committed at this point.  Status or catalog
+        # The batch is durably committed at this point.  Status or catalog
         # enrichment must never turn that success into a retryable failure,
         # which would make the user repeat work that the server already owns.
         try:
             status = await asyncio.to_thread(
                 store.contribution_status,
-                contributor_id,
+                session.user_id,
             )
         except (ContributionError, OSError, sqlite3.Error, RuntimeError):
             LOGGER.warning(
@@ -1654,57 +1502,6 @@ class MiniAppApi:
                 "checksum": None,
                 "available": False,
             }
-
-        return self._response(
-            200,
-            {
-                "protocol_version": 1,
-                "receipt": {
-                    "sync_id": sync_id,
-                    "snapshot_digest": result.snapshot_digest,
-                    "outcome": (
-                        "replayed" if result.replayed_sync else "accepted"
-                    ),
-                    "accepted": result.accepted,
-                    "replayed": result.replayed,
-                    "event_ids": {
-                        client_event_id: _contribution_receipt_id(
-                            contributor_id,
-                            client_event_id,
-                        )
-                        for client_event_id in result.event_ids
-                        if client_event_id in explicit_event_ids
-                    },
-                },
-                "status": status,
-                "catalog": catalog,
-            },
-        )
-
-    def _submit_contribution_events(
-        self,
-        session: MiniAppSession,
-        request: MiniAppHttpRequest,
-    ) -> MiniAppHttpResponse:
-        store = self._contributions
-        if store is None:
-            return self._error_response(
-                503,
-                "contributions_unavailable",
-                "Contributor synchronization is not configured on this instance.",
-                details={"retryable": True},
-            )
-        payload = self._json_body(request)
-        if set(payload) != {"events"}:
-            raise MiniAppApiInputError("Contribution request must contain events.")
-        events = payload.get("events")
-        if not isinstance(events, list):
-            raise MiniAppApiInputError("events must be an array.")
-        if len(events) > MAX_CONTRIBUTION_BATCH:
-            raise MiniAppApiInputError(
-                f"events cannot contain more than {MAX_CONTRIBUTION_BATCH} items."
-            )
-        result = store.record_events(session.user_id, events)
         return self._response(
             200,
             {
@@ -1721,6 +1518,8 @@ class MiniAppApi:
                     )
                     for client_event_id in result.event_ids
                 },
+                "status": status,
+                "catalog": catalog,
             },
         )
 
@@ -2268,7 +2067,6 @@ class MiniAppApi:
     ) -> MiniAppHttpResponse:
         headers = {
             "Access-Control-Allow-Origin": self._origin,
-            "Access-Control-Expose-Headers": "X-Contribution-Token",
             "Cache-Control": "no-store, max-age=0",
             "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
             "Cross-Origin-Resource-Policy": "same-origin",

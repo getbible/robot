@@ -242,20 +242,12 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
             launch=launches.create_launch(user_id=7, target_chat_id=7),
             init_data_digest=b"x" * 32,
         )
-        session.contribution_capability_token = "gbc_private-capability"
-        session.contribution_capability_issued = True
-
         self.assertIs(
             store.find_by_init_data(b"x" * 32, user_id=7),
             session,
         )
         self.assertIsNone(store.find_by_init_data(b"x" * 32, user_id=8))
         self.assertIsNone(store.find_by_init_data(b"y" * 32, user_id=7))
-        self.assertEqual(
-            session.contribution_capability_token,
-            "gbc_private-capability",
-        )
-        self.assertTrue(session.contribution_capability_issued)
 
     def test_rebind_rejects_a_different_signed_chat_context(self) -> None:
         launches = MiniAppLaunchStore(max_launches=2, ttl_seconds=60)
