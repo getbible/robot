@@ -201,9 +201,11 @@ class DecodePushBundleTestCase(unittest.TestCase):
             _encode(plaintext, "j"),
             digest=hashlib.sha256(plaintext).hexdigest(),
         )
-        # json.loads answers pathological nesting with RecursionError; the
-        # decoder must convert it into the ordinary unreadable outcome.
-        with self.assertRaisesRegex(PushMessageError, "not valid JSON"):
+        # Depending on the Python version, pathological nesting either raises
+        # RecursionError inside json.loads (mapped to the unreadable outcome)
+        # or parses into a non-envelope value the shape check rejects. Both
+        # must surface as the ordinary PushMessageError, never escape raw.
+        with self.assertRaises(PushMessageError):
             decode_push_bundle(staged)
 
     def test_wrong_envelope_key_set_is_rejected(self) -> None:
