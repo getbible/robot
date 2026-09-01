@@ -855,6 +855,33 @@ EOF
 assert_equal "$(grep -Fc "$CADDY_IMPORT_BEGIN" "$CADDYFILE")" "1"
 assert_equal "$(grep -Fc "reverse_proxy 127.0.0.1:9201" "$CADDY_ROUTES")" "3"
 
+# A failed public self-probe with a healthy local surface is a hairpin-NAT
+# explanation, not a diagnostic failure: outside devices are unaffected and
+# the operator is told how to verify from one.
+export FAIL_MINI_APP_PUBLIC
+FAIL_MINI_APP_PUBLIC=1
+HAIRPIN_DOCTOR_OUTPUT=$(cmd_doctor alpha 2>&1) ||
+    fail "doctor treated a hairpin-only public probe failure as a problem"
+unset FAIL_MINI_APP_PUBLIC
+[[ "$HAIRPIN_DOCTOR_OUTPUT" == *"could not reach its own public Mini App URL"* ]] || {
+    printf 'DOCTOR OUTPUT:\n%s\n' "$HAIRPIN_DOCTOR_OUTPUT" >&2
+    fail "doctor did not explain the failed public self-probe"
+}
+[[ "$HAIRPIN_DOCTOR_OUTPUT" == *"hairpin NAT"* ]] ||
+    fail "doctor did not name the hairpin cause"
+[[ "$HAIRPIN_DOCTOR_OUTPUT" == *"All deployment diagnostics passed."* ]] ||
+    fail "doctor did not report overall success for a hairpin-only warning"
+
+# A broken local surface remains a hard diagnostic failure even when the
+# public probe fails for the same reason.
+export FAIL_MINI_APP_LOCAL FAIL_MINI_APP_PUBLIC
+FAIL_MINI_APP_LOCAL=1
+FAIL_MINI_APP_PUBLIC=1
+if (cmd_doctor alpha > /dev/null 2>&1); then
+    fail "doctor ignored a failed local Mini App surface"
+fi
+unset FAIL_MINI_APP_LOCAL FAIL_MINI_APP_PUBLIC
+
 CADDYFILE_HASH=$(sha256sum "$CADDYFILE" | awk '{print $1}')
 CADDY_ROUTES_HASH=$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')
 ENV_HASH=$(sha256sum "$(environment_file_for alpha)" | awk '{print $1}')
