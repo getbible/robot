@@ -24,6 +24,7 @@ from scripts.contribution_review import (
     export_current_catalog,
     parse_porcelain_paths,
     publish_live,
+    review_applications,
     review_topics,
     review_verses,
     sanitize_terminal,
@@ -247,6 +248,56 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             output=io.StringIO(),
         )
         return local
+
+    def test_removed_contributor_can_be_reinstated_from_the_review_menu(self) -> None:
+        self.store.submit_application(77, first_name="Returning", username="second_chance")
+        self.store.decide_application(77, "approved", actor="test-admin")
+        self.store.acknowledge_disclosure(77)
+        self.store.decide_application(77, "revoked", actor="test-admin")
+
+        # A fresh /contributor request refreshes the profile but must never
+        # silently resurrect a revoked record on its own.
+        application, created = self.store.submit_application(77, first_name="Returning")
+        self.assertFalse(created)
+        self.assertEqual(application.state, "revoked")
+
+        responses = iter([
+            "n",  # skip the revocation review
+            "y",  # open the reinstatement review
+            "r",  # reinstate the removed contributor
+            "",   # no decision note
+        ])
+        output = io.StringIO()
+        review_applications(
+            self.store,
+            actor="test-admin",
+            input_fn=lambda _prompt: next(responses),
+            output=output,
+        )
+
+        self.assertIn("Removed contributor", output.getvalue())
+        self.assertIn("Contributor reinstated", output.getvalue())
+        self.assertEqual(self.store.application_for(77).state, "approved")
+        # Reinstatement deliberately requires a fresh disclosure before any
+        # new submission is accepted.
+        self.assertTrue(self.store.contribution_status(77)["disclosure_required"])
+        self.store.acknowledge_disclosure(77)
+        result = self.store.record_events(
+            77,
+            [_topic_event("topic.back", "local.back", "Back Again")],
+        )
+        self.assertEqual(result.accepted, 1)
+
+    def test_reinstatement_review_reports_when_nobody_was_removed(self) -> None:
+        responses = iter(["n", "y"])
+        output = io.StringIO()
+        review_applications(
+            self.store,
+            actor="test-admin",
+            input_fn=lambda _prompt: next(responses),
+            output=output,
+        )
+        self.assertIn("No revoked or rejected contributors.", output.getvalue())
 
     def test_cli_topic_text_validation_matches_store_boundaries(self) -> None:
         local = "local.valid"

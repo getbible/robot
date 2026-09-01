@@ -174,7 +174,12 @@ guarded one-command branch workflow is required.
 
 Use its stages in order:
 
-1. review pending applications and optionally revoke an enrolled contributor;
+1. review pending applications, optionally revoke an enrolled contributor, and
+   optionally reinstate a previously revoked or rejected one — a removed
+   contributor's record stays in the store keyed by their Telegram ID, and a
+   fresh `/contributor` request never resets that state on its own, so this
+   stage is the one place access is restored (the enrolment notice is queued
+   again and the disclosure must be re-acknowledged before new submissions);
 2. map each contributor-local topic to an existing canonical topic, merge it
    with another pending proposal, create/correct an English canonical topic, or
    reject/defer it;

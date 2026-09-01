@@ -1254,31 +1254,74 @@ def review_applications(
         store.decide_application(user_id, states[action], actor=_actor(actor), note=note)
         output.write(f"Application {states[action]}; notification queued.\n")
 
-    if not _yes_no("Review enrolled contributors for revocation? [y/N]: ", input_fn):
+    if _yes_no("Review enrolled contributors for revocation? [y/N]: ", input_fn):
+        approved = list(store.list_applications(states={"approved"}, limit=1000))
+        if not approved:
+            output.write("No enrolled contributors.\n")
+        for application in approved:
+            payload = _record_mapping(application)
+            user_id = _bounded_integer(
+                payload.get("user_id"), "contributor id", 1, 2**63 - 1
+            )
+            output.write("\nEnrolled contributor\n")
+            output.write(f"  Telegram ID: {user_id}\n")
+            output.write(f"  Name: {_display_person(payload)}\n")
+            username = sanitize_terminal(payload.get("username") or "not supplied")
+            output.write(f"  Username: {username}\n")
+            action = _choice("Keep, revoke, or stop? [k/r/s]: ", {"k", "r", "s"}, input_fn)
+            if action == "s":
+                return
+            if action == "r":
+                store.decide_application(
+                    user_id,
+                    "revoked",
+                    actor=_actor(actor),
+                    note=_optional_note(input_fn),
+                )
+                output.write("Contributor access revoked; notification queued.\n")
+
+    # A removed contributor's record stays in the store keyed by their
+    # Telegram ID, and a fresh /contributor request never resets a revoked or
+    # rejected state on its own — reinstatement is deliberately an explicit
+    # operator decision made here.
+    if not _yes_no(
+        "Reinstate previously revoked or rejected contributors? [y/N]: ",
+        input_fn,
+    ):
         return
-    approved = list(store.list_applications(states={"approved"}, limit=1000))
-    if not approved:
-        output.write("No enrolled contributors.\n")
+    removed = list(store.list_applications(states={"revoked", "rejected"}, limit=1000))
+    if not removed:
+        output.write("No revoked or rejected contributors.\n")
         return
-    for application in approved:
+    for application in removed:
         payload = _record_mapping(application)
         user_id = _bounded_integer(payload.get("user_id"), "contributor id", 1, 2**63 - 1)
-        output.write("\nEnrolled contributor\n")
+        output.write("\nRemoved contributor\n")
         output.write(f"  Telegram ID: {user_id}\n")
         output.write(f"  Name: {_display_person(payload)}\n")
         username = sanitize_terminal(payload.get("username") or "not supplied")
         output.write(f"  Username: {username}\n")
-        action = _choice("Keep, revoke, or stop? [k/r/s]: ", {"k", "r", "s"}, input_fn)
+        state = sanitize_terminal(str(payload.get("state") or "unknown"))
+        output.write(f"  State: {state}\n")
+        action = _choice(
+            "Reinstate, keep removed, or stop? [r/k/s]: ",
+            {"r", "k", "s"},
+            input_fn,
+        )
         if action == "s":
             return
         if action == "r":
             store.decide_application(
                 user_id,
-                "revoked",
+                "approved",
                 actor=_actor(actor),
                 note=_optional_note(input_fn),
             )
-            output.write("Contributor access revoked; notification queued.\n")
+            output.write(
+                "Contributor reinstated; the enrolment notification is queued "
+                "and the contribution disclosure must be acknowledged again "
+                "before new submissions.\n"
+            )
 
 
 def review_topics(
