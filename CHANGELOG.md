@@ -6,6 +6,12 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Search-style contribution synchronization
 
+- The contribution review menu can reinstate a previously revoked or rejected
+  contributor. Their record always stayed in the store keyed by their Telegram
+  ID, but no menu could restore access and a fresh `/contributor` request
+  never resets a removed state on its own; reinstatement queues the enrolment
+  notice again and requires the disclosure to be acknowledged anew.
+
 - Reworked Mini App contribution synchronization as the same request class
   the working search flow uses: **Sync now** converts the personal
   topic/assignment state into bounded idempotent events with deterministic
