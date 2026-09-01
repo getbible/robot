@@ -16,9 +16,15 @@ const STORAGE_VERSION = 2;
 // Retained only to validate persisted v2 journal entries written by the
 // retired snapshot transport; new state never stores an inflight envelope.
 const LEGACY_PROTOCOL_VERSION = 1;
-const MAX_BATCH_SIZE = 50; // One drip-fed request, mirroring the server bound.
+const MAX_BATCH_SIZE = 50; // The server's hard per-request bound.
+// Every drip request stays in the same size class as a search request: a few
+// kilobytes that fit a couple of network packets. Production showed that this
+// deployment's network path reliably passes search-sized uploads while larger
+// bodies can vanish in transit without ever reaching the application.
+const TARGET_BATCH_BYTES = 2_000;
 const MAX_RATE_LIMIT_RETRIES = 5;
 const MAX_RATE_LIMIT_WAIT_SECONDS = 60;
+const NETWORK_FAILURE_CODES = new Set(["network_error", "request_timeout"]);
 const MAX_EXPLICIT_OPERATIONS = 2_000;
 const MAX_SNAPSHOT_ASSIGNMENTS = 10_000;
 const MAX_PERSISTED_STATE_BYTES = 1024 * 1024;
@@ -389,24 +395,18 @@ export class ContributionSync {
           normalizeContributionStatus(await this.#api.contributionStatus()),
         );
       }
-      const total = Math.ceil(events.length / MAX_BATCH_SIZE);
-      for (let index = 0; index < events.length; index += MAX_BATCH_SIZE) {
+      const batches = contributionEventBatches(events);
+      for (const [index, batch] of batches.entries()) {
         if (typeof onProgress === "function") {
           try {
-            onProgress({
-              batch: Math.floor(index / MAX_BATCH_SIZE) + 1,
-              total,
-            });
+            onProgress({ batch: index + 1, total: batches.length });
           } catch {
             // Progress display must never interrupt the transfer itself.
           }
         }
-        const batch = events.slice(index, index + MAX_BATCH_SIZE);
-        const response = normalizeEventsResponse(
-          await this.#submitBatch(batch, {
-            disclosureAcknowledged: disclosureAcknowledged && index === 0,
-          }),
-        );
+        const response = await this.#submitBatch(batch, {
+          disclosureAcknowledged: disclosureAcknowledged && index === 0,
+        });
         sent += response.accepted;
         replayed += response.replayed;
         catalog = response.catalog;
@@ -445,14 +445,48 @@ export class ContributionSync {
     }
   }
 
-  async #submitBatch(events, { disclosureAcknowledged }) {
+  async #submitBatch(events, options) {
+    try {
+      return normalizeEventsResponse(await this.#submitOnce(events, options));
+    } catch (error) {
+      // A request that dies on the wire while search-sized requests pass is
+      // this deployment's known failure mode: some network element between
+      // the phone and the application drops larger uploads without a trace.
+      // Halve the batch — down to one event per request if necessary — so
+      // the drip degrades to exactly the request size the path has proven.
+      if (events.length > 1 && NETWORK_FAILURE_CODES.has(error?.code)) {
+        const middle = Math.ceil(events.length / 2);
+        const first = await this.#submitBatch(events.slice(0, middle), options);
+        const second = await this.#submitBatch(events.slice(middle), {
+          ...options,
+          disclosureAcknowledged: false,
+        });
+        return foldEventsResponses(first, second);
+      }
+      throw error;
+    }
+  }
+
+  async #submitOnce(events, { disclosureAcknowledged }) {
     let tokenRecoveryAttempted = false;
+    let networkRetryUsed = false;
     for (let attempt = 0; ; attempt += 1) {
       try {
         return await this.#api.submitContributionEvents(events, {
           disclosureAcknowledged,
         });
       } catch (error) {
+        // A lone event is already as small as a request can be; give the
+        // path one brief second chance before surfacing the failure.
+        if (
+          events.length === 1 &&
+          !networkRetryUsed &&
+          NETWORK_FAILURE_CODES.has(error?.code)
+        ) {
+          networkRetryUsed = true;
+          await this.#wait(1_500);
+          continue;
+        }
         // The contributor token rides inside status payloads, so a missing or
         // rotated token is recovered with one ordinary status request before
         // the batch is retried; a second refusal is a real authority loss.
@@ -813,6 +847,39 @@ function contributionUploadEvents(desired, operations) {
   }
   events.push(...operations);
   return events;
+}
+
+function contributionEventBatches(events) {
+  const batches = [];
+  let current = [];
+  let bytes = 0;
+  for (const event of events) {
+    const size = utf8Length(JSON.stringify(event)) + 1;
+    if (
+      current.length > 0 &&
+      (current.length >= MAX_BATCH_SIZE || bytes + size > TARGET_BATCH_BYTES)
+    ) {
+      batches.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push(event);
+    bytes += size;
+  }
+  if (current.length > 0) {
+    batches.push(current);
+  }
+  return batches;
+}
+
+function foldEventsResponses(first, second) {
+  return {
+    accepted: first.accepted + second.accepted,
+    replayed: first.replayed + second.replayed,
+    event_ids: { ...first.event_ids, ...second.event_ids },
+    status: second.status,
+    catalog: second.catalog,
+  };
 }
 
 function normalizeEventsResponse(value) {

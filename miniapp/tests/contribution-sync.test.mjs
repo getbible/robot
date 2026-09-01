@@ -193,7 +193,7 @@ test("one Sync drips the snapshot as idempotent events and returns the result se
   assert.equal(sync.recovering, false);
 });
 
-test("a large contribution is dripped in ordered batches of at most fifty", async () => {
+test("a large contribution is dripped in search-sized ordered batches", async () => {
   const api = new SyncApiMock();
   const sync = createSync(api);
   const topics = Array.from({ length: 60 }, (_, index) =>
@@ -208,21 +208,86 @@ test("a large contribution is dripped in ordered batches of at most fifty", asyn
     { disclosureAcknowledged: true },
   );
 
-  assert.deepEqual(api.calls.map(({ events }) => events.length), [50, 40]);
+  // Every request stays in the size class the network path has proven with
+  // search: a couple of kilobytes, never anywhere near a large upload.
+  assert.ok(api.calls.length > 1);
+  for (const { events } of api.calls) {
+    assert.ok(events.length <= 50);
+    assert.ok(new TextEncoder().encode(JSON.stringify(events)).byteLength <= 2_400);
+  }
   assert.deepEqual(
     api.calls.map(({ options }) => options.disclosureAcknowledged),
-    [true, false],
+    [true, ...api.calls.slice(1).map(() => false)],
   );
   const identifiers = api.calls.flatMap(({ events }) =>
     events.map((event) => event.client_event_id)
   );
   assert.equal(new Set(identifiers).size, identifiers.length);
+  assert.equal(identifiers.length, 90);
   const types = api.calls.flatMap(({ events }) =>
     events.map((event) => event.type)
   );
   assert.equal(types.lastIndexOf("topic_upsert") < types.indexOf("verse_add"), true);
   assert.equal(report.sent, 90);
   assert.equal(report.pending, 0);
+});
+
+test("an upload-hostile path is crossed by halving down to single events", async () => {
+  const api = new SyncApiMock();
+  const submit = api.submitContributionEvents.bind(api);
+  let rejectedLarge = 0;
+  api.submitContributionEvents = async (events, options) => {
+    if (events.length > 1) {
+      rejectedLarge += 1;
+      throw Object.assign(new Error("connection reset"), {
+        code: "network_error",
+        retryable: true,
+      });
+    }
+    return submit(events, options);
+  };
+  const sync = createSync(api);
+  const topics = Array.from({ length: 12 }, (_, index) =>
+    personalTopic({ id: `topic-${index}`, name: `Topic ${index + 1}` })
+  );
+
+  const report = await sync.synchronizeNow(snapshot({ topics, bookmarks: [] }));
+
+  assert.ok(rejectedLarge > 0);
+  assert.equal(report.sent, 12);
+  assert.equal(report.pending, 0);
+  assert.equal(api.calls.length, 12);
+  assert.ok(api.calls.every(({ events }) => events.length === 1));
+});
+
+test("a single-event upload failure is retried once and then surfaced", async () => {
+  const api = new SyncApiMock();
+  let attempts = 0;
+  api.submitContributionEvents = async () => {
+    attempts += 1;
+    throw Object.assign(new Error("connection reset"), {
+      code: "network_error",
+      retryable: true,
+    });
+  };
+  const waits = [];
+  const sync = createSync(api, {
+    waitImplementation: (milliseconds) => {
+      waits.push(milliseconds);
+      return Promise.resolve();
+    },
+  });
+
+  await assert.rejects(
+    sync.synchronizeNow(snapshot({
+      topics: [personalTopic()],
+      bookmarks: [],
+    })),
+    /connection reset/,
+  );
+  assert.equal(attempts, 2);
+  assert.deepEqual(waits, [1_500]);
+  assert.equal(sync.pendingCount, 1);
 });
 
 test("rate limiting paces the drip and retries the same batch", async () => {
@@ -322,11 +387,12 @@ test("the drip reports batch progress without letting display break transfer", a
     },
   });
 
-  assert.deepEqual(progress, [
-    { batch: 1, total: 2 },
-    { batch: 2, total: 2 },
-  ]);
-  assert.equal(api.calls.length, 2);
+  assert.equal(progress.length, api.calls.length);
+  assert.ok(progress.length > 1);
+  assert.deepEqual(
+    progress,
+    progress.map((_, index) => ({ batch: index + 1, total: progress.length })),
+  );
 });
 
 test("a committed sync accepts only the documented catalog fallback", async () => {
@@ -367,19 +433,26 @@ test("an invalid response cannot mark local work as synchronized", async () => {
   assert.equal(sync.pendingCount, 1);
 });
 
-test("a lost response retries the exact same deterministic events", async () => {
+test("a lost response is recovered inside the same drip with the same identities", async () => {
   const api = new SyncApiMock();
   api.failures = 1;
   const sync = createSync(api);
   const current = snapshot();
 
-  await assert.rejects(sync.synchronizeNow(current), /response lost/);
-  assert.equal(sync.pendingCount, 1);
+  // The first request dies on the wire; the drip halves and delivers the
+  // exact same deterministic events without failing the synchronization.
   const report = await sync.synchronizeNow(current);
-
-  assert.equal(api.calls.length, 2);
-  assert.deepEqual(api.calls[1].events, api.calls[0].events);
+  assert.equal(report.sent, 2);
   assert.equal(report.pending, 0);
+  const delivered = [...new Set(api.calls
+    .flatMap(({ events }) => events.map((event) => event.client_event_id)))].sort();
+
+  const replayApi = new SyncApiMock();
+  const replaySync = createSync(replayApi);
+  await replaySync.synchronizeNow(snapshot());
+  const replayed = [...new Set(replayApi.calls
+    .flatMap(({ events }) => events.map((event) => event.client_event_id)))].sort();
+  assert.deepEqual(replayed, delivered);
 });
 
 test("changed content mints new identities while unchanged events keep theirs", async () => {
@@ -436,7 +509,12 @@ test("explicit global operations coalesce to the newest stable intent", async ()
 test("reopening retains explicit operations with their exact identities", async () => {
   const journal = new MemoryJournal();
   const firstApi = new SyncApiMock();
-  firstApi.failures = 1;
+  firstApi.submitContributionEvents = async () => {
+    throw Object.assign(new Error("response lost"), {
+      code: "network_error",
+      retryable: true,
+    });
+  };
   const options = {
     scope: SCOPE,
     instanceScope: INSTANCE_SCOPE,
@@ -452,8 +530,8 @@ test("reopening retains explicit operations with their exact identities", async 
     { book: 1, chapter: 1, verse: 1 },
     snapshot(),
   );
+  const explicitId = JSON.parse(journal.raw).operations[0].client_event_id;
   await assert.rejects(first.synchronizeNow(snapshot()), /response lost/);
-  const sent = structuredClone(firstApi.calls[0].events);
 
   const secondApi = new SyncApiMock();
   const reopened = await ContributionSync.open({
@@ -463,7 +541,10 @@ test("reopening retains explicit operations with their exact identities", async 
   });
   await reopened.synchronizeNow(snapshot());
 
-  assert.deepEqual(secondApi.calls[0].events, sent);
+  const delivered = secondApi.calls.flatMap(({ events }) =>
+    events.map((event) => event.client_event_id)
+  );
+  assert.ok(delivered.includes(explicitId));
   assert.equal(reopened.pendingCount, 0);
 });
 
