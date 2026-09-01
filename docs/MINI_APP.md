@@ -231,10 +231,16 @@ bounded idempotent contribution events whose `client_event_id`s derive
 deterministically from their content (`baseline:<type>:<16-hex>`), appends the
 journalled explicit global add/remove intents, and posts them to the
 same-origin `POST /api/v1/contributions/events` endpoint in sequential
-batches of at most 50 events. Each request is a small JSON POST under the
-ordinary 64 KiB API budget. On HTTP `429` the client waits the announced
+batches of at most 50 events. Each request is deliberately the size class of
+a search request — batches are additionally capped at about 2 KB of JSON —
+because a small POST is the one upload shape every deployment's network path
+has already proven. On HTTP `429` the client waits the announced
 `Retry-After` (bounded to 1–60 seconds, at most 5 retries per batch) and
-continues, so the contribution seeps to the server one small chunk at a time.
+continues, and when a request dies on the wire while smaller requests pass —
+a firewall or path-MTU element silently dropping larger uploads — the drip
+halves the failed batch, down to one event per request if necessary, so the
+contribution seeps to the server one small chunk at a time through any path
+that can carry a search.
 Events carry coordinate identity only, never Scripture text or Telegram
 identity, and the one-time disclosure acknowledgement rides the first batch
 as an optional `disclosure_acknowledged` field in the same POST body. Each

@@ -115,9 +115,12 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 ## Contribution synchronization
 
 - **Sync now** submits session-authenticated bounded idempotent batches of at
-  most 50 contribution events to the same-origin
-  `POST /api/v1/contributions/events` endpoint, sequentially, and the drip
-  obeys the server's `Retry-After` pacing on `429`.
+  most 50 contribution events — each request additionally capped at about
+  2 KB, the proven size class of a search request — to the same-origin
+  `POST /api/v1/contributions/events` endpoint, sequentially; the drip obeys
+  the server's `Retry-After` pacing on `429` and halves a batch that dies on
+  the wire, down to single events, so any network path that carries a search
+  carries a synchronization.
 - Every response returns the complete result set: receipt counts, the full
   detailed contributor status, and the live catalogue revision/checksum, so
   the final batch settles the panel in one round trip. Unavailable catalogue

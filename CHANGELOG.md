@@ -6,6 +6,13 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Search-style contribution synchronization
 
+- Synchronization requests are now literally search-sized: every batch is
+  capped at about 2 KB of JSON, and a request that dies on the wire while
+  smaller requests pass is automatically halved — down to one event per
+  request — so any network path that carries a search carries a full
+  synchronization. This closes the failure family where large uploads were
+  silently dropped between the phone and the application.
+
 - The contribution review menu can reinstate a previously revoked or rejected
   contributor. Their record always stayed in the store keyed by their Telegram
   ID, but no menu could restore access and a fresh `/contributor` request
