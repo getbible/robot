@@ -238,7 +238,7 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
             b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
         )
 
-    def test_static_shell_and_assets_receive_distinct_hardened_cache_headers(self) -> None:
+    def test_static_shell_and_assets_are_never_cacheable(self) -> None:
         shell = self.fetch("/static/")
         self.assertEqual(shell.code, 200)
         self.assertEqual(shell.headers["Cache-Control"], "no-store, max-age=0")
@@ -247,12 +247,12 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
         self.assertIn("default-src 'none'", shell.headers["Content-Security-Policy"])
         self.assertIn("noindex", shell.headers["X-Robots-Tag"])
 
+        # Telegram WebViews do not reliably revalidate, so packaged modules
+        # must carry the same no-store directive as the shell: an upgraded
+        # server followed by a relaunch may never execute stale JavaScript.
         asset = self.fetch("/static/app.js")
         self.assertEqual(asset.code, 200)
-        self.assertEqual(
-            asset.headers["Cache-Control"],
-            "no-cache, max-age=0, must-revalidate",
-        )
+        self.assertEqual(asset.headers["Cache-Control"], "no-store, max-age=0")
 
 
 class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):

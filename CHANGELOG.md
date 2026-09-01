@@ -4,6 +4,26 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Deployment updates that provably reach the phone
+
+- Every packaged Mini App file — `index.html`, `app.js`, every `lib/*.js`
+  module, styles, and locale catalogs — is now served with
+  `Cache-Control: no-store`. Telegram WebViews keep their cache between
+  launches and do not reliably perform conditional revalidation, which could
+  leave a phone running a previous deployment's JavaScript against an
+  upgraded server no matter how many fixes were deployed. A launch now always
+  downloads the running server's complete module graph, so a manager upgrade
+  (menu 16) followed by reopening the Mini App is guaranteed to run the new
+  client code; the in-memory session store already forces open views back
+  through the launch gate when the upgrade restarts the service.
+- The manager's upgrade refresh path now states loudly that no new
+  application code is deployed when the source checkout's `HEAD` already
+  matches the deployed commit, so a `git pull` that did not advance the
+  checkout (wrong branch, nothing new) can no longer look like a completed
+  update.
+- A dirty source checkout now fails `install`/`upgrade` with an explicit
+  explanation instead of dying silently on the clean-tree check.
+
 ### Search-style contribution synchronization
 
 - An explicit **Sync now** tap now always performs a real attempt. The

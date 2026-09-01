@@ -11,12 +11,11 @@ class MiniAppStaticCacheTestCase(unittest.TestCase):
     def test_index_and_packaged_assets_cannot_remain_stale(self) -> None:
         source = TORNADO_ADAPTER.read_text(encoding="utf-8")
 
-        self.assertIn('if path in {"", "index.html"}:', source)
         self.assertIn('"no-store, max-age=0"', source)
-        self.assertIn(
-            '"no-cache, max-age=0, must-revalidate"',
-            source,
-        )
+        # No conditional-caching or long-lived directive may return: Telegram
+        # WebViews do not reliably revalidate, and a stale cached module ran a
+        # retired sync transport against an upgraded server in production.
+        self.assertNotIn("must-revalidate", source)
         self.assertNotIn('"public, max-age=3600"', source)
 
     def test_forwarded_client_address_requires_a_trusted_direct_peer(self) -> None:
