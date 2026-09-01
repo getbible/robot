@@ -135,15 +135,15 @@ confirm the Main Mini App URL in `@BotFather`. See
 
 If **Sync now** fails, first verify the user remains approved with
 `sudo getbible-robot contributions INSTANCE status`, then rerun
-`sudo getbible-robot doctor INSTANCE`. The contributor control should be
-absent unless the approved session supplied its separate capability. One click
-must produce one `POST .../api/v1/contributions/sync`; it must not open a
-WebSocket, target another port, or sequence status/events/catalogue requests.
-A lost response is safe to retry with the same `sync_id`: Robot returns the
-stored receipt instead of duplicating moderation events. HTTP `401` means the
-capability is invalid, `403` means current approval/disclosure policy refused
-it, `409` means that sync ID was reused with different content, and `413`
-means the 1 MiB bound was exceeded.
+`sudo getbible-robot doctor INSTANCE`. The contributor panel appears for any
+approved contributor with a live session. One click produces one or more
+sequential `POST .../api/v1/contributions/events` requests; it must not open
+a WebSocket or target another port. A lost response is safe to retry: every
+event carries a stable `client_event_id` and Robot replays it without
+duplicating moderation events. HTTP `401` means the session is invalid, `403`
+means current approval/disclosure policy refused it, `409` means an event ID
+was reused with different content, `429` paces the drip through
+`Retry-After`, and `413` means the general 64 KiB API bound was exceeded.
 
 ## Service fails with `status=200/CHDIR`
 

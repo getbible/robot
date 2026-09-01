@@ -184,18 +184,20 @@ Use its stages in order:
    branch.
 
 Application decisions queue a private Telegram notification. Approval also
-causes the Mini App to show a one-time disclosure before any baseline is sent.
-After acknowledgement, the user's existing assigned topics/coordinates are
-submitted once and later successful local changes are journalled automatically.
+causes the Mini App to show a one-time disclosure before anything is sent;
+the acknowledgement rides the first event batch of the next Sync.
 The collapsible, approved-contributor-only **Manage Contribution** panel sits
-immediately below Global topics. Its Sync action pushes the durable journal,
-checks review outcomes, and pulls the current global catalogue. Sessions
-without contribution authority do not receive that panel; application
-decisions continue to arrive through the private bot notification and bounded
-authority refresh.
+immediately below Global topics. Its explicit Sync action converts the
+current personal topics/assignments into bounded idempotent events, appends
+the journalled explicit global add/remove intents, and drips them to the
+session-authenticated events endpoint in sequential batches of at most 50;
+every response reports receipt counts, the contributor's detailed status, and
+the live catalogue revision. Sessions without contribution authority do not
+receive that panel; application decisions continue to arrive through the
+private bot notification.
 Personal bookmark writes remain local-first: a network or moderation-server
-failure cannot undo them, and the bounded outbox retries on a later
-synchronization.
+failure cannot undo them, and the same idempotent events are resent on a
+later synchronization.
 
 Topic proposals must use an English source name. The topic stage is where an
 operator resolves spelling, aliases, colors, and overlapping proposals into

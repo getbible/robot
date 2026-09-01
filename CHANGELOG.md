@@ -4,6 +4,32 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Search-style contribution synchronization
+
+- Reworked Mini App contribution synchronization as the same request class
+  the working search flow uses: **Sync now** converts the personal
+  topic/assignment state into bounded idempotent events with deterministic
+  content-derived IDs, appends the journalled explicit global add/remove
+  intents, and drips them to the session-authenticated
+  `POST /api/v1/contributions/events` endpoint in sequential batches of at
+  most 50 events, obeying the server's `Retry-After` pacing on `429`.
+- Made every events response return the complete result set — receipt counts,
+  the full detailed contributor status, and the live catalogue
+  revision/checksum — so the final batch settles the panel in one round trip.
+  The one-time disclosure acknowledgement rides the first batch in the same
+  POST body, replacing the separate `PATCH /contributions/status` route.
+- Removed the capability-token snapshot transport that broke in production
+  three times and the withdrawn Telegram `web_app_data` chunked push
+  transport: `POST /api/v1/contributions/sync` now returns `404`, and the
+  `gbc_` bearer, `X-Contribution-Token` response header, capability issuance,
+  and the dedicated 1 MiB Caddy contribution-sync matcher are gone. Status
+  polls remain `GET /contributions/status?details=1`, and the catalogue pull
+  keeps its ETag revalidation.
+- Downgraded a contribution store left at `user_version=6` by the withdrawn
+  push transport automatically on open: the two dormant push staging tables
+  are dropped and the schema returns to v5 without touching contributor,
+  event, or catalogue state.
+
 ### Trusted topic contributions and reader polish
 
 - Added private, numeric-Telegram-ID contributor applications through the

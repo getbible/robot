@@ -91,12 +91,14 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   be removed; removing a global topic is user-local and **Add all** restores
   it. Approved contributors alone see the collapsible **Manage Contribution**
   panel immediately below Global topics.
-- **Sync now** uses one bounded same-origin HTTPS request with a revocable
-  server-issued contributor capability. Robot atomically accepts the current
-  topic/assignment snapshot and pending explicit operations, then returns a
-  durable idempotent receipt, current status, and catalogue checksum in the
-  same response. It requires no WebSocket, additional port, or repeated raw
-  Telegram `initData` header.
+- **Sync now** drips the contribution to Robot in bounded idempotent batches
+  of at most 50 events over the same session-authenticated same-origin request
+  path search uses. Snapshot-derived events carry deterministic
+  content-derived IDs, so a redelivered event replays safely, and every
+  response returns the complete result set: receipt counts, the full
+  contributor status, and the live catalogue revision/checksum. The final
+  batch settles the panel in one round trip. It requires no capability token,
+  WebSocket, additional port, or repeated raw Telegram `initData` header.
 - Personal bookmark aggregate version 3, topics, the clearable recently-used
   topic order, the active topic, and the compact last-read coordinate reconcile
   by timestamp across scoped
@@ -126,7 +128,7 @@ Robot protects actions with:
 - fresh Telegram-signed `initData` at the initial session exchange;
 - owner-bound, one-time launch tokens;
 - bounded opaque sessions with a three-hour default absolute lifetime;
-- a separate revocable capability for approved-contributor synchronization;
+- per-batch contributor-authority rechecks in the durable contribution store;
 - user/chat/topic binding;
 - bounded request bodies and output;
 - per-user, per-chat, and trusted-client rate limits;
@@ -279,8 +281,8 @@ The permanent release gate requires:
 - scoped durable reading-history move-to-front/reopen/remove/clear and persistence tests;
 - bookmark topic/domain, Telegram storage reconciliation, bounded JSON, and
   private-chat backup/restore tests;
-- one-request contribution snapshot, atomic receipt, capability revocation,
-  and exact-replay tests;
+- session-authenticated batched contribution sync, idempotent event replay,
+  revocation, and rate-limit pacing tests;
 - no pre-Post Robot selection mutation;
 - authoritative idempotent Post tests;
 - Bandit, dependency audit, secret scan, systemd verification, and CodeQL.
@@ -315,9 +317,10 @@ After deploying one exact green commit, verify:
 18. the unified topic list identifies global links with **G**, supports
     per-link hide and per-topic/all-catalog reset, and never includes those
     links in personal sync or backup;
-19. approved-contributor Sync now completes through one request, exact retries
-    return the same durable receipt, and an ordinary or revoked user cannot
-    submit;
+19. approved-contributor Sync now completes through sequential
+    `POST /api/v1/contributions/events` batches whose final response settles
+    receipt counts and status, retried events replay without duplicates, and
+    an ordinary or revoked user cannot submit;
 20. private command and launcher cleanup still works.
 
 Record the deployed commit SHA and permanent CI/CodeQL run links with release evidence.

@@ -22,8 +22,8 @@ The reading and persistence split is:
 - scoped browser `localStorage` plus Telegram `DeviceStorage` reconcile
   device-local global-catalog visibility, per-link exclusions, and legacy
   topic mapping; `CloudStorage` is excluded;
-- per-instance, authenticated-user-scoped IndexedDB stores the approved
-  contributor journal and recovery checkpoints; Web Locks coordinate tabs;
+- per-instance, authenticated-user-scoped IndexedDB journals the approved
+  contributor's explicit global add/remove intents until an explicit Sync;
 - Robot authorizes contributors, accepts bounded idempotent review events, and
   publishes the reviewed live global-catalogue overlay;
 - Robot authenticates Telegram, retains compatible reader preferences, accepts
@@ -47,7 +47,7 @@ The reading and persistence split is:
 | Bookmark/topic editing and local import/export | Yes | No | No |
 | Bookmark and last-read device/cloud sync | Telegram Mini App storage | No | No |
 | Global catalog visibility and exclusions | Scoped localStorage + Telegram DeviceStorage | No | No |
-| Contributor journal and recovery | Per-instance scoped IndexedDB + Web Locks | Authenticated event intake/review | No |
+| Contributor journal of explicit global intents | Per-instance scoped IndexedDB | Authenticated event intake/review | No |
 | Reviewed live global catalogue | Strict instance-scoped browser cache + bundled fallback | Revisioned publication | No |
 | Private-chat bookmark backup/restore transport | Confirm/merge in browser | Yes | No |
 | Telegram authentication | No | Yes | No |
@@ -176,18 +176,23 @@ response keeps the last valid cached or bundled catalogue usable.
 ### Trusted contribution mirror
 
 Only a server-approved Telegram identity can mirror changes. After the
-one-time disclosure is acknowledged, **Sync now** submits the complete bounded
-current personal topic/assignment snapshot plus any pending explicit global
-removals in one request. Topic source names use the repository's English
+one-time disclosure is acknowledged, **Sync now** converts the current
+personal topic/assignment state into bounded idempotent events with
+deterministic content-derived IDs, appends the journalled explicit global
+add/remove intents, and drips them to Robot in sequential
+session-authenticated batches of at most 50 events, pausing for the server's
+`Retry-After` on a `429`. Topic source names use the repository's English
 grammar; missing locale strings continue to fall back to that English source.
 
-`BookmarkStore` remains the durable current-state source. The same stable
-client and `sync_id` values make an ambiguous request safe to retry; Robot
-returns the durable receipt for an exact replay and rejects conflicting reuse.
-The server derives missing moderation events from the last accepted snapshot
-and commits them with that snapshot and receipt in one SQLite transaction.
-Transport failure does not modify personal bookmarks or require a browser
-event journal, cursor recovery, Web Lock, WebSocket, or extra port.
+`BookmarkStore` remains the durable current-state source; only the explicit
+global intents need the journal, because snapshot-derived events are
+re-created on every run and deduplicated server-side by their stable IDs. A
+redelivered event replays idempotently, and a reused ID with different
+content is rejected. Every response returns the receipt counts with the
+complete contributor status and catalogue revision/checksum, so the final
+batch settles the panel. Transport failure does not modify personal bookmarks
+and leaves the same idempotent events available for the next Sync; no
+capability token, WebSocket, or extra port participates.
 
 ### Portable recovery
 
@@ -281,8 +286,9 @@ A failed validation never replaces a previously accepted record.
   local or Telegram store remains available; it does not invalidate Scripture
   content, history, or selection.
 - Contribution journal, network, or rate-limit failure never rolls back a local
-  bookmark mutation; durable checkpoints retry automatically, while an
-  unavailable journal is disclosed as memory-only.
+  bookmark mutation; a `429` paces the drip, redelivered events replay
+  idempotently on the next Sync, and an unavailable journal is disclosed as
+  memory-only.
 - A malformed, oversized, or unavailable live catalogue never replaces a valid
   cached or bundled catalogue; a validated authenticated `200` remains
   authoritative after database recovery.
@@ -326,9 +332,9 @@ The release gate must prove:
 - the unified global/personal list, **G** marker, per-link hide, and
   per-topic/all-catalog reset remain browser-local and absent from personal
   sync and backup;
-- approved contribution capability/disclosure, one-request bounded snapshots,
-  atomic durable receipts, exact retry, and explicit global removals remain
-  local-first;
+- approved contribution disclosure, session-authenticated bounded event
+  batches, idempotent per-event replay, rate-limit pacing, and explicit global
+  removals remain local-first;
 - strict live-catalog validation, authoritative instance-scoped revalidation,
   explicit load refresh, English fallback, and bundled offline fallback hold;
 - private-chat backup is owner-bound and bounded, restore uses a fresh

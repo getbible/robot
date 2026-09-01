@@ -61,7 +61,7 @@ No reader navigation, catalog load, chapter load, select, unselect, reorder, cle
 | `miniapp/lib/bible-canon.js` | Shared 66-book and per-book chapter bounds for contribution and live-catalog coordinates |
 | `miniapp/lib/global-bookmark-live-catalog.js` | Strict ETag/revision overlay validation, instance-scoped cache, and bundled fallback |
 | `miniapp/lib/instance-scope.js` | Deterministic non-secret namespace for state bound to one Robot API path |
-| `miniapp/lib/api.js` | Robot session/search/preferences/Post, bookmark backup/restore, contribution, and live-catalog transport facade plus public API composition |
+| `miniapp/lib/api.js` | Robot session/search/preferences/Post, bookmark backup/restore, contribution status/event-batch, and live-catalog transport facade plus public API composition |
 | `miniapp/app.js` | UI orchestration and rendering only |
 
 `BrowserSelectionStore` is the sole owner of temporary selected state. It enforces bounded capacity, coordinate deduplication, source-independent removal, explicit ordering, defensive snapshots, and final coordinate projection.
@@ -269,13 +269,17 @@ by instance plus authenticated scope, and falls back to the bundled provider on
 offline, malformed, or oversized data. A validated authenticated `200` replaces
 the cache after database recovery even when its revision moves backward or
 diverges; `304` retains the cached envelope. Approved contributors synchronize
-the current personal topic/assignment snapshot plus pending explicit
-compatibility operations through one same-origin request. The server-issued
-contributor capability is independent from client UI state and is checked
-against current approval on every write. One SQLite transaction derives
-moderation events, stores the accepted snapshot and stable `sync_id` receipt,
-and returns that receipt with complete status and catalogue revision/checksum.
-Exact request replay returns the same receipt; conflicting reuse fails closed.
+through an explicit **Sync now**: the browser converts the current personal
+topic/assignment state into bounded idempotent contribution events with
+deterministic content-derived IDs, appends its queued explicit global
+add/remove intents, and posts them to the same-origin
+`POST /api/v1/contributions/events` endpoint in sequential
+session-authenticated batches of at most 50 events. Contributor authority and
+disclosure are rechecked in the durable SQLite store on every batch. A
+redelivered event replays idempotently per contributor and `client_event_id`;
+a reused ID with different content fails closed. Every response returns the
+batch receipt with the complete contributor status and catalogue
+revision/checksum, so the final batch settles the panel in one round trip.
 Contributor state never enters Telegram storage, and a failed request never
 rolls back the personal bookmark mutation.
 
@@ -339,10 +343,10 @@ reading while preserving a definite authentication boundary.
 
 Fresh Telegram `initData` is signature-, age-, user-, chat-, and launch-checked
 only at the initial session exchange. Robot then uses its own opaque session
-bearer for ordinary protected requests. An approved session also receives an
-audience-bound, revocable contribution capability; **Sync now** uses it for one
-bounded HTTPS request on the existing Mini App listener. No WebSocket or extra
-port participates in this control plane.
+bearer for ordinary protected requests. **Sync now** uses that same opaque
+session bearer for its sequential bounded event batches on the existing Mini
+App listener, and a `429` paces the drip through the server's `Retry-After`.
+No WebSocket or extra port participates in this control plane.
 
 Browser selection mutations are synchronous and single-threaded. Search pagination uses latest-request coordination so stale responses cannot overwrite current state. Preference writes are serialized per user. Final posting is serialized and idempotent.
 
@@ -365,7 +369,7 @@ Synchronous Librarian work runs in fixed executors. Timeouts do not release capa
 | Telegram Mini App storage unavailable | local bookmark and last-read copies continue; UI reports degraded sync |
 | Browser local storage unavailable | history falls back to memory; Telegram bookmark storage can still persist when supported |
 | Bookmark chat backup unavailable | live bookmarks remain unchanged; local JSON export remains available |
-| Contribution sync unavailable | personal bookmarks remain authoritative; the same idempotent request can be retried |
+| Contribution sync unavailable | personal bookmarks remain authoritative; the same idempotent event batches can be resent |
 | Invalid public response | rejected without cache replacement |
 | Failed Post | ordered browser selection preserved |
 | Expired Robot session | protected operations fail closed; public cached data remains identity-free |
@@ -411,9 +415,10 @@ A release is production-ready only when permanent CI and CodeQL pass on the exac
 - the unified global/personal list, **G** marker, compact all-catalog controls,
   scoped local/DeviceStorage restoration of global visibility and exclusions,
   and per-link/per-topic/all-catalog reset without CloudStorage or personal sync;
-- approved-contributor disclosure and capability authority, one-request bounded
-  snapshots, atomic durable receipts, exact idempotent replay, offline retry,
-  global-removal capture, and strict live-catalog revision/fallback behavior;
+- approved-contributor disclosure and per-batch authority rechecks, bounded
+  idempotent event batches, per-event replay without duplication, rate-limit
+  pacing, global-removal capture, and strict live-catalog revision/fallback
+  behavior;
 - bounded JSON download/import plus owner-bound private-chat backup, fresh
   one-time restore launch, compact v4 `colorIndexes` plus v1/v2/v3 import,
   persistence-before-acknowledgement, and absence of global links or backup

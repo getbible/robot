@@ -14,7 +14,6 @@ from tornado.web import Application, URLSpec
 from modules.catalog import TranslationOption
 from modules.contributions import ContributionStore
 from modules.miniapp_api import (
-    MAX_CONTRIBUTION_SYNC_REQUEST_BYTES,
     MiniAppApi,
     MiniAppHttpRequest,
     MiniAppHttpResponse,
@@ -218,15 +217,12 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
             method="POST",
             body=b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
         )
-        allowed_sync = self.fetch(
-            "/app/api/v1/contributions/sync",
+        # Contribution batches deliberately share the ordinary bound: the drip
+        # transport never needs a special body budget.
+        oversized_events = self.fetch(
+            "/app/api/v1/contributions/events",
             method="POST",
             body=b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
-        )
-        oversized_sync = self.fetch(
-            "/app/api/v1/contributions/sync",
-            method="POST",
-            body=b"x" * (MAX_CONTRIBUTION_SYNC_REQUEST_BYTES + 1),
         )
 
         # Tornado rejects an over-limit Content-Length at the HTTP transport
@@ -235,13 +231,8 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
         self.assertIn(oversized_lookalike.code, (400, 413))
         self.assertIn(oversized_wrong_method.code, (400, 413))
         self.assertEqual(allowed_backup.code, 202)
-        self.assertEqual(allowed_sync.code, 202)
-        self.assertIn(oversized_sync.code, (400, 413))
-        self.assertEqual(len(self.api.requests), 2)
-        self.assertEqual(
-            self.api.requests[-2].body,
-            b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
-        )
+        self.assertIn(oversized_events.code, (400, 413))
+        self.assertEqual(len(self.api.requests), 1)
         self.assertEqual(
             self.api.requests[-1].body,
             b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
@@ -265,7 +256,7 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
 
 
 class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
-    """Exercise the real HTTP, API, capability, and SQLite sync boundary."""
+    """Exercise the real HTTP, API, session, and SQLite drip-sync boundary."""
 
     def setUp(self) -> None:
         self.database_directory = tempfile.TemporaryDirectory()
@@ -306,7 +297,7 @@ class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
             serve_traceback=False,
         )
 
-    def test_signed_exchange_snapshot_and_restart_safe_replay(self) -> None:
+    def test_signed_exchange_batched_events_and_restart_safe_replay(self) -> None:
         session_response = self.fetch(
             "/getbible/api/v1/session",
             method="POST",
@@ -318,76 +309,79 @@ class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
         )
 
         self.assertEqual(session_response.code, 201)
-        capability = session_response.headers.get("X-Contribution-Token")
-        self.assertIsNotNone(capability)
-        assert capability is not None
-        self.assertRegex(capability, r"\Agbc_[A-Za-z0-9_-]{43}\Z")
-        self.assertTrue(
-            json.loads(session_response.body)["contributions"]["can_contribute"]
-        )
+        self.assertIsNone(session_response.headers.get("X-Contribution-Token"))
+        session_payload = json.loads(session_response.body)
+        self.assertTrue(session_payload["contributions"]["can_contribute"])
+        session_token = session_payload["session_token"]
 
-        sync_document = {
-            "protocol_version": 1,
-            "sync_id": "transport.integration.0001",
-            "client_id": "transport.integration.browser",
-            "snapshot": {
-                "topics": [
-                    {
-                        "id": "local.grace",
+        # The drip transport sends the same plain session bearer search uses.
+        batch_document = {
+            "events": [
+                {
+                    "client_event_id": "baseline:topic_upsert:0011223344556677",
+                    "type": "topic_upsert",
+                    "topic": {
+                        "local_topic_id": "local.grace",
                         "name": "Grace",
                         "color": "#bbf7d0",
-                    }
-                ],
-                "assignments": [
-                    {
-                        "topic_id": "local.grace",
-                        "book": 43,
-                        "chapter": 3,
-                        "verse": 16,
-                    }
-                ],
-            },
-            "operations": [],
+                    },
+                },
+                {
+                    "client_event_id": "baseline:verse_add:8899aabbccddeeff",
+                    "type": "verse_add",
+                    "topic": {
+                        "local_topic_id": "local.grace",
+                        "name": "Grace",
+                        "color": "#bbf7d0",
+                    },
+                    "verse": {"book": 43, "chapter": 3, "verse": 16},
+                },
+            ],
             "disclosure_acknowledged": True,
         }
-        sync_body = json.dumps(sync_document, separators=(",", ":")).encode()
-        sync_headers = {
-            "Authorization": f"Bearer {capability}",
+        batch_body = json.dumps(batch_document, separators=(",", ":")).encode()
+        batch_headers = {
+            "Authorization": f"Bearer {session_token}",
             "Content-Type": "application/json",
             "Origin": _INTEGRATION_ORIGIN,
         }
 
         first_response = self.fetch(
-            "/getbible/api/v1/contributions/sync",
+            "/getbible/api/v1/contributions/events",
             method="POST",
-            headers=sync_headers,
-            body=sync_body,
+            headers=batch_headers,
+            body=batch_body,
         )
         self.assertEqual(first_response.code, 200)
-        first_receipt = json.loads(first_response.body)["receipt"]
-        self.assertEqual(first_receipt["outcome"], "accepted")
-        self.assertEqual(first_receipt["accepted"], 2)
+        first_payload = json.loads(first_response.body)
+        self.assertEqual(first_payload["accepted"], 2)
+        self.assertEqual(first_payload["replayed"], 0)
+        self.assertEqual(first_payload["status"]["state"], "approved")
+        self.assertFalse(first_payload["status"]["disclosure_required"])
+        self.assertEqual(
+            first_payload["status"]["summary"]["events"]["pending"],
+            2,
+        )
+        self.assertEqual(first_payload["catalog"]["revision"], 0)
 
-        # Model a process restart: discard the live connection and make the API
-        # use a fresh store. Both the bearer capability and exact sync receipt
-        # must survive because they are durable SQLite state.
+        # Model a process restart: discard the live connection and make the
+        # API use a fresh store. The recorded events and their per-event
+        # idempotency must survive because they are durable SQLite state.
         self.contributions.close()
         self.contributions = ContributionStore(path=str(self.database_path))
         self.api._contributions = self.contributions
 
         replay_response = self.fetch(
-            "/getbible/api/v1/contributions/sync",
+            "/getbible/api/v1/contributions/events",
             method="POST",
-            headers=sync_headers,
-            body=sync_body,
+            headers=batch_headers,
+            body=batch_body,
         )
         self.assertEqual(replay_response.code, 200)
-        replay_receipt = json.loads(replay_response.body)["receipt"]
-        self.assertEqual(replay_receipt["outcome"], "replayed")
-        self.assertEqual(
-            replay_receipt["snapshot_digest"],
-            first_receipt["snapshot_digest"],
-        )
+        replay_payload = json.loads(replay_response.body)
+        self.assertEqual(replay_payload["accepted"], 0)
+        self.assertEqual(replay_payload["replayed"], 2)
+        self.assertEqual(replay_payload["event_ids"], first_payload["event_ids"])
 
         events = self.contributions.list_events()
         self.assertEqual(
@@ -403,6 +397,14 @@ class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
         self.assertFalse(
             self.contributions.contribution_status(42)["disclosure_required"]
         )
+
+        retired_sync = self.fetch(
+            "/getbible/api/v1/contributions/sync",
+            method="POST",
+            headers=batch_headers,
+            body=batch_body,
+        )
+        self.assertEqual(retired_sync.code, 404)
 
 
 class MiniAppServerLifecycleTestCase(unittest.IsolatedAsyncioTestCase):

@@ -185,6 +185,14 @@ database file alongside the older release is what makes the rollback clean.
 Reverting only the Librarian pin while keeping this release is not a supported
 rollback: Librarian 1.x rejects the current diacritics vocabulary outright.
 
+### Contribution store schema
+
+The contribution store remains schema v5. A production database left at
+`user_version=6` by the withdrawn Telegram `web_app_data` push transport is
+downgraded automatically the next time Robot opens it: the two dormant push
+staging tables are dropped and `user_version` returns to 5. Contributor,
+event, and catalogue state are untouched, and no operator action is required.
+
 ## Docker upgrade and rollback
 
 Docker deployments upgrade by changing the explicit `ROBOT_IMAGE` value in the

@@ -203,30 +203,29 @@ class DocumentationContractTestCase(unittest.TestCase):
         self.assertIn("never enter the live", operations)
         self.assertIn("only for native deployments", docker)
 
-    def test_one_request_contribution_sync_contract_is_documented(self) -> None:
+    def test_search_style_contribution_sync_contract_is_documented(self) -> None:
         contract = json.loads(
             (ROOT / "miniapp" / "api-contract.json").read_text(encoding="utf-8")
         )
-        sync = contract["paths"]["/contributions/sync"]["post"]
-        self.assertEqual(sync["security"], [{"contributionCapability": []}])
-        self.assertEqual(
-            sync["requestBody"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/ContributionSyncRequest",
+        self.assertNotIn("/contributions/sync", contract["paths"])
+        self.assertNotIn(
+            "contributionCapability", contract["components"]["securitySchemes"]
         )
-        schemas = contract["components"]["schemas"]
-        request = schemas["ContributionSyncRequest"]
-        self.assertEqual(request["properties"]["protocol_version"]["const"], 1)
+        events = contract["paths"]["/contributions/events"]["post"]
+        self.assertFalse(events.get("deprecated", False))
+        request = events["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request["properties"]["events"]["maxItems"], 50)
         self.assertEqual(
-            request["properties"]["snapshot"]["$ref"],
-            "#/components/schemas/ContributionSnapshot",
+            request["properties"]["disclosure_acknowledged"]["type"], "boolean"
         )
-        self.assertEqual(request["properties"]["operations"]["maxItems"], 2000)
-        snapshot = schemas["ContributionSnapshot"]
-        self.assertEqual(snapshot["properties"]["topics"]["maxItems"], 100)
-        self.assertEqual(snapshot["properties"]["assignments"]["maxItems"], 10000)
-        self.assertTrue(contract["paths"]["/contributions/status"]["get"]["deprecated"])
-        self.assertTrue(contract["paths"]["/contributions/events"]["post"]["deprecated"])
-        self.assertNotIn("telegramInitData", contract["components"]["securitySchemes"])
+        response = events["responses"]["200"]["content"]["application/json"][
+            "schema"
+        ]
+        self.assertIn("status", response["properties"])
+        self.assertIn("catalog", response["properties"])
+        status = contract["paths"]["/contributions/status"]
+        self.assertFalse(status["get"].get("deprecated", False))
+        self.assertNotIn("patch", status)
 
         docs = "\n".join(
             (ROOT / relative).read_text(encoding="utf-8")
@@ -238,8 +237,8 @@ class DocumentationContractTestCase(unittest.TestCase):
             )
         )
         for required in (
-            "one request",
-            "durable receipt",
+            "bounded idempotent batches",
+            "result set",
             "No WebSocket",
             "initial session exchange",
         ):

@@ -630,7 +630,9 @@ function contributionControlVisible(status = contributionStatus) {
     return false;
   }
   if (status.can_contribute) {
-    return api?.contributionTransportReady === true;
+    // Synchronization rides the ordinary session transport, so an approved
+    // contributor with a live session always sees the panel.
+    return Boolean(api);
   }
   return Boolean(
     contributionAuthorityUnknown(status) ||
@@ -642,11 +644,7 @@ async function ensureContributionSync(initialStatus) {
   if (contributionSync) {
     return contributionSync;
   }
-  if (
-    !initialStatus?.enabled ||
-    !initialStatus.can_contribute ||
-    api?.contributionTransportReady !== true
-  ) {
+  if (!initialStatus?.enabled || !initialStatus.can_contribute || !api) {
     return null;
   }
   if (contributionOpenTask) {
@@ -709,7 +707,7 @@ function updateContributorPresentation() {
     contributionStatus?.enabled &&
     contributionStatus.can_contribute &&
     contributionSync?.canContribute &&
-    api?.contributionTransportReady,
+    api,
   );
   elements.contributorManager.hidden = !visible;
   elements.contributorTopicGuidance.hidden = !visible;
@@ -1072,10 +1070,7 @@ async function synchronizeContributionsNow() {
           return null;
         }
       }
-      if (
-        !contributionSync?.canContribute ||
-        api?.contributionTransportReady !== true
-      ) {
+      if (!contributionSync?.canContribute || !api) {
         setContributionPresentation(
           "pending",
           contributionApplicationMessageKey(contributionStatus?.state),
@@ -1083,9 +1078,9 @@ async function synchronizeContributionsNow() {
         return null;
       }
       if (contributionSync.disclosureRequired) {
-        // Consent is carried in the same atomic sync envelope. Showing the
+        // Consent rides inside the first synchronized batch. Showing the
         // disclosure here must not introduce a preliminary status write or a
-        // second upload request.
+        // separate acknowledgement request.
         await bridge.alert(i18n.t("bookmarks.contribution_disclosure"));
         if (generation !== sessionGeneration) {
           return null;

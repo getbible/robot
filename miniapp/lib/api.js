@@ -21,7 +21,7 @@ const MAX_SEARCH_TIMEOUT_MS = 900_000;
 // deadline, so a server that gives up first can say why.
 const SEARCH_TIMEOUT_GRACE_MS = 10_000;
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
-const CONTRIBUTION_TOKEN_PATTERN = /^gbc_[A-Za-z0-9_-]{43}$/;
+const CONTRIBUTION_EVENTS_MAXIMUM = 50;
 
 export class ApiError extends Error {
   constructor(message, {
@@ -44,7 +44,6 @@ export class ApiError extends Error {
 export class MiniAppApi {
   #initData;
   #sessionToken = null;
-  #contributionToken = null;
   #searchTimeoutMs = DEFAULT_SEARCH_TIMEOUT_MS;
   #timeoutMs;
   #cleanupAttempted = false;
@@ -144,12 +143,7 @@ export class MiniAppApi {
 
   clearSession() {
     this.#sessionToken = null;
-    this.#contributionToken = null;
     this.#cleanupAttempted = false;
-  }
-
-  get contributionTransportReady() {
-    return this.#contributionToken !== null;
   }
 
   async revokeSession() {
@@ -256,32 +250,27 @@ export class MiniAppApi {
     return this.#request("contributions/status?details=1");
   }
 
-  acknowledgeContributionDisclosure() {
-    return this.#request("contributions/status?details=1", {
-      method: "PATCH",
-      body: { disclosure_acknowledged: true },
-    });
-  }
-
-  syncContributions(envelope) {
-    if (
-      !envelope ||
-      typeof envelope !== "object" ||
-      Array.isArray(envelope)
-    ) {
-      throw new TypeError("A contribution sync envelope is required.");
+  submitContributionEvents(events, { disclosureAcknowledged = false } = {}) {
+    if (!Array.isArray(events) || events.length === 0) {
+      throw new TypeError("A non-empty contribution event batch is required.");
     }
-    if (!this.#contributionToken) {
-      throw new ApiError("Contribution sync is not available for this session.", {
-        code: "contribution_transport_not_ready",
-        status: 403,
-      });
+    if (events.length > CONTRIBUTION_EVENTS_MAXIMUM) {
+      throw new RangeError(
+        `A contribution batch is limited to ${CONTRIBUTION_EVENTS_MAXIMUM} events.`,
+      );
     }
-    return this.#request("contributions/sync", {
+    if (typeof disclosureAcknowledged !== "boolean") {
+      throw new TypeError("disclosureAcknowledged must be a boolean.");
+    }
+    // Contribution batches ride the exact same session-authenticated,
+    // same-origin request path as search: a small JSON POST with the plain
+    // session bearer, no separate capability and no special body budget.
+    return this.#request("contributions/events", {
       method: "POST",
-      body: envelope,
-      timeoutMs: 30_000,
-      contributionAuthenticated: true,
+      body: {
+        events,
+        ...(disclosureAcknowledged ? { disclosure_acknowledged: true } : {}),
+      },
     });
   }
 
@@ -437,19 +426,12 @@ export class MiniAppApi {
     keepalive = false,
     timeoutMs = this.#timeoutMs,
     headers: requestHeaders = {},
-    contributionAuthenticated = false,
     allowNotModified = false,
     includeEtag = false,
   } = {}) {
     if (authenticated && !this.#sessionToken) {
       throw new ApiError("Your secure session is not ready.", {
         code: "session_not_ready",
-      });
-    }
-    if (contributionAuthenticated && !this.#contributionToken) {
-      throw new ApiError("Contribution sync is not available for this session.", {
-        code: "contribution_transport_not_ready",
-        status: 403,
       });
     }
     const controller = new AbortController();
@@ -461,11 +443,7 @@ export class MiniAppApi {
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     if (authenticated) {
-      headers.Authorization = `Bearer ${
-        contributionAuthenticated
-          ? this.#contributionToken
-          : this.#sessionToken
-      }`;
+      headers.Authorization = `Bearer ${this.#sessionToken}`;
     }
     let response;
     try {
@@ -493,9 +471,6 @@ export class MiniAppApi {
       );
     } finally {
       this.#clearTimeout(timeout);
-    }
-    if (response.ok) {
-      this.#acceptContributionToken(response);
     }
     if (allowNotModified && response.status === 304) {
       return {
@@ -547,24 +522,6 @@ export class MiniAppApi {
     return includeEtag
       ? { ...payload, etag: response.headers.get("etag") }
       : payload;
-  }
-
-  #acceptContributionToken(response) {
-    const token = response.headers.get("x-contribution-token");
-    if (token === null) {
-      return;
-    }
-    if (!CONTRIBUTION_TOKEN_PATTERN.test(token)) {
-      throw new ApiError(
-        "getBible.Life returned an invalid contribution capability.",
-        {
-          code: "invalid_response",
-          status: response.status,
-          retryable: true,
-        },
-      );
-    }
-    this.#contributionToken = token;
   }
 }
 

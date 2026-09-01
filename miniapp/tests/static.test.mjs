@@ -450,7 +450,10 @@ test("offers one-click contributor sync with lossless personal-to-global present
   assert.doesNotMatch(app, /contributionSync\.acknowledgeDisclosure\(/);
   assert.doesNotMatch(app, /ensureContributionDisclosure/);
   assert.match(app, /coreTopics: globalBookmarkCatalog\.topicDefinitions\(\)/);
-  assert.match(app, /api\?\.contributionTransportReady/);
+  // Synchronization rides the ordinary session transport: no separate
+  // capability readiness gate may reappear anywhere in the app shell.
+  assert.doesNotMatch(app, /contributionTransportReady/);
+  assert.doesNotMatch(app, /X-Contribution-Token/i);
   assert.match(app, /refreshLiveGlobalBookmarkCatalog\(\{ requireNetwork: true \}\)/);
   assert.match(
     app,
