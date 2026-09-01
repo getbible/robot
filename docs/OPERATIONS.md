@@ -184,23 +184,18 @@ Use its stages in order:
    branch.
 
 Application decisions queue a private Telegram notification. Approval also
-causes the Mini App to show a one-time disclosure before anything is shared,
-and `/contributor` attaches a persistent **Push contribution** reply-keyboard
-button to the approved contributor's private chat. The collapsible,
-approved-contributor-only **Manage Contribution** panel sits immediately below
-Global topics. Its **Push** action serializes the current topic/assignment
-snapshot and hands it to Telegram as bounded chunks from that keyboard launch;
-the bot stages each delivered service message durably, deletes it from the
-chat, keeps one edited progress message for a multi-part transfer, commits the
-completed bundle atomically, and confirms in the chat. Its **Pull** action
-refreshes contributor status, confirms a pending push receipt, and revalidates
-the current global catalogue; status otherwise refreshes only at session
-bootstrap, never through background polling. Sessions without contribution
-authority do not receive that panel; application decisions continue to arrive
-through the private bot notification.
+causes the Mini App to show a one-time disclosure before any baseline is sent.
+After acknowledgement, the user's existing assigned topics/coordinates are
+submitted once and later successful local changes are journalled automatically.
+The collapsible, approved-contributor-only **Manage Contribution** panel sits
+immediately below Global topics. Its Sync action pushes the durable journal,
+checks review outcomes, and pulls the current global catalogue. Sessions
+without contribution authority do not receive that panel; application
+decisions continue to arrive through the private bot notification and bounded
+authority refresh.
 Personal bookmark writes remain local-first: a network or moderation-server
-failure cannot undo them, and the durable outbox resends the identical
-transfer on a later push.
+failure cannot undo them, and the bounded outbox retries on a later
+synchronization.
 
 Topic proposals must use an English source name. The topic stage is where an
 operator resolves spelling, aliases, colors, and overlapping proposals into
@@ -317,9 +312,8 @@ The non-destructive diagnostic checks:
 - generated Caddy route equality, full Caddyfile validation, and Caddy service
   enablement/activity;
 - local Mini App shell plus public TLS and response-content checks;
-- local and public `bookmarks/catalog`, `contributions/status`, and
-  `contributions/receipt` GET routes reaching Robot and returning its expected
-  unauthenticated JSON `401` response;
+- local and public contribution status/event routes reaching Robot and
+  returning its expected unauthenticated JSON response;
 - health and readiness when running.
 
 Use `runtime` for operational counters and `doctor` for an evidence-backed pass/fail deployment check.

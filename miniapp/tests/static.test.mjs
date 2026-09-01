@@ -411,18 +411,11 @@ test("keeps global and personal bookmarks in one controllable topic list", async
   assert.match(UI_CATALOGS.en["bookmarks.imported"], /skipped ranges/);
 });
 
-test("wires contributor push and pull through the Telegram uplink", async () => {
+test("offers one-click contributor sync with lossless personal-to-global presentation", async () => {
   const html = await readFile(new URL("index.html", root), "utf8");
   const app = await readFile(new URL("app.js", root), "utf8");
   const css = await readFile(new URL("styles.css", root), "utf8");
-  const api = await readFile(new URL("lib/api.js", root), "utf8");
-  const telegram = await readFile(new URL("lib/telegram.js", root), "utf8");
-  const pushLib = await readFile(
-    new URL("lib/contribution-push.js", root),
-    "utf8",
-  );
 
-  // The contributor panel offers exactly two actions: Push and Pull.
   const globalControls = html.indexOf('class="bookmark-global"');
   const manager = html.indexOf('id="contributor-manager"');
   const sync = html.indexOf('id="contributor-sync"');
@@ -438,221 +431,26 @@ test("wires contributor push and pull through the Telegram uplink", async () => 
     /<details[^>]*id="contributor-manager"[^>]*hidden[\s\S]*?<summary[^>]*data-i18n="bookmarks\.manage_contribution"[\s\S]*?id="contributor-sync"[\s\S]*?<\/details>/,
   );
   assert.doesNotMatch(html, /id="bookmark-topic-editor"/);
-  assert.doesNotMatch(html, /id="contributor-sync-button"/);
-  const actions =
-    html.match(/<div class="contributor-sync__actions">[\s\S]*?<\/div>/)?.[0] ??
-    "";
-  assert.match(actions, /id="contributor-push-button"/);
-  assert.match(actions, /id="contributor-pull-button"/);
-  assert.ok(
-    actions.indexOf('id="contributor-push-button"') <
-      actions.indexOf('id="contributor-pull-button"'),
-  );
-  assert.match(
-    actions,
-    /id="contributor-push-button"[\s\S]*?data-i18n="bookmarks\.contribution_push"/,
-  );
-  assert.match(
-    actions,
-    /id="contributor-pull-button"[\s\S]*?data-i18n="bookmarks\.contribution_pull"/,
-  );
+  assert.match(html, /id="contributor-sync-button"/);
   assert.match(html, /id="contributor-sync-status"[\s\S]*?aria-live="polite"/);
   assert.match(html, /id="contributor-sync-details"/);
   assert.match(css, /\.contributor-sync\[data-state="success"\]/);
-  assert.match(css, /\.contributor-sync__actions/);
   assert.match(css, /\.bookmark-contribution-badge/);
-  assert.match(app, /contributorPushButton: "contributor-push-button"/);
-  assert.match(app, /contributorPullButton: "contributor-pull-button"/);
-  assert.match(
-    app,
-    /elements\.contributorPushButton\.addEventListener\("click", \(\) => \{\s*void pushContribution\(\);/,
-  );
-  assert.match(
-    app,
-    /elements\.contributorPullButton\.addEventListener\("click", \(\) => \{\s*void pullContribution\(\);/,
-  );
-  assert.match(app, /elements\.contributorPushButton\.hidden = passiveApplication/);
-  assert.match(
-    app,
-    /elements\.contributorPullButton\.hidden = passiveApplication \|\|\s*waitingForApproval/,
-  );
 
-  // PUSH rides Telegram's own sendData uplink from the keyboard launch; the
-  // single bridge.sendData call site lives inside sendNextPushMessage.
-  const sendNextStart = app.indexOf("async function sendNextPushMessage()");
-  const pushStart = app.indexOf("async function pushContribution()");
-  const pullStart = app.indexOf("async function pullContribution()");
-  const pullEnd = app.indexOf("function stageContributionTopicOutcomes(");
-  assert.ok(
-    sendNextStart >= 0 &&
-    sendNextStart < pushStart &&
-    pushStart < pullStart &&
-    pullStart < pullEnd,
-  );
-  const sendNext = app.slice(sendNextStart, pushStart);
-  const pushBody = app.slice(pushStart, pullStart);
-  const pullBody = app.slice(pullStart, pullEnd);
-  assert.equal([...app.matchAll(/bridge\.sendData\(/g)].length, 1);
-  assert.match(sendNext, /if \(!bridge\.sendData\(message\)\)/);
-  assert.match(
-    sendNext,
-    /rewindPushMessage\(\)[\s\S]*?"bookmarks\.contribution_push_keyboard_hint"/,
-  );
-  assert.match(app, /import \{ buildPushMessages \} from "\.\/lib\/contribution-push\.js"/);
-  assert.match(pushBody, /^  if \(\s*contributionActionTask \|\|/m);
-  assert.match(
-    pushBody,
-    /if \(!bridge\.pushLaunch\) \{[\s\S]*?"bookmarks\.contribution_push_keyboard_hint",[\s\S]*?return null;/,
+  const manualSync = app.slice(
+    app.indexOf("async function synchronizeContributionsNow()"),
+    app.indexOf("function contributionInactivePresentation"),
   );
   assert.match(
-    pushBody,
-    /const confirmed = await confirmPendingPushReceipt\(\)/,
+    manualSync,
+    /contributionSync\.synchronizeNow\([\s\S]*?bookmarkStore\.snapshot\(\)[\s\S]*?disclosureAcknowledged/,
   );
-  assert.match(
-    pushBody,
-    /!confirmed && contributionSync\.outbox\?\.sent_all[\s\S]*?await contributionSync\.restartPush\(\)/,
-  );
-  assert.match(
-    pushBody,
-    /bridge\.alert\(i18n\.t\("bookmarks\.contribution_disclosure"\)\)[\s\S]*?disclosureAcknowledged = true/,
-  );
-  assert.match(
-    pushBody,
-    /contributionSync\.preparePush\(bookmarkStore\.snapshot\(\), \{\s*disclosureAcknowledged,\s*encode: \(envelope\) => buildPushMessages\(envelope\)/,
-  );
-  assert.equal(pushBody.match(/\.preparePush\(/g)?.length, 1);
-  assert.doesNotMatch(pushBody, /api\.|fetch\(/);
-
-  // A push launch lands on the contribution panel and auto-continues a
-  // mid-transfer outbox; a fully-sent one waits for its receipt.
-  assert.match(
-    app,
-    /if \(bridge\.pushLaunch\) \{[\s\S]*?setRoute\("bookmarks"\)[\s\S]*?contributorManager\.open = true/,
-  );
-  const continueBody = app.slice(
-    app.indexOf("function continuePushTransfer("),
-    sendNextStart,
-  );
-  assert.match(
-    continueBody,
-    /outbox\.sent_all \|\| !bridge\.pushLaunch \|\| outbox\.attempt_index === 0/,
-  );
-  assert.match(continueBody, /"bookmarks\.contribution_push_awaiting"/);
-  // Auto-continue shares the Push/Pull single-flight so a boot continuation
-  // can never race a tap into skipping or double-sending a chunk.
-  assert.match(
-    continueBody,
-    /if \(contributionActionTask \|\| !contributionSync\?\.outbox\)/,
-  );
-  assert.match(continueBody, /contributionActionTask = task/);
-  assert.match(
-    app,
-    /contributionSync\?\.outbox[\s\S]*?await continuePushTransfer\(generation\)/,
-  );
-
-  // PULL is the only HTTPS side: status, receipt confirmation, then the strict
-  // network catalogue refresh that reconciles staged review outcomes.
-  assert.match(pullBody, /if \(contributionActionTask \|\| !contributionControlVisible\(\)\)/);
-  const statusStep = pullBody.indexOf("await loadContributionStatus()");
-  const receiptStep = pullBody.indexOf("await confirmPendingPushReceipt()");
-  const catalogStep = pullBody.indexOf(
-    "await refreshLiveGlobalBookmarkCatalog({ requireNetwork: true })",
-  );
-  const loadStep = pullBody.indexOf("await loadGlobalBookmarks()");
-  assert.ok(
-    statusStep >= 0 &&
-    statusStep < receiptStep &&
-    receiptStep < catalogStep &&
-    catalogStep < loadStep,
-  );
-  assert.match(pullBody, /"bookmarks\.contribution_pull_complete"/);
-  assert.match(api, /contributionStatus\(\) \{\s*return this\.#request\("contributions\/status\?details=1"\)/);
-  assert.match(api, /contributionReceipt\(syncId\)[\s\S]*?contributions\/receipt/);
-  assert.doesNotMatch(api, /contributions\/sync|contributions\/events|X-Contribution-Token|capability/i);
-
-  // Receipt confirmation is the one path that clears pushed operations.
-  assert.equal([...app.matchAll(/contributionSync\.confirmReceipt\(/g)].length, 1);
-  const receiptBody = app.slice(
-    app.indexOf("async function confirmPendingPushReceipt()"),
-    app.indexOf("async function continuePushTransfer("),
-  );
-  assert.match(receiptBody, /api\.contributionReceipt\(outbox\.sync_id\)/);
-  assert.match(
-    receiptBody,
-    /payload\.receipt\?\.sync_id === outbox\.sync_id[\s\S]*?await contributionSync\.confirmReceipt\(payload\.receipt\)/,
-  );
-
-  // The HTTPS sync transport, capability tokens, and status polling are gone.
-  for (const removed of [
-    "scheduleContributionStatusPoll",
-    "refreshContributionStatus",
-    "CONTRIBUTION_STATUS_POLL",
-    "contributionRetryNotBefore",
-    "recordContributionRetryDeadline",
-    "contributionRetryDelayMs",
-    "synchronizeContributionsNow",
-    "contributionTransportReady",
-    "contribution_transport_not_ready",
-    "adoptContributionAuthorityLoss",
-  ]) {
-    assert.equal(app.includes(removed), false, `app.js still has ${removed}`);
-    assert.equal(api.includes(removed), false, `api.js still has ${removed}`);
-  }
+  assert.equal(manualSync.match(/\.synchronizeNow\(/g)?.length, 1);
+  assert.doesNotMatch(manualSync, /refreshLiveGlobalBookmarkCatalog/);
   assert.doesNotMatch(app, /contributionSync\.acknowledgeDisclosure\(/);
   assert.doesNotMatch(app, /ensureContributionDisclosure/);
-  assert.doesNotMatch(app, /function scheduleContribution(?:Sync|Retry)/);
-  assert.match(
-    app.match(/function contributionControlVisible[\s\S]*?\n\}/)?.[0] ?? "",
-    /\["pending", "deferred", "rejected", "revoked"\]\.includes\(status\.state\)/,
-  );
-  assert.match(app, /if \(contributionOpenTask\) \{\s*return contributionOpenTask;/);
-
-  // The Telegram bridge owns the single 4096-byte-bounded sendData wrapper and
-  // the ?context=push launch marker.
-  assert.equal([...telegram.matchAll(/^ {2}sendData\(data\) \{/gm)].length, 1);
-  assert.match(telegram, /const MAX_SEND_DATA_BYTES = 4096;/);
-  assert.match(telegram, /const PUSH_LAUNCH_CONTEXT = "push";/);
-  assert.match(telegram, /get pushLaunch\(\)/);
-  assert.match(
-    telegram,
-    /byteLength > MAX_SEND_DATA_BYTES[\s\S]*?throw new RangeError[\s\S]*?typeof this\.#webApp\?\.sendData !== "function"[\s\S]*?return false;[\s\S]*?this\.#webApp\.sendData\(data\);[\s\S]*?return true;/,
-  );
-
-  // The GBC1 chunk protocol pins its wire bounds.
-  assert.match(pushLib, /export const PUSH_PROTOCOL_PREFIX = "GBC1";/);
-  assert.match(pushLib, /export const MAX_PUSH_MESSAGE_BYTES = 4096;/);
-  assert.match(pushLib, /export const MAX_PUSH_CHUNKS = 64;/);
-  assert.match(pushLib, /export const MAX_PUSH_CHUNK_PAYLOAD_CHARS = 3584;/);
-  assert.match(pushLib, /message\.length > MAX_PUSH_MESSAGE_BYTES/);
-  assert.match(pushLib, /chunkCount > MAX_PUSH_CHUNKS/);
-
-  // Push/pull vocabulary replaced the one-click sync strings.
-  for (const key of [
-    "bookmarks.contribution_push",
-    "bookmarks.contribution_pull",
-    "bookmarks.contribution_pushing",
-    "bookmarks.contribution_pulling",
-    "bookmarks.contribution_push_keyboard_hint",
-    "bookmarks.contribution_push_awaiting",
-    "bookmarks.contribution_pull_complete",
-    "bookmarks.contribution_sync_retry_wait",
-  ]) {
-    assert.equal(typeof UI_CATALOGS.en[key], "string", key);
-  }
-  for (const key of [
-    "bookmarks.contribution_sync_now",
-    "bookmarks.contribution_syncing",
-    "bookmarks.contribution_sent_one",
-    "bookmarks.contribution_sent_other",
-    "bookmarks.contribution_waiting_one",
-    "bookmarks.contribution_waiting_other",
-  ]) {
-    assert.equal(UI_CATALOGS.en[key], undefined, key);
-  }
-
-  // Publication remains a separate read model: staged review outcomes still
-  // reconcile losslessly inside the ordered catalogue refresh queue.
   assert.match(app, /coreTopics: globalBookmarkCatalog\.topicDefinitions\(\)/);
+  assert.match(app, /api\?\.contributionTransportReady/);
   assert.match(app, /refreshLiveGlobalBookmarkCatalog\(\{ requireNetwork: true \}\)/);
   assert.match(
     app,
@@ -662,6 +460,53 @@ test("wires contributor push and pull through the Telegram uplink", async () => 
     app,
     /if \(!unchanged && result\.source !== "network"\)[\s\S]*?return \{ changed: false, source: result\.source \}/,
   );
+  assert.match(app, /window\.addEventListener\("focus"[\s\S]*?refreshContributionStatus/);
+  assert.match(app, /document\.addEventListener\("visibilitychange"[\s\S]*?refreshContributionStatus/);
+  assert.match(
+    app.match(/function contributionStatusShouldPoll[\s\S]*?\n\}/)?.[0] ?? "",
+    /status\.can_contribute[\s\S]*?status\.state === "pending"[\s\S]*?contributionAuthorityUnknown\(status\)/,
+  );
+  assert.doesNotMatch(
+    app.match(/function contributionStatusShouldPoll[\s\S]*?\n\}/)?.[0] ?? "",
+    /deferred|rejected|revoked|not_applied/,
+  );
+  assert.match(
+    app,
+    /scheduleContributionStatusPoll[\s\S]*?force: contributionAuthorityUnknown\(\),[\s\S]*?allowPendingPoll: true,[\s\S]*?allowAuthorityRecovery: true/,
+  );
+  assert.match(app, /let contributionStatusPollTimerDueAt = 0/);
+  assert.match(
+    app.match(/function scheduleContributionStatusPoll[\s\S]*?\n\}/)?.[0] ?? "",
+    /authorityRecovery \? 1_000 : CONTRIBUTION_STATUS_POLL_MS[\s\S]*?contributionStatusPollTimerDueAt <= dueAt/,
+  );
+  assert.match(
+    app,
+    /if \(contributionOpenTask\) \{[\s\S]*?await contributionOpenTask\.catch/,
+  );
+  assert.match(
+    app,
+    /contributionStatus\?\.state === "pending"[\s\S]*?!allowPendingPoll[\s\S]*?!allowApplicantCheck/,
+  );
+  assert.match(
+    app,
+    /contributionAuthorityUnknown\(\) && !allowAuthorityRecovery/,
+  );
+  assert.doesNotMatch(
+    app.match(/window\.addEventListener\("online"[\s\S]*?\n  \}\);/)?.[0] ?? "",
+    /allowPendingPoll/,
+  );
+  assert.doesNotMatch(
+    app.match(/window\.addEventListener\("focus"[\s\S]*?\n  \}\);/)?.[0] ?? "",
+    /allowPendingPoll/,
+  );
+  assert.match(
+    app.match(/function contributionApplicantCanCheck[\s\S]*?\n\}/)?.[0] ?? "",
+    /\["pending", "deferred"\]\.includes\(status\.state\)/,
+  );
+  assert.match(
+    app,
+    /elements\.contributorSyncButton\.hidden = passiveApplication/,
+  );
   assert.match(
     app,
     /globalBookmarkCatalogRefreshQueue\.then\([\s\S]*?performLiveGlobalBookmarkCatalogRefresh/,
@@ -670,16 +515,24 @@ test("wires contributor push and pull through the Telegram uplink", async () => 
     app,
     /pendingContributionOutcomeRefresh\?\.version === stagedOutcomes\.version/,
   );
+  assert.doesNotMatch(
+    app,
+    /function scheduleContribution(?:Sync|Retry)/,
+  );
   const personalCapture = app.slice(
     app.indexOf("function capturePersonalBookmarkMutation"),
     app.indexOf("function captureGlobalBookmarkRemoval"),
   );
   assert.match(personalCapture, /captureMutation/);
-  assert.doesNotMatch(personalCapture, /synchronize|scheduleContribution|sendData/);
+  assert.doesNotMatch(personalCapture, /synchronize|scheduleContribution/);
   assert.match(app, /let globalBookmarkCatalogRetryNotBefore = 0/);
   assert.match(
     app,
     /function scheduleGlobalBookmarkCatalogRetry[\s\S]*?recordGlobalBookmarkCatalogRetryDeadline/,
+  );
+  assert.doesNotMatch(
+    app.match(/function scheduleGlobalBookmarkCatalogRetry[\s\S]*?\n\}/)?.[0] ?? "",
+    /recordContributionRetryDeadline|contributionRetryDelayMs/,
   );
   assert.match(
     app,
@@ -693,7 +546,7 @@ test("wires contributor push and pull through the Telegram uplink", async () => 
   assert.match(app, /summary\.events[\s\S]*?"deferred"[\s\S]*?"rejected"/);
   assert.match(app, /reconcileContributionTopicMappings\(\{/);
   assert.match(app, /promotedTopicIds: canonicalTopicIds/);
-  assert.match(app, /detailsAvailable: contributionReviewDetailsAvailable\(status\)/);
+  assert.match(app, /detailsAvailable: result\.review_details_available === true/);
   assert.match(app, /classified\.get\(topicId\)\?\.coordinates\.has\(coordinateKey\)/);
   assert.match(app, /globalTopic\.coordinates\.has\(bookmarkCoordinateKey\(bookmark\)\)/);
   assert.match(app, /const personalCount = personalBookmarkCount\(snapshot, classifiedTopics\)/);

@@ -203,33 +203,30 @@ class DocumentationContractTestCase(unittest.TestCase):
         self.assertIn("never enter the live", operations)
         self.assertIn("only for native deployments", docker)
 
-    def test_telegram_push_and_pull_contract_is_documented(self) -> None:
+    def test_one_request_contribution_sync_contract_is_documented(self) -> None:
         contract = json.loads(
             (ROOT / "miniapp" / "api-contract.json").read_text(encoding="utf-8")
         )
-        # Push travels over Telegram's own uplink, so the HTTP contract must
-        # carry no ingest surface at all: no sync or events paths, no bearer
-        # capability, and no capability header anywhere in the document.
-        self.assertNotIn("/contributions/sync", contract["paths"])
-        self.assertNotIn("/contributions/events", contract["paths"])
-        self.assertNotIn(
-            "contributionCapability",
-            contract["components"]["securitySchemes"],
+        sync = contract["paths"]["/contributions/sync"]["post"]
+        self.assertEqual(sync["security"], [{"contributionCapability": []}])
+        self.assertEqual(
+            sync["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ContributionSyncRequest",
         )
+        schemas = contract["components"]["schemas"]
+        request = schemas["ContributionSyncRequest"]
+        self.assertEqual(request["properties"]["protocol_version"]["const"], 1)
+        self.assertEqual(
+            request["properties"]["snapshot"]["$ref"],
+            "#/components/schemas/ContributionSnapshot",
+        )
+        self.assertEqual(request["properties"]["operations"]["maxItems"], 2000)
+        snapshot = schemas["ContributionSnapshot"]
+        self.assertEqual(snapshot["properties"]["topics"]["maxItems"], 100)
+        self.assertEqual(snapshot["properties"]["assignments"]["maxItems"], 10000)
+        self.assertTrue(contract["paths"]["/contributions/status"]["get"]["deprecated"])
+        self.assertTrue(contract["paths"]["/contributions/events"]["post"]["deprecated"])
         self.assertNotIn("telegramInitData", contract["components"]["securitySchemes"])
-        self.assertNotIn(
-            "X-Contribution-Token",
-            (ROOT / "miniapp" / "api-contract.json").read_text(encoding="utf-8"),
-        )
-        status = contract["paths"]["/contributions/status"]
-        self.assertEqual(sorted(status), ["get"])
-        self.assertNotIn("deprecated", status["get"])
-        receipt = contract["paths"]["/contributions/receipt"]["get"]
-        parameter = receipt["parameters"][0]
-        self.assertEqual(parameter["name"], "sync_id")
-        self.assertTrue(parameter["required"])
-        lookup = contract["components"]["schemas"]["ContributionReceiptLookup"]
-        self.assertEqual(lookup["required"], ["found", "receipt"])
 
         docs = "\n".join(
             (ROOT / relative).read_text(encoding="utf-8")
@@ -241,12 +238,9 @@ class DocumentationContractTestCase(unittest.TestCase):
             )
         )
         for required in (
-            "sendData",
-            "web_app_data",
-            "reply-keyboard",
-            "4096",
-            "no inbound port",
+            "one request",
             "durable receipt",
+            "No WebSocket",
             "initial session exchange",
         ):
             with self.subTest(required=required):

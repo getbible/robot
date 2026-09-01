@@ -694,7 +694,7 @@ cat "$dropin_root/alpha.conf"
         self.assertIn("dl.cloudsmith.io/public/caddy/stable", script)
         self.assertIn("render_caddy_routes", script)
         self.assertIn("max_size 64KB", script)
-        self.assertNotIn("max_size 1MiB", script)
+        self.assertIn("max_size 1MiB", script)
         self.assertIn("max_size 5MB", script)
         self.assertIn("/api/v1/bookmarks/backup", script)
         render_start = script.index("render_caddy_routes() {")
@@ -702,19 +702,21 @@ cat "$dropin_root/alpha.conf"
         caddy_renderer = script[render_start:render_end]
         self.assertEqual(caddy_renderer.count("path {path}/api/v1/*"), 1)
         self.assertEqual(caddy_renderer.count("path /api/v1/*"), 1)
-        # PUSH now travels over Telegram sendData, so the managed proxy keeps
-        # no contribution-specific matchers at all: only the bookmark-backup
-        # carve-out and the general /api/v1/* rule remain.
-        self.assertNotIn("/api/v1/contributions", caddy_renderer)
-        self.assertNotIn("_contribution_sync", caddy_renderer)
+        self.assertEqual(
+            caddy_renderer.count("/api/v1/contributions/sync"),
+            2,
+        )
+        self.assertNotIn('"/api/v1/contributions/status"', caddy_renderer)
+        self.assertNotIn('"/api/v1/contributions/events"', caddy_renderer)
         for nested in (True, False):
             marker = "f\"        path {path}/api/v1/*\"" if nested else (
                 '"        path /api/v1/*"'
             )
             prefix_at = caddy_renderer.index(marker)
-            backup_at = caddy_renderer.rfind("_bookmark_backup", 0, prefix_at)
-            self.assertGreater(backup_at, -1)
-            self.assertGreater(prefix_at, backup_at)
+            sync_at = caddy_renderer.rfind("_contribution_sync", 0, prefix_at)
+            backup_at = caddy_renderer.rfind("_bookmark_backup", 0, sync_at)
+            self.assertGreater(sync_at, backup_at)
+            self.assertGreater(prefix_at, sync_at)
         self.assertIn("caddy validate --config", script)
         self.assertIn("rollback_caddy_transaction", script)
         self.assertIn("wait_for_mini_app_surface", script)
@@ -723,10 +725,8 @@ cat "$dropin_root/alpha.conf"
         surface = script[surface_start:surface_end]
         self.assertIn('"${base_url}/api/v1/bookmarks/catalog" GET', surface)
         self.assertIn('"${base_url}/api/v1/contributions/status" GET', surface)
-        self.assertIn('"${base_url}/api/v1/contributions/receipt" GET', surface)
-        self.assertNotIn("contributions/events", surface)
-        self.assertNotIn("contributions/sync", surface)
-        self.assertNotIn(" POST", surface)
+        self.assertIn('"${base_url}/api/v1/contributions/events" POST', surface)
+        self.assertIn('"${base_url}/api/v1/contributions/sync" POST', surface)
         self.assertIn("verify_mini_app_public", script)
         self.assertIn('systemctl enable --now "$service"', script)
         self.assertNotIn("Traefik", (ROOT / "docs" / "MINI_APP.md").read_text())
@@ -784,16 +784,17 @@ render_caddy_routes "$4"
             routes = destination.read_text(encoding="utf-8")
             self.assertIn("path /getbible/app/api/v1/*", routes)
             self.assertIn("path /api/v1/*", routes)
-            # Contribution PUSH no longer transits HTTPS, so no contributions
-            # matcher (sync or otherwise) may be rendered for any instance.
-            self.assertNotIn("/api/v1/contributions", routes)
-            self.assertNotIn("max_size 1MiB", routes)
+            self.assertIn("path /getbible/app/api/v1/contributions/sync", routes)
+            self.assertIn("path /api/v1/contributions/sync", routes)
+            self.assertEqual(routes.count("max_size 1MiB"), 2)
             self.assertEqual(routes.count("max_size 5MB"), 2)
             self.assertEqual(routes.count("max_size 64KB"), 2)
             for matcher in ("gb_nested", "gb_root"):
                 backup = routes.index(f"@{matcher}_bookmark_backup")
+                sync = routes.index(f"@{matcher}_contribution_sync")
                 api = routes.index(f"@{matcher}_api ")
-                self.assertLess(backup, api)
+                self.assertLess(backup, sync)
+                self.assertLess(sync, api)
             self.assertNotIn("header_up -Authorization", routes)
             self.assertNotIn("header_up -Origin", routes)
 

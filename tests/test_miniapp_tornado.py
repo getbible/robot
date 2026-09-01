@@ -8,14 +8,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import urlencode
 
-from tornado.httpclient import HTTPResponse
 from tornado.testing import AsyncHTTPTestCase
 from tornado.web import Application, URLSpec
 
-from modules.bookmark_backup import MAX_BOOKMARK_BACKUP_REQUEST_BYTES
 from modules.catalog import TranslationOption
 from modules.contributions import ContributionStore
 from modules.miniapp_api import (
+    MAX_CONTRIBUTION_SYNC_REQUEST_BYTES,
     MiniAppApi,
     MiniAppHttpRequest,
     MiniAppHttpResponse,
@@ -214,20 +213,20 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
             method="PUT",
             body=b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
         )
-        retired_sync_route = self.fetch(
-            "/app/api/v1/contributions/sync",
-            method="POST",
-            body=b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
-        )
         allowed_backup = self.fetch(
             "/app/api/v1/bookmarks/backup",
             method="POST",
             body=b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
         )
-        oversized_backup = self.fetch(
-            "/app/api/v1/bookmarks/backup",
+        allowed_sync = self.fetch(
+            "/app/api/v1/contributions/sync",
             method="POST",
-            body=b"x" * (MAX_BOOKMARK_BACKUP_REQUEST_BYTES + 1),
+            body=b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
+        )
+        oversized_sync = self.fetch(
+            "/app/api/v1/contributions/sync",
+            method="POST",
+            body=b"x" * (MAX_CONTRIBUTION_SYNC_REQUEST_BYTES + 1),
         )
 
         # Tornado rejects an over-limit Content-Length at the HTTP transport
@@ -235,13 +234,14 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
         self.assertIn(oversized_ordinary.code, (400, 413))
         self.assertIn(oversized_lookalike.code, (400, 413))
         self.assertIn(oversized_wrong_method.code, (400, 413))
-        # Contribution PUSH moved to Telegram sendData, so the retired
-        # POST contributions/sync route must not keep an escalated body
-        # limit as an anonymous large-upload channel.
-        self.assertIn(retired_sync_route.code, (400, 413))
         self.assertEqual(allowed_backup.code, 202)
-        self.assertIn(oversized_backup.code, (400, 413))
-        self.assertEqual(len(self.api.requests), 1)
+        self.assertEqual(allowed_sync.code, 202)
+        self.assertIn(oversized_sync.code, (400, 413))
+        self.assertEqual(len(self.api.requests), 2)
+        self.assertEqual(
+            self.api.requests[-2].body,
+            b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
+        )
         self.assertEqual(
             self.api.requests[-1].body,
             b"x" * (MAX_MINI_APP_REQUEST_BYTES + 1),
@@ -265,14 +265,7 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
 
 
 class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
-    """Exercise the surviving HTTP contribution surface against real SQLite.
-
-    Contribution PUSH now travels over Telegram ``sendData`` and the bot's
-    ``web_app_data`` intake, never HTTPS.  What remains on HTTP is read-only
-    and authenticated by the plain session bearer: the session bootstrap
-    status payload, GET contributions/status, the bundled bookmark catalog,
-    and GET contributions/receipt used to settle the browser outbox.
-    """
+    """Exercise the real HTTP, API, capability, and SQLite sync boundary."""
 
     def setUp(self) -> None:
         self.database_directory = tempfile.TemporaryDirectory()
@@ -313,8 +306,8 @@ class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
             serve_traceback=False,
         )
 
-    def _exchange_session(self) -> dict:
-        response = self.fetch(
+    def test_signed_exchange_snapshot_and_restart_safe_replay(self) -> None:
+        session_response = self.fetch(
             "/getbible/api/v1/session",
             method="POST",
             headers={
@@ -323,138 +316,21 @@ class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
             },
             body=json.dumps({"init_data": _signed_init_data(42)}).encode(),
         )
-        self.assertEqual(response.code, 201)
-        self._session_response = response
-        return json.loads(response.body)
 
-    def _authorized_get(
-        self,
-        path: str,
-        token: str,
-        headers: dict[str, str] | None = None,
-    ) -> HTTPResponse:
-        return self.fetch(
-            path,
-            headers={"Authorization": f"Bearer {token}", **(headers or {})},
+        self.assertEqual(session_response.code, 201)
+        capability = session_response.headers.get("X-Contribution-Token")
+        self.assertIsNotNone(capability)
+        assert capability is not None
+        self.assertRegex(capability, r"\Agbc_[A-Za-z0-9_-]{43}\Z")
+        self.assertTrue(
+            json.loads(session_response.body)["contributions"]["can_contribute"]
         )
 
-    def test_session_exchange_bootstraps_status_without_capability_header(self) -> None:
-        bootstrap = self._exchange_session()
-
-        header_names = {name.lower() for name in self._session_response.headers}
-        self.assertNotIn("x-contribution-token", header_names)
-        self.assertFalse(
-            any("contribution" in name for name in header_names),
-            header_names,
-        )
-        self.assertGreaterEqual(len(bootstrap["session_token"]), 16)
-        contributions = bootstrap["contributions"]
-        self.assertTrue(contributions["enabled"])
-        self.assertEqual(contributions["state"], "approved")
-        self.assertTrue(contributions["can_contribute"])
-        self.assertTrue(contributions["disclosure_required"])
-        self.assertEqual(contributions["topics"], [])
-
-    def test_contribution_status_uses_the_plain_session_bearer_only(self) -> None:
-        token = self._exchange_session()["session_token"]
-
-        detailed = self._authorized_get(
-            "/getbible/api/v1/contributions/status?details=1",
-            token,
-        )
-        self.assertEqual(detailed.code, 200)
-        status = json.loads(detailed.body)
-        self.assertEqual(status["state"], "approved")
-        self.assertTrue(status["can_contribute"])
-        self.assertIn("topics", status)
-        self.assertIn("summary", status)
-
-        legacy = self._authorized_get(
-            "/getbible/api/v1/contributions/status",
-            token,
-        )
-        self.assertEqual(legacy.code, 200)
-        self.assertEqual(
-            set(json.loads(legacy.body)),
-            {"enabled", "state", "can_contribute", "disclosure_required"},
-        )
-
-        unauthenticated = self.fetch("/getbible/api/v1/contributions/status?details=1")
-        self.assertEqual(unauthenticated.code, 401)
-
-        # The HTTPS write surface is retired end-to-end: PUSH travels only
-        # through Telegram sendData and the web_app_data intake.
-        write_headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Origin": _INTEGRATION_ORIGIN,
-        }
-        for target in (
-            "/getbible/api/v1/contributions/sync",
-            "/getbible/api/v1/contributions/events",
-        ):
-            with self.subTest(target=target):
-                removed = self.fetch(
-                    target,
-                    method="POST",
-                    headers=write_headers,
-                    body=b"{}",
-                )
-                self.assertEqual(removed.code, 404)
-        patched_status = self.fetch(
-            "/getbible/api/v1/contributions/status",
-            method="PATCH",
-            headers=write_headers,
-            body=b"{}",
-        )
-        self.assertEqual(patched_status.code, 405)
-        self.assertEqual(patched_status.headers["Allow"], "GET, OPTIONS")
-
-    def test_bookmark_catalog_serves_and_revalidates_with_etag(self) -> None:
-        token = self._exchange_session()["session_token"]
-
-        first = self._authorized_get("/getbible/api/v1/bookmarks/catalog", token)
-        self.assertEqual(first.code, 200)
-        etag = first.headers.get("ETag")
-        self.assertIsNotNone(etag)
-        assert etag is not None
-        payload = json.loads(first.body)
-        self.assertEqual(set(payload), {"revision", "checksum", "catalog"})
-        self.assertIsInstance(payload["revision"], int)
-
-        revalidated = self._authorized_get(
-            "/getbible/api/v1/bookmarks/catalog",
-            token,
-            headers={"If-None-Match": etag},
-        )
-        self.assertEqual(revalidated.code, 304)
-        self.assertEqual(revalidated.headers.get("ETag"), etag)
-        self.assertEqual(revalidated.body, b"")
-
-    def test_receipt_confirms_committed_snapshot_and_survives_restart(self) -> None:
-        token = self._exchange_session()["session_token"]
-        sync_id = "transport.integration.0001"
-
-        def receipt_payload(requested_sync_id: str) -> dict:
-            response = self._authorized_get(
-                f"/getbible/api/v1/contributions/receipt?sync_id={requested_sync_id}",
-                token,
-            )
-            self.assertEqual(response.code, 200)
-            return json.loads(response.body)
-
-        self.assertEqual(
-            receipt_payload(sync_id),
-            {"found": False, "receipt": None},
-        )
-
-        # Commit through synchronize_snapshot exactly as the Telegram
-        # web_app_data intake does after reassembling a pushed bundle.
-        result = self.contributions.synchronize_snapshot(
-            42,
-            sync_id=sync_id,
-            client_id="transport.integration.browser",
-            snapshot={
+        sync_document = {
+            "protocol_version": 1,
+            "sync_id": "transport.integration.0001",
+            "client_id": "transport.integration.browser",
+            "snapshot": {
                 "topics": [
                     {
                         "id": "local.grace",
@@ -471,41 +347,47 @@ class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
                     }
                 ],
             },
-            operations=(),
-            disclosure_acknowledged=True,
-        )
-        self.assertEqual((result.accepted, result.replayed), (2, 0))
+            "operations": [],
+            "disclosure_acknowledged": True,
+        }
+        sync_body = json.dumps(sync_document, separators=(",", ":")).encode()
+        sync_headers = {
+            "Authorization": f"Bearer {capability}",
+            "Content-Type": "application/json",
+            "Origin": _INTEGRATION_ORIGIN,
+        }
 
-        committed = receipt_payload(sync_id)
-        self.assertTrue(committed["found"])
-        receipt = committed["receipt"]
-        self.assertEqual(receipt["sync_id"], sync_id)
-        self.assertEqual(receipt["accepted"], 2)
-        self.assertEqual(receipt["replayed"], 0)
-        self.assertEqual(receipt["snapshot_digest"], result.snapshot_digest)
-        self.assertEqual(set(receipt["event_ids"]), set(result.event_ids))
-        # The HTTP receipt must expose opaque contributor-scoped IDs, not
-        # the store's global AUTOINCREMENT row IDs.
-        self.assertNotEqual(
-            sorted(receipt["event_ids"].values()),
-            sorted(result.event_ids.values()),
+        first_response = self.fetch(
+            "/getbible/api/v1/contributions/sync",
+            method="POST",
+            headers=sync_headers,
+            body=sync_body,
         )
-        for opaque_id in receipt["event_ids"].values():
-            self.assertIsInstance(opaque_id, int)
-            self.assertGreaterEqual(opaque_id, 1)
-        self.assertEqual(
-            receipt_payload("transport.integration.9999"),
-            {"found": False, "receipt": None},
-        )
+        self.assertEqual(first_response.code, 200)
+        first_receipt = json.loads(first_response.body)["receipt"]
+        self.assertEqual(first_receipt["outcome"], "accepted")
+        self.assertEqual(first_receipt["accepted"], 2)
 
-        # Model a process restart: discard the live connection and make the
-        # API use a fresh store. The exact receipt must survive byte for
-        # byte because it is durable SQLite state, not process memory.
+        # Model a process restart: discard the live connection and make the API
+        # use a fresh store. Both the bearer capability and exact sync receipt
+        # must survive because they are durable SQLite state.
         self.contributions.close()
         self.contributions = ContributionStore(path=str(self.database_path))
         self.api._contributions = self.contributions
 
-        self.assertEqual(receipt_payload(sync_id), committed)
+        replay_response = self.fetch(
+            "/getbible/api/v1/contributions/sync",
+            method="POST",
+            headers=sync_headers,
+            body=sync_body,
+        )
+        self.assertEqual(replay_response.code, 200)
+        replay_receipt = json.loads(replay_response.body)["receipt"]
+        self.assertEqual(replay_receipt["outcome"], "replayed")
+        self.assertEqual(
+            replay_receipt["snapshot_digest"],
+            first_receipt["snapshot_digest"],
+        )
 
         events = self.contributions.list_events()
         self.assertEqual(
@@ -518,12 +400,9 @@ class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
             (events[1].book, events[1].chapter, events[1].verse),
             (43, 3, 16),
         )
-        after_commit = self._authorized_get(
-            "/getbible/api/v1/contributions/status?details=1",
-            token,
+        self.assertFalse(
+            self.contributions.contribution_status(42)["disclosure_required"]
         )
-        self.assertEqual(after_commit.code, 200)
-        self.assertFalse(json.loads(after_commit.body)["disclosure_required"])
 
 
 class MiniAppServerLifecycleTestCase(unittest.IsolatedAsyncioTestCase):

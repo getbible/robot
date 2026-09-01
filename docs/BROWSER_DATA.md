@@ -23,10 +23,9 @@ The reading and persistence split is:
   device-local global-catalog visibility, per-link exclusions, and legacy
   topic mapping; `CloudStorage` is excluded;
 - per-instance, authenticated-user-scoped IndexedDB stores the approved
-  contributor push outbox and explicit global add/remove intents;
-- Robot authorizes contributors, consumes pushed contribution bundles from
-  Telegram `web_app_data` updates, and publishes the reviewed live
-  global-catalogue overlay;
+  contributor journal and recovery checkpoints; Web Locks coordinate tabs;
+- Robot authorizes contributors, accepts bounded idempotent review events, and
+  publishes the reviewed live global-catalogue overlay;
 - Robot authenticates Telegram, retains compatible reader preferences, accepts
   the final ordered post request, validates it, and sends authoritative
   Scripture or an explicitly requested bookmark backup document to Telegram.
@@ -48,7 +47,7 @@ The reading and persistence split is:
 | Bookmark/topic editing and local import/export | Yes | No | No |
 | Bookmark and last-read device/cloud sync | Telegram Mini App storage | No | No |
 | Global catalog visibility and exclusions | Scoped localStorage + Telegram DeviceStorage | No | No |
-| Contributor push outbox and explicit intents | Per-instance scoped IndexedDB | Telegram `web_app_data` intake/review | No |
+| Contributor journal and recovery | Per-instance scoped IndexedDB + Web Locks | Authenticated event intake/review | No |
 | Reviewed live global catalogue | Strict instance-scoped browser cache + bundled fallback | Revisioned publication | No |
 | Private-chat bookmark backup/restore transport | Confirm/merge in browser | Yes | No |
 | Telegram authentication | No | Yes | No |
@@ -71,9 +70,8 @@ flowchart LR
     T --> H[Scoped local ReadingHistoryStore]
     T --> M[BookmarkStore]
     M <-->|newest timestamped aggregate| TS[Telegram DeviceStorage / CloudStorage]
-    T --> C[Contribution push outbox]
-    C -->|numbered GBC1 sendData chunks| G
-    G -->|web_app_data updates| I[Robot contribution intake]
+    T --> C[Contribution journal]
+    C -->|bounded idempotent review events| P
     B -->|final ordered coordinates once| P[Robot protected endpoints]
     M -->|explicit bounded JSON backup| P
     P -->|validated Scripture or private backup document| G[Telegram]
@@ -178,27 +176,18 @@ response keeps the last valid cached or bundled catalogue usable.
 ### Trusted contribution mirror
 
 Only a server-approved Telegram identity can mirror changes. After the
-one-time disclosure is acknowledged, **Push** shares the complete bounded
+one-time disclosure is acknowledged, **Sync now** submits the complete bounded
 current personal topic/assignment snapshot plus any pending explicit global
-removals over Telegram's own uplink: one envelope, compressed when smaller and
-base64url-encoded, split into numbered `GBC1` chunks that
-`Telegram.WebApp.sendData()` hands to Telegram from the reply-keyboard push
-launch. The bot stages each delivered `web_app_data` chunk durably, verifies
-the assembled bundle's digest, and commits it atomically. Topic source names
-use the repository's English grammar; missing locale strings continue to fall
-back to that English source.
+removals in one request. Topic source names use the repository's English
+grammar; missing locale strings continue to fall back to that English source.
 
-`BookmarkStore` remains the durable current-state source. The outbox persists
-the envelope and its encoded messages before the first `sendData` call, so an
-interrupted transfer resends the identical bytes under the same stable
-`client_id` and `sync_id`; Robot returns the durable receipt for an exact
-replay and rejects conflicting reuse. The server derives missing moderation
-events from the last accepted snapshot and commits them with that snapshot and
-receipt in one SQLite transaction. Explicit global add/remove intents clear
-only when **Pull** observes the server's receipt, and a failed transfer never
-modifies personal bookmarks. No HTTP ingest, WebSocket, extra port, or bearer
-token participates in push; **Pull** reads status, the pending receipt, and
-the reviewed catalogue over the ordinary authenticated session.
+`BookmarkStore` remains the durable current-state source. The same stable
+client and `sync_id` values make an ambiguous request safe to retry; Robot
+returns the durable receipt for an exact replay and rejects conflicting reuse.
+The server derives missing moderation events from the last accepted snapshot
+and commits them with that snapshot and receipt in one SQLite transaction.
+Transport failure does not modify personal bookmarks or require a browser
+event journal, cursor recovery, Web Lock, WebSocket, or extra port.
 
 ### Portable recovery
 
@@ -291,9 +280,9 @@ A failed validation never replaces a previously accepted record.
 - Telegram storage failure degrades bookmark/last-read sync to whichever valid
   local or Telegram store remains available; it does not invalidate Scripture
   content, history, or selection.
-- A contribution push, staging, or rate-limit failure never rolls back a local
-  bookmark mutation; the persisted outbox resends the identical transfer, and
-  explicit intents clear only on an observed server receipt.
+- Contribution journal, network, or rate-limit failure never rolls back a local
+  bookmark mutation; durable checkpoints retry automatically, while an
+  unavailable journal is disclosed as memory-only.
 - A malformed, oversized, or unavailable live catalogue never replaces a valid
   cached or bundled catalogue; a validated authenticated `200` remains
   authoritative after database recovery.
@@ -337,9 +326,9 @@ The release gate must prove:
 - the unified global/personal list, **G** marker, per-link hide, and
   per-topic/all-catalog reset remain browser-local and absent from personal
   sync and backup;
-- approved contribution disclosure, chunked bounded push bundles, atomic
-  durable receipts, exact byte-for-byte resend, and explicit global removals
-  remain local-first;
+- approved contribution capability/disclosure, one-request bounded snapshots,
+  atomic durable receipts, exact retry, and explicit global removals remain
+  local-first;
 - strict live-catalog validation, authoritative instance-scoped revalidation,
   explicit load refresh, English fallback, and bundled offline fallback hold;
 - private-chat backup is owner-bound and bounded, restore uses a fresh

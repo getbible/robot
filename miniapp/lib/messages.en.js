@@ -223,33 +223,23 @@ export const ENGLISH_MESSAGES = Object.freeze({
     "Remove {name}? Personal verse links removed: {personal}. Global verse links hidden until Global Tags are reloaded: {global}.",
   "bookmarks.topic_added": "Topic added.",
   "bookmarks.contribution_english_guidance":
-    "Contributor topics must use an English name. Push sends your topic and verse changes to the bot for review; Pull loads the reviewed global catalogue.",
+    "Contributor topics must use an English name. Your topic and verse changes are sent securely for review after they are saved locally.",
   "bookmarks.contribution_english_required":
     "Use an English topic name before saving this contributor topic.",
   "bookmarks.contribution_sync_attention":
-    "Your local bookmarks are safe. A pushed contribution is still waiting for the bot's confirmation; Pull checks for it, and Push resends the same transfer safely.",
+    "Your local bookmarks are safe. The contributor queue reached this device's safe limit, so the Mini App is reconciling a compact snapshot with the review server. Keep it open and online; new changes remain local and join the next recovery pass.",
   "bookmarks.contribution_storage_attention":
     "Your local bookmarks are safe, but this device could not preserve the contributor review queue. Keep the Mini App open and online while it retries, and do not clear its app data.",
   "bookmarks.contribution_disclosure":
     "You are enrolled as a GetBible contributor. Topic names must be in English. New topics and changes to topic verse assignments are saved on your device first and also sent securely to the project administrators for review. Approved changes may become part of the global topic library used by everyone.",
   "bookmarks.contribution_sync_title": "Contributor sync",
-  "bookmarks.contribution_push": "Push",
-  "bookmarks.contribution_pull": "Pull",
+  "bookmarks.contribution_sync_now": "Sync now",
   "bookmarks.contribution_check_status": "Check status",
-  "bookmarks.contribution_pushing": "Preparing your push…",
-  "bookmarks.contribution_pulling": "Pulling the reviewed catalogue…",
+  "bookmarks.contribution_syncing": "Syncing…",
   "bookmarks.contribution_sync_idle":
-    "Push sends your changes for review; Pull loads the reviewed catalogue.",
-  "bookmarks.contribution_push_keyboard_hint":
-    "To push, open getBible.Life from the “Push contribution” button in the bot chat keyboard. Send /contributor in the chat if you do not see it.",
-  "bookmarks.contribution_push_awaiting":
-    "Your push was handed to Telegram; the bot confirms in the chat. Pull picks up review results, and Push safely resends the same transfer.",
-  "bookmarks.contribution_push_too_large":
-    "This contribution is too large to push in one transfer. Pull the reviewed catalogue first, or remove some changes and push again.",
-  "bookmarks.contribution_pull_complete":
-    "Pull complete. Published topics are global; unreviewed changes remain personal.",
+    "Ready to sync your topics and verse links.",
   "bookmarks.contribution_sync_pending":
-    "Your contributor application is waiting for approval. The bot will notify you. Use Check status to check now.",
+    "Your contributor application is waiting for approval. The bot will notify you, and this app checks periodically. Use Check status to check now.",
   "bookmarks.contribution_application_deferred":
     "Your contributor application needs further review. Use Check status to see whether an administrator has updated it.",
   "bookmarks.contribution_application_rejected":
@@ -258,22 +248,30 @@ export const ENGLISH_MESSAGES = Object.freeze({
     "Contributor access is no longer active. Your personal topics and verse links remain safely on this device.",
   "bookmarks.contribution_sync_complete":
     "Everything is in sync. Topics still under review remain personal; published topics are marked G.",
+  "bookmarks.contribution_sync_sent_one":
+    "Sync complete. One update was sent for review.",
+  "bookmarks.contribution_sync_sent_other":
+    "Sync complete. {count} updates were sent for review.",
+  "bookmarks.contribution_sync_waiting_one":
+    "One local update is still waiting to be sent. We will retry automatically.",
+  "bookmarks.contribution_sync_waiting_other":
+    "{count} local updates are still waiting to be sent. We will retry automatically.",
   "bookmarks.contribution_sync_retry_wait":
-    "The server asked us to wait before trying again. Try again shortly.",
+    "The server asked us to wait before syncing again. We will retry automatically.",
   "bookmarks.contribution_sync_unavailable":
     "Contributor sync is temporarily unavailable. Your bookmarks remain safe on this device.",
   "bookmarks.contribution_sync_invalid_data":
-    "The review server could not accept one saved contribution record. It remains personal and safe. After the app or server is updated, try again; if it continues, report any reference shown.",
+    "The review server could not accept one saved contribution record. It remains personal and safe. After the app or server is updated, tap Sync again; if it continues, report any reference shown.",
   "bookmarks.contribution_sync_server_error":
-    "The contributor review service is temporarily unavailable. Your bookmarks are safe; try Pull again shortly.",
+    "The contributor review service is temporarily unavailable. Your bookmarks are safe; Sync will retry automatically.",
   "bookmarks.contribution_sync_update_error":
-    "Contributor sync is unavailable on this server version. Your contribution remains personal and safe; it will work after the server update completes.",
+    "Contributor sync is unavailable on this server version. Your contribution remains personal and safe; Sync will work after the server update completes.",
   "bookmarks.contribution_sync_local_error":
-    "The Mini App could not prepare some saved contribution data. It remains personal and safe. After the app is updated, try again.",
+    "The Mini App could not prepare some saved contribution data. It remains personal and safe. After the app is updated, tap Sync again.",
   "bookmarks.contribution_sync_error":
-    "This could not finish. Your contribution remains personal and safe; try again.",
+    "Sync could not finish. Your contribution remains personal and safe; tap Sync again.",
   "bookmarks.contribution_sync_catalog_error":
-    "The global topic library could not be refreshed. Try Pull again.",
+    "Your updates reached the review server, but the global topic library could not be refreshed. Try Sync again.",
   "bookmarks.contribution_sync_reference": "Reference: {reference}",
   "bookmarks.contribution_pending_marker": "Personal contributor topic or verse link",
   "bookmarks.contribution_topic_outcomes": "Topics",

@@ -34,7 +34,6 @@ LAYERS = {
     "modules.posting": 3,
     "modules.miniapp_api": 4,
     "modules.commands": 5,
-    "modules.contribution_intake": 5,
     "modules.contributor_command": 5,
     "modules.dependencies": 5,
     "modules.miniapp_tornado": 5,

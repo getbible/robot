@@ -72,14 +72,6 @@ assert_contains() {
         fail "$file does not contain $expected"
 }
 
-assert_not_contains() {
-    local file=$1
-    local unexpected=$2
-    if grep -Fq -- "$unexpected" "$file"; then
-        fail "$file unexpectedly contains $unexpected"
-    fi
-}
-
 assert_equal() {
     [[ "$1" == "$2" ]] || fail "expected '$2', got '$1'"
 }
@@ -152,7 +144,9 @@ verify_mini_app_local() {
         "$base_url" >>"$MINI_APP_VERIFY_LOG"
     printf 'local GET %sapi/v1/contributions/status\n' \
         "$base_url" >>"$MINI_APP_VERIFY_LOG"
-    printf 'local GET %sapi/v1/contributions/receipt\n' \
+    printf 'local POST %sapi/v1/contributions/events\n' \
+        "$base_url" >>"$MINI_APP_VERIFY_LOG"
+    printf 'local POST %sapi/v1/contributions/sync\n' \
         "$base_url" >>"$MINI_APP_VERIFY_LOG"
     [[ ${FAIL_MINI_APP_LOCAL:-0} != "1" ]]
 }
@@ -167,7 +161,9 @@ verify_mini_app_public() {
         "$base_url" >>"$MINI_APP_VERIFY_LOG"
     printf 'public GET %sapi/v1/contributions/status\n' \
         "$base_url" >>"$MINI_APP_VERIFY_LOG"
-    printf 'public GET %sapi/v1/contributions/receipt\n' \
+    printf 'public POST %sapi/v1/contributions/events\n' \
+        "$base_url" >>"$MINI_APP_VERIFY_LOG"
+    printf 'public POST %sapi/v1/contributions/sync\n' \
         "$base_url" >>"$MINI_APP_VERIFY_LOG"
     [[ ${FAIL_MINI_APP_PUBLIC:-0} != "1" ]]
 }
@@ -768,8 +764,8 @@ assert_contains "$CADDY_ROUTES" "bot.example.com {"
 assert_contains "$CADDY_ROUTES" "@gb_alpha_static path /getbible/alpha /getbible/alpha/"
 assert_contains "$CADDY_ROUTES" 'path /getbible/alpha/api/v1/*'
 assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/bookmarks/backup'
-assert_not_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/sync'
-assert_not_contains "$CADDY_ROUTES" 'max_size 1MiB'
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/sync'
+assert_contains "$CADDY_ROUTES" 'max_size 1MiB'
 assert_contains "$CADDY_ROUTES" 'max_size 5MB'
 assert_contains "$CADDY_ROUTES" 'respond "" 404'
 assert_contains "$CADDY_ROUTES" "reverse_proxy 127.0.0.1:9201"
@@ -857,7 +853,7 @@ https://bot.example.com/getbible/alpha
 9201
 EOF
 assert_equal "$(grep -Fc "$CADDY_IMPORT_BEGIN" "$CADDYFILE")" "1"
-assert_equal "$(grep -Fc "reverse_proxy 127.0.0.1:9201" "$CADDY_ROUTES")" "3"
+assert_equal "$(grep -Fc "reverse_proxy 127.0.0.1:9201" "$CADDY_ROUTES")" "4"
 
 CADDYFILE_HASH=$(sha256sum "$CADDYFILE" | awk '{print $1}')
 CADDY_ROUTES_HASH=$(sha256sum "$CADDY_ROUTES" | awk '{print $1}')
@@ -1000,7 +996,7 @@ assert_equal \
     "$FIRST_SHA"
 assert_contribution_assets "${INSTANCE_ROOT}/alpha/app.previous"
 assert_contains "$CADDY_ROUTES" 'path /getbible/alpha/api/v1/*'
-assert_not_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/sync'
+assert_contains "$CADDY_ROUTES" '/getbible/alpha/api/v1/contributions/sync'
 verify_managed_caddy_routes ||
     fail "successful upgrade did not install the regenerated managed Caddy routes"
 assert_equal \
@@ -1037,13 +1033,17 @@ assert_contains "$MINI_APP_VERIFY_LOG" \
 assert_contains "$MINI_APP_VERIFY_LOG" \
     'local GET http://127.0.0.1:9201/getbible/alpha/api/v1/contributions/status'
 assert_contains "$MINI_APP_VERIFY_LOG" \
-    'local GET http://127.0.0.1:9201/getbible/alpha/api/v1/contributions/receipt'
+    'local POST http://127.0.0.1:9201/getbible/alpha/api/v1/contributions/events'
+assert_contains "$MINI_APP_VERIFY_LOG" \
+    'local POST http://127.0.0.1:9201/getbible/alpha/api/v1/contributions/sync'
 assert_contains "$MINI_APP_VERIFY_LOG" \
     'public GET https://bot.example.com/getbible/alpha/api/v1/bookmarks/catalog'
 assert_contains "$MINI_APP_VERIFY_LOG" \
     'public GET https://bot.example.com/getbible/alpha/api/v1/contributions/status'
 assert_contains "$MINI_APP_VERIFY_LOG" \
-    'public GET https://bot.example.com/getbible/alpha/api/v1/contributions/receipt'
+    'public POST https://bot.example.com/getbible/alpha/api/v1/contributions/events'
+assert_contains "$MINI_APP_VERIFY_LOG" \
+    'public POST https://bot.example.com/getbible/alpha/api/v1/contributions/sync'
 
 # A same-commit repair is an artifact transaction, not merely a Caddy
 # transaction. Force the candidate restart to fail after every managed file has

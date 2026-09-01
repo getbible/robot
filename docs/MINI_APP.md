@@ -20,9 +20,8 @@ Post, explicit bookmark chat backup/restore, and trusted contributions.
 | Opened chapter and selected verse history | Scoped browser `localStorage` |
 | Personal bookmark aggregate v3, topics, recent topics, and active topic | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage` |
 | Global topic visibility, exclusions, and legacy mapping | Scoped `localStorage` + Telegram `DeviceStorage` only |
-| Approved-contributor push outbox and explicit global intents | Per-instance, authenticated-user-scoped browser IndexedDB |
-| Contribution push transport | Telegram `sendData` → `web_app_data` bot updates |
-| Contributor status, staged push bundles, receipts, and live global-catalogue revision | Robot → private per-instance SQLite |
+| Approved-contributor journal and recovery checkpoints | Per-instance, authenticated-user-scoped browser IndexedDB coordinated with Web Locks |
+| Contributor status, events, and live global-catalogue revision | Robot → private per-instance SQLite |
 | Compact last-read coordinate | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage`, with Robot preference compatibility |
 | Bookmark JSON download/import | Browser |
 | Private-chat bookmark backup/restore | Browser confirmation + Robot/Telegram transport |
@@ -32,10 +31,9 @@ Post, explicit bookmark chat backup/restore, and trusted contributions.
 | Final Telegram delivery | Robot |
 
 A normal reader action must never call Robot for translations, books, chapters, chapter text, selecting, unselecting, reordering, clearing, or copying.
-For an approved contributor only, explicit global add/remove choices queue
-durable intents and an explicit **Push** shares the current snapshot for
-review over Telegram's own uplink; that mirror never becomes a dependency of
-the local action.
+For an approved contributor only, a successful personal topic/bookmark mutation
+may also enqueue an asynchronous review event; that mirror never becomes a
+dependency of the local action.
 
 ## Runtime flow
 
@@ -48,8 +46,7 @@ Telegram WebView
   ├─ unique coordinate history                       → scoped local ReadingHistoryStore
   ├─ personal bookmarks / topics / last-read         → local + Telegram storage adapter
   ├─ global topic visibility / exclusions            → scoped localStorage + DeviceStorage
-  ├─ approved contribution push (GBC1 chunks)        → Telegram sendData → bot updates
-  └─ contributor status / receipt / live overlay     → authenticated Robot API
+  └─ approved contribution outbox / live overlay     → authenticated Robot API
 ```
 
 Reader and search results are normalized into one verse descriptor. Coordinate identity is:
@@ -169,10 +166,9 @@ local cache fails.
 
 Immediately below the Global topics controls, an approved contributor sees a
 collapsible **Manage Contribution** panel containing synchronization state,
-review information, and its **Push** and **Pull** actions. The panel is absent
-when the authenticated session has no contribution authority. It is
-independent of the new-topic form and remains available without scrolling past
-the topic list.
+review information, and its sync action. The panel is absent when the
+authenticated session has no contribution authority. It is independent of the
+new-topic form and remains available without scrolling past the topic list.
 
 `BookmarkStore` writes personal aggregate version 3 immediately to scoped
 `localStorage`. `TelegramBookmarkStorage` compares timestamped candidates from
@@ -209,67 +205,36 @@ The hidden private Telegram `/contributor` command is the only application
 entry point. It submits the signed numeric Telegram ID for operator review;
 the Mini App never treats a username, client flag, or hidden control as
 authorization. After approval, the next authenticated Mini App launch shows a
-one-time disclosure that topic and verse-tag changes are shared for review,
-and `/contributor` attaches a persistent reply-keyboard button, **Push
-contribution**, to the contributor's private chat. That button's `web_app` URL
-carries `?context=push`, and only a Mini App launched from such a
-reply-keyboard button can call `Telegram.WebApp.sendData()`.
+one-time disclosure that topic and verse-tag changes are shared for review.
+Synchronization starts only after that disclosure is acknowledged.
 
-**Push** runs in that launch, which lands on the Bookmarks contribution panel.
-It builds one bounded envelope — protocol version 1, stable `sync_id` and
-`client_id`, the current personal topic/assignment snapshot, pending explicit
-operations, and the disclosure acknowledgement — serializes it,
-deflate-compresses it when that is smaller, base64url-encodes it, and splits
-it into numbered chunks
+An approved session response supplies a separate, revocable contributor
+capability. The browser sends that capability in `Authorization` only to the
+same-origin `POST /api/v1/contributions/sync` endpoint. It never infers
+authority from a cached status flag, and Robot rechecks the capability owner
+against current approval on every synchronization.
 
-```text
-GBC1|<sync_id>|<index>|<count>|<d|j>|<sha256-hex-of-plaintext>|<payload>
-```
+**Sync now** sends one bounded request and receives one definitive response.
+The request contains protocol version 1, stable client and idempotency IDs, the
+current personal topic/assignment snapshot, any still-pending explicit legacy
+operations, and the disclosure acknowledgement. It contains coordinate
+identity only, never Scripture text or Telegram identity. Robot validates the
+complete request, derives the missing moderation events from the last accepted
+snapshot, and commits the snapshot, operations, disclosure, events, and durable
+receipt in one SQLite transaction. An exact `sync_id` replay returns that
+receipt; reuse with different content fails closed. The response carries the
+receipt, complete contributor status, and live-catalogue revision/checksum, so
+success is not coupled to separate status or catalogue requests.
 
-of at most 4096 bytes each and at most 64 per transfer. The envelope contains
-coordinate identity only, never Scripture text or Telegram identity. Each
-chunk goes through one `sendData()` call, which closes the Mini App; Telegram
-delivers it to the bot as a `web_app_data` service message on the bot's
-ordinary polling or webhook update channel. Push therefore has zero inbound
-surface: no inbound port, Caddy route, WebSocket, or bearer token
-participates, and behind a firewall that exposes only 443 for the Mini App, a
-push in polling mode needs nothing at all.
-
-The bot consumes each service message: it rate-limits the sender, stages the
-chunk durably and idempotently per chunk index in the private SQLite store,
-deletes the service message from the chat, and keeps one edited progress
-message for a multi-part transfer ("Received part i of n — tap Push
-contribution to send the next part"). When the transfer completes, exactly one
-caller assembles the bundle, base64url-decodes it, decompresses it under a
-1 MiB plaintext bound that refuses decompression bombs, verifies the SHA-256
-digest of the plaintext, and commits through the unchanged atomic
-`ContributionStore.synchronize_snapshot` path: snapshot, operations,
-disclosure, derived moderation events, and the durable receipt in one SQLite
-transaction. Approval and disclosure are rechecked on every staging and commit
-write, stale incomplete bundles expire after 24 hours, and the bot then edits
-or sends one confirmation in the chat.
-
-The client side is lossless. The envelope and its encoded messages persist as
-a durable outbox before the first `sendData` call, so an interrupted transfer
-resends the identical bytes under the same `sync_id`, and the server answers
-an exact replay with the stored durable receipt without duplicating anything.
-Explicit global add/remove intents clear only when the server's receipt is
-observed. `BookmarkStore` remains the durable source for current personal
-state: a failed transfer cannot roll back a bookmark mutation, and revocation
-or rejection stops future submission without deleting personal topics or
-markings.
-
-**Pull** sits next to **Push** in the Manage contribution card. It refreshes
-contributor status through `GET /api/v1/contributions/status?details=1`,
-confirms any pending push receipt through
-`GET /api/v1/contributions/receipt?sync_id=…` (settling the outbox), strictly
-refreshes the live catalogue over the network, and performs the Add-all
-semantics. Published contributor topics reclassify from personal (**P**) to
-global (**G**) through the existing mapping machinery; personal verses outside
-the global set keep rendering untouched. There is no background status
-polling: status refreshes at session bootstrap and on Pull. These reads use
-the plain opaque Mini App session bearer issued at the initial session
-exchange — no separate contribution credential exists.
+`BookmarkStore` remains the durable source for current personal state. A
+transport failure cannot roll back a bookmark mutation and leaves the same
+idempotent synchronization available for retry. Revocation or rejection stops
+future submission without deleting personal topics or markings. The transport
+is ordinary same-origin HTTPS on the Mini App domain and port already in use;
+it needs no WebSocket, long-lived connection, extra listener, or Telegram
+`sendData` bridge. The former status/event endpoints remain temporarily for
+older deployed clients, but new clients do not orchestrate batches through
+them.
 
 Contribution source topic names must be English. The UI explains that rule,
 the browser omits invalid topic-name proposals, the server validates them
@@ -312,16 +277,14 @@ No ordinary click may create server basket state. Legacy per-click basket and Ro
 The public HTML shell is not an authentication boundary. Robot validates fresh
 Telegram-signed `initData` and the owner-bound launch during the initial session
 exchange only. It then issues an active opaque session bearer for ordinary
-actions, including the contributor status, receipt, and catalogue reads. No
-separate contributor credential exists: a pushed contribution is authorized by
-the Telegram account that sent it. The bot token remains server-side.
+actions and, only for a currently approved contributor, a separate revocable
+contributor capability. The bot token remains server-side.
 
 The browser is untrusted for final output. It may control display state, but it cannot determine the authoritative text delivered to Telegram. Final output remains bounded, escaped, idempotent, and tied to the originating user, chat, and topic.
 
 The browser is also untrusted for contributor authority and global catalogue
-publication. Every staged push chunk and every committed contribution is
-validated against the current approved numeric Telegram user ID of the
-sending account. Client-supplied verse text is never
+publication. Every synchronization validates the durable capability and
+current approved numeric Telegram user ID. Client-supplied verse text is never
 a review authority; the terminal reviewer fetches and validates the configured
 translation directly from `query.getbible.net` and defers when it is
 unavailable.
@@ -362,7 +325,7 @@ sudo getbible-robot doctor production
 | `MINI_APP_MAX_SEARCHES_PER_SESSION` | Bounded Librarian result snapshots |
 | `MINI_APP_MAX_SELECTIONS` | Browser and final-post selection limit |
 | `MINI_APP_TRUSTED_PROXY_CIDRS` | Optional advanced restriction for forwarded client addresses |
-| `CONTRIBUTION_STORE_FILE` | Absolute private SQLite path; blank disables `/contributor` applications and the push intake and makes the contribution status/receipt endpoints return `503` |
+| `CONTRIBUTION_STORE_FILE` | Absolute private SQLite path; blank disables contribution endpoints and `/contributor` applications |
 | `CONTRIBUTION_CONTRIBUTOR_LIMIT` | Bounded application population |
 | `CONTRIBUTION_EVENT_LIMIT` | Bounded retained event journal |
 
@@ -378,10 +341,9 @@ host address and `MINI_APP_PORT` printed by setup.
 
 The generated Caddy route is deny-by-default. It forwards only packaged
 shell/assets and the bounded Mini App `/api/v1/*` namespace; every other
-request receives an empty `404` without contacting Tornado. The exact
-`bookmarks/backup` matcher applies its 5 MiB limit before the general 64 KiB
-API matcher; contribution push never traverses this route at all.
-Tornado remains deny-by-default inside that namespace and
+request receives an empty `404` without contacting Tornado. Exact backup and
+contribution-sync matchers apply 5 MiB and 1 MiB limits before the general
+64 KiB API matcher. Tornado remains deny-by-default inside that namespace and
 recognizes routes and methods before authentication or rate-limit accounting.
 This prefix prevents a newly deployed API from being stranded behind a stale
 endpoint allow-list without exposing a broad site catch-all.
@@ -431,10 +393,10 @@ After deployment, verify:
     sync and backup;
 18. topic management is alphabetical, while verse assignment shows a clearable
     recent group followed by the full alphabetical list;
-19. an unapproved user's pushed chunks are refused without creating server
-    contribution events, while an approved user's pushed snapshot commits
-    atomically, an identical resend replays the same receipt, and every local
-    mutation survives server failure;
+19. an unapproved user never receives a contributor capability or creates
+    server contribution events, while an approved user's one-request snapshot
+    sync commits atomically, replays the same receipt after an ambiguous
+    response, and keeps every local mutation on server failure;
 20. a newly published live topic appears on the same instance, uses its English
     source when the active locale lacks a translation, and falls back to the
     bundled catalogue when overlay validation fails;
