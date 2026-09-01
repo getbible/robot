@@ -257,18 +257,15 @@ class MiniAppStaticHandler(StaticFileHandler):
             "max-age=63072000; includeSubDomains",
         )
         self.set_header("X-Robots-Tag", "noindex, nofollow, noarchive")
-        if path in {"", "index.html"}:
-            self.set_header("Cache-Control", "no-store, max-age=0")
-        else:
-            # Telegram's embedded browser may keep the WebView cache between
-            # launches. Revalidate every packaged asset so an atomic instance
-            # upgrade cannot combine a new index with stale JavaScript, locale
-            # catalogs, styles, or branding. Tornado's content ETag still lets
-            # unchanged files return 304 without downloading the body again.
-            self.set_header(
-                "Cache-Control",
-                "no-cache, max-age=0, must-revalidate",
-            )
+        # Telegram's embedded browser keeps its WebView cache between launches
+        # and does not reliably perform conditional revalidation, so cached
+        # entries left phones running one deployment's index with another
+        # deployment's JavaScript modules. Every packaged file is uncacheable:
+        # each launch downloads the module graph the running server ships, and
+        # an instance upgrade followed by a relaunch can never execute stale
+        # code. The shell is a few hundred gzipped kilobytes, a price worth an
+        # always-current client.
+        self.set_header("Cache-Control", "no-store, max-age=0")
 
 
 class MiniAppServer:

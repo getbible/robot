@@ -412,7 +412,7 @@ requests.
 
 ## Deployment consistency
 
-Deploy HTML, JavaScript modules, server code, and documentation from one validated commit. `index.html` is served with `no-store`; static modules revalidate through ETags. This prevents a Telegram WebView from combining a new shell with old modules.
+Deploy HTML, JavaScript modules, server code, and documentation from one validated commit. Every packaged file, `index.html` and all static modules alike, is served with `no-store`, because Telegram WebViews do not reliably perform conditional revalidation. A launch therefore always downloads the running server's complete module graph, and a WebView can never combine a new shell with old modules.
 
 After deployment, verify:
 

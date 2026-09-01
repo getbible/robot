@@ -530,8 +530,10 @@ resolve_source_dir() {
     git_source_read "$candidate" rev-parse --is-inside-work-tree \
         >/dev/null 2>&1 ||
         die "Source directory is not a Git checkout."
-    git_source_read "$candidate" diff --quiet --ignore-submodules --
-    git_source_read "$candidate" diff --cached --quiet --ignore-submodules --
+    git_source_read "$candidate" diff --quiet --ignore-submodules -- ||
+        die "The source checkout at ${candidate} has uncommitted changes. Only a clean, committed state deploys; commit, stash, or discard them first."
+    git_source_read "$candidate" diff --cached --quiet --ignore-submodules -- ||
+        die "The source checkout at ${candidate} has staged but uncommitted changes. Only a clean, committed state deploys; commit or unstage them first."
     printf '%s\n' "$candidate"
 }
 
@@ -3711,6 +3713,10 @@ cmd_upgrade() {
     if [[ "$target_sha" == "$ACTIVE_SHA" ]]; then
         printf 'Refresh %s at deployed commit %s\n' \
             "$ACTIVE_INSTANCE" "$target_sha"
+        printf 'The source checkout HEAD already matches the deployed commit, so NO new\n'
+        printf 'application code will be deployed. If you expected an update, the git pull\n'
+        printf 'did not advance this checkout (wrong branch or nothing new); this pass only\n'
+        printf 'refreshes configuration, the manager, proxy routes, and postflight checks.\n'
         confirm "Refresh configuration, manager, routes, and postflight checks?" yes ||
             die "Deployment refresh cancelled."
 

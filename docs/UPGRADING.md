@@ -39,10 +39,12 @@ checkout must not require `chmod`. Although the manager itself runs through
 locks disabled. The deployment must not refresh or change ownership of
 `.git/index`.
 
-The Mini App revalidates every packaged asset when Telegram opens it, so the
-new deployment cannot reuse JavaScript, CSS, locale catalogs, or branding from
-the previous commit. Close any Mini App view that was already open during the
-upgrade and launch `/bible` or `/search` again.
+Every packaged Mini App file is served `no-store`, so a launch downloads the
+exact JavaScript, CSS, locale catalogs, and branding the running server ships;
+the new deployment cannot reuse any file from the previous commit even in a
+WebView that skips conditional revalidation. Sessions live in server memory,
+so the upgrade restart also signs out any Mini App view that was already open —
+launching `/bible` or `/search` again always runs the deployed commit.
 
 For a separately reviewed checkout pinned to an exact commit:
 
