@@ -212,8 +212,8 @@ The panel is visible to any approved contributor with a live session. Status
 reads authenticate exactly as search does: the plain opaque session bearer
 issued at the initial session exchange. Event submission requires a second
 credential on top of that bearer. An approved contributor receives a
-short-lived `contribution_token` — `gbc_` plus 43 URL-safe characters, held
-server-side only as a SHA-256 digest, valid for 24 hours, at most 16 active
+long-lived `contribution_token` — `gbc_` plus 43 URL-safe characters, held
+server-side only as a SHA-256 digest, valid for ninety days, at most 16 active
 per contributor, and revoked immediately when approval is withdrawn. The
 token is delivered only inside ordinary JSON payloads — the session
 bootstrap's `contributions` object, `GET
@@ -366,7 +366,7 @@ sudo getbible-robot doctor production
 | `MINI_APP_PORT` | Unique per instance |
 | `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | Short Telegram authentication window |
 | `MINI_APP_LAUNCH_TTL_SECONDS` | Short owner-bound launch lifetime |
-| `MINI_APP_SESSION_TTL_SECONDS` | Three-hour default absolute authenticated-session lifetime |
+| `MINI_APP_SESSION_TTL_SECONDS` | Ninety-day default absolute authenticated-session lifetime |
 | `MINI_APP_SESSION_LIMIT` | Bounded active sessions |
 | `MINI_APP_SESSIONS_PER_USER` | Bounded sessions per user |
 | `MINI_APP_MAX_SEARCHES_PER_SESSION` | Bounded Librarian result snapshots |

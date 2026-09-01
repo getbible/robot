@@ -132,7 +132,7 @@ Robot protects actions with:
 
 - fresh Telegram-signed `initData` at the initial session exchange;
 - owner-bound, one-time launch tokens;
-- bounded opaque sessions with a three-hour default absolute lifetime;
+- bounded opaque sessions with a ninety-day default absolute lifetime;
 - per-batch contributor-authority rechecks in the durable contribution store;
 - user/chat/topic binding;
 - bounded request bodies and output;

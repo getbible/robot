@@ -100,7 +100,7 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.mini_app_port, 9250)
         self.assertEqual(settings.mini_app_init_data_max_age_seconds, 300)
         self.assertEqual(settings.mini_app_launch_ttl_seconds, 300)
-        self.assertEqual(settings.mini_app_session_ttl_seconds, 10_800)
+        self.assertEqual(settings.mini_app_session_ttl_seconds, 7_776_000)
         self.assertEqual(settings.mini_app_session_limit, 200)
         self.assertEqual(settings.mini_app_sessions_per_user, 2)
         self.assertEqual(settings.mini_app_max_available_selections, 256)
@@ -118,14 +118,17 @@ class SettingsTestCase(unittest.TestCase):
         )
         self.assertTrue(settings.mini_app_access_log)
 
-    def test_mini_app_session_lifetime_is_multi_hour_and_rollback_safe(self) -> None:
+    def test_mini_app_session_lifetime_is_ninety_day_and_rollback_safe(self) -> None:
         expected = {
-            60: 10_800,
-            900: 10_800,
-            3_600: 10_800,
-            7_200: 7_200,
-            10_800: 10_800,
+            60: 7_776_000,
+            900: 7_776_000,
+            3_600: 7_776_000,
+            7_200: 7_776_000,
+            10_800: 7_776_000,
+            86_399: 7_776_000,
             86_400: 86_400,
+            7_776_000: 7_776_000,
+            15_552_000: 15_552_000,
         }
         for configured, effective in expected.items():
             with (
@@ -144,7 +147,7 @@ class SettingsTestCase(unittest.TestCase):
                     effective,
                 )
 
-        for configured in (59, 3_601, 7_199, 86_401):
+        for configured in (59, 15_552_001):
             with (
                 self.subTest(invalid=configured),
                 patch.dict(
