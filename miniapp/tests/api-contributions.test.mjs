@@ -4,16 +4,20 @@ import test from "node:test";
 import { ApiError, MiniAppApi } from "../lib/api.js";
 
 const SESSION_TOKEN = "abcdefghijklmnop";
-const SESSION = {
-  session_token: SESSION_TOKEN,
-  limits: { search_timeout_seconds: 30 },
-  basket: { maximum: 100, items: [] },
-};
+const CONTRIBUTION_TOKEN = `gbc_${"A".repeat(43)}`;
 const STATUS = {
   enabled: true,
   state: "approved",
   can_contribute: true,
   disclosure_required: false,
+};
+// Approved contributors receive their second token only inside ordinary
+// JSON payloads — the session bootstrap and the detailed status.
+const SESSION = {
+  session_token: SESSION_TOKEN,
+  limits: { search_timeout_seconds: 30 },
+  basket: { maximum: 100, items: [] },
+  contributions: { ...STATUS, contribution_token: CONTRIBUTION_TOKEN },
 };
 const EVENTS = [
   {
@@ -86,6 +90,7 @@ test("submits contribution batches with the plain session bearer like search", a
   });
 
   await api.createSession("OwnerBoundLaunch1");
+  assert.equal(api.contributionTransportReady, true);
   assert.deepEqual(await api.contributionStatus(), STATUS);
   assert.deepEqual(
     await api.submitContributionEvents(EVENTS, { disclosureAcknowledged: true }),
@@ -118,14 +123,58 @@ test("submits contribution batches with the plain session bearer like search", a
   assert.equal(batchRequests.length, 2);
   assert.equal(batchRequests[0].options.method, "POST");
   // The first batch carries the inline disclosure consent; later batches
-  // stay minimal so an already-acknowledged consent is never re-stated.
+  // stay minimal so an already-acknowledged consent is never re-stated. The
+  // contributor token rides in every batch body, never in a header.
   assert.deepEqual(JSON.parse(batchRequests[0].options.body), {
     events: EVENTS,
+    contribution_token: CONTRIBUTION_TOKEN,
     disclosure_acknowledged: true,
   });
   assert.deepEqual(JSON.parse(batchRequests[1].options.body), {
     events: EVENTS,
+    contribution_token: CONTRIBUTION_TOKEN,
   });
+  assert.ok(batchRequests.every(({ options }) =>
+    options.headers["X-Contribution-Token"] === undefined
+  ));
+});
+
+test("withholds contribution batches until a contributor token arrives", async () => {
+  const requests = [];
+  const api = testApi(async (url) => {
+    const path = new URL(url).pathname;
+    requests.push(path);
+    if (path.endsWith("/session")) {
+      return json({ ...SESSION, contributions: STATUS }, 201);
+    }
+    if (path.endsWith("/cleanup")) return new Response(null, { status: 204 });
+    if (path.endsWith("/contributions/status")) {
+      return json({ ...STATUS, contribution_token: CONTRIBUTION_TOKEN });
+    }
+    return json({ error: "not_found" }, 404);
+  });
+
+  await api.createSession("OwnerBoundLaunch1");
+  assert.equal(api.contributionTransportReady, false);
+  await assert.rejects(
+    Promise.resolve().then(() => api.submitContributionEvents(EVENTS)),
+    (error) => {
+      assert.equal(error instanceof ApiError, true);
+      assert.equal(error.code, "contribution_transport_not_ready");
+      assert.equal(error.status, 403);
+      return true;
+    },
+  );
+  assert.equal(
+    requests.filter((path) => path.endsWith("/contributions/events")).length,
+    0,
+  );
+
+  // One ordinary status request recovers the token.
+  await api.contributionStatus();
+  assert.equal(api.contributionTransportReady, true);
+  api.clearSession();
+  assert.equal(api.contributionTransportReady, false);
 });
 
 test("bounds contribution batches locally before any transport", async () => {
@@ -155,7 +204,7 @@ test("bounds contribution batches locally before any transport", async () => {
   );
 });
 
-test("requires a live session before a contribution batch is sent", async () => {
+test("requires a live session and token before a contribution batch is sent", async () => {
   const requests = [];
   const api = testApi(async (url) => {
     const path = new URL(url).pathname;
@@ -163,11 +212,14 @@ test("requires a live session before a contribution batch is sent", async () => 
     return json({ error: "not_found" }, 404);
   });
 
-  await assert.rejects(api.submitContributionEvents(EVENTS), (error) => {
-    assert.equal(error instanceof ApiError, true);
-    assert.equal(error.code, "session_not_ready");
-    return true;
-  });
+  await assert.rejects(
+    Promise.resolve().then(() => api.submitContributionEvents(EVENTS)),
+    (error) => {
+      assert.equal(error instanceof ApiError, true);
+      assert.equal(error.code, "contribution_transport_not_ready");
+      return true;
+    },
+  );
   assert.equal(requests.length, 0);
 });
 

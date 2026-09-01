@@ -127,7 +127,22 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - Contributor authority and the acknowledged disclosure are rechecked in the
   durable SQLite store on every batch; the acknowledgement itself rides the
   first batch of the synchronization.
-- No WebSocket, extra port, capability token, or special body budget
+- Both credentials are required on every batch: the ordinary opaque session
+  bearer plus a valid `contribution_token` in the POST body. A request
+  missing either is refused with `403 contribution_not_allowed` before any
+  store work, and only approved contributors ever receive a token.
+- The contributor token travels only inside JSON payloads — the session
+  bootstrap's `contributions` object, the detailed status response, and every
+  events response's `status` — never in a custom header.
+- Contribution batches draw on their own env-tunable budget
+  (`CONTRIBUTION_RATE_CAPACITY`, `CONTRIBUTION_RATE_REFILL_PER_SECOND`),
+  separate from the public search and user limits; an over-budget batch
+  waits behind `429` and `Retry-After`, it never fails permanently.
+- Personal topics and bookmarks are never altered by any synchronization
+  outcome: a failed or pending synchronization leaves them untouched, only a
+  topic verifiably published in the live core catalogue is ever marked **G**,
+  and nothing is removed.
+- No WebSocket, extra port, custom header, or special body budget
   participates; every batch fits the ordinary 64 KiB API bound.
 
 ## Bookmark portability and chat recovery

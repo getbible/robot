@@ -76,6 +76,8 @@ EXPECTED_TEMPLATE_KEYS = {
     "CONTRIBUTION_STORE_FILE",
     "CONTRIBUTION_CONTRIBUTOR_LIMIT",
     "CONTRIBUTION_EVENT_LIMIT",
+    "CONTRIBUTION_RATE_CAPACITY",
+    "CONTRIBUTION_RATE_REFILL_PER_SECOND",
     "CONTRIBUTION_GIT_CHECKOUT",
     "CONTRIBUTION_GIT_USER",
     "GETBIBLE_API_BASE_URL",
@@ -218,6 +220,22 @@ class DocumentationContractTestCase(unittest.TestCase):
         self.assertEqual(
             request["properties"]["disclosure_acknowledged"]["type"], "boolean"
         )
+        self.assertIn("contribution_token", request["required"])
+        self.assertEqual(
+            request["properties"]["contribution_token"]["pattern"],
+            "^gbc_[A-Za-z0-9_-]{43}$",
+        )
+        status_schema = contract["components"]["schemas"]["ContributionStatus"]
+        self.assertNotIn("contribution_token", status_schema["required"])
+        self.assertEqual(
+            status_schema["properties"]["contribution_token"]["pattern"],
+            "^gbc_[A-Za-z0-9_-]{43}$",
+        )
+        full_status = contract["components"]["schemas"]["ContributionFullStatus"]
+        self.assertIn(
+            {"$ref": "#/components/schemas/ContributionStatus"},
+            full_status["allOf"],
+        )
         response = events["responses"]["200"]["content"]["application/json"][
             "schema"
         ]
@@ -241,6 +259,8 @@ class DocumentationContractTestCase(unittest.TestCase):
             "result set",
             "No WebSocket",
             "initial session exchange",
+            "contribution_token",
+            "CONTRIBUTION_RATE_CAPACITY",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, docs)

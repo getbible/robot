@@ -349,6 +349,17 @@ class MiniAppServer:
             load_bookmark_backup=load_bookmark_backup,
             cleanup_launch=self._cleanup.cleanup_now,
             contributions=contributions,
+            contribution_limiter=InboundRateLimiter(
+                user_capacity=settings.contribution_rate_capacity,
+                user_refill_per_second=(
+                    settings.contribution_rate_refill_per_second
+                ),
+                chat_capacity=settings.contribution_rate_capacity,
+                chat_refill_per_second=(
+                    settings.contribution_rate_refill_per_second
+                ),
+                max_entries=settings.rate_limit_cache_size,
+            ),
             ingress_limiter=MiniAppIngressLimiter(
                 capacity=settings.mini_app_session_exchange_rate_capacity,
                 refill_per_second=(

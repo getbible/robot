@@ -279,6 +279,56 @@ test("a persistent rate limit surfaces after bounded pacing attempts", async () 
   assert.equal(sync.pendingCount, 1);
 });
 
+test("a missing contributor token is recovered with one status request", async () => {
+  const api = new SyncApiMock();
+  let statusCalls = 0;
+  let tokenReady = false;
+  const submit = api.submitContributionEvents.bind(api);
+  api.submitContributionEvents = async (events, options) => {
+    if (!tokenReady) {
+      throw Object.assign(new Error("token missing"), {
+        code: "contribution_transport_not_ready",
+        status: 403,
+      });
+    }
+    return submit(events, options);
+  };
+  api.contributionStatus = async () => {
+    statusCalls += 1;
+    tokenReady = true;
+    return structuredClone(api.status);
+  };
+  const sync = createSync(api);
+
+  const report = await sync.synchronizeNow(snapshot());
+
+  assert.equal(statusCalls, 1);
+  assert.equal(report.sent, 2);
+  assert.equal(api.calls.length, 1);
+});
+
+test("the drip reports batch progress without letting display break transfer", async () => {
+  const api = new SyncApiMock();
+  const sync = createSync(api);
+  const topics = Array.from({ length: 60 }, (_, index) =>
+    personalTopic({ id: `topic-${index}`, name: `Topic ${index + 1}` })
+  );
+  const progress = [];
+
+  await sync.synchronizeNow(snapshot({ topics, bookmarks: [] }), {
+    onProgress(update) {
+      progress.push({ ...update });
+      throw new Error("display failure must not stop the drip");
+    },
+  });
+
+  assert.deepEqual(progress, [
+    { batch: 1, total: 2 },
+    { batch: 2, total: 2 },
+  ]);
+  assert.equal(api.calls.length, 2);
+});
+
 test("a committed sync accepts only the documented catalog fallback", async () => {
   const api = new SyncApiMock();
   api.submitContributionEvents = async function (events, options = {}) {

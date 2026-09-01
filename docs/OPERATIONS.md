@@ -191,7 +191,11 @@ immediately below Global topics. Its explicit Sync action converts the
 current personal topics/assignments into bounded idempotent events, appends
 the journalled explicit global add/remove intents, and drips them to the
 session-authenticated events endpoint in sequential batches of at most 50;
-every response reports receipt counts, the contributor's detailed status, and
+each batch body also carries the contributor's short-lived
+`contribution_token`, which only approved contributors receive inside JSON
+payloads. A `403` means the user is not an approved contributor or the token
+went stale; the app recovers automatically with one ordinary status refresh.
+Every response reports receipt counts, the contributor's detailed status, and
 the live catalogue revision. Sessions without contribution authority do not
 receive that panel; application decisions continue to arrive through the
 private bot notification.

@@ -438,6 +438,8 @@ class Settings:
     contribution_store_file: str | None
     contribution_contributor_limit: int
     contribution_event_limit: int
+    contribution_rate_capacity: int
+    contribution_rate_refill_per_second: float
     api_base_url: str
     web_base_url: str
     welcome_message: str
@@ -671,6 +673,18 @@ class Settings:
                 250_000,
                 1_000,
                 5_000_000,
+            ),
+            contribution_rate_capacity=_integer(
+                "CONTRIBUTION_RATE_CAPACITY",
+                60,
+                1,
+                100_000,
+            ),
+            contribution_rate_refill_per_second=_number(
+                "CONTRIBUTION_RATE_REFILL_PER_SECOND",
+                5.0,
+                0.01,
+                1_000.0,
             ),
             api_base_url=_base_url("GETBIBLE_API_BASE_URL", "https://api.getbible.net"),
             web_base_url=_base_url("GETBIBLE_WEB_BASE_URL", "https://getbible.life"),

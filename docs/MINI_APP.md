@@ -208,12 +208,23 @@ authorization. After approval, the next authenticated Mini App launch shows a
 one-time disclosure that topic and verse-tag changes are shared for review.
 Synchronization starts only after that disclosure is acknowledged.
 
-The panel is visible to any approved contributor with a live session, and its
-requests authenticate exactly as search does: the plain opaque session bearer
-issued at the initial session exchange, with no separate capability token or
-header. The browser never infers authority from a cached status flag, and
-Robot rechecks the contributor's approved application and acknowledged
-disclosure in the durable SQLite store on every event batch.
+The panel is visible to any approved contributor with a live session. Status
+reads authenticate exactly as search does: the plain opaque session bearer
+issued at the initial session exchange. Event submission requires a second
+credential on top of that bearer. An approved contributor receives a
+short-lived `contribution_token` — `gbc_` plus 43 URL-safe characters, held
+server-side only as a SHA-256 digest, valid for 24 hours, at most 16 active
+per contributor, and revoked immediately when approval is withdrawn. The
+token is delivered only inside ordinary JSON payloads — the session
+bootstrap's `contributions` object, `GET
+/api/v1/contributions/status?details=1`, and the `status` of every events
+response — never in a custom header, and a non-approved user never receives
+one. `POST /api/v1/contributions/events` refuses a request that does not
+carry both the session bearer and a valid body `contribution_token` with
+`403 contribution_not_allowed` before any store work. With both present, the
+browser still never infers authority from a cached status flag, and Robot
+rechecks the contributor's approved application and acknowledged disclosure
+in the durable SQLite store on every event batch.
 
 **Sync now** converts the current personal topic/assignment state into
 bounded idempotent contribution events whose `client_event_id`s derive
@@ -226,7 +237,17 @@ ordinary 64 KiB API budget. On HTTP `429` the client waits the announced
 continues, so the contribution seeps to the server one small chunk at a time.
 Events carry coordinate identity only, never Scripture text or Telegram
 identity, and the one-time disclosure acknowledgement rides the first batch
-as an optional `disclosure_acknowledged` field in the same POST body.
+as an optional `disclosure_acknowledged` field in the same POST body. Each
+batch body also carries the current `contribution_token`; the client harvests
+the freshest token from every status-bearing response, recovers a missing or
+rotated token with one ordinary status request, and shows drip progress
+("part X of Y") while a multi-batch synchronization runs. The batches draw on
+a dedicated server-side contribution rate budget, configured by
+`CONTRIBUTION_RATE_CAPACITY` (default `60`) and
+`CONTRIBUTION_RATE_REFILL_PER_SECOND` (default `5.0`) and separate from the
+public search and user limits, so a large personal dataset neither starves
+nor is starved by public search; a batch beyond the budget waits behind
+`429` and `Retry-After`, it never fails permanently.
 
 Every response returns the complete result set: `accepted`, `replayed`, and
 `event_ids` receipts, the full detailed contributor status, and the live
@@ -244,8 +265,12 @@ snapshot-derived events are re-created deterministically on every run, so a
 crash mid-drip loses nothing: the next Sync resends and the server
 deduplicates. A transport failure cannot roll back a bookmark mutation.
 Revocation or rejection stops future submission without deleting personal
-topics or markings. The transport is ordinary same-origin HTTPS on the Mini
-App domain and port already in use; it needs no capability token, WebSocket,
+topics or markings. Personal topics and bookmarks are never altered by any
+synchronization outcome: a failed or pending synchronization leaves the
+personal topic and its bookmarks untouched, only a topic verifiably
+published in the live core catalogue is ever marked **G**, and nothing is
+removed. The transport is ordinary same-origin HTTPS on the Mini
+App domain and port already in use; it needs no custom header, WebSocket,
 long-lived connection, extra listener, or Telegram `sendData` bridge. Status
 polls between synchronizations use
 `GET /api/v1/contributions/status?details=1`, and the reviewed catalogue pull
@@ -344,6 +369,8 @@ sudo getbible-robot doctor production
 | `CONTRIBUTION_STORE_FILE` | Absolute private SQLite path; blank disables contribution endpoints and `/contributor` applications |
 | `CONTRIBUTION_CONTRIBUTOR_LIMIT` | Bounded application population |
 | `CONTRIBUTION_EVENT_LIMIT` | Bounded retained event journal |
+| `CONTRIBUTION_RATE_CAPACITY` | Dedicated contributor event-batch budget, separate from the public limits |
+| `CONTRIBUTION_RATE_REFILL_PER_SECOND` | Refill rate of that contribution budget |
 
 The public browser cache is identity-free. Robot retains only the compatible
 reader preference containing translation and reader coordinates. Device-local

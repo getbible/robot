@@ -122,6 +122,18 @@ export function normalizeContributionStatus(value) {
   if (!isRecord(value)) {
     throw new TypeError("Invalid contributor status response.");
   }
+  // The contributor token is an optional sibling the API layer harvests
+  // before this shape check; the normalized status itself never carries it.
+  if (Object.hasOwn(value, "contribution_token")) {
+    if (
+      typeof value.contribution_token !== "string" ||
+      !/^gbc_[A-Za-z0-9_-]{43}$/.test(value.contribution_token)
+    ) {
+      throw new TypeError("Invalid contributor status response.");
+    }
+    const { contribution_token: _ignored, ...rest } = value;
+    value = rest;
+  }
   const keys = Object.keys(value).sort();
   const legacyKeys = [
     "can_contribute",

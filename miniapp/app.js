@@ -1088,7 +1088,18 @@ async function synchronizeContributionsNow() {
       }
       result = await contributionSync.synchronizeNow(
         bookmarkStore.snapshot(),
-        { disclosureAcknowledged: contributionSync.disclosureRequired },
+        {
+          disclosureAcknowledged: contributionSync.disclosureRequired,
+          onProgress: ({ batch, total }) => {
+            if (total > 1 && generation === sessionGeneration) {
+              setContributionPresentation(
+                "syncing",
+                "bookmarks.contribution_sync_progress",
+                { batch, total },
+              );
+            }
+          },
+        },
       );
       if (generation !== sessionGeneration) {
         return null;

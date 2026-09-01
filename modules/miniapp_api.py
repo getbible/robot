@@ -287,6 +287,7 @@ class MiniAppApi:
         | None = None,
         cleanup_launch: Callable[[MiniAppLaunch], Awaitable[None]] | None = None,
         contributions: ContributionStore | None = None,
+        contribution_limiter: InboundRateLimiter | None = None,
         ingress_limiter: MiniAppIngressLimiter | None = None,
         replay_guard: TelegramInitDataReplayGuard | None = None,
         audit_settings: Settings | None = None,
@@ -323,6 +324,16 @@ class MiniAppApi:
         self._load_bookmark_backup = load_bookmark_backup
         self._cleanup_launch = cleanup_launch
         self._contributions = contributions
+        # Contributors are a small, individually approved group with large
+        # personal datasets, so their synchronization endpoint carries its own
+        # generous budget instead of competing with the public search limits.
+        self._contribution_limiter = contribution_limiter or InboundRateLimiter(
+            user_capacity=60,
+            user_refill_per_second=5.0,
+            chat_capacity=60,
+            chat_refill_per_second=5.0,
+            max_entries=2_000,
+        )
         self._replay_guard = replay_guard or TelegramInitDataReplayGuard(
             ttl_seconds=300,
             max_entries=20_000,
@@ -822,7 +833,10 @@ class MiniAppApi:
             session.user_id,
             preferences.translation,
         )
-        contribution_status = self._bootstrap_contribution_status_payload(session.user_id)
+        contribution_status = self._contribution_status_payload(
+            session.user_id,
+            self._bootstrap_contribution_status_payload(session.user_id),
+        )
         response = self._response(
             status,
             {
@@ -891,12 +905,20 @@ class MiniAppApi:
         session = self._sessions.get(match.group(1), touch=False)
         if session is None:
             raise MiniAppAuthenticationError("Invalid Mini App session.")
-        await self._limiter.acquire(
-            user_id=session.user_id,
-            chat_id=session.chat_id,
-            cost=self._rate_cost(request),
-            client_key=request.client_key,
-        )
+        if self._contribution_route(request):
+            await self._contribution_limiter.acquire(
+                user_id=session.user_id,
+                chat_id=session.chat_id,
+                cost=1.0,
+                client_key=request.client_key,
+            )
+        else:
+            await self._limiter.acquire(
+                user_id=session.user_id,
+                chat_id=session.chat_id,
+                cost=self._rate_cost(request),
+                client_key=request.client_key,
+            )
         if not self._sessions.touch(session):
             raise MiniAppAuthenticationError("Invalid Mini App session.")
         return session
@@ -1025,6 +1047,14 @@ class MiniAppApi:
             return None
         return self._sessions.get(match.group(1), touch=False)
 
+    def _contribution_route(self, request: MiniAppHttpRequest) -> bool:
+        """Contribution batches are budgeted apart from the public limits."""
+        return (
+            request.method.upper() == "POST"
+            and urlsplit(request.target).path
+            == f"{self._api_prefix}/contributions/events"
+        )
+
     def _rate_cost(self, request: MiniAppHttpRequest) -> float:
         path = urlsplit(request.target).path
         expensive = {
@@ -1033,7 +1063,6 @@ class MiniAppApi:
             f"{self._api_prefix}/post",
             f"{self._api_prefix}/bookmarks/backup",
             f"{self._api_prefix}/bookmarks/restore",
-            f"{self._api_prefix}/contributions/events",
         }
         if request.method.upper() != "DELETE" and path in expensive:
             return 1.0
@@ -1397,6 +1426,33 @@ class MiniAppApi:
             )
             return _unavailable_contribution_status()
 
+    def _contribution_status_payload(
+        self,
+        user_id: int,
+        status: dict[str, object],
+    ) -> dict[str, object]:
+        """Attach a fresh contributor token to an approved detailed status.
+
+        The token travels only inside ordinary JSON payloads — never a custom
+        header — so it rides the exact same transport as every other field.
+        Only approved contributors ever receive one; everyone else gets the
+        plain status and the endpoint later refuses their requests outright.
+        Issuance is fail-open: a token hiccup must never hide the panel, and
+        the next status response simply carries a fresh token.
+        """
+        store = self._contributions
+        if store is None or status.get("state") != "approved":
+            return status
+        try:
+            token = store.issue_capability(user_id)
+        except (ContributionError, OSError, sqlite3.Error, RuntimeError):
+            LOGGER.warning(
+                "A contributor token could not be issued",
+                exc_info=True,
+            )
+            return status
+        return {**status, "contribution_token": token}
+
     def _contribution_status(
         self,
         session: MiniAppSession,
@@ -1416,7 +1472,9 @@ class MiniAppApi:
             return self._contributions_unavailable_response()
         return self._response(
             200,
-            status if details else _legacy_contribution_status(status),
+            self._contribution_status_payload(session.user_id, status)
+            if details
+            else _legacy_contribution_status(status),
         )
 
     def _contributions_unavailable_response(self) -> MiniAppHttpResponse:
@@ -1449,7 +1507,8 @@ class MiniAppApi:
                 details={"retryable": True},
             )
         payload = self._json_body(request)
-        if set(payload) - {"events", "disclosure_acknowledged"} or "events" not in payload:
+        allowed_fields = {"events", "disclosure_acknowledged", "contribution_token"}
+        if set(payload) - allowed_fields or "events" not in payload:
             raise MiniAppApiInputError("Contribution request must contain events.")
         events = payload.get("events")
         if not isinstance(events, list):
@@ -1461,6 +1520,33 @@ class MiniAppApi:
         disclosure_acknowledged = payload.get("disclosure_acknowledged", False)
         if not isinstance(disclosure_acknowledged, bool):
             raise MiniAppApiInputError("disclosure_acknowledged must be a boolean.")
+
+        # Defence in depth: beside the ordinary session bearer, a contribution
+        # write must carry the contributor token that only approved
+        # contributors ever receive (inside JSON payloads, never a header).
+        # A request without both is refused before any store work happens.
+        contribution_token = payload.get("contribution_token")
+        if not isinstance(contribution_token, str) or not contribution_token:
+            raise ContributionNotAllowed(
+                "This Telegram user is not an approved contributor."
+            )
+        try:
+            contributor_id = await asyncio.to_thread(
+                store.authenticate_capability,
+                contribution_token,
+            )
+        except ContributionNotAllowed:
+            raise
+        except (OSError, sqlite3.Error, RuntimeError):
+            LOGGER.warning(
+                "Contributor token authentication is temporarily unavailable",
+                exc_info=True,
+            )
+            return self._contributions_unavailable_response()
+        if contributor_id != session.user_id:
+            raise ContributionNotAllowed(
+                "This Telegram user is not an approved contributor."
+            )
         try:
             if disclosure_acknowledged:
                 await asyncio.to_thread(store.acknowledge_disclosure, session.user_id)
@@ -1477,8 +1563,10 @@ class MiniAppApi:
         # which would make the user repeat work that the server already owns.
         try:
             status = await asyncio.to_thread(
-                store.contribution_status,
-                session.user_id,
+                lambda: self._contribution_status_payload(
+                    session.user_id,
+                    store.contribution_status(session.user_id),
+                ),
             )
         except (ContributionError, OSError, sqlite3.Error, RuntimeError):
             LOGGER.warning(

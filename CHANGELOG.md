@@ -25,6 +25,28 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   and the dedicated 1 MiB Caddy contribution-sync matcher are gone. Status
   polls remain `GET /contributions/status?details=1`, and the catalogue pull
   keeps its ETag revalidation.
+- Gave `POST /api/v1/contributions/events` its own dedicated contributor
+  rate budget through the new `CONTRIBUTION_RATE_CAPACITY` (default `60`) and
+  `CONTRIBUTION_RATE_REFILL_PER_SECOND` (default `5.0`) settings. Approved
+  contributors are a small, individually reviewed group with potentially
+  large personal datasets; their batches no longer compete with the public
+  search and user limits in either direction, and an over-budget batch waits
+  behind `429` and `Retry-After` instead of failing permanently.
+- Restored the contributor token as a JSON-body credential: an approved
+  contributor receives a short-lived `contribution_token` (`gbc_` plus 43
+  URL-safe characters, held server-side only as a SHA-256 digest, 24-hour
+  lifetime, at most 16 active per contributor, revoked immediately when
+  approval is withdrawn) inside status-bearing JSON payloads only — never a
+  header. Every event batch must now carry both the session bearer and that
+  token or it is refused with `403 contribution_not_allowed` before any
+  store work; the client harvests the freshest token from every response and
+  recovers a missing or rotated one with a single ordinary status request.
+- Showed drip progress ("part X of Y") in the contributor panel while a
+  multi-batch synchronization runs.
+- Pinned the personal-data inviolability guarantee in a real-browser test:
+  a failed or pending synchronization leaves the personal topic and its
+  bookmarks untouched, only a topic verifiably published in the live core
+  catalogue is ever marked global, and nothing is removed.
 - Downgraded a contribution store left at `user_version=6` by the withdrawn
   push transport automatically on open: the two dormant push staging tables
   are dropped and the schema returns to v5 without touching contributor,
