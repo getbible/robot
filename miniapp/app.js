@@ -350,6 +350,9 @@ const elements = mapElements({
   contributorSyncButton: "contributor-sync-button",
   contributorSyncDetails: "contributor-sync-details",
   contributorSyncStatus: "contributor-sync-status",
+  contributorDisclosure: "contributor-disclosure",
+  contributorDisclosureAccept: "contributor-disclosure-accept",
+  contributorDisclosureDecline: "contributor-disclosure-decline",
   closeBookmarkPopover: "close-bookmark-popover",
   selectionSummary: "selection-summary",
   clearSelection: "clear-selection",
@@ -1082,9 +1085,22 @@ async function synchronizeContributionsNow() {
       if (contributionSync.disclosureRequired) {
         // Consent rides inside the first synchronized batch. Showing the
         // disclosure here must not introduce a preliminary status write or a
-        // separate acknowledgement request.
-        await bridge.alert(i18n.t("bookmarks.contribution_disclosure"));
+        // separate acknowledgement request. It is rendered by the Mini App
+        // itself: Telegram's popup API rejects any message over 256
+        // characters with a synchronous throw, and routing this 300-character
+        // disclosure through it turned every newly approved contributor's
+        // first Sync into "could not finish" before a single request left
+        // the phone — and, because the acknowledgement never reached the
+        // server, every later Sync repeated it.
+        const accepted = await requestContributorDisclosureConsent();
         if (generation !== sessionGeneration) {
+          return null;
+        }
+        if (!accepted) {
+          setContributionPresentation(
+            "idle",
+            "bookmarks.contribution_sync_disclosure_declined",
+          );
           return null;
         }
       }
@@ -1187,6 +1203,61 @@ async function synchronizeContributionsNow() {
   });
   contributionManualSyncTask = manualTask;
   return manualTask;
+}
+
+/**
+ * Show the one-time contributor disclosure inside the Mini App and resolve
+ * with whether the reader explicitly agreed. Never rejects: a closed or
+ * dismissed sheet is a decline, and a WebView without <dialog> support falls
+ * back to a native confirm so consent can still be given.
+ */
+function requestContributorDisclosureConsent() {
+  const dialog = elements.contributorDisclosure;
+  const accept = elements.contributorDisclosureAccept;
+  const decline = elements.contributorDisclosureDecline;
+  if (
+    !dialog ||
+    !accept ||
+    !decline ||
+    typeof dialog.showModal !== "function"
+  ) {
+    return Promise.resolve(
+      window.confirm(i18n.t("bookmarks.contribution_disclosure")),
+    );
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (agreed) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      accept.removeEventListener("click", onAccept);
+      decline.removeEventListener("click", onDecline);
+      dialog.removeEventListener("close", onClose);
+      dialog.removeEventListener("cancel", onCancel);
+      if (dialog.open) {
+        dialog.close();
+      }
+      resolve(agreed);
+    };
+    const onAccept = () => finish(true);
+    const onDecline = () => finish(false);
+    const onClose = () => finish(false);
+    const onCancel = (event) => {
+      event.preventDefault();
+      finish(false);
+    };
+    accept.addEventListener("click", onAccept);
+    decline.addEventListener("click", onDecline);
+    dialog.addEventListener("close", onClose);
+    dialog.addEventListener("cancel", onCancel);
+    try {
+      dialog.showModal();
+    } catch {
+      finish(window.confirm(i18n.t("bookmarks.contribution_disclosure")));
+    }
+  });
 }
 
 function contributionInactivePresentation(status) {

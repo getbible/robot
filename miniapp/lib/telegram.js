@@ -3,6 +3,18 @@ const FULLSCREEN_API_VERSION = "8.0";
 const INSET_SIDES = Object.freeze(["top", "right", "bottom", "left"]);
 const MAX_SAFE_AREA_INSET = 320;
 
+// Telegram's showPopup/showAlert/showConfirm accept a message of 1-256
+// characters and throw synchronously for anything else.
+export const TELEGRAM_POPUP_MESSAGE_LIMIT = 256;
+
+export function fitsTelegramPopup(message) {
+  if (typeof message !== "string") {
+    return false;
+  }
+  const length = message.trim().length;
+  return length >= 1 && length <= TELEGRAM_POPUP_MESSAGE_LIMIT;
+}
+
 export class TelegramBridge {
   #webApp;
   #backHandler = null;
@@ -181,15 +193,39 @@ export class TelegramBridge {
   }
 
   confirm(message) {
-    if (typeof this.#webApp?.showConfirm === "function") {
-      return new Promise((resolve) => this.#webApp.showConfirm(message, resolve));
+    const webApp = this.#webApp;
+    if (
+      typeof webApp?.showConfirm === "function" &&
+      fitsTelegramPopup(message)
+    ) {
+      return new Promise((resolve) => {
+        // The SDK throws synchronously (unsupported client version, a popup
+        // already open, invalid parameters) instead of calling back; that
+        // must degrade to a native confirm, never to a rejected promise.
+        try {
+          webApp.showConfirm(message, resolve);
+        } catch {
+          resolve(window.confirm(message));
+        }
+      });
     }
     return Promise.resolve(window.confirm(message));
   }
 
   alert(message) {
-    if (typeof this.#webApp?.showAlert === "function") {
-      return new Promise((resolve) => this.#webApp.showAlert(message, resolve));
+    const webApp = this.#webApp;
+    if (
+      typeof webApp?.showAlert === "function" &&
+      fitsTelegramPopup(message)
+    ) {
+      return new Promise((resolve) => {
+        try {
+          webApp.showAlert(message, resolve);
+        } catch {
+          window.alert(message);
+          resolve();
+        }
+      });
     }
     window.alert(message);
     return Promise.resolve();

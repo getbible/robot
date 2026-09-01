@@ -65,11 +65,22 @@ function installTelegramMock() {
           window.__telegramState.notifications.push(type);
         },
       },
+      // Mirror the real SDK: showAlert/showConfirm route through showPopup,
+      // which throws synchronously for a message outside 1-256 characters
+      // instead of ever calling back.
       showAlert(message, callback) {
+        if (typeof message !== "string" || message.trim().length > 256) {
+          throw new Error("WebAppPopupParamInvalid");
+        }
         window.__telegramState.alerts.push(message);
         callback();
       },
-      showConfirm(_message, callback) { callback(true); },
+      showConfirm(message, callback) {
+        if (typeof message !== "string" || message.trim().length > 256) {
+          throw new Error("WebAppPopupParamInvalid");
+        }
+        callback(true);
+      },
       onEvent(name, handler) {
         const current = handlers.get(name) ?? new Set();
         current.add(handler);
@@ -649,7 +660,7 @@ test("an explicit Sync tap after a dropped connection really retries", async (co
 
 test("disclosure consent rides inside the first synchronized batch", async (context) => {
   const fixture = await createBrowserFixture(context, { disclosureRequired: true });
-  const { page, syncRequests } = fixture;
+  const { page, pageErrors, syncRequests } = fixture;
   await page.goto("https://app.local/miniapp/index.html?launch=contributor-test", {
     waitUntil: "domcontentloaded",
   });
@@ -658,13 +669,21 @@ test("disclosure consent rides inside the first synchronized batch", async (cont
   await openContributorManager(page);
 
   await page.locator("#contributor-sync-button").click();
+  // The disclosure is the Mini App's own sheet, never a Telegram popup:
+  // the SDK rejects popup messages over 256 characters with a synchronous
+  // throw, which used to fail every first Sync before any request was sent.
+  const sheet = page.locator("#contributor-disclosure[open]");
+  await sheet.waitFor({ state: "visible" });
+  assert.match(await sheet.textContent(), /enrolled as a GetBible contributor/);
+  assert.equal(syncRequests.length, 0);
+  await page.locator("#contributor-disclosure-accept").click();
   await page.waitForFunction(() => (
     document.querySelector("#contributor-sync")?.dataset.state === "success"
   ));
 
   assert.equal(
     await page.evaluate(() => window.__telegramState.alerts.length),
-    1,
+    0,
   );
   assert.equal(syncRequests.length, 1);
   assert.equal(syncRequests[0].body.disclosure_acknowledged, true);
@@ -672,6 +691,51 @@ test("disclosure consent rides inside the first synchronized batch", async (cont
     Object.keys(syncRequests[0].body).sort(),
     ["contribution_token", "disclosure_acknowledged", "events"],
   );
+  assert.deepEqual(pageErrors, []);
+});
+
+test("declining the disclosure sends nothing and leaves the panel ready", async (context) => {
+  const fixture = await createBrowserFixture(context, { disclosureRequired: true });
+  const { page, pageErrors, syncRequests } = fixture;
+  await page.goto("https://app.local/miniapp/index.html?launch=contributor-test", {
+    waitUntil: "domcontentloaded",
+  });
+  await page.waitForSelector('[data-reader-verse="2"]', { timeout: 15_000 });
+  const localTopicId = await createPersonalTopicWithVerse(page);
+  await openContributorManager(page);
+
+  await page.locator("#contributor-sync-button").click();
+  await page.locator("#contributor-disclosure[open]").waitFor({ state: "visible" });
+  await page.locator("#contributor-disclosure-decline").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#contributor-sync")?.dataset.state === "idle"
+  ));
+
+  assert.equal(syncRequests.length, 0);
+  assert.match(
+    await page.locator("#contributor-sync-status").textContent(),
+    /Nothing was sent/,
+  );
+  assert.equal(
+    await page.locator("#contributor-disclosure").evaluate((element) => element.open),
+    false,
+  );
+  // Declining is not an error: no error haptic, and the tap can be repeated.
+  assert.equal(
+    await page.evaluate(() => window.__telegramState.notifications.includes("error")),
+    false,
+  );
+  await assertPersonalTopicIntact(page, localTopicId);
+  await openContributorManager(page);
+  await page.locator("#contributor-sync-button").click();
+  await page.locator("#contributor-disclosure[open]").waitFor({ state: "visible" });
+  await page.locator("#contributor-disclosure-accept").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#contributor-sync")?.dataset.state === "success"
+  ));
+  assert.equal(syncRequests.length, 1);
+  assert.equal(syncRequests[0].body.disclosure_acknowledged, true);
+  assert.deepEqual(pageErrors, []);
 });
 
 async function assertPersonalTopicIntact(page, localTopicId) {

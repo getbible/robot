@@ -148,6 +148,46 @@ refresh. `409` means an event ID
 was reused with different content, `429` paces the drip through
 `Retry-After`, and `413` means the general 64 KiB API bound was exceeded.
 
+## An approved contributor sees the panel but every Sync fails
+
+Search works, the contributor panel is visible, and every **Sync now** ends
+in an error while nothing reaches the review queue.
+
+**On a Mini App older than this release** the cause was the first-sync
+disclosure itself: it was shown through Telegram's `showAlert`, whose SDK
+throws for any message over 256 characters, so the very first Sync failed
+before any request was sent and — since the acknowledgement travels with
+that first batch — every later Sync repeated it. Upgrade the instance; the
+disclosure is now an in-app sheet. No server data needs repair: the
+contributor's approval and personal data were never touched.
+
+**On this release** the remaining mechanism is a contribution store that
+accepts **reads** (the application row says approved, so the panel appears)
+but refuses **writes**, so the server cannot issue a contributor token or
+record events. The Mini App names it directly ("could not issue a
+contributor token … ask the administrator to run Diagnostics") and the
+application log carries an `ERROR` line beginning `A contributor token could
+not be issued`.
+
+Causes seen in practice:
+
+- A table missing from a store already at the current schema version (an
+  interrupted upgrade or a rollback across the retired sync transports). The
+  store now recreates any missing table on every open, so a service restart
+  repairs it; `setup.sh doctor` reports `missing tables` if it recurs.
+- A root-owned `contributions.sqlite3-wal` or `-shm` sidecar beside a correctly
+  owned database, left by a session run as root. The service can read but not
+  write. `setup.sh doctor` and every upgrade preflight now refuse a sidecar not
+  owned by the service account; stop the service, `chown` or remove the
+  sidecars, start it again.
+- A read-only file or directory, a full disk, or a quota. `setup.sh doctor`
+  runs the same rolled-back write probe the runtime needs and prints the
+  exact SQLite error.
+
+Run `setup.sh doctor <instance>`; the store checks name the fault. Every other
+part of the contribution path is exercised end to end by the real-server
+browser test (`miniapp/tests/browser/contributor-real-server.test.mjs`).
+
 ## Service fails with `status=200/CHDIR`
 
 This status means systemd could not enter the configured application directory

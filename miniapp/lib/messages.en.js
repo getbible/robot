@@ -232,6 +232,11 @@ export const ENGLISH_MESSAGES = Object.freeze({
     "Your local bookmarks are safe, but this device could not preserve the contributor review queue. Keep the Mini App open and online while it retries, and do not clear its app data.",
   "bookmarks.contribution_disclosure":
     "You are enrolled as a GetBible contributor. Topic names must be in English. New topics and changes to topic verse assignments are saved on your device first and also sent securely to the project administrators for review. Approved changes may become part of the global topic library used by everyone.",
+  "bookmarks.contribution_disclosure_title": "Before your first sync",
+  "bookmarks.contribution_disclosure_accept": "I understand and agree",
+  "bookmarks.contribution_disclosure_decline": "Not now",
+  "bookmarks.contribution_sync_disclosure_declined":
+    "Nothing was sent. Your topics and verse links stay on this device until you agree to the contributor disclosure; tap Sync when you are ready.",
   "bookmarks.contribution_sync_title": "Contributor sync",
   "bookmarks.contribution_sync_now": "Sync now",
   "bookmarks.contribution_check_status": "Check status",
@@ -272,6 +277,8 @@ export const ENGLISH_MESSAGES = Object.freeze({
     "The Mini App could not prepare some saved contribution data. It remains personal and safe. After the app is updated, tap Sync again.",
   "bookmarks.contribution_sync_network":
     "The connection was interrupted while sending. Nothing was lost; tap Sync to try again.",
+  "bookmarks.contribution_sync_token_unavailable":
+    "The server confirms you are an approved contributor but could not issue a contributor token, so nothing can be sent. This is a server-side storage fault, not something on your device: ask the administrator to run Diagnostics on the bot server.",
   "bookmarks.contribution_sync_error":
     "Sync could not finish. Your contribution remains personal and safe; tap Sync again.",
   "bookmarks.contribution_sync_catalog_error":

@@ -66,6 +66,23 @@ _COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}\Z")
 _CHECKSUM_RE = re.compile(r"[0-9a-f]{64}\Z")
 _CONTRIBUTOR_CAPABILITY_RE = re.compile(r"gbc_[A-Za-z0-9_-]{43}\Z")
 _ENGLISH_TOPIC_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]\Z")
+# Every table the runtime writes; verify_writable() refuses a store missing any.
+_REQUIRED_TABLES = frozenset(
+    {
+        "contributor_applications",
+        "contribution_canonical_topics",
+        "contributor_source_topics",
+        "contribution_events",
+        "contribution_decisions",
+        "contribution_audit",
+        "contribution_notifications",
+        "contribution_catalog_revisions",
+        "contribution_publication_state",
+        "contribution_client_snapshots",
+        "contribution_sync_receipts",
+        "contributor_capabilities",
+    }
+)
 # Protestant canon order used by the bundled global bookmark catalogue and its
 # repository CSV. Contributions outside this catalogue are rejected before
 # queueing, even when a selected reader translation exposes additional books.
@@ -2112,11 +2129,56 @@ class ContributionStore:
                 self._migrate_v4_to_v5(connection)
             elif user_version == 6:
                 self._downgrade_v6_to_v5(connection)
+            # A store already at the current version takes no migration branch,
+            # so a table lost to an interrupted upgrade, a rollback across the
+            # snapshot/push/drip transports, or a manual repair stayed missing
+            # forever: reads kept working (an approved contributor saw the
+            # panel) while every write — token issuance, event recording —
+            # failed. The schema script is entirely IF NOT EXISTS, so applying
+            # it on every open guarantees every table regardless of history.
+            self._create_schema(connection)
             self._ensure_seed_state(connection)
         except BaseException:
             connection.close()
             raise
         return connection
+
+    def verify_writable(self) -> None:
+        """Prove the runtime can write this store, or raise the exact reason.
+
+        Reads succeed on a store the service cannot write — a table dropped by
+        an interrupted migration, a root-owned WAL sidecar, a read-only file —
+        and the Mini App then shows an approved contributor who can never be
+        issued a token, so every Sync fails while search works. This probe
+        exercises exactly what token issuance and event recording need: the
+        write lock, every table, and a real page write, all rolled back.
+        """
+        with self._guard:
+            connection = self._connection_required()
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            missing = sorted(_REQUIRED_TABLES - tables)
+            if missing:
+                raise sqlite3.DatabaseError(
+                    "Contribution store is missing tables: " + ", ".join(missing)
+                )
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "DELETE FROM contributor_capabilities WHERE expires_at <= 0"
+                )
+                connection.execute(
+                    """
+                    UPDATE contribution_catalog_revisions
+                    SET actor = actor WHERE revision = 0
+                    """
+                )
+            finally:
+                connection.execute("ROLLBACK")
 
     @staticmethod
     def _create_schema(connection: sqlite3.Connection) -> None:

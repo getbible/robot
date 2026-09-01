@@ -25,13 +25,21 @@ export function contributionErrorPresentation(error, { catalog = false } = {}) {
   ) {
     messageKey = "bookmarks.contribution_sync_update_error";
   } else if (!catalog && error instanceof ApiError) {
-    if (error.status === 429 || error.code === "rate_limited") {
+    if (error.code === "contribution_transport_not_ready") {
+      // The server called this contributor approved but, even after a fresh
+      // status request, issued no contributor token: its store accepted the
+      // read and refused the write. Nothing on the phone can fix that, so
+      // say exactly that instead of a generic "try again".
+      messageKey = "bookmarks.contribution_sync_token_unavailable";
+    } else if (error.status === 429 || error.code === "rate_limited") {
       messageKey = "bookmarks.contribution_sync_retry_wait";
     } else if (["network_error", "request_timeout"].includes(error.code)) {
       messageKey = "bookmarks.contribution_sync_network";
     } else if (
       error.status === 400 ||
-      ["invalid_contribution", "invalid_request"].includes(error.code)
+      error.status === 409 ||
+      ["invalid_contribution", "invalid_request", "idempotency_conflict"]
+        .includes(error.code)
     ) {
       messageKey = "bookmarks.contribution_sync_invalid_data";
     } else if (

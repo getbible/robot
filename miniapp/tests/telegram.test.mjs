@@ -1,7 +1,70 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { TelegramBridge, validLaunchToken } from "../lib/telegram.js";
+import {
+  TELEGRAM_POPUP_MESSAGE_LIMIT,
+  TelegramBridge,
+  fitsTelegramPopup,
+  validLaunchToken,
+} from "../lib/telegram.js";
+
+test("popup helpers never reject: a throwing or over-long message falls back natively", async () => {
+  const restore = installDocument();
+  const shown = [];
+  const nativeAlerts = [];
+  const nativeConfirms = [];
+  const originalWindow = globalThis.window;
+  globalThis.window = {
+    alert(message) { nativeAlerts.push(message); },
+    confirm(message) { nativeConfirms.push(message); return true; },
+  };
+  try {
+    const webApp = {
+      showAlert(message, callback) {
+        // The real SDK routes through showPopup and throws synchronously for
+        // a message outside 1-256 characters instead of calling back.
+        if (message.trim().length > TELEGRAM_POPUP_MESSAGE_LIMIT) {
+          throw new Error("WebAppPopupParamInvalid");
+        }
+        shown.push(message);
+        callback();
+      },
+      showConfirm(message, callback) {
+        if (message.trim().length > TELEGRAM_POPUP_MESSAGE_LIMIT) {
+          throw new Error("WebAppPopupParamInvalid");
+        }
+        shown.push(message);
+        callback(true);
+      },
+    };
+    const bridge = new TelegramBridge(webApp);
+    const long = "x".repeat(300);
+
+    assert.equal(fitsTelegramPopup("ok"), true);
+    assert.equal(fitsTelegramPopup(long), false);
+    assert.equal(fitsTelegramPopup("   "), false);
+
+    await bridge.alert("short");
+    assert.deepEqual(shown, ["short"]);
+    // Over the limit: the SDK is not even asked, the native dialog is used.
+    await bridge.alert(long);
+    assert.deepEqual(nativeAlerts, [long]);
+    assert.equal(await bridge.confirm(long), true);
+    assert.deepEqual(nativeConfirms, [long]);
+
+    // A throw for any other reason (unsupported client, popup already open)
+    // also degrades instead of rejecting the caller.
+    webApp.showAlert = () => { throw new Error("WebAppPopupOpened"); };
+    webApp.showConfirm = () => { throw new Error("WebAppMethodUnsupported"); };
+    await bridge.alert("again");
+    assert.equal(nativeAlerts.at(-1), "again");
+    assert.equal(await bridge.confirm("sure?"), true);
+    assert.equal(nativeConfirms.at(-1), "sure?");
+  } finally {
+    globalThis.window = originalWindow;
+    restore.restore();
+  }
+});
 
 function installDocument() {
   const originalDocument = globalThis.document;

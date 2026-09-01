@@ -467,9 +467,34 @@ export class ContributionSync {
     }
   }
 
+  /**
+   * Give every queued explicit operation in `events` a fresh client_event_id,
+   * in the batch and in the persisted queue. Returns whether any changed.
+   */
+  #rekeyQueuedOperations(events) {
+    let changed = false;
+    for (const event of events) {
+      const index = this.#state.operations.findIndex(
+        (operation) => operation.client_event_id === event.client_event_id,
+      );
+      if (index < 0) {
+        continue;
+      }
+      const next = this.#nextId("e");
+      this.#state.operations[index] = {
+        ...this.#state.operations[index],
+        client_event_id: next,
+      };
+      event.client_event_id = next;
+      changed = true;
+    }
+    return changed;
+  }
+
   async #submitOnce(events, { disclosureAcknowledged }) {
     let tokenRecoveryAttempted = false;
     let networkRetryUsed = false;
+    let conflictRekeyAttempted = false;
     for (let attempt = 0; ; attempt += 1) {
       try {
         return await this.#api.submitContributionEvents(events, {
@@ -504,6 +529,22 @@ export class ContributionSync {
         ) {
           tokenRecoveryAttempted = true;
           await this.#api.contributionStatus();
+          continue;
+        }
+        // The server keeps one payload per client_event_id forever. An
+        // explicit operation is re-keyed on every local edit, but a queued
+        // one can still collide with a record from an earlier client
+        // generation; that is a conflict of identity, not of data, so give
+        // the queued operations fresh identities once and resend. Baseline
+        // ids are content-derived and cannot legitimately conflict, so a
+        // second refusal surfaces as the server's verdict.
+        if (
+          !conflictRekeyAttempted &&
+          (error?.code === "idempotency_conflict" || error?.status === 409) &&
+          this.#rekeyQueuedOperations(events)
+        ) {
+          conflictRekeyAttempted = true;
+          await this.#persist().catch(() => false);
           continue;
         }
         const rateLimited =
