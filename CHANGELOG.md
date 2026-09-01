@@ -6,6 +6,15 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Search-style contribution synchronization
 
+- Both Mini App credentials are now long-lived, ending forced hourly-scale
+  re-authentication: the authenticated session's default absolute lifetime is
+  ninety days (`MINI_APP_SESSION_TTL_SECONDS` default `7776000`, new explicit
+  range one to one hundred and eighty days, formerly written hour-scale
+  values normalized upward without rewriting installed environment files),
+  and the contributor `contribution_token` is valid for ninety days as well.
+  A fresh Telegram launch still re-authenticates with fresh signed
+  `initData`, and withdrawing approval still revokes contributor tokens
+  immediately.
 - Synchronization requests are now literally search-sized: every batch is
   capped at about 2 KB of JSON, and a request that dies on the wire while
   smaller requests pass is automatically halved — down to one event per
@@ -46,8 +55,8 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
   search and user limits in either direction, and an over-budget batch waits
   behind `429` and `Retry-After` instead of failing permanently.
 - Restored the contributor token as a JSON-body credential: an approved
-  contributor receives a short-lived `contribution_token` (`gbc_` plus 43
-  URL-safe characters, held server-side only as a SHA-256 digest, 24-hour
+  contributor receives a `contribution_token` (`gbc_` plus 43
+  URL-safe characters, held server-side only as a SHA-256 digest, ninety-day
   lifetime, at most 16 active per contributor, revoked immediately when
   approval is withdrawn) inside status-bearing JSON payloads only — never a
   header. Every event batch must now carry both the session bearer and that
@@ -131,9 +140,10 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 ### Long reading sessions and browser history
 
 - Raised the authenticated Mini App session default from fifteen minutes to
-  three hours, with a two-to-twenty-four-hour current range. Former valid
-  values normalize to three hours without rewriting installed environments, so
-  upgrades fix active readers while old-code rollback remains possible.
+  a multi-hour lifetime (since superseded by the ninety-day default above).
+  Former valid values normalize upward without rewriting installed
+  environments, so upgrades fix active readers while old-code rollback
+  remains possible.
 - Added a dedicated Bible reading-history page backed by bounded, versioned
   browser `sessionStorage`. Successful chapter opens and verse selections keep
   their exact reference and translation; revisiting the same chapter or verse

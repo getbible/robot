@@ -435,8 +435,8 @@ class MiniAppSessionStore:
     ) -> None:
         if not 1 <= max_sessions <= 100_000:
             raise ValueError("max_sessions must be between 1 and 100000.")
-        if not 30 <= ttl_seconds <= 86_400:
-            raise ValueError("ttl_seconds must be between 30 and 86400.")
+        if not 30 <= ttl_seconds <= 15_552_000:
+            raise ValueError("ttl_seconds must be between 30 and 15552000.")
         if not 1 <= max_sessions_per_user <= 10:
             raise ValueError("max_sessions_per_user must be between 1 and 10.")
         if not 1 <= max_searches_per_session <= 16:

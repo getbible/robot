@@ -194,7 +194,7 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
   ownership are validated at the initial session exchange; later requests use
   Robot-issued opaque bearers instead of forwarding raw `initData` again.
 - Launches and sessions are bounded and owner-bound; authenticated Mini App
-  sessions have a three-hour default absolute lifetime.
+  sessions have a ninety-day default absolute lifetime.
 - The bot token never enters HTML, JavaScript, URLs, logs, browser storage, or public API traffic.
 - Public cache contains no identity, session, preference, search, selection, or posting data.
 - Public cache contains no history, bookmark, last-read, or backup data.

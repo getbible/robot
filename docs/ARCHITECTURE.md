@@ -165,7 +165,7 @@ Robot owns:
 
 - Telegram-signed `initData` verification;
 - owner-bound launch exchange;
-- bounded opaque sessions with a three-hour default absolute lifetime;
+- bounded opaque sessions with a ninety-day default absolute lifetime;
 - reader preferences;
 - full-text search and pagination through Librarian;
 - validation and private-chat delivery/retrieval of explicitly requested,
@@ -342,9 +342,11 @@ Known partial sends are rolled back best-effort. Ambiguous outcomes remain locke
 ## Session and concurrency model
 
 Launch tokens and sessions are owner-bound, capacity-bounded, and independent.
-The authenticated Mini App session has a three-hour default absolute lifetime
-and is not extended indefinitely by activity. This is long enough for sustained
-reading while preserving a definite authentication boundary.
+The authenticated Mini App session has a ninety-day default absolute lifetime
+and is not extended indefinitely by activity. This keeps a launch usable for a
+whole season of reading and contributing while preserving a definite
+authentication boundary, and a fresh Telegram launch always re-authenticates
+with fresh signed `initData` regardless of the stored lifetime.
 
 Fresh Telegram `initData` is signature-, age-, user-, chat-, and launch-checked
 only at the initial session exchange. Robot then uses its own opaque session

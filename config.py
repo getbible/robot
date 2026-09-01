@@ -347,23 +347,24 @@ def _mini_app_public_url(enabled: bool) -> str | None:
 
 
 def _mini_app_session_ttl_seconds() -> int:
-    """Return a rollback-safe, multi-hour Mini App session lifetime."""
+    """Return a rollback-safe, multi-day Mini App session lifetime."""
 
     name = "MINI_APP_SESSION_TTL_SECONDS"
-    raw = _env(name, "10800")
+    raw = _env(name, "7776000")
     try:
         value = int(raw or "")
     except ValueError as error:
         raise ConfigurationError(f"{name} must be an integer.") from error
-    # Released managers wrote values in the former 60-3600 range into the
+    # Released managers wrote hour-scale values (the former 60-3600 range, the
+    # 900 compatibility fallback, and the 10800 template default) into the
     # instance environment. Keep those files untouched so an old-code rollback
-    # remains bootable, while normalizing their effective lifetime to three
-    # hours in the new runtime.
-    if 60 <= value <= 3_600:
-        return 10_800
-    if not 7_200 <= value <= 86_400:
+    # remains bootable, while normalizing their effective lifetime to ninety
+    # days in the new runtime.
+    if 60 <= value < 86_400:
+        return 7_776_000
+    if not 86_400 <= value <= 15_552_000:
         raise ConfigurationError(
-            f"{name} must be between 7200 and 86400 seconds."
+            f"{name} must be between 86400 and 15552000 seconds."
         )
     return value
 
@@ -505,7 +506,7 @@ class Settings:
     mini_app_port: int = 9201
     mini_app_init_data_max_age_seconds: int = 300
     mini_app_launch_ttl_seconds: int = 300
-    mini_app_session_ttl_seconds: int = 10_800
+    mini_app_session_ttl_seconds: int = 7_776_000
     mini_app_session_limit: int = 200
     mini_app_sessions_per_user: int = 2
     mini_app_max_searches_per_session: int = 2

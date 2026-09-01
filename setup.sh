@@ -912,8 +912,8 @@ migrate_instance_configuration() {
     ensure_env_value "$python_bin" "$env_file" \
         "MINI_APP_LAUNCH_TTL_SECONDS" "300"
     # Keep a missing legacy file readable by the immediately previous release.
-    # Current code normalizes this former default to an effective three hours;
-    # fresh installs already carry 10800 from .env.template.
+    # Current code normalizes this former default to an effective ninety days;
+    # fresh installs already carry 7776000 from .env.template.
     ensure_env_value "$python_bin" "$env_file" \
         "MINI_APP_SESSION_TTL_SECONDS" "900"
     migrate_env_default \
