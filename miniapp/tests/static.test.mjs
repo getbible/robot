@@ -530,7 +530,7 @@ test("wires contributor push and pull through the Telegram uplink", async () => 
     /if \(bridge\.pushLaunch\) \{[\s\S]*?setRoute\("bookmarks"\)[\s\S]*?contributorManager\.open = true/,
   );
   const continueBody = app.slice(
-    app.indexOf("async function continuePushTransfer("),
+    app.indexOf("function continuePushTransfer("),
     sendNextStart,
   );
   assert.match(
@@ -538,6 +538,13 @@ test("wires contributor push and pull through the Telegram uplink", async () => 
     /outbox\.sent_all \|\| !bridge\.pushLaunch \|\| outbox\.attempt_index === 0/,
   );
   assert.match(continueBody, /"bookmarks\.contribution_push_awaiting"/);
+  // Auto-continue shares the Push/Pull single-flight so a boot continuation
+  // can never race a tap into skipping or double-sending a chunk.
+  assert.match(
+    continueBody,
+    /if \(contributionActionTask \|\| !contributionSync\?\.outbox\)/,
+  );
+  assert.match(continueBody, /contributionActionTask = task/);
   assert.match(
     app,
     /contributionSync\?\.outbox[\s\S]*?await continuePushTransfer\(generation\)/,

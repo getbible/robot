@@ -415,8 +415,10 @@ export class ContributionSync {
   /**
    * Durably advance the outbox pointer and return the message to send.
    *
-   * The pointer commits before transport so a crash between persist and
-   * sendData can only cause a redundant resend, which the bot's chunk
+   * The pointer commits before transport, so a crash between persist and
+   * sendData skips that chunk for the current pass. The transfer still
+   * cannot lose data: an incomplete bundle never yields a receipt, and the
+   * next Push restarts the whole transfer, which the bot's idempotent chunk
    * staging and sync receipts absorb safely.
    */
   async takeNextPushMessage() {

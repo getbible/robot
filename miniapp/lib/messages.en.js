@@ -244,6 +244,8 @@ export const ENGLISH_MESSAGES = Object.freeze({
     "To push, open getBible.Life from the “Push contribution” button in the bot chat keyboard. Send /contributor in the chat if you do not see it.",
   "bookmarks.contribution_push_awaiting":
     "Your push was handed to Telegram; the bot confirms in the chat. Pull picks up review results, and Push safely resends the same transfer.",
+  "bookmarks.contribution_push_too_large":
+    "This contribution is too large to push in one transfer. Pull the reviewed catalogue first, or remove some changes and push again.",
   "bookmarks.contribution_pull_complete":
     "Pull complete. Published topics are global; unreviewed changes remain personal.",
   "bookmarks.contribution_sync_pending":

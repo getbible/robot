@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from telegram import ReplyKeyboardRemove
+from telegram.error import BadRequest
 
 from modules.commands import LIMITER_SLOT, SETTINGS_SLOT
 from modules.contribution_intake import (
@@ -192,6 +193,17 @@ class DecodePushBundleTestCase(unittest.TestCase):
             digest=hashlib.sha256(plaintext).hexdigest(),
         )
         with self.assertRaisesRegex(PushMessageError, "plaintext bound"):
+            decode_push_bundle(staged)
+
+    def test_deeply_nested_json_is_rejected_not_raised(self) -> None:
+        plaintext = b"[" * 60_000 + b"]" * 60_000
+        staged = _staged(
+            _encode(plaintext, "j"),
+            digest=hashlib.sha256(plaintext).hexdigest(),
+        )
+        # json.loads answers pathological nesting with RecursionError; the
+        # decoder must convert it into the ordinary unreadable outcome.
+        with self.assertRaisesRegex(PushMessageError, "not valid JSON"):
             decode_push_bundle(staged)
 
     def test_wrong_envelope_key_set_is_rejected(self) -> None:
@@ -424,6 +436,72 @@ class ContributionPushMessageTestCase(unittest.IsolatedAsyncioTestCase):
         context.bot.edit_message_text.assert_not_awaited()
         self.assertEqual(self.store.list_events(), ())
         self.assertIsNone(self.store.sync_receipt(42, SYNC_ID))
+
+    async def test_redelivered_chunk_after_commit_replays_without_restaging(self) -> None:
+        self.approve()
+        first, second = _messages(_envelope(), chunks=2)
+        await contribution_push_message(_update(first)[0], _context(self.store))
+        await contribution_push_message(_update(second)[0], _context(self.store))
+        self.assertIsNotNone(self.store.sync_receipt(42, SYNC_ID))
+
+        update, delete = _update(first)
+        context = _context(self.store)
+        await contribution_push_message(update, context)
+
+        delete.assert_awaited_once_with()
+        text = context.bot.send_message.await_args.kwargs["text"]
+        # A redelivered chunk of a committed transfer must answer with the
+        # replay notice, never re-stage a ghost bundle whose progress message
+        # would contradict the confirmation the contributor already saw.
+        self.assertIn("already received", text)
+        self.assertNotIn("Received part", text)
+        connection = self.store._connection_required()
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM contribution_push_bundles"
+            ).fetchone()[0],
+            0,
+        )
+
+    async def test_identical_progress_edit_rejection_sends_no_duplicate(self) -> None:
+        self.approve()
+        first, _second, _third = _messages(_envelope(), chunks=3)
+        context = _context(self.store)
+        await contribution_push_message(_update(first)[0], context)
+        context.bot.send_message.assert_awaited_once()
+
+        # Telegram rejects edits whose text is byte-identical, which is what
+        # an idempotently redelivered chunk produces; the stored message
+        # already shows the right progress, so nothing new may be posted.
+        context.bot.edit_message_text = AsyncMock(
+            side_effect=BadRequest("Message is not modified")
+        )
+        await contribution_push_message(_update(first)[0], context)
+
+        context.bot.send_message.assert_awaited_once()
+        context.bot.delete_message.assert_not_awaited()
+
+    async def test_losing_progress_candidate_is_deleted(self) -> None:
+        self.approve()
+        first = _messages(_envelope(), chunks=3)[0]
+        update, delete = _update(first)
+        context = _context(self.store)
+
+        # Another concurrently handled chunk adopted its own message between
+        # this handler's staging and adoption; the duplicate must be removed.
+        with patch.object(
+            self.store,
+            "set_push_progress_message",
+            return_value=False,
+        ):
+            await contribution_push_message(update, context)
+
+        delete.assert_awaited_once_with()
+        context.bot.send_message.assert_awaited_once()
+        context.bot.delete_message.assert_awaited_once_with(
+            chat_id=42,
+            message_id=PROGRESS_MESSAGE_ID,
+        )
 
     async def test_rate_limited_push_is_consumed_without_staging(self) -> None:
         self.approve()
