@@ -534,7 +534,8 @@ cat "$dropin_root/alpha.conf"
         self.assertIn("store.verify_writable()", access)
 
         doctor = script[script.index("cmd_doctor() {"):]
-        doctor = doctor[: doctor.index("\ncmd_repair() {")] if "\ncmd_repair() {" in doctor else doctor
+        if "\ncmd_repair() {" in doctor:
+            doctor = doctor[: doctor.index("\ncmd_repair() {")]
         self.assertIn(
             'verify_contribution_store_access "$app_dir" "$env_file" "$ACTIVE_USER"',
             doctor,
