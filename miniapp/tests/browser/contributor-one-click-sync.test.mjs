@@ -210,7 +210,12 @@ async function serveStatic(route) {
 
 async function createBrowserFixture(
   context,
-  { approved = true, disclosureRequired = false, failFirstSync = false } = {},
+  {
+    approved = true,
+    disclosureRequired = false,
+    failFirstSync = false,
+    abortSync = false,
+  } = {},
 ) {
   const executablePath = browserName === "chromium"
     ? process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
@@ -232,6 +237,8 @@ async function createBrowserFixture(
   let statusRequests = 0;
   let catalogRequests = 0;
   let shouldFailSync = failFirstSync;
+  let shouldAbortSync = abortSync;
+  let abortedSyncs = 0;
   let disclosurePending = disclosureRequired;
   page.on("pageerror", (error) => pageErrors.push(error.message));
   page.on("requestfailed", (request) => {
@@ -345,6 +352,11 @@ async function createBrowserFixture(
       );
     }
     if (apiPath === "contributions/events") {
+      if (shouldAbortSync) {
+        abortedSyncs += 1;
+        requestSequence.push("sync-dropped");
+        return route.abort();
+      }
       const body = request.postDataJSON();
       syncRequests.push({
         body,
@@ -401,12 +413,16 @@ async function createBrowserFixture(
   });
 
   return {
+    abortedSyncCount: () => abortedSyncs,
     catalogRequestCount: () => catalogRequests,
     failedRequests,
     page,
     pageErrors,
     requestSequence,
     sessionRequests,
+    setAbortSync: (value) => {
+      shouldAbortSync = value;
+    },
     statusRequestCount: () => statusRequests,
     syncRequests,
   };
@@ -587,6 +603,47 @@ test("a lost batch retries the identical deterministic events", async (context) 
   assert.equal(syncRequests[1].headers.authorization, `Bearer ${sessionToken}`);
 
   // A merely submitted (still pending) contribution is equally untouchable.
+  await assertPersonalTopicIntact(page, localTopicId);
+});
+
+test("an explicit Sync tap after a dropped connection really retries", async (context) => {
+  const fixture = await createBrowserFixture(context, { abortSync: true });
+  const { page, syncRequests } = fixture;
+  await page.goto("https://app.local/miniapp/index.html?launch=contributor-test", {
+    waitUntil: "domcontentloaded",
+  });
+  await page.waitForSelector('[data-reader-verse="2"]', { timeout: 15_000 });
+  const localTopicId = await createPersonalTopicWithVerse(page);
+  await openContributorManager(page);
+
+  await page.locator("#contributor-sync-button").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#contributor-sync")?.dataset.state === "error"
+  ), undefined, { timeout: 15_000 });
+  // Every request died on the wire before reaching the server, and the panel
+  // says so honestly instead of blaming a server that was never reached.
+  assert.equal(syncRequests.length, 0);
+  assert.ok(fixture.abortedSyncCount() >= 1);
+  assert.match(
+    await page.locator("#contributor-sync").innerText(),
+    /connection was interrupted/i,
+  );
+
+  // The client's own failure backoff paces automatic retries only. The very
+  // next explicit tap — well inside the backoff window — must perform a real
+  // attempt, never a synthetic "the server asked us to wait".
+  fixture.setAbortSync(false);
+  await page.locator("#contributor-sync-button").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#contributor-sync")?.dataset.state === "success"
+  ));
+  assert.ok(syncRequests.length >= 1);
+  for (const request of syncRequests) {
+    assert.deepEqual(
+      request.body.events.map((event) => event.type),
+      ["topic_upsert", "verse_add"],
+    );
+  }
   await assertPersonalTopicIntact(page, localTopicId);
 });
 

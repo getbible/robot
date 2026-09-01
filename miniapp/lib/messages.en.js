@@ -270,6 +270,8 @@ export const ENGLISH_MESSAGES = Object.freeze({
     "Contributor sync is unavailable on this server version. Your contribution remains personal and safe; Sync will work after the server update completes.",
   "bookmarks.contribution_sync_local_error":
     "The Mini App could not prepare some saved contribution data. It remains personal and safe. After the app is updated, tap Sync again.",
+  "bookmarks.contribution_sync_network":
+    "The connection was interrupted while sending. Nothing was lost; tap Sync to try again.",
   "bookmarks.contribution_sync_error":
     "Sync could not finish. Your contribution remains personal and safe; tap Sync again.",
   "bookmarks.contribution_sync_catalog_error":

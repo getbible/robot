@@ -63,6 +63,7 @@ const englishFallbackKeys = Object.freeze([
   "bookmarks.contribution_sync_server_error",
   "bookmarks.contribution_sync_update_error",
   "bookmarks.contribution_sync_local_error",
+  "bookmarks.contribution_sync_network",
   "bookmarks.contribution_sync_error",
   "bookmarks.contribution_sync_catalog_error",
   "bookmarks.contribution_sync_reference",

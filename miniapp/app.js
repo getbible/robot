@@ -95,6 +95,7 @@ let contributionPresentationState = "idle";
 let contributionPresentationMessageKey = "bookmarks.contribution_sync_idle";
 let contributionPresentationMessageValues = {};
 let contributionRetryNotBefore = 0;
+let contributionRetryServerNotBefore = 0;
 let contributionRetryDelayMs = 2_000;
 const CONTRIBUTION_STATUS_POLL_MS = 60_000;
 const CONTRIBUTION_STATUS_STALE_MS = 15_000;
@@ -940,6 +941,7 @@ async function refreshContributionStatus({
     contributionLastStatusRefreshAt = Date.now();
     contributionStatus = status;
     contributionRetryNotBefore = 0;
+    contributionRetryServerNotBefore = 0;
     contributionRetryDelayMs = 2_000;
     const reviewDetailsAvailable = contributionSync
       ? contributionSync.reviewDetailsAvailable
@@ -1486,13 +1488,17 @@ function contributionFailureIsRetryable(error) {
 }
 
 function cancelContributionRetry({ respectAuthority = false } = {}) {
+  // Only a genuine server-issued Retry-After may defer an explicit Sync tap.
+  // The client's own failure backoff paces automatic retries, never a person:
+  // an explicit tap discards it and performs a real attempt.
   if (
     respectAuthority &&
-    contributionRetryNotBefore > Date.now()
+    contributionRetryServerNotBefore > Date.now()
   ) {
     return false;
   }
   contributionRetryNotBefore = 0;
+  contributionRetryServerNotBefore = 0;
   contributionRetryDelayMs = 2_000;
   return true;
 }
@@ -1503,10 +1509,14 @@ function contributionRetryRemaining() {
 
 function recordContributionRetryDeadline(error) {
   const delay = contributionRetryDelay(error);
-  contributionRetryNotBefore = Math.max(
-    contributionRetryNotBefore,
-    Date.now() + delay,
-  );
+  const deadline = Date.now() + delay;
+  contributionRetryNotBefore = Math.max(contributionRetryNotBefore, deadline);
+  if (Number.isFinite(error?.retryAfter)) {
+    contributionRetryServerNotBefore = Math.max(
+      contributionRetryServerNotBefore,
+      deadline,
+    );
+  }
   return contributionRetryRemaining();
 }
 

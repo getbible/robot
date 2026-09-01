@@ -27,6 +27,8 @@ export function contributionErrorPresentation(error, { catalog = false } = {}) {
   } else if (!catalog && error instanceof ApiError) {
     if (error.status === 429 || error.code === "rate_limited") {
       messageKey = "bookmarks.contribution_sync_retry_wait";
+    } else if (["network_error", "request_timeout"].includes(error.code)) {
+      messageKey = "bookmarks.contribution_sync_network";
     } else if (
       error.status === 400 ||
       ["invalid_contribution", "invalid_request"].includes(error.code)

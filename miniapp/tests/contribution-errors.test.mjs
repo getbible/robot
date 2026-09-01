@@ -46,6 +46,20 @@ test("contributor errors use safe actionable categories", () => {
       key: "bookmarks.contribution_sync_retry_wait",
     },
     {
+      error: new ApiError("private connection detail", {
+        code: "network_error",
+        retryable: true,
+      }),
+      key: "bookmarks.contribution_sync_network",
+    },
+    {
+      error: new ApiError("private timeout detail", {
+        code: "request_timeout",
+        retryable: true,
+      }),
+      key: "bookmarks.contribution_sync_network",
+    },
+    {
       error: new TypeError("private bookmark value"),
       key: "bookmarks.contribution_sync_local_error",
     },
@@ -57,6 +71,30 @@ test("contributor errors use safe actionable categories", () => {
       values: {},
     });
   }
+});
+
+test("only an explicit Retry-After value survives as a server wait", () => {
+  // Number(null) and Number("") are 0. An error without Retry-After must not
+  // masquerade as a server instruction to wait zero seconds — that is the
+  // difference between the client's own backoff and a genuine server pause.
+  for (const absent of [undefined, null, ""]) {
+    const error = new ApiError("dropped on the wire", {
+      code: "network_error",
+      retryable: true,
+      ...(absent === undefined ? {} : { retryAfter: absent }),
+    });
+    assert.equal(error.retryAfter, null);
+  }
+  const limited = new ApiError("busy", {
+    code: "rate_limited",
+    status: 429,
+    retryAfter: 7,
+  });
+  assert.equal(limited.retryAfter, 7);
+  assert.equal(
+    new ApiError("busy", { status: 429, retryAfter: 0 }).retryAfter,
+    0,
+  );
 });
 
 test("contributor errors expose only a short safe request reference", () => {

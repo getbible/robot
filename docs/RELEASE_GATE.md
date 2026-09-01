@@ -141,6 +141,11 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
   (`CONTRIBUTION_RATE_CAPACITY`, `CONTRIBUTION_RATE_REFILL_PER_SECOND`),
   separate from the public search and user limits; an over-budget batch
   waits behind `429` and `Retry-After`, it never fails permanently.
+- An explicit **Sync now** tap always performs a real request. The client's
+  own failure backoff paces only automatic retries; a person is deferred
+  solely while a genuine server `Retry-After` is in force, and a request that
+  died on the wire is reported as an interrupted connection, never as a
+  server instruction.
 - Personal topics and bookmarks are never altered by any synchronization
   outcome: a failed or pending synchronization leaves them untouched, only a
   topic verifiably published in the live core catalogue is ever marked **G**,
