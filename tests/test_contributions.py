@@ -417,6 +417,19 @@ class ContributionStoreTestCase(unittest.TestCase):
         self.assertRegex(self.store.issue_capability(42), r"\Agbc_[A-Za-z0-9_-]{43}\Z")
         self.store.verify_writable()
 
+    def test_healthy_store_opens_without_touching_its_schema(self) -> None:
+        # Self-healing must only act on a damaged store. SQLite bumps the
+        # schema cookie on any DDL that changes the schema, so a healthy
+        # current-version store must open with the cookie untouched.
+        self.store.close()
+        with sqlite3.connect(self.path) as connection:
+            before = connection.execute("PRAGMA schema_version").fetchone()[0]
+        self.store = ContributionStore(path=str(self.path))
+        self.store.verify_writable()
+        with sqlite3.connect(self.path) as connection:
+            after = connection.execute("PRAGMA schema_version").fetchone()[0]
+        self.assertEqual(after, before)
+
     def test_verify_writable_names_missing_tables_and_passes_a_healthy_store(self) -> None:
         self.store.verify_writable()
         with sqlite3.connect(self.path) as connection:
