@@ -372,6 +372,34 @@ test("a missing contributor token is recovered with one status request", async (
   assert.equal(api.calls.length, 1);
 });
 
+test("a server-refused stale token is recovered instead of read as revocation", async () => {
+  const api = new SyncApiMock();
+  let statusCalls = 0;
+  let tokenFresh = false;
+  const submit = api.submitContributionEvents.bind(api);
+  api.submitContributionEvents = async (events, options) => {
+    if (!tokenFresh) {
+      throw Object.assign(new Error("capability expired"), {
+        code: "contribution_not_allowed",
+        status: 403,
+      });
+    }
+    return submit(events, options);
+  };
+  api.contributionStatus = async () => {
+    statusCalls += 1;
+    tokenFresh = true;
+    return structuredClone(api.status);
+  };
+  const sync = createSync(api);
+
+  const report = await sync.synchronizeNow(snapshot());
+
+  assert.equal(statusCalls, 1);
+  assert.equal(report.sent, 2);
+  assert.equal(sync.canContribute, true);
+});
+
 test("the drip reports batch progress without letting display break transfer", async () => {
   const api = new SyncApiMock();
   const sync = createSync(api);
