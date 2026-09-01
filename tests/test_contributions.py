@@ -929,7 +929,14 @@ class ContributionStoreTestCase(unittest.TestCase):
             payload="one",
         )
         self.assertIsNone(staged.progress_message_id)
-        self.store.set_push_progress_message(42, "client:s:3:1111111111111111", 777)
+        self.assertTrue(
+            self.store.set_push_progress_message(42, "client:s:3:1111111111111111", 777)
+        )
+        # Concurrent chunk handlers may each post a candidate; only the first
+        # adoption wins so the losers can delete their duplicate messages.
+        self.assertFalse(
+            self.store.set_push_progress_message(42, "client:s:3:1111111111111111", 888)
+        )
         repeated = self.store.stage_push_chunk(
             42,
             bundle_id="client:s:3:1111111111111111",
@@ -940,6 +947,60 @@ class ContributionStoreTestCase(unittest.TestCase):
             payload="one",
         )
         self.assertEqual(repeated.progress_message_id, 777)
+
+    def test_expired_partial_transfers_never_wedge_later_pushes(self) -> None:
+        self.approve()
+        self.store.submit_application(43, first_name="Hope")
+        self.store.decide_application(43, "approved", actor="admin")
+        digest = "ab" * 32
+        self.store.stage_push_chunk(
+            42,
+            bundle_id="client:s:9:abandoned00000ff",
+            index=1,
+            count=2,
+            encoding="j",
+            digest=digest,
+            payload="orphaned",
+        )
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("UPDATE contribution_push_bundles SET updated_at = 1")
+
+        # The expiry sweep runs inside every staging transaction; a stale
+        # bundle with staged chunks must clean up child-first instead of
+        # failing the foreign-key check and wedging all push intake.
+        completed = self.store.stage_push_chunk(
+            43,
+            bundle_id="client:s:1:fresh00000000000",
+            index=1,
+            count=1,
+            encoding="j",
+            digest=digest,
+            payload="fresh",
+        )
+        self.assertTrue(completed.complete)
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM contribution_push_bundles"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM contribution_push_chunks"
+                ).fetchone()[0],
+                0,
+            )
+        retried = self.store.stage_push_chunk(
+            42,
+            bundle_id="client:s:9:abandoned00000ff",
+            index=1,
+            count=2,
+            encoding="j",
+            digest=digest,
+            payload="orphaned",
+        )
+        self.assertEqual((retried.received, retried.chunk_count), (1, 2))
 
     def test_sync_receipt_reads_back_a_committed_synchronization(self) -> None:
         self.approve()

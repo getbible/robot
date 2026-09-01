@@ -15,6 +15,7 @@ digest-verified, and committed through the same atomic, replay-safe
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -101,6 +102,12 @@ _DISCLOSURE_TEXT = (
 )
 
 
+_REPLAYED_TEXT = (
+    "This contribution was already received; nothing was duplicated. "
+    "Pull inside the Mini App to see review progress."
+)
+
+
 class PushMessageError(ValueError):
     """A web_app_data payload is not a valid contribution push message."""
 
@@ -164,7 +171,7 @@ def decode_push_bundle(staged: PushChunkResult) -> dict[str, object]:
         raise PushMessageError("Push bundle digest verification failed.")
     try:
         envelope = json.loads(plaintext.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise PushMessageError("Push bundle is not valid JSON.") from error
     if not isinstance(envelope, dict) or set(envelope) != _ENVELOPE_FIELDS:
         raise PushMessageError("Push bundle does not match protocol version 1.")
@@ -209,7 +216,14 @@ async def contribution_push_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Consume one web_app_data push chunk from the contributor's private chat."""
+    """Consume one web_app_data push chunk from the contributor's private chat.
+
+    The service message is consumed on every path so contribution data never
+    lingers in the chat. A chunk that could not be staged (rate limiting, a
+    busy store) is not lost: the Mini App keeps the whole transfer durable
+    and resends it when no receipt appears, and a completed bundle whose
+    commit was interrupted is recovered the same way.
+    """
     message = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -218,51 +232,77 @@ async def contribution_push_message(
     web_app_data = getattr(message, "web_app_data", None)
     if web_app_data is None:
         return
-    await _consume_service_message(message)
-    if chat.type != ChatType.PRIVATE:
-        # Keyboard-button Mini Apps exist only in private chats; anything
-        # else is spoofed or malformed and is dropped after consumption.
-        return
+    try:
+        if chat.type != ChatType.PRIVATE:
+            # Keyboard-button Mini Apps exist only in private chats; anything
+            # else is spoofed or malformed and is consumed without processing.
+            return
+        await _process_push_chunk(update, context, chat.id, user.id, web_app_data)
+    finally:
+        await _consume_service_message(message)
+
+
+async def _process_push_chunk(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int,
+    web_app_data: object,
+) -> None:
     data = context.application.bot_data
     limiter = data.get(LIMITER_SLOT)
     if not isinstance(limiter, InboundRateLimiter):
         LOGGER.error("Contribution push intake has no inbound rate limiter")
-        await _notify(context, chat.id, _UNAVAILABLE_TEXT)
+        await _notify(context, chat_id, _UNAVAILABLE_TEXT)
         return
     if not await allow_command(update, context, limiter):
         return
     store = data.get(CONTRIBUTION_STORE_SLOT)
     if not isinstance(store, ContributionStore):
-        await _notify(context, chat.id, _UNAVAILABLE_TEXT)
+        await _notify(context, chat_id, _UNAVAILABLE_TEXT)
         return
 
     try:
-        chunk = parse_push_message(web_app_data.data)
+        chunk = parse_push_message(getattr(web_app_data, "data", None))
     except PushMessageError:
-        _audit_outcome(context, user.id, chat.id, outcome="unreadable")
-        await _notify(context, chat.id, _UNREADABLE_TEXT)
+        _audit_outcome(context, user_id, chat_id, outcome="unreadable")
+        await _notify(context, chat_id, _UNREADABLE_TEXT)
+        return
+
+    # A transfer whose receipt already exists was fully committed earlier;
+    # redelivered or resent chunks must not re-stage a ghost bundle that
+    # contradicts the confirmation the contributor already saw.
+    try:
+        receipt = await asyncio.to_thread(store.sync_receipt, user_id, chunk.bundle_id)
+    except (ContributionError, OSError, sqlite3.Error, RuntimeError):
+        receipt = None
+    if receipt is not None:
+        _audit_outcome(context, user_id, chat_id, outcome="replayed")
+        await _notify(context, chat_id, _REPLAYED_TEXT)
         return
 
     try:
-        staged = store.stage_push_chunk(
-            user.id,
-            bundle_id=chunk.bundle_id,
-            index=chunk.index,
-            count=chunk.count,
-            encoding=chunk.encoding,
-            digest=chunk.digest,
-            payload=chunk.payload,
+        staged = await asyncio.to_thread(
+            lambda: store.stage_push_chunk(
+                user_id,
+                bundle_id=chunk.bundle_id,
+                index=chunk.index,
+                count=chunk.count,
+                encoding=chunk.encoding,
+                digest=chunk.digest,
+                payload=chunk.payload,
+            )
         )
     except ContributionNotAllowed:
-        await _reply_not_allowed(context, chat.id, store, user.id)
+        await _reply_not_allowed(context, chat_id, store, user_id)
         return
     except ContributionError:
-        _audit_outcome(context, user.id, chat.id, outcome="invalid_chunk")
-        await _notify(context, chat.id, _UNREADABLE_TEXT)
+        _audit_outcome(context, user_id, chat_id, outcome="invalid_chunk")
+        await _notify(context, chat_id, _UNREADABLE_TEXT)
         return
     except (OSError, sqlite3.Error, RuntimeError):
         LOGGER.warning("A push chunk could not be staged", exc_info=True)
-        await _notify(context, chat.id, _UNAVAILABLE_TEXT)
+        await _notify(context, chat_id, _UNAVAILABLE_TEXT)
         return
 
     if not staged.complete:
@@ -272,24 +312,34 @@ async def contribution_push_message(
         )
         message_id = await _show_progress(
             context,
-            chat.id,
+            chat_id,
             staged.progress_message_id,
             text,
         )
         if message_id is not None and message_id != staged.progress_message_id:
+            adopted = False
             try:
-                store.set_push_progress_message(user.id, chunk.bundle_id, message_id)
+                adopted = await asyncio.to_thread(
+                    store.set_push_progress_message,
+                    user_id,
+                    chunk.bundle_id,
+                    message_id,
+                )
             except (ContributionError, OSError, sqlite3.Error, RuntimeError):
                 LOGGER.info("Push progress message could not be remembered")
+            if not adopted and staged.progress_message_id is None:
+                # A concurrent chunk handler adopted its own message first;
+                # remove this duplicate instead of littering the chat.
+                await _delete_progress(context, chat_id, message_id)
         return
 
     try:
-        envelope = decode_push_bundle(staged)
+        envelope = await asyncio.to_thread(decode_push_bundle, staged)
     except PushMessageError:
-        _audit_outcome(context, user.id, chat.id, outcome="undecodable")
+        _audit_outcome(context, user_id, chat_id, outcome="undecodable")
         await _finalize_progress(
             context,
-            chat.id,
+            chat_id,
             staged.progress_message_id,
             _UNREADABLE_TEXT,
         )
@@ -297,29 +347,34 @@ async def contribution_push_message(
     if envelope["sync_id"] != chunk.bundle_id:
         # The transport bundle identity is the envelope's sync identity; a
         # mismatch means the payload does not belong to this transfer.
-        _audit_outcome(context, user.id, chat.id, outcome="identity_mismatch")
+        _audit_outcome(context, user_id, chat_id, outcome="identity_mismatch")
         await _finalize_progress(
             context,
-            chat.id,
+            chat_id,
             staged.progress_message_id,
             _UNREADABLE_TEXT,
         )
         return
 
     try:
-        result = store.synchronize_snapshot(
-            user.id,
-            sync_id=str(envelope["sync_id"]),
-            client_id=str(envelope["client_id"]),
-            snapshot=cast("Mapping[str, object]", envelope["snapshot"]),
-            operations=cast("Sequence[Mapping[str, object]]", envelope["operations"]),
-            disclosure_acknowledged=bool(envelope["disclosure_acknowledged"]),
+        result = await asyncio.to_thread(
+            lambda: store.synchronize_snapshot(
+                user_id,
+                sync_id=str(envelope["sync_id"]),
+                client_id=str(envelope["client_id"]),
+                snapshot=cast("Mapping[str, object]", envelope["snapshot"]),
+                operations=cast(
+                    "Sequence[Mapping[str, object]]",
+                    envelope["operations"],
+                ),
+                disclosure_acknowledged=bool(envelope["disclosure_acknowledged"]),
+            )
         )
     except ContributionIdempotencyConflict:
-        _audit_outcome(context, user.id, chat.id, outcome="idempotency_conflict")
+        _audit_outcome(context, user_id, chat_id, outcome="idempotency_conflict")
         await _finalize_progress(
             context,
-            chat.id,
+            chat_id,
             staged.progress_message_id,
             _CONFLICT_TEXT,
         )
@@ -327,17 +382,17 @@ async def contribution_push_message(
     except ContributionNotAllowed:
         await _reply_not_allowed(
             context,
-            chat.id,
+            chat_id,
             store,
-            user.id,
+            user_id,
             progress_message_id=staged.progress_message_id,
         )
         return
-    except ContributionError:
-        _audit_outcome(context, user.id, chat.id, outcome="invalid_contribution")
+    except (ContributionError, RecursionError):
+        _audit_outcome(context, user_id, chat_id, outcome="invalid_contribution")
         await _finalize_progress(
             context,
-            chat.id,
+            chat_id,
             staged.progress_message_id,
             _INVALID_TEXT,
         )
@@ -346,7 +401,7 @@ async def contribution_push_message(
         LOGGER.warning("A pushed contribution could not be committed", exc_info=True)
         await _finalize_progress(
             context,
-            chat.id,
+            chat_id,
             staged.progress_message_id,
             _UNAVAILABLE_TEXT,
         )
@@ -354,13 +409,13 @@ async def contribution_push_message(
 
     _audit_outcome(
         context,
-        user.id,
-        chat.id,
+        user_id,
+        chat_id,
         outcome="replayed" if result.replayed_sync else "accepted",
     )
     await _finalize_progress(
         context,
-        chat.id,
+        chat_id,
         staged.progress_message_id,
         _confirmation_text(result),
     )
@@ -368,10 +423,7 @@ async def contribution_push_message(
 
 def _confirmation_text(result: SnapshotSyncResult) -> str:
     if result.replayed_sync:
-        return (
-            "This contribution was already received; nothing was duplicated. "
-            "Pull inside the Mini App to see review progress."
-        )
+        return _REPLAYED_TEXT
     if result.accepted == 0:
         return (
             "Contribution received. Everything was already up to date, so no "
@@ -396,7 +448,7 @@ async def _reply_not_allowed(
     """Distinguish a missing disclosure from missing contributor authority."""
     disclosure_pending = False
     try:
-        application = store.application_for(user_id)
+        application = await asyncio.to_thread(store.application_for, user_id)
         disclosure_pending = (
             application is not None
             and application.state == "approved"
@@ -453,6 +505,11 @@ async def _notify(
     return int(message_id) if isinstance(message_id, int) else None
 
 
+def _edit_was_redundant(error: TelegramError) -> bool:
+    """Telegram rejects edits whose text is byte-identical; that is success."""
+    return "not modified" in str(error).casefold()
+
+
 async def _show_progress(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
@@ -467,7 +524,11 @@ async def _show_progress(
                 message_id=progress_message_id,
                 text=text,
             )
-        except TelegramError:
+        except TelegramError as error:
+            if _edit_was_redundant(error):
+                # An idempotently redelivered chunk reproduces the identical
+                # progress text; the existing message already says it.
+                return progress_message_id
             LOGGER.info("A push progress message could not be edited")
         else:
             return progress_message_id
@@ -488,7 +549,9 @@ async def _finalize_progress(
                 message_id=progress_message_id,
                 text=text,
             )
-        except TelegramError:
+        except TelegramError as error:
+            if _edit_was_redundant(error):
+                return
             LOGGER.info("A push outcome message could not be edited")
         else:
             return

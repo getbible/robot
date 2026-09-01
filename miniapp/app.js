@@ -884,30 +884,45 @@ async function confirmPendingPushReceipt() {
   return false;
 }
 
-async function continuePushTransfer(generation = sessionGeneration) {
-  const outbox = contributionSync?.outbox;
-  if (!outbox) {
-    return;
+function continuePushTransfer(generation = sessionGeneration) {
+  if (contributionActionTask || !contributionSync?.outbox) {
+    // A running Push or Pull owns the outbox; auto-continue must not race
+    // it into handing Telegram the same or a skipped chunk.
+    return contributionActionTask ?? Promise.resolve();
   }
-  const confirmed = await confirmPendingPushReceipt();
-  if (confirmed || generation !== sessionGeneration) {
-    return;
-  }
-  if (outbox.sent_all || !bridge.pushLaunch || outbox.attempt_index === 0) {
-    // A fully-sent transfer waits for its receipt (Push restarts it), and an
-    // unstarted one waits for the contributor's explicit Push tap.
-    if (outbox.sent_all) {
-      setContributionPresentation(
-        "pending",
-        "bookmarks.contribution_push_awaiting",
-      );
+  const task = (async () => {
+    // Yield once so the shared task reference is installed before cleanup.
+    await Promise.resolve();
+    const outbox = contributionSync?.outbox;
+    if (!outbox) {
+      return;
     }
-    return;
-  }
-  // Mid-transfer in a push launch: the contributor already confirmed this
-  // bundle, so hand Telegram the next chunk without another tap. sendData
-  // closes the Mini App; the bot's progress message guides the next reopen.
-  await sendNextPushMessage();
+    const confirmed = await confirmPendingPushReceipt();
+    if (confirmed || generation !== sessionGeneration) {
+      return;
+    }
+    if (outbox.sent_all || !bridge.pushLaunch || outbox.attempt_index === 0) {
+      // A fully-sent transfer waits for its receipt (Push restarts it), and
+      // an unstarted one waits for the contributor's explicit Push tap.
+      if (outbox.sent_all) {
+        setContributionPresentation(
+          "pending",
+          "bookmarks.contribution_push_awaiting",
+        );
+      }
+      return;
+    }
+    // Mid-transfer in a push launch: the contributor already confirmed this
+    // bundle, so hand Telegram the next chunk without another tap. sendData
+    // closes the Mini App; the bot's progress message guides the next reopen.
+    await sendNextPushMessage();
+  })().finally(() => {
+    if (contributionActionTask === task) {
+      contributionActionTask = null;
+    }
+  });
+  contributionActionTask = task;
+  return task;
 }
 
 async function sendNextPushMessage() {
@@ -998,7 +1013,17 @@ async function pushContribution() {
       if (generation !== sessionGeneration) {
         return null;
       }
-      handleContributionSyncError(error);
+      if (error instanceof RangeError) {
+        // The transfer capacity (64 sendData chunks) is below the envelope
+        // bound only for pathological uncompressible contributions; name the
+        // way out instead of a generic local error.
+        setContributionPresentation(
+          "error",
+          "bookmarks.contribution_push_too_large",
+        );
+      } else {
+        handleContributionSyncError(error);
+      }
       bridge.notifyError();
       return null;
     } finally {

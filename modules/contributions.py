@@ -873,19 +873,24 @@ class ContributionStore:
         cutoff = now - PUSH_BUNDLE_TTL_SECONDS * 1_000_000_000
         with self._guard, self._transaction() as connection:
             self._require_contributor_locked(connection, identity, require_disclosure=False)
-            connection.execute(
-                "DELETE FROM contribution_push_bundles WHERE updated_at <= ?",
-                (cutoff,),
-            )
+            # Expire abandoned transfers child-first: the chunk table references
+            # the bundle table under enforced foreign keys, so the parent delete
+            # would otherwise fail forever once one stale bundle exists.
             connection.execute(
                 """
                 DELETE FROM contribution_push_chunks
-                WHERE NOT EXISTS (
+                WHERE EXISTS (
                     SELECT 1 FROM contribution_push_bundles AS bundle
                     WHERE bundle.contributor_id = contribution_push_chunks.contributor_id
                       AND bundle.bundle_id = contribution_push_chunks.bundle_id
+                      AND bundle.updated_at <= ?
                 )
-                """
+                """,
+                (cutoff,),
+            )
+            connection.execute(
+                "DELETE FROM contribution_push_bundles WHERE updated_at <= ?",
+                (cutoff,),
             )
             existing = connection.execute(
                 """
@@ -1049,8 +1054,13 @@ class ContributionStore:
         contributor_id: int,
         bundle_id: str,
         message_id: int,
-    ) -> None:
-        """Remember the one chat message that reports this bundle's progress."""
+    ) -> bool:
+        """Adopt the one chat message that reports this bundle's progress.
+
+        Concurrent chunk handlers can each post a candidate message before any
+        adoption lands; only the first adoption wins so the losers can delete
+        their duplicates instead of littering the private chat.
+        """
         identity = _telegram_user_id(contributor_id)
         checked_bundle_id = _safe_id(bundle_id, "bundle_id")
         checked_message_id = _positive_integer(
@@ -1059,14 +1069,16 @@ class ContributionStore:
             9_007_199_254_740_991,
         )
         with self._guard, self._transaction() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE contribution_push_bundles
                 SET progress_message_id = ?, updated_at = ?
                 WHERE contributor_id = ? AND bundle_id = ?
+                  AND progress_message_id IS NULL
                 """,
                 (checked_message_id, time.time_ns(), identity, checked_bundle_id),
             )
+            return cursor.rowcount == 1
 
     def sync_receipt(
         self,
