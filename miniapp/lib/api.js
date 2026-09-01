@@ -578,6 +578,11 @@ function retryAfterSeconds(response, payload) {
 }
 
 function normalizeRetryAfterSeconds(value) {
+  // Number(null) and Number("") are 0, which would forge a server-issued
+  // "wait zero seconds" out of an error that carried no Retry-After at all.
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
   const seconds = Number(value);
   if (!Number.isFinite(seconds) || seconds < 0) {
     return null;

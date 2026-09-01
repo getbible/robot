@@ -6,6 +6,14 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Search-style contribution synchronization
 
+- An explicit **Sync now** tap now always performs a real attempt. The
+  client's exponential failure backoff (which grows to five minutes) paces
+  only automatic retries: previously it also blocked manual taps and showed
+  "the server asked us to wait" even though no request had been sent and the
+  server had said nothing — the loop behind syncs that appeared permanently
+  rate-limited while the application log showed no sync request at all. Only
+  a genuine server `Retry-After` still defers a tap, and a request that died
+  on the wire is now reported honestly as an interrupted connection.
 - Both Mini App credentials are now long-lived, ending forced hourly-scale
   re-authentication: the authenticated session's default absolute lifetime is
   ninety days (`MINI_APP_SESSION_TTL_SECONDS` default `7776000`, new explicit
