@@ -5,35 +5,16 @@ from __future__ import annotations
 import logging
 import sqlite3
 
-from telegram import KeyboardButton, ReplyKeyboardMarkup, Update, WebAppInfo
+from telegram import Update
 from telegram.constants import ChatType
 from telegram.ext import ContextTypes
 
-from config import Settings
-
-from .commands import LIMITER_SLOT, SETTINGS_SLOT, allow_command
+from .commands import LIMITER_SLOT, allow_command
 from .contributions import ContributionError, ContributionStore
 from .rate_limit import InboundRateLimiter
 
 LOGGER = logging.getLogger(__name__)
 CONTRIBUTION_STORE_SLOT = "contribution_store"
-# The reply-keyboard label is part of the push protocol surface: only a Mini
-# App launched from this keyboard button can call Telegram.WebApp.sendData(),
-# and intake progress messages tell the contributor to tap it again.
-PUSH_KEYBOARD_BUTTON_TEXT = "Push contribution"
-PUSH_LAUNCH_QUERY = "context=push"
-
-
-def contribution_push_keyboard(settings: Settings) -> ReplyKeyboardMarkup | None:
-    """Build the persistent private-chat keyboard that launches push mode."""
-    if not settings.mini_app_enabled or not settings.mini_app_public_url:
-        return None
-    url = f"{settings.mini_app_public_url.rstrip('/')}/?{PUSH_LAUNCH_QUERY}"
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton(text=PUSH_KEYBOARD_BUTTON_TEXT, web_app=WebAppInfo(url=url))]],
-        resize_keyboard=True,
-        is_persistent=True,
-    )
 
 
 async def contributor_command(
@@ -85,24 +66,11 @@ async def contributor_command(
         )
         return
 
-    keyboard: ReplyKeyboardMarkup | None = None
     if application.state == "approved":
-        settings = data.get(SETTINGS_SLOT)
-        if isinstance(settings, Settings):
-            keyboard = contribution_push_keyboard(settings)
         text = (
-            "You are enrolled as a GetBible topic contributor. Tap the "
-            f"“{PUSH_KEYBOARD_BUTTON_TEXT}” keyboard button below to send your "
-            "topic and verse-tag changes for review, and use Pull in the Mini "
-            "App to receive the reviewed catalogue. Approved changes become "
+            "You are enrolled as a GetBible topic contributor. Your topic and "
+            "verse-tag changes are being reviewed, and approved changes become "
             "part of the core catalogue for the rest of the world using the app."
-            if keyboard is not None
-            else (
-                "You are enrolled as a GetBible topic contributor. Your topic "
-                "and verse-tag changes are reviewed after you push them, and "
-                "approved changes become part of the core catalogue for the "
-                "rest of the world using the app."
-            )
         )
     elif application.state == "pending":
         text = (
@@ -129,7 +97,4 @@ async def contributor_command(
             "Your GetBible contributor enrolment is not currently active. Your "
             "personal topics and verse markings remain available on your devices."
         )
-    if keyboard is not None:
-        await message.reply_text(text, reply_markup=keyboard)
-    else:
-        await message.reply_text(text)
+    await message.reply_text(text)

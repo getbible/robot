@@ -57,7 +57,6 @@ import { GlobalBookmarkPreferences } from "./lib/global-bookmark-preferences.js"
 import { miniAppInstanceScope } from "./lib/instance-scope.js";
 import { restoreBookmarkBackup } from "./lib/bookmark-restore.js";
 import { TelegramBookmarkStorage } from "./lib/telegram-bookmark-storage.js";
-import { buildPushMessages } from "./lib/contribution-push.js";
 import { TelegramBridge } from "./lib/telegram.js";
 import {
   clearBoundSession,
@@ -83,15 +82,23 @@ let globalBookmarkCatalogRetryNotBefore = 0;
 let globalBookmarkCatalogRetryDelayMs = 2_000;
 let contributionSync = null;
 let contributionOpenTask = null;
-let contributionStatusTask = null;
-let contributionActionTask = null;
+let contributionStatusRefreshTask = null;
+let contributionManualSyncTask = null;
+let contributionStatusPollTimer = null;
+let contributionStatusPollTimerDueAt = 0;
 let contributionStatus = null;
 let verifiedPublishedContributionTopics = new Map();
 let pendingContributionOutcomeRefresh = null;
 let contributionOutcomeRefreshVersion = 0;
+let contributionLastStatusRefreshAt = 0;
 let contributionPresentationState = "idle";
 let contributionPresentationMessageKey = "bookmarks.contribution_sync_idle";
 let contributionPresentationMessageValues = {};
+let contributionRetryNotBefore = 0;
+let contributionRetryDelayMs = 2_000;
+const CONTRIBUTION_STATUS_POLL_MS = 60_000;
+const CONTRIBUTION_STATUS_STALE_MS = 15_000;
+const contributionRetryDelays = new WeakMap();
 const globalBookmarkCatalogRetryDelays = new WeakMap();
 let api = null;
 let scriptureExcerpts = null;
@@ -339,8 +346,7 @@ const elements = mapElements({
   clearRecentBookmarkTopics: "clear-recent-bookmark-topics",
   contributorTopicGuidance: "contributor-topic-guidance",
   contributorSync: "contributor-sync",
-  contributorPushButton: "contributor-push-button",
-  contributorPullButton: "contributor-pull-button",
+  contributorSyncButton: "contributor-sync-button",
   contributorSyncDetails: "contributor-sync-details",
   contributorSyncStatus: "contributor-sync-status",
   closeBookmarkPopover: "close-bookmark-popover",
@@ -525,14 +531,6 @@ async function boot() {
       state.bible.entryReference = entrypoint.bible_reference;
     }
     setRoute(entrypoint.route);
-    if (bridge.pushLaunch) {
-      // The contributor reply-keyboard button opened this instance; it is the
-      // only launch surface whose sendData reaches the bot, so land directly
-      // on the contribution panel.
-      clearBookmarkNavigation();
-      setRoute("bookmarks");
-      elements.contributorManager.open = true;
-    }
     if (entrypoint.search_query) {
       elements.searchQuery.value = entrypoint.search_query;
       await runSearch(entrypoint.search_query);
@@ -574,7 +572,7 @@ async function initializeContributionSync() {
         { detailsAvailable: reviewDetailsAvailable },
       );
       // Publication is a separate read model. Refresh it opportunistically,
-      // but never couple its availability to the push transport.
+      // but never couple its availability to contribution transport state.
       void refreshLiveGlobalBookmarkCatalog().catch((error) => {
         if (
           generation === sessionGeneration &&
@@ -584,22 +582,39 @@ async function initializeContributionSync() {
         }
       });
     }
-    if (contributionSync?.outbox) {
-      // A durable transfer survived the last launch. Settle it against the
-      // server receipt, and in a push launch continue sending automatically.
-      await continuePushTransfer(generation);
-      if (generation !== sessionGeneration) {
-        return;
-      }
-    }
     updateContributorPresentation();
   } catch (error) {
     if (generation !== sessionGeneration) {
       return;
     }
+    if (contributionFailureIsRetryable(error)) {
+      recordContributionRetryDeadline(error);
+    }
     handleContributionSyncError(error);
     updateContributorPresentation();
+  } finally {
+    if (generation === sessionGeneration) {
+      scheduleContributionStatusPoll();
+    }
   }
+}
+
+function contributionStatusShouldPoll(status = contributionStatus) {
+  return Boolean(
+    status?.enabled &&
+    (
+      status.can_contribute ||
+      status.state === "pending" ||
+      contributionAuthorityUnknown(status)
+    )
+  );
+}
+
+function contributionApplicantCanCheck(status = contributionStatus) {
+  return Boolean(
+    status?.enabled &&
+    ["pending", "deferred"].includes(status.state)
+  );
 }
 
 function contributionAuthorityUnknown(status = contributionStatus) {
@@ -615,7 +630,7 @@ function contributionControlVisible(status = contributionStatus) {
     return false;
   }
   if (status.can_contribute) {
-    return true;
+    return api?.contributionTransportReady === true;
   }
   return Boolean(
     contributionAuthorityUnknown(status) ||
@@ -627,7 +642,11 @@ async function ensureContributionSync(initialStatus) {
   if (contributionSync) {
     return contributionSync;
   }
-  if (!initialStatus?.enabled || !initialStatus.can_contribute) {
+  if (
+    !initialStatus?.enabled ||
+    !initialStatus.can_contribute ||
+    api?.contributionTransportReady !== true
+  ) {
     return null;
   }
   if (contributionOpenTask) {
@@ -636,6 +655,7 @@ async function ensureContributionSync(initialStatus) {
   const contributionOptions = {
     scope: bookmarkStorageScopeValue,
     instanceScope,
+    api,
     initialStatus,
     coreTopics: globalBookmarkCatalog.topicDefinitions(),
     coreTopicIds: globalBookmarkCatalog
@@ -688,7 +708,8 @@ function updateContributorPresentation() {
   const visible = Boolean(
     contributionStatus?.enabled &&
     contributionStatus.can_contribute &&
-    contributionSync?.canContribute,
+    contributionSync?.canContribute &&
+    api?.contributionTransportReady,
   );
   elements.contributorManager.hidden = !visible;
   elements.contributorTopicGuidance.hidden = !visible;
@@ -698,7 +719,7 @@ function updateContributorPresentation() {
   }
   const messageKey = contributionSync?.persistenceFailed
     ? "bookmarks.contribution_storage_attention"
-    : contributionSync?.outbox?.sent_all
+    : contributionSync?.recovering
       ? "bookmarks.contribution_sync_attention"
       : "bookmarks.contribution_english_guidance";
   elements.contributorTopicGuidance.textContent = i18n.t(
@@ -739,20 +760,15 @@ function updateContributorPresentation() {
         { reference: requestReference },
       )}`
     : statusMessage;
-  elements.contributorPushButton.hidden = passiveApplication;
-  elements.contributorPushButton.disabled =
+  elements.contributorSyncButton.hidden = passiveApplication;
+  elements.contributorSyncButton.disabled =
     passiveApplication || stateName === "syncing";
-  elements.contributorPushButton.textContent = i18n.t(
-    waitingForApproval
-      ? "bookmarks.contribution_check_status"
-      : "bookmarks.contribution_push",
-  );
-  elements.contributorPullButton.hidden = passiveApplication ||
-    waitingForApproval;
-  elements.contributorPullButton.disabled =
-    passiveApplication || stateName === "syncing";
-  elements.contributorPullButton.textContent = i18n.t(
-    "bookmarks.contribution_pull",
+  elements.contributorSyncButton.textContent = i18n.t(
+    stateName === "syncing"
+      ? "bookmarks.contribution_syncing"
+      : waitingForApproval
+        ? "bookmarks.contribution_check_status"
+        : "bookmarks.contribution_sync_now",
   );
   const details = contributionOutcomeDetails(contributionStatus?.summary);
   elements.contributorSyncDetails.hidden = details.length === 0;
@@ -813,6 +829,358 @@ function contributionOutcomeGroup(labelKey, value, outcomes) {
     : "";
 }
 
+function scheduleContributionStatusPoll(delay = CONTRIBUTION_STATUS_POLL_MS) {
+  if (!contributionStatusShouldPoll()) {
+    if (contributionStatusPollTimer !== null) {
+      window.clearTimeout(contributionStatusPollTimer);
+      contributionStatusPollTimer = null;
+    }
+    contributionStatusPollTimerDueAt = 0;
+    return;
+  }
+  const now = Date.now();
+  const retryRemaining = contributionRetryRemaining();
+  const authorityRecovery = contributionAuthorityUnknown() && retryRemaining > 0;
+  const normalizedDelay = Math.max(
+    authorityRecovery ? 1_000 : CONTRIBUTION_STATUS_POLL_MS,
+    Number.isFinite(delay) ? delay : CONTRIBUTION_STATUS_POLL_MS,
+  );
+  // A denied upload whose authority recheck failed must retry at the server's
+  // not-before deadline, not be pushed back to the ordinary one-minute poll by
+  // a later presentation update. Other polls may never bypass that deadline.
+  const dueAt = authorityRecovery
+    ? Math.max(now + 1_000, contributionRetryNotBefore)
+    : Math.max(now + normalizedDelay, contributionRetryNotBefore);
+  if (
+    contributionStatusPollTimer !== null &&
+    contributionStatusPollTimerDueAt >= contributionRetryNotBefore &&
+    contributionStatusPollTimerDueAt <= dueAt
+  ) {
+    return;
+  }
+  if (contributionStatusPollTimer !== null) {
+    window.clearTimeout(contributionStatusPollTimer);
+  }
+  contributionStatusPollTimerDueAt = dueAt;
+  contributionStatusPollTimer = window.setTimeout(() => {
+    contributionStatusPollTimer = null;
+    contributionStatusPollTimerDueAt = 0;
+    void refreshContributionStatus({
+      // A denied upload deliberately leaves an approved-but-suspended local
+      // authority marker. Its short recovery poll must reach the server even
+      // when the successful pre-upload status check is still inside the
+      // ordinary freshness window.
+      force: contributionAuthorityUnknown(),
+      allowPendingPoll: true,
+      allowAuthorityRecovery: true,
+    })
+      .catch(() => undefined);
+  }, Math.max(1, dueAt - now));
+}
+
+async function refreshContributionStatus({
+  force = false,
+  refreshCatalog = true,
+  allowApplicantCheck = false,
+  allowPendingPoll = false,
+  allowAuthorityRecovery = false,
+} = {}) {
+  const generation = sessionGeneration;
+  if (
+    (
+      !contributionStatusShouldPoll() &&
+      !(allowApplicantCheck && contributionApplicantCanCheck()) &&
+      !(allowAuthorityRecovery && contributionAuthorityUnknown())
+    ) ||
+    !api
+  ) {
+    return contributionStatus;
+  }
+  if (contributionOpenTask) {
+    await contributionOpenTask.catch(() => null);
+    if (generation !== sessionGeneration) {
+      return null;
+    }
+  }
+  if (
+    contributionStatus?.state === "pending" &&
+    !contributionStatus?.can_contribute &&
+    !allowPendingPoll &&
+    !allowApplicantCheck
+  ) {
+    return contributionStatus;
+  }
+  if (contributionAuthorityUnknown() && !allowAuthorityRecovery) {
+    return contributionStatus;
+  }
+  const retryRemaining = contributionRetryRemaining();
+  if (retryRemaining > 0) {
+    scheduleContributionStatusPoll(retryRemaining);
+    return contributionStatus;
+  }
+  const now = Date.now();
+  if (
+    !force &&
+    now - contributionLastStatusRefreshAt < CONTRIBUTION_STATUS_STALE_MS
+  ) {
+    scheduleContributionStatusPoll();
+    return contributionStatus;
+  }
+  if (contributionStatusRefreshTask) {
+    return contributionStatusRefreshTask;
+  }
+  let statusRetryDelay = null;
+  const refreshTask = (async () => {
+    const previousCanContribute = Boolean(contributionStatus?.can_contribute);
+    const hadContributionSync = Boolean(contributionSync);
+    let status = contributionSync
+      ? await contributionSync.refreshStatus()
+      : normalizeContributionStatus(await api.contributionStatus());
+    if (generation !== sessionGeneration) {
+      return null;
+    }
+    contributionLastStatusRefreshAt = Date.now();
+    contributionStatus = status;
+    contributionRetryNotBefore = 0;
+    contributionRetryDelayMs = 2_000;
+    const reviewDetailsAvailable = contributionSync
+      ? contributionSync.reviewDetailsAvailable
+      : contributionReviewDetailsAvailable(status);
+    if (status.can_contribute) {
+      await ensureContributionSync(status);
+      if (generation !== sessionGeneration) {
+        return null;
+      }
+      status = contributionStatus ?? status;
+      if (refreshCatalog) {
+        stageContributionTopicOutcomes(status.topics, {
+          detailsAvailable: reviewDetailsAvailable,
+        });
+        void refreshLiveGlobalBookmarkCatalog().catch((error) => {
+          if (
+            generation === sessionGeneration &&
+            contributionFailureIsRetryable(error)
+          ) {
+            scheduleGlobalBookmarkCatalogRetry(error);
+          }
+        });
+      }
+      if (!["syncing", "success"].includes(contributionPresentationState)) {
+        setContributionPresentation(
+          "idle",
+          "bookmarks.contribution_sync_idle",
+        );
+      }
+    } else if (["pending", "deferred"].includes(status.state)) {
+      setContributionPresentation(
+        "pending",
+        status.state === "deferred"
+          ? "bookmarks.contribution_application_deferred"
+          : "bookmarks.contribution_sync_pending",
+      );
+    }
+    if (
+      !status.can_contribute &&
+      refreshCatalog &&
+      (
+        (status.topics?.length ?? 0) > 0 ||
+        Object.keys(
+          globalBookmarkPreferences?.contributionTopicMappings ?? {},
+        ).length > 0
+      )
+    ) {
+      stageContributionTopicOutcomes(status.topics, {
+        detailsAvailable: reviewDetailsAvailable,
+      });
+      void refreshLiveGlobalBookmarkCatalog().catch((error) => {
+        if (
+          generation === sessionGeneration &&
+          contributionFailureIsRetryable(error)
+        ) {
+          scheduleGlobalBookmarkCatalogRetry(error);
+        }
+      });
+    }
+    if (
+      hadContributionSync &&
+      previousCanContribute !== Boolean(status.can_contribute)
+    ) {
+      renderContributionMarkers();
+    }
+    updateContributorPresentation();
+    return status;
+  })().catch((error) => {
+    if (generation !== sessionGeneration) {
+      return null;
+    }
+    if (contributionFailureIsRetryable(error)) {
+      statusRetryDelay = recordContributionRetryDeadline(error);
+    }
+    handleContributionSyncError(error);
+    throw error;
+  }).finally(() => {
+    if (contributionStatusRefreshTask === refreshTask) {
+      contributionStatusRefreshTask = null;
+    }
+    if (generation === sessionGeneration) {
+      scheduleContributionStatusPoll(
+        statusRetryDelay ?? CONTRIBUTION_STATUS_POLL_MS,
+      );
+    }
+  });
+  contributionStatusRefreshTask = refreshTask;
+  return refreshTask;
+}
+
+async function synchronizeContributionsNow() {
+  if (
+    contributionManualSyncTask ||
+    !contributionControlVisible() ||
+    ["rejected", "revoked"].includes(contributionStatus?.state)
+  ) {
+    return contributionManualSyncTask;
+  }
+  const generation = sessionGeneration;
+  const manualTask = (async () => {
+    setContributionPresentation(
+      "syncing",
+      "bookmarks.contribution_syncing",
+    );
+    let result = null;
+    let statusRetryDelay = null;
+    try {
+      if (!cancelContributionRetry({ respectAuthority: true })) {
+        setContributionPresentation(
+          "pending",
+          "bookmarks.contribution_sync_retry_wait",
+        );
+        return null;
+      }
+      const authorityCheck = contributionAuthorityUnknown();
+      const applicantCheck = contributionApplicantCanCheck() || authorityCheck;
+      if (applicantCheck) {
+        await refreshContributionStatus({
+          force: true,
+          refreshCatalog: false,
+          allowApplicantCheck: true,
+          allowAuthorityRecovery: authorityCheck,
+        });
+        if (generation !== sessionGeneration) {
+          return null;
+        }
+        if (!contributionStatus?.can_contribute) {
+          return null;
+        }
+      }
+      if (
+        !contributionSync?.canContribute ||
+        api?.contributionTransportReady !== true
+      ) {
+        setContributionPresentation(
+          "pending",
+          contributionApplicationMessageKey(contributionStatus?.state),
+        );
+        return null;
+      }
+      if (contributionSync.disclosureRequired) {
+        // Consent is carried in the same atomic sync envelope. Showing the
+        // disclosure here must not introduce a preliminary status write or a
+        // second upload request.
+        await bridge.alert(i18n.t("bookmarks.contribution_disclosure"));
+        if (generation !== sessionGeneration) {
+          return null;
+        }
+      }
+      result = await contributionSync.synchronizeNow(
+        bookmarkStore.snapshot(),
+        { disclosureAcknowledged: contributionSync.disclosureRequired },
+      );
+      if (generation !== sessionGeneration) {
+        return null;
+      }
+      contributionStatus = result.status;
+      stageContributionTopicOutcomes(result.topic_outcomes, {
+        detailsAvailable: result.review_details_available === true,
+      });
+      const inactive = !result.status.can_contribute
+        ? adoptContributionAuthorityLoss(result.status)
+        : null;
+      if (inactive) {
+        bridge.notifyError();
+        return null;
+      }
+      contributionRetryDelayMs = 2_000;
+      if (result.pending > 0) {
+        setContributionPresentation(
+          "pending",
+          result.pending === 1
+            ? "bookmarks.contribution_sync_waiting_one"
+            : "bookmarks.contribution_sync_waiting_other",
+          { count: result.pending },
+        );
+      } else if (result.sent > 0) {
+        setContributionPresentation(
+          "success",
+          result.sent === 1
+            ? "bookmarks.contribution_sync_sent_one"
+            : "bookmarks.contribution_sync_sent_other",
+          { count: result.sent },
+        );
+      } else {
+        setContributionPresentation(
+          "success",
+          "bookmarks.contribution_sync_complete",
+        );
+      }
+      bridge.notifySuccess();
+      return result;
+    } catch (error) {
+      if (generation !== sessionGeneration) {
+        return null;
+      }
+      const inactiveStatus = result?.status && !result.status.can_contribute
+        ? result.status
+        : contributionSync && !contributionSync.canContribute
+          ? contributionSync.status
+          : null;
+      const inactive = inactiveStatus
+        ? adoptContributionAuthorityLoss(inactiveStatus)
+        : null;
+      if (inactive) {
+        setContributionPresentation(inactive.state, inactive.messageKey);
+        renderContributionMarkers();
+      } else {
+        handleContributionSyncError(error);
+      }
+      bridge.notifyError();
+      if (contributionFailureIsRetryable(error)) {
+        if (!inactive) {
+          statusRetryDelay = recordContributionRetryDeadline(error);
+        }
+      }
+      return null;
+    } finally {
+      if (generation === sessionGeneration) {
+        const retryRemaining = contributionRetryRemaining();
+        scheduleContributionStatusPoll(
+          retryRemaining > 0
+            ? retryRemaining
+            : statusRetryDelay ?? CONTRIBUTION_STATUS_POLL_MS,
+        );
+      }
+    }
+  })().finally(() => {
+    if (contributionManualSyncTask === manualTask) {
+      contributionManualSyncTask = null;
+    }
+    if (generation === sessionGeneration) {
+      updateContributorPresentation();
+    }
+  });
+  contributionManualSyncTask = manualTask;
+  return manualTask;
+}
+
 function contributionInactivePresentation(status) {
   const stateName = status?.state;
   return {
@@ -825,273 +1193,17 @@ function contributionInactivePresentation(status) {
   };
 }
 
-async function loadContributionStatus() {
-  if (!api || !contributionStatus?.enabled) {
-    return contributionStatus;
+function adoptContributionAuthorityLoss(status = contributionSync?.status) {
+  if (!status || status.can_contribute) {
+    return null;
   }
-  if (contributionStatusTask) {
-    return contributionStatusTask;
-  }
-  const generation = sessionGeneration;
-  const task = (async () => {
-    const status = normalizeContributionStatus(await api.contributionStatus());
-    if (generation !== sessionGeneration) {
-      return null;
-    }
-    contributionStatus = status;
-    if (contributionSync) {
-      await contributionSync.seedStatus(status);
-    } else if (status.can_contribute) {
-      await ensureContributionSync(status);
-    }
-    if (generation !== sessionGeneration) {
-      return null;
-    }
-    stageContributionTopicOutcomes(status.topics, {
-      detailsAvailable: contributionReviewDetailsAvailable(status),
-    });
-    renderContributionMarkers();
-    updateContributorPresentation();
-    return status;
-  })().finally(() => {
-    if (contributionStatusTask === task) {
-      contributionStatusTask = null;
-    }
-  });
-  contributionStatusTask = task;
-  return task;
-}
-
-async function confirmPendingPushReceipt() {
-  const outbox = contributionSync?.outbox;
-  if (!outbox || !api) {
-    return false;
-  }
-  try {
-    const payload = await api.contributionReceipt(outbox.sync_id);
-    if (
-      payload?.found === true &&
-      payload.receipt?.sync_id === outbox.sync_id
-    ) {
-      await contributionSync.confirmReceipt(payload.receipt);
-      updateContributorPresentation();
-      return true;
-    }
-  } catch {
-    // Receipt confirmation is opportunistic; the durable outbox keeps the
-    // transfer resendable until a receipt is actually observed.
-  }
-  return false;
-}
-
-function continuePushTransfer(generation = sessionGeneration) {
-  if (contributionActionTask || !contributionSync?.outbox) {
-    // A running Push or Pull owns the outbox; auto-continue must not race
-    // it into handing Telegram the same or a skipped chunk.
-    return contributionActionTask ?? Promise.resolve();
-  }
-  const task = (async () => {
-    // Yield once so the shared task reference is installed before cleanup.
-    await Promise.resolve();
-    const outbox = contributionSync?.outbox;
-    if (!outbox) {
-      return;
-    }
-    const confirmed = await confirmPendingPushReceipt();
-    if (confirmed || generation !== sessionGeneration) {
-      return;
-    }
-    if (outbox.sent_all || !bridge.pushLaunch || outbox.attempt_index === 0) {
-      // A fully-sent transfer waits for its receipt (Push restarts it), and
-      // an unstarted one waits for the contributor's explicit Push tap.
-      if (outbox.sent_all) {
-        setContributionPresentation(
-          "pending",
-          "bookmarks.contribution_push_awaiting",
-        );
-      }
-      return;
-    }
-    // Mid-transfer in a push launch: the contributor already confirmed this
-    // bundle, so hand Telegram the next chunk without another tap. sendData
-    // closes the Mini App; the bot's progress message guides the next reopen.
-    await sendNextPushMessage();
-  })().finally(() => {
-    if (contributionActionTask === task) {
-      contributionActionTask = null;
-    }
-  });
-  contributionActionTask = task;
-  return task;
-}
-
-async function sendNextPushMessage() {
-  const message = await contributionSync.takeNextPushMessage();
-  if (message === null) {
-    setContributionPresentation(
-      "pending",
-      "bookmarks.contribution_push_awaiting",
-    );
-    return false;
-  }
-  try {
-    if (!bridge.sendData(message)) {
-      await contributionSync.rewindPushMessage();
-      setContributionPresentation(
-        "error",
-        "bookmarks.contribution_push_keyboard_hint",
-      );
-      return false;
-    }
-  } catch (error) {
-    await contributionSync.rewindPushMessage();
-    throw error;
-  }
-  return true;
-}
-
-async function pushContribution() {
-  if (
-    contributionActionTask ||
-    !contributionControlVisible() ||
-    ["rejected", "revoked"].includes(contributionStatus?.state)
-  ) {
-    return contributionActionTask;
-  }
-  const generation = sessionGeneration;
-  const task = (async () => {
-    // Yield once so the shared task reference is installed before cleanup.
-    await Promise.resolve();
-    try {
-      if (!contributionSync?.canContribute) {
-        // An applicant's button is a status check, exactly like before.
-        setContributionPresentation("syncing", "bookmarks.contribution_pushing");
-        await loadContributionStatus();
-        return null;
-      }
-      if (!bridge.pushLaunch) {
-        setContributionPresentation(
-          "pending",
-          "bookmarks.contribution_push_keyboard_hint",
-        );
-        return null;
-      }
-      const confirmed = await confirmPendingPushReceipt();
-      if (generation !== sessionGeneration) {
-        return null;
-      }
-      if (!confirmed && contributionSync.outbox?.sent_all) {
-        // The bot never confirmed the previous transfer; resend it whole.
-        // Chunk staging and sync receipts make the resend a safe replay.
-        await contributionSync.restartPush();
-      }
-      let disclosureAcknowledged =
-        contributionSync.outbox?.disclosure_acknowledged === true;
-      if (contributionSync.disclosureRequired && !disclosureAcknowledged) {
-        // Consent travels inside the same durable envelope; showing the
-        // disclosure here introduces no extra request or status write.
-        await bridge.alert(i18n.t("bookmarks.contribution_disclosure"));
-        if (generation !== sessionGeneration) {
-          return null;
-        }
-        disclosureAcknowledged = true;
-      }
-      setContributionPresentation("syncing", "bookmarks.contribution_pushing");
-      await contributionSync.preparePush(bookmarkStore.snapshot(), {
-        disclosureAcknowledged,
-        encode: (envelope) => buildPushMessages(envelope),
-      });
-      if (generation !== sessionGeneration) {
-        return null;
-      }
-      const sent = await sendNextPushMessage();
-      if (sent) {
-        bridge.notifySuccess();
-      }
-      return sent;
-    } catch (error) {
-      if (generation !== sessionGeneration) {
-        return null;
-      }
-      if (error instanceof RangeError) {
-        // The transfer capacity (64 sendData chunks) is below the envelope
-        // bound only for pathological uncompressible contributions; name the
-        // way out instead of a generic local error.
-        setContributionPresentation(
-          "error",
-          "bookmarks.contribution_push_too_large",
-        );
-      } else {
-        handleContributionSyncError(error);
-      }
-      bridge.notifyError();
-      return null;
-    } finally {
-      if (contributionActionTask === task) {
-        contributionActionTask = null;
-      }
-      if (generation === sessionGeneration) {
-        updateContributorPresentation();
-      }
-    }
-  })();
-  contributionActionTask = task;
-  return task;
-}
-
-async function pullContribution() {
-  if (contributionActionTask || !contributionControlVisible()) {
-    return contributionActionTask;
-  }
-  const generation = sessionGeneration;
-  const task = (async () => {
-    // Yield once so the shared task reference is installed before cleanup.
-    await Promise.resolve();
-    setContributionPresentation("syncing", "bookmarks.contribution_pulling");
-    try {
-      await loadContributionStatus();
-      if (generation !== sessionGeneration) {
-        return null;
-      }
-      await confirmPendingPushReceipt();
-      if (generation !== sessionGeneration) {
-        return null;
-      }
-      // The staged review outcomes reconcile inside this strict network
-      // refresh: personal topics that became global switch classification
-      // without touching the personal verses outside the global set.
-      await refreshLiveGlobalBookmarkCatalog({ requireNetwork: true });
-      if (generation !== sessionGeneration) {
-        return null;
-      }
-      await loadGlobalBookmarks();
-      if (generation !== sessionGeneration) {
-        return null;
-      }
-      setContributionPresentation(
-        "success",
-        "bookmarks.contribution_pull_complete",
-      );
-      bridge.notifySuccess();
-      return true;
-    } catch (error) {
-      if (generation !== sessionGeneration) {
-        return null;
-      }
-      handleContributionSyncError(error, { catalog: true });
-      bridge.notifyError();
-      return null;
-    } finally {
-      if (contributionActionTask === task) {
-        contributionActionTask = null;
-      }
-      if (generation === sessionGeneration) {
-        updateContributorPresentation();
-      }
-    }
-  })();
-  contributionActionTask = task;
-  return task;
+  contributionStatus = status;
+  cancelContributionRetry({ respectAuthority: true });
+  const inactive = contributionInactivePresentation(status);
+  renderContributionMarkers();
+  setContributionPresentation(inactive.state, inactive.messageKey);
+  scheduleContributionStatusPoll();
+  return inactive;
 }
 
 function stageContributionTopicOutcomes(
@@ -1367,6 +1479,31 @@ function contributionFailureIsRetryable(error) {
     : navigator.onLine !== false;
 }
 
+function cancelContributionRetry({ respectAuthority = false } = {}) {
+  if (
+    respectAuthority &&
+    contributionRetryNotBefore > Date.now()
+  ) {
+    return false;
+  }
+  contributionRetryNotBefore = 0;
+  contributionRetryDelayMs = 2_000;
+  return true;
+}
+
+function contributionRetryRemaining() {
+  return Math.max(0, contributionRetryNotBefore - Date.now());
+}
+
+function recordContributionRetryDeadline(error) {
+  const delay = contributionRetryDelay(error);
+  contributionRetryNotBefore = Math.max(
+    contributionRetryNotBefore,
+    Date.now() + delay,
+  );
+  return contributionRetryRemaining();
+}
+
 function scheduleGlobalBookmarkCatalogRetry(error) {
   const delay = recordGlobalBookmarkCatalogRetryDeadline(error);
   const generation = sessionGeneration;
@@ -1625,8 +1762,14 @@ function attachListeners() {
   window.addEventListener("online", () => {
     updateConnectionState();
     void refreshLiveGlobalBookmarkCatalog();
+    void refreshContributionStatus({
+      force: true,
+    }).catch(() => undefined);
   });
   window.addEventListener("offline", updateConnectionState);
+  window.addEventListener("focus", () => {
+    void refreshContributionStatus().catch(() => undefined);
+  });
 
   document.querySelectorAll("[data-route]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1666,6 +1809,8 @@ function attachListeners() {
         persistVisibleReaderPosition();
       }
       void globalBookmarkPreferences?.flush();
+    } else {
+      void refreshContributionStatus().catch(() => undefined);
     }
   });
   window.addEventListener("pagehide", () => {
@@ -1836,11 +1981,8 @@ function attachListeners() {
   });
   elements.bookmarkGroupList.addEventListener("click", onBookmarkGroupAction);
   elements.bookmarkTopicForm.addEventListener("submit", onBookmarkTopicCreate);
-  elements.contributorPushButton.addEventListener("click", () => {
-    void pushContribution();
-  });
-  elements.contributorPullButton.addEventListener("click", () => {
-    void pullContribution();
+  elements.contributorSyncButton.addEventListener("click", () => {
+    void synchronizeContributionsNow();
   });
   elements.bookmarkAllTopics.addEventListener("click", showAllBookmarkTopics);
   elements.bookmarkBackToVerse.addEventListener("click", () => {
@@ -1929,6 +2071,30 @@ function attachListeners() {
       closeBookmarkPopover({ restoreFocus: false });
     }
   });
+}
+
+function contributionRetryDelay(error) {
+  if (
+    error &&
+    typeof error === "object" &&
+    contributionRetryDelays.has(error)
+  ) {
+    return contributionRetryDelays.get(error);
+  }
+  let delay;
+  if (Number.isFinite(error?.retryAfter)) {
+    delay = Math.min(3_600_000, Math.max(250, error.retryAfter * 1_000));
+  } else {
+    delay = Math.min(300_000, Math.max(250, contributionRetryDelayMs));
+    contributionRetryDelayMs = Math.min(
+      300_000,
+      Math.max(2_000, delay * 2),
+    );
+  }
+  if (error && typeof error === "object") {
+    contributionRetryDelays.set(error, delay);
+  }
+  return delay;
 }
 
 function loadHeroAsset() {
@@ -6808,18 +6974,26 @@ function handleSessionError(error) {
 
 function invalidateClientSessionState() {
   sessionGeneration += 1;
+  if (contributionStatusPollTimer !== null) {
+    window.clearTimeout(contributionStatusPollTimer);
+    contributionStatusPollTimer = null;
+  }
+  contributionStatusPollTimerDueAt = 0;
+  cancelContributionRetry();
   cancelGlobalBookmarkCatalogRetry();
   contributionSync = null;
   contributionOpenTask = null;
-  contributionStatusTask = null;
-  contributionActionTask = null;
+  contributionStatusRefreshTask = null;
+  contributionManualSyncTask = null;
   contributionStatus = null;
   verifiedPublishedContributionTopics = new Map();
   pendingContributionOutcomeRefresh = null;
   contributionOutcomeRefreshVersion += 1;
+  contributionLastStatusRefreshAt = 0;
   contributionPresentationState = "idle";
   contributionPresentationMessageKey = "bookmarks.contribution_sync_idle";
   contributionPresentationMessageValues = {};
+  contributionRetryDelayMs = 2_000;
   globalBookmarkCatalogRefreshQueue = Promise.resolve();
   basketMutationTask = Promise.resolve();
   searchRequestId += 1;

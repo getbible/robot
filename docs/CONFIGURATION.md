@@ -192,13 +192,10 @@ state. The contributor and event limits remain configurable per instance.
 The hidden private `/contributor` command submits the signed numeric Telegram
 user ID for review. It is intentionally absent from Telegram's command menu.
 Usernames and profile names help a moderator recognize an application, but
-never grant authority; every staged push chunk and committed contribution is
-authorized again against the current numeric-ID application state. Leaving
-`CONTRIBUTION_STORE_FILE` empty keeps the ordinary personal bookmark
-experience available while disabling the feature: `/contributor` reports that
-applications are unavailable, a pushed contribution receives an unavailable
-reply from the bot, and the contribution status and receipt endpoints return
-`503`.
+never grant authority; every Mini App event is authorized again against the
+current numeric-ID application state. Leaving `CONTRIBUTION_STORE_FILE` empty
+keeps the ordinary personal bookmark experience available while making the
+command report that applications are unavailable.
 
 Contributed source topic names and moderator-created aliases must be English.
 The stable repository key is `bookmark_topics.<english-slug>`, and the canonical

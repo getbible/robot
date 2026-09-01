@@ -209,10 +209,9 @@ modules, and browser APIs. It verifies:
    removal confirms linked-verse deletion;
 10. **Manage Contribution** appears directly below Global topics only for an
     approved contributor and remains separate from topic creation; and
-11. **Push** persists its outbox before the first `sendData` call and hands
-    bounded numbered `GBC1` chunks to the Telegram bridge, an interrupted
-    transfer resends the identical bytes, and **Pull** refreshes status,
-    settles a pending receipt, and strictly revalidates the catalogue; and
+11. **Sync now** emits one same-origin snapshot request and accepts one atomic
+    receipt/status/catalogue response, including exact replay after a lost
+    response; and
 12. no legacy Robot Scripture or history request is emitted.
 
 Focused model, storage, API, and backend tests separately verify selection
@@ -250,11 +249,9 @@ Inject and verify independent failures for:
 - oversized, malformed, wrong-owner, missing, or changed bookmark backup
   documents;
 - restore persistence or acknowledgement failure;
-- contributor revocation between chunk staging and bundle commit, a lost or
-  interrupted push transfer followed by an identical byte-for-byte resend,
-  conflicting `sync_id` reuse, an oversized or bomb-compressed bundle, a
-  digest mismatch, stale-bundle expiry, and SQLite rollback before receipt
-  commit;
+- contribution capability expiry/revocation, a lost sync response followed by
+  exact replay, conflicting `sync_id` reuse, an oversized snapshot, and SQLite
+  rollback before receipt commit;
 - final Telegram send failure.
 
 Each failure must remain inside its ownership boundary. Public API errors must not invalidate authentication; search errors must not disable reading; Post errors must not erase local selections.
@@ -286,14 +283,9 @@ After all deterministic gates pass, deploy one validated commit and verify in Te
   per-link hide plus per-topic/all reset without personal sync or backup;
 - an approved contributor sees the collapsible **Manage Contribution** panel
   directly below Global topics, while an ordinary session does not;
-- an approved **Push** delivers its `sendData` chunks as `web_app_data`
-  service messages that the bot consumes, deletes, and answers with one chat
-  confirmation, resending the identical transfer returns the stored receipt
-  without duplicate moderation events, and revoked or ordinary users cannot
-  submit;
-- **Pull** confirms a pending push receipt, refreshes contributor status, and
-  reclassifies published topics from personal to global without deleting
-  personal verses outside the global set;
+- approved **Sync now** performs one `POST .../api/v1/contributions/sync`, an
+  ambiguous retry returns the same receipt without duplicate moderation
+  events, and revoked or ordinary users cannot submit;
 - global topics survive reopening Telegram Desktop after its WebView
   localStorage is cleared, using DeviceStorage without CloudStorage;
 - unchanged CloudStorage items remain stable, partial commits are rejected by

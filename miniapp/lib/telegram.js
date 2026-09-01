@@ -1,6 +1,4 @@
 const LAUNCH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
-const PUSH_LAUNCH_CONTEXT = "push";
-const MAX_SEND_DATA_BYTES = 4096;
 const FULLSCREEN_API_VERSION = "8.0";
 const INSET_SIDES = Object.freeze(["top", "right", "bottom", "left"]);
 const MAX_SAFE_AREA_INSET = 320;
@@ -61,32 +59,6 @@ export class TelegramBridge {
 
   get webApp() {
     return this.#webApp;
-  }
-
-  get pushLaunch() {
-    // The contributor reply-keyboard button carries this marker in its
-    // web_app URL. Only that launch surface can deliver sendData payloads.
-    const url = new URL(window.location.href);
-    if (url.searchParams.get("context") === PUSH_LAUNCH_CONTEXT) {
-      return true;
-    }
-    const hashParams = new URLSearchParams(url.hash.replace(/^#/, ""));
-    return hashParams.get("context") === PUSH_LAUNCH_CONTEXT;
-  }
-
-  sendData(data) {
-    if (
-      typeof data !== "string" ||
-      data.length === 0 ||
-      new TextEncoder().encode(data).byteLength > MAX_SEND_DATA_BYTES
-    ) {
-      throw new RangeError("Telegram sendData payloads must be 1-4096 bytes.");
-    }
-    if (typeof this.#webApp?.sendData !== "function") {
-      return false;
-    }
-    this.#webApp.sendData(data);
-    return true;
   }
 
   initialize() {

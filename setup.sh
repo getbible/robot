@@ -1443,6 +1443,16 @@ for host in sorted(routes):
                     "        }",
                     f"        reverse_proxy 127.0.0.1:{port}",
                     "    }",
+                    f"    @{matcher}_contribution_sync {{",
+                    f"        path {path}/api/v1/contributions/sync",
+                    "        method POST OPTIONS",
+                    "    }",
+                    f"    handle @{matcher}_contribution_sync {{",
+                    "        request_body {",
+                    "            max_size 1MiB",
+                    "        }",
+                    f"        reverse_proxy 127.0.0.1:{port}",
+                    "    }",
                     f"    @{matcher}_api {{",
                     f"        path {path}/api/v1/*",
                     "        method GET POST PUT PATCH DELETE OPTIONS",
@@ -1473,6 +1483,16 @@ for host in sorted(routes):
                     f"    handle @{matcher}_bookmark_backup {{",
                     "        request_body {",
                     "            max_size 5MB",
+                    "        }",
+                    f"        reverse_proxy 127.0.0.1:{port}",
+                    "    }",
+                    f"    @{matcher}_contribution_sync {{",
+                    "        path /api/v1/contributions/sync",
+                    "        method POST OPTIONS",
+                    "    }",
+                    f"    handle @{matcher}_contribution_sync {{",
+                    "        request_body {",
+                    "            max_size 1MiB",
                     "        }",
                     f"        reverse_proxy 127.0.0.1:{port}",
                     "    }",
@@ -1829,7 +1849,10 @@ probe_mini_app_surface() {
             "${base_url}/api/v1/contributions/status" GET "$public_origin" &&
         probe_mini_app_api_url \
             "$app_dir/venv/bin/python" \
-            "${base_url}/api/v1/contributions/receipt" GET "$public_origin"
+            "${base_url}/api/v1/contributions/events" POST "$public_origin" &&
+        probe_mini_app_api_url \
+            "$app_dir/venv/bin/python" \
+            "${base_url}/api/v1/contributions/sync" POST "$public_origin"
 }
 
 wait_for_mini_app_surface() {

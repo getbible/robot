@@ -114,39 +114,22 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 
 ## Contribution synchronization
 
-- Contribution push travels only on Telegram's own uplink: a Mini App launched
-  from the bot's **Push contribution** reply-keyboard button — the only launch
-  surface whose `Telegram.WebApp.sendData()` reaches the bot — emits numbered
-  `GBC1` chunks that arrive as `web_app_data` service messages on the ordinary
-  update channel. Push uses no inbound port, Caddy route, WebSocket, or bearer
-  token.
-- Every chunk is at most 4096 bytes and a transfer at most 64 chunks. The
-  assembled bundle is base64url-decoded, decompressed under the 1 MiB
-  plaintext bound with decompression-bomb rejection, and accepted only when
-  the SHA-256 digest of the plaintext matches the declared value.
-- Chunk staging is durable and idempotent per chunk index, stale incomplete
-  bundles expire after 24 hours, and exactly one caller assembles a completed
-  bundle.
-- Every `web_app_data` service message is consumed: deleted from the chat
-  after staging, with one edited progress message per multi-part transfer and
-  one final confirmation.
-- Approval and disclosure are rechecked against the sender's numeric Telegram
-  ID on every staging and commit write.
-- A completed bundle commits through the atomic
-  `ContributionStore.synchronize_snapshot` transaction: snapshot, explicit
-  operations, disclosure acknowledgement, derived moderation events, and the
-  durable receipt together. Exact `sync_id` replay returns the stored receipt
-  without duplicate events; reuse with changed content fails closed and
-  transaction failure stores neither snapshot nor receipt.
-- The client persists the envelope and its encoded messages as a durable
-  outbox before the first `sendData` call, and explicit global add/remove
-  intents clear only when the server's receipt is observed through **Pull**.
-- Pull-side reclassification moves published contributor topics from personal
-  to global through the existing mapping machinery and never deletes personal
-  verses outside the global set.
-- No bearer contributor capability, capability header, one-request sync or
-  event-batch endpoint, or periodic status-polling machinery remains in code,
-  routes, contracts, or documentation.
+- Only an approved session receives the separate `gbc_` contributor
+  capability, and every write rechecks its numeric Telegram owner against
+  current approval and revocation state.
+- **Sync now** makes one same-origin `POST /api/v1/contributions/sync`; it does
+  not orchestrate status, event-batch, or catalogue requests and does not use a
+  WebSocket or another port.
+- Version 1 accepts at most 100 topics, 10,000 flattened assignments across at
+  most 800 verse coordinates, 2,000 explicit operations, and a 1 MiB body.
+- Snapshot derivation, disclosure acknowledgement, explicit operations,
+  moderation events, and the durable receipt commit in one SQLite transaction.
+- Exact `sync_id` replay returns the stored receipt without duplicate events;
+  reuse with changed content fails closed and transaction failure stores
+  neither snapshot nor receipt.
+- The response returns its receipt, complete contributor status, and catalogue
+  revision/checksum together; a later catalogue fetch cannot turn a committed
+  synchronization into a reported failure.
 
 ## Bookmark portability and chat recovery
 
@@ -219,9 +202,9 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - Host Mini App, webhook, and health listeners remain separate and loopback/private behind ingress.
 - Caddy/systemd setup remains transactional and rollback-safe.
 - Managed Caddy forwards the bounded Mini App `/api/v1/*` namespace for both
-  root and nested public URLs, applies the 5 MiB backup exception before the
-  general 64 KiB matcher, and leaves the backend router deny-by-default;
-  contribution push traverses no proxy route.
+  root and nested public URLs, applies the 5 MiB backup and 1 MiB sync
+  exceptions before the general 64 KiB matcher, and leaves the backend router
+  deny-by-default.
 - One bot token has one active polling/webhook workload.
 - Production container build and smoke test pass.
 - systemd verification passes.

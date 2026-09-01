@@ -19,11 +19,7 @@ from modules.catalog import (
 from modules.contributions import ContributionStore
 from modules.errors import RobotRateLimited, ScriptureUnavailable
 from modules.interactions import SearchOptions, SearchResult
-from modules.miniapp_api import (
-    MiniAppApi,
-    MiniAppHttpRequest,
-    _contribution_receipt_id,
-)
+from modules.miniapp_api import MiniAppApi, MiniAppHttpRequest
 from modules.miniapp_auth import TelegramInitDataValidator
 from modules.miniapp_sessions import MiniAppLaunchStore, MiniAppSessionStore
 from modules.preferences import ReaderLocation, SearchDefaults, UserPreferences
@@ -761,9 +757,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("paused", self.warnings[0][2])
         self.assertEqual(self.api.snapshot()["api_abuse_blocks"], 1)
 
-    async def test_contributor_status_is_read_only_and_disclosure_rides_the_push(
-        self,
-    ) -> None:
+    async def test_contributor_status_is_ux_only_and_disclosure_is_one_time(self) -> None:
         self.contributions.submit_application(42, first_name="Old name")
         self.contributions.decide_application(42, "approved", actor="admin")
         token = await self.exchange()
@@ -807,9 +801,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         # but only the numeric ID controls this approved record.
         self.assertEqual(self.contributions.application_for(42).first_name, "Grace")
 
-        # HTTPS no longer mutates disclosure state: the acknowledgement rides
-        # the pushed envelope, so PATCH is a method error, not a mutation.
-        patched = await self.api.handle(
+        acknowledged = await self.api.handle(
             self.request(
                 "PATCH",
                 "/getbible/api/v1/contributions/status?details=1",
@@ -817,28 +809,19 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 body={"disclosure_acknowledged": True},
             )
         )
-        self.assertEqual(patched.status, 405)
-        self.assertEqual(patched.headers["Allow"], "GET, OPTIONS")
-
-        # The push intake commits the envelope's acknowledgement server-side.
-        self.contributions.synchronize_snapshot(
-            42,
-            sync_id="sync.disclosure.0001",
-            client_id="browser.installation.0001",
-            snapshot={"topics": [], "assignments": []},
-            operations=[],
-            disclosure_acknowledged=True,
-        )
-        acknowledged = await self.api.handle(
-            self.request(
-                "GET",
-                "/getbible/api/v1/contributions/status?details=1",
-                token=token,
-            )
-        )
         self.assertEqual(acknowledged.status, 200)
         self.assertFalse(json.loads(acknowledged.body)["disclosure_required"])
         self.assertIn("summary", json.loads(acknowledged.body))
+
+        repeated = await self.api.handle(
+            self.request(
+                "PATCH",
+                "/getbible/api/v1/contributions/status",
+                token=token,
+                body={"disclosure_acknowledged": True},
+            )
+        )
+        self.assertEqual(repeated.status, 200)
 
         result = self.contributions.record_events(
             42,
@@ -920,8 +903,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("contributor_id", reconciled.body.decode())
 
-    async def test_no_contribution_capability_token_is_ever_issued(self) -> None:
-        """PUSH rides Telegram sendData now: HTTPS never mints a second secret."""
+    async def test_capability_is_issued_only_after_approval_and_repeated_safely(self) -> None:
         self.contributions.submit_application(42, first_name="Grace")
         self.active_init_data = _init_data()
         bootstrap = await self.api.handle(
@@ -933,58 +915,73 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(bootstrap.status, 201)
         self.assertNotIn("X-Contribution-Token", bootstrap.headers)
-        payload = json.loads(bootstrap.body)
-        self.assertEqual(
-            [key for key in payload if "token" in key],
-            ["session_token"],
-        )
-        session_token = payload["session_token"]
+        session_token = json.loads(bootstrap.body)["session_token"]
 
-        self.contributions.decide_application(42, "approved", actor="admin")
-        for method, path in (
-            ("GET", "/getbible/api/v1/contributions/status"),
-            ("GET", "/getbible/api/v1/session"),
-        ):
-            with self.subTest(path=path):
-                approved = await self.api.handle(
-                    self.request(
-                        method,
-                        path,
-                        token=session_token,
-                        include_init_data=False,
-                    )
-                )
-                self.assertEqual(approved.status, 200)
-                self.assertNotIn("X-Contribution-Token", approved.headers)
-                self.assertNotIn("capability", approved.body.decode())
-
-        session = self.sessions.get(session_token, touch=False)
-        self.assertIsNotNone(session)
-        self.assertFalse(hasattr(session, "contribution_capability_token"))
-
-    async def test_receipt_confirms_a_committed_push_and_stays_stable_on_replay(
-        self,
-    ) -> None:
-        self.contributions.submit_application(42, first_name="Grace")
-        self.contributions.decide_application(42, "approved", actor="admin")
-        token = await self.exchange()
-
-        unknown = await self.api.handle(
+        pending = await self.api.handle(
             self.request(
                 "GET",
-                "/getbible/api/v1/contributions/receipt?sync_id=sync.snapshot.0001",
-                token=token,
+                "/getbible/api/v1/contributions/status",
+                token=session_token,
+                include_init_data=False,
             )
         )
-        self.assertEqual(unknown.status, 200)
-        self.assertEqual(json.loads(unknown.body), {"found": False, "receipt": None})
+        self.assertNotIn("X-Contribution-Token", pending.headers)
 
-        # The push transport (Telegram web_app_data) commits through the
-        # unchanged atomic store entry point; HTTPS only reads the receipt.
-        commit = dict(
-            sync_id="sync.snapshot.0001",
-            client_id="browser.installation.0001",
-            snapshot={
+        self.contributions.decide_application(42, "approved", actor="admin")
+        approved = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/contributions/status",
+                token=session_token,
+                include_init_data=False,
+            )
+        )
+        capability = approved.headers["X-Contribution-Token"]
+        self.assertTrue(capability.startswith("gbc_"))
+        repeated = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/session",
+                token=session_token,
+                include_init_data=False,
+            )
+        )
+        self.assertEqual(
+            repeated.headers["X-Contribution-Token"],
+            capability,
+        )
+        self.assertNotIn("X-Contribution-Token", json.loads(repeated.body))
+
+        self.contributions.decide_application(42, "rejected", actor="admin")
+        rejected = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/contributions/status",
+                token=session_token,
+                include_init_data=False,
+            )
+        )
+        self.assertNotIn("X-Contribution-Token", rejected.headers)
+
+    async def test_snapshot_sync_is_one_durable_idempotent_capability_request(self) -> None:
+        self.contributions.submit_application(42, first_name="Grace")
+        self.contributions.decide_application(42, "approved", actor="admin")
+        session_token = await self.exchange()
+        session = self.sessions.get(session_token, touch=False)
+        self.assertIsNotNone(session)
+        assert session is not None
+        capability = session.contribution_capability_token
+        self.assertIsNotNone(capability)
+        assert capability is not None
+
+        # The contributor capability is durable and intentionally independent
+        # of the volatile Scripture-reading session.
+        self.sessions.revoke(session_token)
+        body = {
+            "protocol_version": 1,
+            "sync_id": "sync.snapshot.0001",
+            "client_id": "browser.installation.0001",
+            "snapshot": {
                 "topics": [
                     {
                         "id": "local.grace",
@@ -1001,137 +998,129 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                     }
                 ],
             },
-            operations=[
-                {
-                    "client_event_id": "compat.topic.grace.v1",
-                    "type": "topic_upsert",
-                    "topic": {
-                        "local_topic_id": "local.grace",
-                        "name": "Grace",
-                        "color": "#bbf7d0",
-                    },
-                }
-            ],
-            disclosure_acknowledged=True,
-        )
-        result = self.contributions.synchronize_snapshot(42, **commit)
-        self.assertFalse(result.replayed_sync)
-
-        confirmed = await self.api.handle(
+            "operations": [],
+            "disclosure_acknowledged": True,
+        }
+        first = await self.api.handle(
             self.request(
-                "GET",
-                "/getbible/api/v1/contributions/receipt?sync_id=sync.snapshot.0001",
-                token=token,
+                "POST",
+                "/getbible/api/v1/contributions/sync",
+                token=capability,
+                include_init_data=False,
+                body=body,
             )
         )
-        self.assertEqual(confirmed.status, 200)
-        payload = json.loads(confirmed.body)
-        self.assertTrue(payload["found"])
-        receipt = payload["receipt"]
+        replay = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/sync",
+                token=capability,
+                include_init_data=False,
+                body=body,
+            )
+        )
+
+        self.assertEqual(first.status, 200)
+        self.assertEqual(replay.status, 200)
+        payload = json.loads(first.body)
+        replay_payload = json.loads(replay.body)
+        self.assertEqual(payload["protocol_version"], 1)
+        self.assertEqual(payload["receipt"]["sync_id"], body["sync_id"])
+        self.assertEqual(payload["receipt"]["outcome"], "accepted")
+        self.assertEqual(payload["receipt"]["accepted"], 2)
+        self.assertEqual(payload["receipt"]["event_ids"], {})
+        self.assertEqual(replay_payload["receipt"]["outcome"], "replayed")
         self.assertEqual(
-            set(receipt),
-            {"sync_id", "accepted", "replayed", "snapshot_digest", "event_ids"},
+            replay_payload["receipt"]["snapshot_digest"],
+            payload["receipt"]["snapshot_digest"],
         )
-        self.assertEqual(receipt["sync_id"], "sync.snapshot.0001")
-        self.assertEqual(receipt["accepted"], 3)
-        self.assertEqual(receipt["replayed"], 0)
-        self.assertEqual(receipt["snapshot_digest"], result.snapshot_digest)
-        # Exactly the committed client_event_ids appear: the two derived
-        # snapshot-diff events plus the explicit compatibility operation.
-        self.assertEqual(set(receipt["event_ids"]), set(result.event_ids))
-        self.assertIn("compat.topic.grace.v1", receipt["event_ids"])
-        self.assertEqual(self.limiter.details[-1][2], 0.25)
+        self.assertEqual(payload["status"]["state"], "approved")
+        self.assertEqual(set(payload["catalog"]), {"revision", "checksum"})
+        self.assertEqual(len(self.contributions.list_events()), 2)
+        self.assertEqual(self.limiter.details[-1][2], 1.0)
 
-        # A replayed push (same sync_id, same data) changes nothing the
-        # browser can observe through the receipt.
-        replay = self.contributions.synchronize_snapshot(42, **commit)
-        self.assertTrue(replay.replayed_sync)
-        reread = await self.api.handle(
-            self.request(
-                "GET",
-                "/getbible/api/v1/contributions/receipt?sync_id=sync.snapshot.0001",
-                token=token,
-            )
-        )
-        self.assertEqual(reread.status, 200)
-        self.assertEqual(json.loads(reread.body), payload)
-
-    async def test_receipt_requires_a_session_and_exactly_one_valid_sync_id(
-        self,
-    ) -> None:
-        unauthenticated = await self.api.handle(
-            self.request(
-                "GET",
-                "/getbible/api/v1/contributions/receipt?sync_id=sync.snapshot.0001",
-            )
-        )
-        self.assertEqual(unauthenticated.status, 401)
-
-        token = await self.exchange()
-        for query in (
-            "",
-            "details=1",
-            "sync_id=sync.snapshot.0001&details=1",
-            "sync_id=sync.snapshot.0001&sync_id=sync.snapshot.0002",
-            "sync_id=bad%20sync%20id",
-            f"sync_id={'x' * 129}",
+        body["sync_id"] = "sync.snapshot.0001.enrichment"
+        with patch.object(
+            self.contributions,
+            "current_catalog",
+            side_effect=OSError("catalog temporarily unavailable"),
         ):
-            with self.subTest(query=query):
-                target = "/getbible/api/v1/contributions/receipt"
-                if query:
-                    target = f"{target}?{query}"
-                rejected = await self.api.handle(
-                    self.request("GET", target, token=token)
+            enriched = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/contributions/sync",
+                    token=capability,
+                    include_init_data=False,
+                    body=body,
                 )
-                self.assertEqual(rejected.status, 400)
-                self.assertEqual(
-                    json.loads(rejected.body)["error"],
-                    "invalid_request",
-                )
+            )
+        self.assertEqual(enriched.status, 200)
+        self.assertEqual(json.loads(enriched.body)["receipt"]["outcome"], "accepted")
+        self.assertFalse(json.loads(enriched.body)["catalog"]["available"])
 
-    async def test_removed_contribution_write_routes_are_gone(self) -> None:
-        """PUSH left HTTPS entirely: no sync, events, or status mutation remains."""
-        for method, path in (
-            ("POST", "/getbible/api/v1/contributions/sync"),
-            ("POST", "/getbible/api/v1/contributions/events"),
-            ("GET", "/getbible/api/v1/contributions/sync"),
-            ("DELETE", "/getbible/api/v1/contributions/events"),
-        ):
-            with self.subTest(method=method, path=path):
-                response = await self.api.handle(
-                    self.request(method, path, body={})
-                )
-                self.assertEqual(response.status, 404)
-        patched = await self.api.handle(
+    async def test_snapshot_sync_capability_failures_and_body_limit_fail_closed(self) -> None:
+        body = {
+            "protocol_version": 1,
+            "sync_id": "sync.snapshot.0002",
+            "client_id": "browser.installation.0001",
+            "snapshot": {"topics": [], "assignments": []},
+            "operations": [],
+            "disclosure_acknowledged": True,
+        }
+        missing = await self.api.handle(
             self.request(
-                "PATCH",
-                "/getbible/api/v1/contributions/status",
-                body={"disclosure_acknowledged": True},
+                "POST",
+                "/getbible/api/v1/contributions/sync",
+                include_init_data=False,
+                body=body,
             )
         )
-        self.assertEqual(patched.status, 405)
-        self.assertEqual(patched.headers["Allow"], "GET, OPTIONS")
-        self.assertEqual(self.limiter.calls, [])
+        self.assertEqual(missing.status, 401)
 
-    async def test_oversized_bodies_are_rejected_before_authentication(self) -> None:
+        self.contributions.submit_application(42, first_name="Grace")
+        self.contributions.decide_application(42, "approved", actor="admin")
+        session_token = await self.exchange()
+        session = self.sessions.get(session_token, touch=False)
+        assert session is not None
+        capability = session.contribution_capability_token
+        assert capability is not None
+        replacement = "A" if capability[-1] != "A" else "B"
+        tampered = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/sync",
+                token=f"{capability[:-1]}{replacement}",
+                include_init_data=False,
+                body=body,
+            )
+        )
+        self.assertEqual(tampered.status, 403)
+
+        self.contributions.decide_application(42, "rejected", actor="admin")
+        revoked = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/sync",
+                token=capability,
+                include_init_data=False,
+                body=body,
+            )
+        )
+        self.assertEqual(revoked.status, 403)
+
         too_large = await self.api.handle(
             MiniAppHttpRequest(
                 method="POST",
-                target="/getbible/api/v1/search",
+                target="/getbible/api/v1/contributions/sync",
                 headers={
                     "Content-Type": "application/json",
                     "Origin": ORIGIN,
                 },
-                body=b"x" * (64 * 1024 + 1),
+                body=b"x" * (1024 * 1024 + 1),
                 client_key="192.0.2.1",
             )
         )
         self.assertEqual(too_large.status, 413)
-        self.assertEqual(
-            json.loads(too_large.body)["error"],
-            "request_too_large",
-        )
-        self.assertEqual(self.limiter.calls, [])
 
     async def test_contributor_store_failure_never_blocks_scripture_session(self) -> None:
         self.contributions.close()
@@ -1188,17 +1177,18 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 "retryable": True,
             },
         )
-        receipt = await self.api.handle(
+        acknowledgement = await self.api.handle(
             self.request(
-                "GET",
-                "/getbible/api/v1/contributions/receipt?sync_id=sync.snapshot.0001",
+                "PATCH",
+                "/getbible/api/v1/contributions/status?details=1",
                 token=token,
+                body={"disclosure_acknowledged": True},
             )
         )
-        self.assertEqual(receipt.status, 503)
-        self.assertTrue(json.loads(receipt.body)["retryable"])
+        self.assertEqual(acknowledgement.status, 503)
+        self.assertTrue(json.loads(acknowledgement.body)["retryable"])
 
-    async def test_explicit_contribution_reads_require_a_configured_store(self) -> None:
+    async def test_explicit_contribution_status_requires_a_configured_store(self) -> None:
         token = await self.exchange()
         with patch.object(self.api, "_contributions", None):
             status = await self.api.handle(
@@ -1208,67 +1198,187 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                     token=token,
                 )
             )
-            receipt = await self.api.handle(
+            acknowledgement = await self.api.handle(
                 self.request(
-                    "GET",
-                    "/getbible/api/v1/contributions/receipt"
-                    "?sync_id=sync.snapshot.0001",
+                    "PATCH",
+                    "/getbible/api/v1/contributions/status",
                     token=token,
+                    body={"disclosure_acknowledged": True},
                 )
             )
-        for response in (status, receipt):
+        for response in (status, acknowledgement):
             self.assertEqual(response.status, 503)
-            self.assertEqual(
-                json.loads(response.body)["error"],
-                "contributions_unavailable",
-            )
             self.assertTrue(json.loads(response.body)["retryable"])
+
+    async def test_contribution_events_are_approval_gated_and_idempotent(self) -> None:
+        self.contributions.submit_application(42, first_name="Grace")
+        token = await self.exchange()
+        payload = {
+            "events": [
+                {
+                    "client_event_id": "topic.grace.v1",
+                    "type": "topic_upsert",
+                    "topic": {
+                        "local_topic_id": "local.grace",
+                        "name": "Grace",
+                        "color": "#bbf7d0",
+                    },
+                },
+                {
+                    "client_event_id": "verse.grace.43.3.16.add",
+                    "type": "verse_add",
+                    "topic": {"local_topic_id": "local.grace"},
+                    "verse": {"book": 43, "chapter": 3, "verse": 16},
+                },
+            ]
+        }
+        denied = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                body=payload,
+            )
+        )
+        self.assertEqual(denied.status, 403)
+        self.assertEqual(json.loads(denied.body)["error"], "contribution_not_allowed")
+
+        self.contributions.decide_application(42, "approved", actor="admin")
+        awaiting_disclosure = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                body=payload,
+            )
+        )
+        self.assertEqual(awaiting_disclosure.status, 403)
+        self.assertEqual(
+            json.loads(awaiting_disclosure.body)["error"],
+            "contribution_not_allowed",
+        )
+        acknowledged = await self.api.handle(
+            self.request(
+                "PATCH",
+                "/getbible/api/v1/contributions/status",
+                token=token,
+                body={"disclosure_acknowledged": True},
+            )
+        )
+        self.assertEqual(acknowledged.status, 200)
+        accepted = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                body=payload,
+            )
+        )
+        self.assertEqual(accepted.status, 200)
+        self.assertEqual(json.loads(accepted.body)["accepted"], 2)
+
+        replayed = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                body=payload,
+            )
+        )
+        self.assertEqual(replayed.status, 200)
+        self.assertEqual(json.loads(replayed.body)["replayed"], 2)
+
+        conflicting = json.loads(json.dumps(payload))
+        conflicting["events"][1]["verse"]["verse"] = 17
+        conflict = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                body=conflicting,
+            )
+        )
+        self.assertEqual(conflict.status, 409)
+        self.assertEqual(json.loads(conflict.body)["error"], "idempotency_conflict")
+
+        unsupported = {
+            "events": [
+                {
+                    "client_event_id": "verse.grace.67.1.1.add",
+                    "type": "verse_add",
+                    "topic": {"local_topic_id": "local.grace"},
+                    "verse": {"book": 67, "chapter": 1, "verse": 1},
+                }
+            ]
+        }
+        rejected = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                body=unsupported,
+            )
+        )
+        self.assertEqual(rejected.status, 400)
+        self.assertEqual(json.loads(rejected.body)["error"], "invalid_contribution")
+        self.assertEqual(len(self.contributions.list_events()), 2)
 
     async def test_contribution_failure_access_log_records_only_safe_error_code(
         self,
     ) -> None:
+        self.contributions.submit_application(42, first_name="Grace")
+        self.contributions.decide_application(42, "approved", actor="admin")
+        self.contributions.acknowledge_disclosure(42)
         token = await self.exchange()
         self.api._audit_settings = SimpleNamespace(
             audit_log_mode="metadata",
             audit_identity_mode="disabled",
             telegram_api_token=TOKEN,
         )
-        private_message = "Contributor synchronization is temporarily unavailable."
+        private_message = "book must be between 1 and 66."
 
-        with (
-            patch.object(self.api, "_contributions", None),
-            patch("modules.miniapp_api.audit_event") as record,
-        ):
-            unavailable = await self.api.handle(
+        with patch("modules.miniapp_api.audit_event") as record:
+            rejected = await self.api.handle(
                 self.request(
-                    "GET",
-                    "/getbible/api/v1/contributions/receipt"
-                    "?sync_id=sync.snapshot.0001",
+                    "POST",
+                    "/getbible/api/v1/contributions/events",
                     token=token,
+                    body={
+                        "events": [
+                            {
+                                "client_event_id": "verse.invalid.book",
+                                "type": "verse_add",
+                                "topic": {"local_topic_id": "local.grace"},
+                                "verse": {"book": 67, "chapter": 1, "verse": 1},
+                            }
+                        ]
+                    },
                 )
             )
 
-        self.assertEqual(unavailable.status, 503)
-        self.assertIn(private_message, unavailable.body.decode())
+        self.assertEqual(rejected.status, 400)
+        self.assertIn(private_message, rejected.body.decode())
         metadata = record.call_args.kwargs["metadata"]
-        self.assertEqual(metadata["error_code"], "contributions_unavailable")
-        self.assertEqual(metadata["route"], "contributions/receipt")
+        self.assertEqual(metadata["error_code"], "invalid_contribution")
+        self.assertEqual(metadata["route"], "contributions/events")
         self.assertNotIn("message", metadata)
         self.assertNotIn(private_message, json.dumps(metadata))
 
     async def test_contribution_receipts_are_stable_scoped_and_opaque(self) -> None:
-        operations = [
-            {
-                "client_event_id": "topic.shared.v1",
-                "type": "topic_upsert",
-                "topic": {
-                    "local_topic_id": "local.shared",
-                    "name": "Shared",
-                    "color": "#123456",
-                },
-            }
-        ]
-        tokens: dict[int, str] = {}
+        payload = {
+            "events": [
+                {
+                    "client_event_id": "topic.shared.v1",
+                    "type": "topic_upsert",
+                    "topic": {
+                        "local_topic_id": "local.shared",
+                        "name": "Shared",
+                        "color": "#123456",
+                    },
+                }
+            ]
+        }
+        sessions: dict[int, tuple[str, str]] = {}
         for user_id in (42, 43):
             self.contributions.submit_application(user_id, first_name="Contributor")
             self.contributions.decide_application(user_id, "approved", actor="admin")
@@ -1285,70 +1395,45 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 )
             )
             self.assertEqual(exchanged.status, 201)
-            tokens[user_id] = json.loads(exchanged.body)["session_token"]
-            self.contributions.synchronize_snapshot(
-                user_id,
-                sync_id="sync.shared.0001",
-                client_id=f"browser.installation.{user_id}",
-                snapshot={"topics": [], "assignments": []},
-                operations=operations,
-            )
+            sessions[user_id] = (json.loads(exchanged.body)["session_token"], init_data)
 
         receipts: dict[int, int] = {}
-        for user_id, token in tokens.items():
-            for attempt in ("first", "repeated"):
-                confirmed = await self.api.handle(
-                    self.request(
-                        "GET",
-                        "/getbible/api/v1/contributions/receipt"
-                        "?sync_id=sync.shared.0001",
-                        token=token,
-                        include_init_data=False,
-                    )
+        for user_id, (token, init_data) in sessions.items():
+            submitted = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/contributions/events",
+                    token=token,
+                    init_data=init_data,
+                    body=payload,
                 )
-                self.assertEqual(confirmed.status, 200)
-                payload = json.loads(confirmed.body)
-                self.assertTrue(payload["found"])
-                receipt = payload["receipt"]["event_ids"]["topic.shared.v1"]
-                self.assertGreaterEqual(receipt, 1)
-                self.assertLessEqual(receipt, 9_007_199_254_740_991)
-                if attempt == "first":
-                    receipts[user_id] = receipt
-                else:
-                    self.assertEqual(receipt, receipts[user_id])
-
-        # The same client_event_id yields a different receipt per contributor,
-        # matching the deterministic contributor-scoped derivation.
-        self.assertNotEqual(receipts[42], receipts[43])
-        for user_id, receipt in receipts.items():
-            self.assertEqual(
-                receipt,
-                _contribution_receipt_id(user_id, "topic.shared.v1"),
             )
+            self.assertEqual(submitted.status, 200)
+            receipt = json.loads(submitted.body)["event_ids"]["topic.shared.v1"]
+            self.assertGreaterEqual(receipt, 1)
+            self.assertLessEqual(receipt, 9_007_199_254_740_991)
+            receipts[user_id] = receipt
 
-        # Receipts are opaque: never the moderation store's own row IDs.
+        self.assertNotEqual(receipts[42], receipts[43])
         internal_ids = {event.id for event in self.contributions.list_events()}
         self.assertTrue(set(receipts.values()).isdisjoint(internal_ids))
 
-        # A receipt belongs to the contributor who pushed it: another user's
-        # session cannot observe a sync it did not commit.
-        self.contributions.synchronize_snapshot(
-            42,
-            sync_id="sync.private.0001",
-            client_id="browser.installation.42",
-            snapshot={"topics": [], "assignments": []},
-            operations=operations,
-        )
-        foreign = await self.api.handle(
+        token, init_data = sessions[42]
+        replayed = await self.api.handle(
             self.request(
-                "GET",
-                "/getbible/api/v1/contributions/receipt?sync_id=sync.private.0001",
-                token=tokens[43],
-                include_init_data=False,
+                "POST",
+                "/getbible/api/v1/contributions/events",
+                token=token,
+                init_data=init_data,
+                body=payload,
             )
         )
-        self.assertEqual(foreign.status, 200)
-        self.assertEqual(json.loads(foreign.body), {"found": False, "receipt": None})
+        self.assertEqual(replayed.status, 200)
+        self.assertEqual(json.loads(replayed.body)["replayed"], 1)
+        self.assertEqual(
+            json.loads(replayed.body)["event_ids"]["topic.shared.v1"],
+            receipts[42],
+        )
 
     async def test_live_catalog_is_authenticated_revisioned_and_revalidates_by_etag(
         self,
@@ -1401,32 +1486,20 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unchanged.body, b"")
 
     async def test_contribution_preflight_and_wrong_methods_use_declared_contract(self) -> None:
-        for path in (
-            "/getbible/api/v1/contributions/status",
-            "/getbible/api/v1/contributions/receipt",
-        ):
-            with self.subTest(path=path):
-                preflight = await self.api.handle(self.request("OPTIONS", path))
-                self.assertEqual(preflight.status, 204)
-                self.assertIn(
-                    "GET",
-                    preflight.headers["Access-Control-Allow-Methods"],
-                )
+        preflight = await self.api.handle(
+            self.request(
+                "OPTIONS",
+                "/getbible/api/v1/contributions/status",
+            )
+        )
+        self.assertEqual(preflight.status, 204)
+        self.assertIn("PATCH", preflight.headers["Access-Control-Allow-Methods"])
 
-                wrong = await self.api.handle(self.request("POST", path, body={}))
-                self.assertEqual(wrong.status, 405)
-                self.assertEqual(wrong.headers["Allow"], "GET, OPTIONS")
-
-        # The removed transport routes are not method errors: they no longer
-        # exist at all, and preflight cannot resurrect them.
-        for path in (
-            "/getbible/api/v1/contributions/sync",
-            "/getbible/api/v1/contributions/events",
-        ):
-            with self.subTest(path=path):
-                gone = await self.api.handle(self.request("OPTIONS", path))
-                self.assertEqual(gone.status, 404)
-        self.assertEqual(self.limiter.calls, [])
+        wrong = await self.api.handle(
+            self.request("DELETE", "/getbible/api/v1/contributions/events")
+        )
+        self.assertEqual(wrong.status, 405)
+        self.assertEqual(wrong.headers["Allow"], "POST, OPTIONS")
 
     def request(
         self,
@@ -1820,9 +1893,10 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             json.loads(second.body)["session_token"],
             json.loads(first.body)["session_token"],
         )
-        # Approval no longer mints an HTTPS push credential on either exchange.
-        self.assertNotIn("X-Contribution-Token", first.headers)
-        self.assertNotIn("X-Contribution-Token", second.headers)
+        self.assertEqual(
+            second.headers["X-Contribution-Token"],
+            first.headers["X-Contribution-Token"],
+        )
 
     async def test_invalid_launch_and_bootstrap_failure_do_not_burn_init_data(
         self,

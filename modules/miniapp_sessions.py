@@ -400,6 +400,12 @@ class MiniAppSession:
     translation: str
     launch: MiniAppLaunch
     init_data_digest: bytes
+    # The raw contributor capability is retained only in this bounded,
+    # in-memory session.  Keeping it here lets an exact session-exchange retry
+    # recover a response that was lost after the capability was committed,
+    # without returning the capability in JSON or persisting it in plaintext.
+    contribution_capability_token: str | None = field(default=None, repr=False)
+    contribution_capability_issued: bool = False
     searches: OrderedDict[str, MiniAppSearch] = field(default_factory=OrderedDict)
     available_selections: OrderedDict[str, MiniAppSelection] = field(default_factory=OrderedDict)
     basket: list[MiniAppSelection] = field(default_factory=list)

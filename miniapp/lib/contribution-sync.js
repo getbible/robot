@@ -1,11 +1,6 @@
 import { isCanonicalVerseCoordinate } from "./bible-canon.js";
 import { IndexedDbContributionJournal } from "./contribution-journal.js";
 import {
-  MAX_PUSH_CHUNKS,
-  MAX_PUSH_MESSAGE_BYTES,
-  PUSH_PROTOCOL_PREFIX,
-} from "./contribution-push.js";
-import {
   isMiniAppInstanceScope,
   miniAppInstanceScope,
 } from "./instance-scope.js";
@@ -17,7 +12,7 @@ import {
 // Keep the established key while migrating its value in place. A new key
 // would strand an unacknowledged v1 global-preference operation.
 const STORAGE_PREFIX = "getbible.miniapp.contributions.v1";
-const STORAGE_VERSION = 3;
+const STORAGE_VERSION = 2;
 const PROTOCOL_VERSION = 1;
 const MAX_BATCH_SIZE = 50; // Compatibility export; snapshot sync is unbatched.
 const MAX_EXPLICIT_OPERATIONS = 2_000;
@@ -32,15 +27,14 @@ const ENGLISH_TOPIC_PATTERN =
   /^(?=[A-Za-z0-9 &'():?-]{2,80}$)(?=.*[A-Za-z])(?!.* {2})[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]$/;
 
 /**
- * Durable local state for the Telegram sendData contribution push.
+ * Durable adapter for the single-request contribution snapshot endpoint.
  *
  * BookmarkStore is the source of truth for personal topics. This class only
- * persists the exact push outbox (envelope plus its encoded GBC1 messages)
- * and explicit global add/remove intents which cannot be reconstructed from
- * BookmarkStore. Explicit intents clear only when a server receipt confirms
- * them through the pull side, so a lost transfer is always resendable.
+ * persists an exact retry envelope and explicit global add/remove intents
+ * which cannot be reconstructed from BookmarkStore.
  */
 export class ContributionSync {
+  #api;
   #coreTopicIds;
   #coreTopics;
   #idFactory;
@@ -51,6 +45,7 @@ export class ContributionSync {
   #persistTail = Promise.resolve();
   #state;
   #storage;
+  #syncPromise = null;
 
   static async open(options = {}) {
     const instanceScope = options.instanceScope ?? defaultInstanceScope();
@@ -114,6 +109,7 @@ export class ContributionSync {
 
   constructor({
     scope,
+    api,
     coreTopics = [],
     coreTopicIds = [],
     storage = browserLocalStorage(),
@@ -125,6 +121,9 @@ export class ContributionSync {
   } = {}) {
     if (typeof scope !== "string" || !SCOPE_PATTERN.test(scope)) {
       throw new TypeError("An authenticated contribution scope is required.");
+    }
+    if (!api || typeof api.syncContributions !== "function") {
+      throw new TypeError("A contribution snapshot API client is required.");
     }
     if (
       !Array.isArray(coreTopics) ||
@@ -151,6 +150,7 @@ export class ContributionSync {
       this.#coreTopicIds.add(id);
     }
 
+    this.#api = api;
     this.#idFactory = idFactory;
     this.#journal = journal;
     this.#key = contributionStorageKey(scope, instanceScope);
@@ -217,6 +217,41 @@ export class ContributionSync {
     this.#applyStatus(normalizeContributionStatus(value));
     await this.#persist().catch(() => false);
     return this.status;
+  }
+
+  async refreshStatus() {
+    if (typeof this.#api.contributionStatus !== "function") {
+      throw new TypeError("The contribution status transport is unavailable.");
+    }
+    try {
+      return await this.seedStatus(await this.#api.contributionStatus());
+    } catch (error) {
+      if (isContributionDenied(error)) {
+        await this.#suspendAfterDenial();
+      }
+      throw error;
+    }
+  }
+
+  /** Compatibility path; new manual flows acknowledge in synchronizeNow. */
+  async acknowledgeDisclosure() {
+    if (!this.disclosureRequired) {
+      return false;
+    }
+    if (typeof this.#api.acknowledgeContributionDisclosure !== "function") {
+      throw new TypeError("Disclosure must be acknowledged with snapshot sync.");
+    }
+    try {
+      await this.seedStatus(
+        await this.#api.acknowledgeContributionDisclosure(),
+      );
+      return true;
+    } catch (error) {
+      if (isContributionDenied(error)) {
+        await this.#suspendAfterDenial();
+      }
+      throw error;
+    }
   }
 
   /** Personal state is reconciled from the next current BookmarkStore snapshot. */
@@ -316,32 +351,26 @@ export class ContributionSync {
     return this.#persistCapture(changed);
   }
 
-  get outbox() {
-    const outbox = this.#state.outbox;
-    if (!outbox) {
-      return null;
-    }
-    return {
-      sync_id: outbox.envelope.sync_id,
-      fingerprint: outbox.fingerprint,
-      total: outbox.messages.length,
-      attempt_index: outbox.attempt_index,
-      sent_all: outbox.attempt_index >= outbox.messages.length,
-      disclosure_acknowledged: outbox.envelope.disclosure_acknowledged,
-    };
+  synchronizeNow(snapshot, { disclosureAcknowledged = false } = {}) {
+    return this.#singleFlight(snapshot, disclosureAcknowledged === true);
   }
 
-  /**
-   * Build (or resume) the durable push outbox for the current desired state.
-   *
-   * ``encode`` turns one envelope into its GBC1 sendData messages. Identical
-   * content resumes the existing outbox byte-for-byte, so re-pushing after a
-   * lost transfer replays the same sync identity the server can deduplicate.
-   */
-  async preparePush(snapshot, { disclosureAcknowledged = false, encode } = {}) {
-    if (typeof encode !== "function") {
-      throw new TypeError("A push message encoder is required.");
+  synchronize(snapshot) {
+    return this.#singleFlight(snapshot, false);
+  }
+
+  #singleFlight(snapshot, disclosureAcknowledged) {
+    if (this.#syncPromise) {
+      return this.#syncPromise;
     }
+    this.#syncPromise = this.#synchronize(snapshot, disclosureAcknowledged)
+      .finally(() => {
+        this.#syncPromise = null;
+      });
+    return this.#syncPromise;
+  }
+
+  async #synchronize(snapshot, disclosureAcknowledged) {
     const desired = normalizeDesiredSnapshot(
       snapshot,
       this.#coreTopics,
@@ -351,167 +380,87 @@ export class ContributionSync {
     const descriptor = {
       snapshot: desired,
       operations,
-      disclosure_acknowledged: disclosureAcknowledged === true,
+      disclosure_acknowledged: disclosureAcknowledged,
     };
     const fingerprint = valueFingerprint(descriptor);
-    const existing = this.#state.outbox;
+    let envelope;
     if (
-      existing?.fingerprint === fingerprint &&
-      outboxMatchesDescriptor(existing.envelope, descriptor)
+      this.#state.inflight?.fingerprint === fingerprint &&
+      inflightMatchesDescriptor(this.#state.inflight.envelope, descriptor)
     ) {
-      return this.outbox;
+      envelope = cloneEnvelope(this.#state.inflight.envelope);
+    } else {
+      envelope = {
+        protocol_version: PROTOCOL_VERSION,
+        sync_id: this.#nextId("s", fingerprint),
+        client_id: this.#state.client_id,
+        snapshot: desired,
+        operations,
+        disclosure_acknowledged: disclosureAcknowledged,
+      };
+      this.#state.inflight = {
+        fingerprint,
+        envelope: cloneEnvelope(envelope),
+      };
     }
-    const envelope = {
-      protocol_version: PROTOCOL_VERSION,
-      sync_id: this.#nextId("s", fingerprint),
-      client_id: this.#state.client_id,
-      snapshot: desired,
-      operations,
-      disclosure_acknowledged: disclosureAcknowledged === true,
-    };
     if (utf8Length(JSON.stringify(envelope)) > MAX_SYNC_ENVELOPE_BYTES) {
-      throw new RangeError("The contribution snapshot is too large to push.");
+      throw new RangeError("The contribution snapshot is too large to synchronize.");
     }
-    const encoded = await encode(cloneEnvelope(envelope));
-    const messages = Array.isArray(encoded?.messages) ? encoded.messages : null;
-    if (
-      !messages ||
-      messages.length < 1 ||
-      messages.length > MAX_PUSH_CHUNKS ||
-      !messages.every((message) =>
-        typeof message === "string" &&
-        message.startsWith(PUSH_PROTOCOL_PREFIX + "|") &&
-        utf8Length(message) <= MAX_PUSH_MESSAGE_BYTES
-      )
-    ) {
-      throw new TypeError("The encoded push messages are invalid.");
-    }
-    this.#state.outbox = {
-      fingerprint,
-      envelope: cloneEnvelope(envelope),
-      messages: [...messages],
-      attempt_index: 0,
-      revision: this.#state.revision,
-    };
-    // The exact transfer commits durably before the first sendData call.
-    // Journal-backed persistence rejects on failure while the localStorage
-    // fallback resolves false; both must leave no phantom in-memory outbox.
-    let persisted = false;
-    try {
-      persisted = await this.#persist();
-    } finally {
-      if (!persisted) {
-        this.#state.outbox = null;
-      }
-    }
-    if (!persisted) {
+
+    // The exact idempotency identity and body commit before transport.
+    const revision = this.#state.revision;
+    if (!await this.#persist()) {
       throw new Error(
-        "Contribution retry storage is unavailable; the push was not prepared.",
+        "Contribution retry storage is unavailable; synchronization was not sent.",
       );
     }
-    return this.outbox;
-  }
-
-  /**
-   * Durably advance the outbox pointer and return the message to send.
-   *
-   * The pointer commits before transport, so a crash between persist and
-   * sendData skips that chunk for the current pass. The transfer still
-   * cannot lose data: an incomplete bundle never yields a receipt, and the
-   * next Push restarts the whole transfer, which the bot's idempotent chunk
-   * staging and sync receipts absorb safely.
-   */
-  async takeNextPushMessage() {
-    const outbox = this.#state.outbox;
-    if (!outbox || outbox.attempt_index >= outbox.messages.length) {
-      return null;
-    }
-    const message = outbox.messages[outbox.attempt_index];
-    outbox.attempt_index += 1;
-    // Journal-backed persistence rejects on failure while the localStorage
-    // fallback resolves false; both must roll the pointer back so no chunk
-    // is ever skipped by a phantom in-memory advance.
-    let persisted = false;
     try {
-      persisted = await this.#persist();
-    } finally {
-      if (!persisted) {
-        outbox.attempt_index -= 1;
-      }
-    }
-    if (!persisted) {
-      throw new Error(
-        "Contribution retry storage is unavailable; the push was not sent.",
+      const response = normalizeSyncResponse(
+        await this.#api.syncContributions(cloneEnvelope(envelope)),
+        envelope.sync_id,
       );
+      const sentIds = new Set(
+        envelope.operations.map((operation) => operation.client_event_id),
+      );
+      this.#state.operations = this.#state.operations.filter(
+        (operation) => !sentIds.has(operation.client_event_id),
+      );
+      if (this.#state.revision === revision) {
+        this.#state.dirty = false;
+      }
+      if (this.#state.inflight?.envelope.sync_id === envelope.sync_id) {
+        this.#state.inflight = null;
+      }
+      this.#applyStatus(response.status);
+      // The server receipt is authoritative. If local cleanup cannot persist,
+      // the pre-request envelope remains durable and a later launch will make
+      // the same safe replay; never relabel the confirmed commit as a failure.
+      await this.#persist().catch(() => false);
+      return synchronizationReport(response, this.pendingCount);
+    } catch (error) {
+      if (isContributionDenied(error)) {
+        await this.#suspendAfterDenial();
+      }
+      throw error;
     }
-    return message;
-  }
-
-  /** Undo one pointer advance after a synchronous sendData failure. */
-  async rewindPushMessage() {
-    const outbox = this.#state.outbox;
-    if (!outbox || outbox.attempt_index === 0) {
-      return false;
-    }
-    outbox.attempt_index -= 1;
-    await this.#persist().catch(() => false);
-    return true;
-  }
-
-  /** Resend a fully-sent but unconfirmed transfer from its first message. */
-  async restartPush() {
-    const outbox = this.#state.outbox;
-    if (!outbox) {
-      return false;
-    }
-    outbox.attempt_index = 0;
-    await this.#persist().catch(() => false);
-    return true;
-  }
-
-  /**
-   * Settle the outbox against a server receipt observed through the pull side.
-   *
-   * Explicit operations clear only here: a transfer that never produced a
-   * receipt keeps its intents queued, so nothing is lost to a failed push.
-   */
-  async confirmReceipt(receipt) {
-    const outbox = this.#state.outbox;
-    if (
-      !outbox ||
-      typeof receipt?.sync_id !== "string" ||
-      receipt.sync_id !== outbox.envelope.sync_id
-    ) {
-      return false;
-    }
-    const sentIds = new Set(
-      outbox.envelope.operations.map((operation) => operation.client_event_id),
-    );
-    this.#state.operations = this.#state.operations.filter(
-      (operation) => !sentIds.has(operation.client_event_id),
-    );
-    if (this.#state.revision === outbox.revision) {
-      this.#state.dirty = false;
-    }
-    this.#state.outbox = null;
-    // The server receipt is authoritative. If local cleanup cannot persist,
-    // the durable outbox remains and a later launch makes the same safe
-    // confirmation again; never relabel the confirmed commit as a failure.
-    await this.#persist().catch(() => false);
-    return true;
-  }
-
-  async discardPush() {
-    if (!this.#state.outbox) {
-      return false;
-    }
-    this.#state.outbox = null;
-    await this.#persist().catch(() => false);
-    return true;
   }
 
   #applyStatus(status) {
     this.#state.status = cloneContributionStatus(status);
+  }
+
+  async #suspendAfterDenial() {
+    const current = this.status;
+    this.#applyStatus({
+      enabled: current.enabled,
+      state: current.state,
+      can_contribute: false,
+      disclosure_required: false,
+      ...(this.reviewDetailsAvailable
+        ? { topics: current.topics, summary: current.summary }
+        : {}),
+    });
+    await this.#persist().catch(() => false);
   }
 
   #nextId(kind, suffix = "") {
@@ -592,11 +541,8 @@ export class ContributionSync {
     }
     try {
       const parsed = JSON.parse(raw);
-      if (validV3State(parsed)) {
-        return cloneState(parsed);
-      }
       if (validV2State(parsed)) {
-        return migrateV2State(parsed, fresh);
+        return cloneState(parsed);
       }
       if (parsed?.version === 1) {
         return migrateV1State(parsed, fresh);
@@ -801,10 +747,102 @@ function normalizeBookmarkSnapshot(value) {
   return { topics, bookmarks };
 }
 
-function outboxMatchesDescriptor(envelope, descriptor) {
+function normalizeSyncResponse(value, expectedSyncId) {
+  const receipt = value?.receipt;
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !sameKeys(value, ["catalog", "protocol_version", "receipt", "status"]) ||
+    value.protocol_version !== PROTOCOL_VERSION ||
+    !receipt ||
+    typeof receipt !== "object" ||
+    Array.isArray(receipt) ||
+    !sameKeys(receipt, [
+      "accepted",
+      "event_ids",
+      "outcome",
+      "replayed",
+      "snapshot_digest",
+      "sync_id",
+    ]) ||
+    receipt.sync_id !== expectedSyncId ||
+    !/^[a-f0-9]{64}$/.test(receipt.snapshot_digest ?? "") ||
+    !["accepted", "replayed"].includes(receipt.outcome) ||
+    !boundedInteger(receipt.accepted, 0, 12_100) ||
+    !boundedInteger(receipt.replayed, 0, 12_100) ||
+    !validReceiptEventIds(receipt.event_ids)
+  ) {
+    throw new TypeError("Invalid contribution sync response.");
+  }
+  const status = normalizeContributionStatus(value.status);
+  const catalog = normalizeSyncCatalog(value.catalog);
+  return {
+    protocol_version: PROTOCOL_VERSION,
+    receipt: jsonClone(receipt),
+    status,
+    catalog,
+  };
+}
+
+function validReceiptEventIds(value) {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).length <= MAX_EXPLICIT_OPERATIONS &&
+    Object.entries(value).every(([key, receiptId]) =>
+      SAFE_ID_PATTERN.test(key) &&
+      boundedInteger(receiptId, 1, Number.MAX_SAFE_INTEGER)
+    ),
+  );
+}
+
+function normalizeSyncCatalog(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Invalid contribution sync response.");
+  }
+  if (
+    sameKeys(value, ["checksum", "revision"]) &&
+    boundedInteger(value.revision, 0, Number.MAX_SAFE_INTEGER) &&
+    /^[a-f0-9]{64}$/.test(value.checksum ?? "")
+  ) {
+    return { revision: value.revision, checksum: value.checksum };
+  }
+  if (
+    sameKeys(value, ["available", "checksum", "revision"]) &&
+    value.available === false &&
+    value.revision === null &&
+    value.checksum === null
+  ) {
+    return { revision: null, checksum: null, available: false };
+  }
+  throw new TypeError("Invalid contribution sync response.");
+}
+
+function sameKeys(value, expected) {
+  const actual = Object.keys(value).sort();
+  return actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index]);
+}
+
+function synchronizationReport(response, pending) {
+  const status = cloneContributionStatus(response.status);
+  return {
+    sent: response.receipt.accepted,
+    pending,
+    review_details_available: contributionReviewDetailsAvailable(status),
+    status,
+    topic_outcomes: status.topics.map(cloneTopicOutcome),
+    catalog: response.catalog,
+    receipt: response.receipt,
+  };
+}
+
+function inflightMatchesDescriptor(envelope, descriptor) {
   // Shapes are canonicalized and ordered before this comparison. The hash is
-  // only a compact ID suffix; exact equality decides whether a transfer is
-  // safe to resume with the same sync identity.
+  // only a compact ID suffix; exact equality decides whether a body is safe to
+  // replay after a lost response.
   return JSON.stringify({
     snapshot: envelope.snapshot,
     operations: envelope.operations,
@@ -820,7 +858,7 @@ function freshState(idFactory) {
     dirty: true,
     revision: 0,
     operations: [],
-    outbox: null,
+    inflight: null,
     status: unavailableStatus(),
   };
 }
@@ -931,56 +969,33 @@ function normalizeLegacyOperation(value, state) {
   }
 }
 
-function validV3State(value) {
-  try {
-    return Boolean(
-      value &&
-      value.version === STORAGE_VERSION &&
-      validCommonState(value) &&
-      (value.outbox === null || validOutbox(value.outbox)) &&
-      (
-        value.outbox === null ||
-        value.outbox.envelope.client_id === value.client_id
-      )
-    );
-  } catch {
-    return false;
-  }
-}
-
 function validV2State(value) {
   try {
     return Boolean(
       value &&
-      value.version === 2 &&
-      validCommonState(value) &&
-      (value.inflight === null || validEnvelopeCarrier(value.inflight)) &&
+      value.version === STORAGE_VERSION &&
+      CLIENT_ID_PATTERN.test(value.client_id) &&
+      Number.isSafeInteger(value.next_sequence) &&
+      value.next_sequence >= 0 &&
+      typeof value.dirty === "boolean" &&
+      Number.isSafeInteger(value.revision) &&
+      value.revision >= 0 &&
+      Array.isArray(value.operations) &&
+      value.operations.length <= MAX_EXPLICIT_OPERATIONS &&
+      value.operations.every(validOperation) &&
+      (value.inflight === null || validInflight(value.inflight)) &&
       (
         value.inflight === null ||
         value.inflight.envelope.client_id === value.client_id
-      )
+      ) &&
+      Boolean(normalizeContributionStatus(value.status))
     );
   } catch {
     return false;
   }
 }
 
-function validCommonState(value) {
-  return Boolean(
-    CLIENT_ID_PATTERN.test(value.client_id) &&
-    Number.isSafeInteger(value.next_sequence) &&
-    value.next_sequence >= 0 &&
-    typeof value.dirty === "boolean" &&
-    Number.isSafeInteger(value.revision) &&
-    value.revision >= 0 &&
-    Array.isArray(value.operations) &&
-    value.operations.length <= MAX_EXPLICIT_OPERATIONS &&
-    value.operations.every(validOperation) &&
-    Boolean(normalizeContributionStatus(value.status))
-  );
-}
-
-function validEnvelopeCarrier(value) {
+function validInflight(value) {
   return Boolean(
     value &&
     typeof value === "object" &&
@@ -993,39 +1008,6 @@ function validEnvelopeCarrier(value) {
     Array.isArray(value.envelope?.operations) &&
     typeof value.envelope?.disclosure_acknowledged === "boolean"
   );
-}
-
-function validOutbox(value) {
-  return Boolean(
-    validEnvelopeCarrier(value) &&
-    Array.isArray(value.messages) &&
-    value.messages.length >= 1 &&
-    value.messages.length <= MAX_PUSH_CHUNKS &&
-    value.messages.every((message) =>
-      typeof message === "string" &&
-      message.startsWith(PUSH_PROTOCOL_PREFIX + "|") &&
-      utf8Length(message) <= MAX_PUSH_MESSAGE_BYTES
-    ) &&
-    Number.isSafeInteger(value.attempt_index) &&
-    value.attempt_index >= 0 &&
-    value.attempt_index <= value.messages.length &&
-    Number.isSafeInteger(value.revision) &&
-    value.revision >= 0
-  );
-}
-
-function migrateV2State(value, fresh) {
-  fresh.client_id = value.client_id;
-  fresh.next_sequence = value.next_sequence;
-  // A pending v2 HTTP envelope cannot travel the sendData transport; drop it
-  // and keep the state dirty so the next push rebuilds the same content. Its
-  // explicit operations are still queued below, so nothing is lost.
-  fresh.dirty = value.dirty || value.inflight !== null;
-  fresh.revision = value.revision;
-  fresh.operations = value.operations.map(cloneOperation);
-  fresh.outbox = null;
-  fresh.status = cloneContributionStatus(value.status);
-  return fresh;
 }
 
 function validOperation(value) {
@@ -1047,14 +1029,11 @@ function cloneState(value) {
     dirty: value.dirty,
     revision: value.revision,
     operations: value.operations.map(cloneOperation),
-    outbox: value.outbox === null
+    inflight: value.inflight === null
       ? null
       : {
-          fingerprint: value.outbox.fingerprint,
-          envelope: cloneEnvelope(value.outbox.envelope),
-          messages: [...value.outbox.messages],
-          attempt_index: value.outbox.attempt_index,
-          revision: value.outbox.revision,
+          fingerprint: value.inflight.fingerprint,
+          envelope: cloneEnvelope(value.inflight.envelope),
         },
     status: cloneContributionStatus(value.status),
   };
@@ -1066,7 +1045,7 @@ function migratableRawState(raw) {
   }
   try {
     const value = JSON.parse(raw);
-    return value?.version === 1 || validV2State(value) || validV3State(value);
+    return value?.version === 1 || validV2State(value);
   } catch {
     return false;
   }
@@ -1137,6 +1116,20 @@ function normalizeContributionTopic(value) {
 
 function cloneContributionStatus(value) {
   return normalizeContributionStatus(value);
+}
+
+function cloneTopicOutcome(topic) {
+  return {
+    ...topic,
+    ...(topic.canonical_topic
+      ? {
+          canonical_topic: {
+            ...topic.canonical_topic,
+            aliases: [...topic.canonical_topic.aliases],
+          },
+        }
+      : {}),
+  };
 }
 
 function cloneOperation(operation) {
@@ -1214,6 +1207,14 @@ function defaultToken() {
 
 function unavailableStatus() {
   return normalizeContributionStatus(undefined);
+}
+
+function isContributionDenied(error) {
+  return error?.code === "contribution_not_allowed";
+}
+
+function jsonClone(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 function utf8Length(value) {
