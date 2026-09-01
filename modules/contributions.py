@@ -2135,8 +2135,10 @@ class ContributionStore:
             # forever: reads kept working (an approved contributor saw the
             # panel) while every write — token issuance, event recording —
             # failed. The schema script is entirely IF NOT EXISTS, so applying
-            # it on every open guarantees every table regardless of history.
-            self._create_schema(connection)
+            # it whenever a runtime table is absent repairs any history without
+            # running DDL against a healthy store on every start.
+            if self._missing_required_tables(connection):
+                self._create_schema(connection)
             self._ensure_seed_state(connection)
         except BaseException:
             connection.close()
@@ -2155,13 +2157,7 @@ class ContributionStore:
         """
         with self._guard:
             connection = self._connection_required()
-            tables = {
-                str(row[0])
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                )
-            }
-            missing = sorted(_REQUIRED_TABLES - tables)
+            missing = sorted(self._missing_required_tables(connection))
             if missing:
                 raise sqlite3.DatabaseError(
                     "Contribution store is missing tables: " + ", ".join(missing)
@@ -2179,6 +2175,17 @@ class ContributionStore:
                 )
             finally:
                 connection.execute("ROLLBACK")
+
+    @staticmethod
+    def _missing_required_tables(connection: sqlite3.Connection) -> frozenset[str]:
+        """Return the runtime tables this store cannot find."""
+        present = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        return _REQUIRED_TABLES - present
 
     @staticmethod
     def _create_schema(connection: sqlite3.Connection) -> None:
