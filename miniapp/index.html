@@ -857,6 +857,53 @@
     </div>
 
     <dialog
+      id="contributor-disclosure"
+      class="sheet"
+      aria-labelledby="contributor-disclosure-title"
+      aria-describedby="contributor-disclosure-text"
+    >
+      <div class="sheet__surface">
+        <header class="sheet__header">
+          <div>
+            <p class="eyebrow" data-i18n="bookmarks.contribution_sync_title">Contributor sync</p>
+            <h2
+              id="contributor-disclosure-title"
+              data-i18n="bookmarks.contribution_disclosure_title"
+            >
+              Before your first sync
+            </h2>
+          </div>
+        </header>
+        <div class="sheet__content">
+          <p
+            id="contributor-disclosure-text"
+            data-i18n="bookmarks.contribution_disclosure"
+          >
+            Contributor disclosure
+          </p>
+        </div>
+        <footer class="sheet__footer">
+          <button
+            id="contributor-disclosure-decline"
+            class="button button--secondary"
+            type="button"
+            data-i18n="bookmarks.contribution_disclosure_decline"
+          >
+            Not now
+          </button>
+          <button
+            id="contributor-disclosure-accept"
+            class="button button--primary"
+            type="button"
+            data-i18n="bookmarks.contribution_disclosure_accept"
+          >
+            I understand and agree
+          </button>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog
       id="translation-dialog"
       class="sheet sheet--translation"
       aria-labelledby="translation-title"

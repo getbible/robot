@@ -1446,8 +1446,16 @@ class MiniAppApi:
         try:
             token = store.issue_capability(user_id)
         except (ContributionError, OSError, sqlite3.Error, RuntimeError):
-            LOGGER.warning(
-                "A contributor token could not be issued",
+            # This is the one failure that leaves an approved contributor with
+            # a visible panel and no way to synchronize: the status read
+            # succeeded but the store refused a write. Name it as the fault
+            # it is so the operator finds it in the log, not by guesswork.
+            LOGGER.error(
+                "A contributor token could not be issued for an approved "
+                "contributor: the contribution store accepted reads but refused "
+                "a write. Every Sync will fail until this is fixed; run "
+                "`setup.sh doctor` to check store ownership, sidecar files, "
+                "and schema completeness.",
                 exc_info=True,
             )
             return status

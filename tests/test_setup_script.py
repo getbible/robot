@@ -525,6 +525,26 @@ cat "$dropin_root/alpha.conf"
             script,
         )
 
+    def test_store_preflight_and_doctor_prove_the_write_path(self) -> None:
+        script = SETUP.read_text(encoding="utf-8")
+        # Reads alone once passed a store the service could not write, which
+        # left approved contributors with a visible panel and no token.
+        access = script[script.index("verify_contribution_store_access() {"):]
+        access = access[: access.index("\nverify_contribution_store_readonly() {")]
+        self.assertIn("store.verify_writable()", access)
+
+        doctor = script[script.index("cmd_doctor() {"):]
+        doctor = doctor[: doctor.index("\ncmd_repair() {")] if "\ncmd_repair() {" in doctor else doctor
+        self.assertIn(
+            'verify_contribution_store_access "$app_dir" "$env_file" "$ACTIVE_USER"',
+            doctor,
+        )
+
+        validate = script[script.index("validate_contribution_store_path() {"):]
+        validate = validate[: validate.index("\nload_contribution_context() {")]
+        for suffix in ("-wal", "-shm", "-journal"):
+            self.assertIn(f'"{suffix}"', validate)
+
     def test_upgrade_refreshes_managed_caddy_transactionally(self) -> None:
         script = SETUP.read_text(encoding="utf-8")
         start = script.index("cmd_upgrade() {")

@@ -11,6 +11,16 @@ import { ENGLISH_MESSAGES } from "../lib/messages.en.js";
 test("contributor errors use safe actionable categories", () => {
   const cases = [
     {
+      // The server called the contributor approved yet issued no token even
+      // after a fresh status request: a server-side write fault the phone
+      // cannot fix, which must never hide behind a generic "try again".
+      error: new ApiError("Contribution sync is not available for this session.", {
+        code: "contribution_transport_not_ready",
+        status: 403,
+      }),
+      key: "bookmarks.contribution_sync_token_unavailable",
+    },
+    {
       error: new ApiError("private rejected field", {
         code: "invalid_contribution",
         status: 400,

@@ -4,6 +4,58 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### The first contributor Sync no longer fails before it starts
+
+- Found and fixed the defect behind every newly approved contributor's Sync
+  ending in "Sync could not finish" with nothing ever reaching the review
+  queue. The one-time contributor disclosure — 300 characters, identical in
+  every locale — was shown through Telegram's `showAlert`, whose SDK routes
+  it to `showPopup` and **throws synchronously for any message over 256
+  characters** instead of calling back. The rejected promise landed in the
+  sync error handler as a generic failure before a single request left the
+  phone; because the acknowledgement rides on the first batch, it never
+  reached the server, `disclosure_required` stayed true, and every later tap
+  repeated the same failure. This was unaffected by every transport, token,
+  caching, and backoff change, and invisible to every test because each
+  browser stub's `showAlert` accepted any length.
+- The disclosure is now the Mini App's own sheet with explicit **I
+  understand and agree** / **Not now** actions; declining sends nothing and
+  leaves the panel ready. `TelegramBridge.alert`/`confirm` never reject any
+  more: a message over the limit or an SDK throw (unsupported client, popup
+  already open) degrades to the native dialog. Both browser fixtures now
+  mirror the SDK's 256-character rejection, and a unit test pins that every
+  message still routed through a popup fits in every locale and that the
+  disclosure never goes near one again.
+
+### A contribution store that reads but cannot write no longer looks approved
+
+- Reproduced the one mechanism behind "the panel is visible, search works,
+  and every Sync fails": the store answered the approval read, so the panel
+  appeared, while token issuance and event recording — writes — failed, and
+  the server's fail-open status handed the client an approved contributor
+  with no token. A store already at the current schema version that lost a
+  table (an interrupted upgrade, a rollback across the retired transports)
+  stayed that way forever because no migration branch runs at the current
+  version. The store now applies its idempotent schema on every open, so any
+  missing table is recreated at the next start.
+- Added `ContributionStore.verify_writable()`, which checks every runtime
+  table and performs a rolled-back page write. The install/upgrade preflight
+  and `setup.sh doctor` run it as the service account, so a store the runtime
+  cannot write fails the upgrade and the diagnostics loudly instead of
+  silently breaking contributors. The store path check also refuses a
+  `-wal`/`-shm`/`-journal` sidecar not owned by the service account — the
+  trace a root-run session leaves that lets the service read but not write.
+- The server now logs token-issuance failure for an approved contributor at
+  `ERROR` with the remedy, and the Mini App reports it as a server-side
+  storage fault ("could not issue a contributor token … run Diagnostics")
+  instead of the generic "Sync could not finish".
+- Added a real-server browser test: the genuine Mini App in Chromium against
+  the genuine `MiniAppApi`, Tornado adapters, session exchange with signed
+  Telegram `initData`, token issuance, and SQLite store — first-ever sync with
+  the disclosure, a returning contributor, a self-healed damaged store, and
+  the honest report when every token write fails. Until now every browser
+  test mocked the server and every server test hand-wrote the batches.
+
 ### Deployment updates that provably reach the phone
 
 - Every packaged Mini App file — `index.html`, `app.js`, every `lib/*.js`

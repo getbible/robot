@@ -1009,6 +1009,10 @@ try:
     status = store.contribution_status(1)
     if not isinstance(status, dict) or "can_contribute" not in status:
         raise RuntimeError("Contribution authority lookup is unavailable.")
+    # Reads alone once passed a store the service could not write, which
+    # left approved contributors with a panel and no token. Prove the
+    # write path the runtime needs, rolled back.
+    store.verify_writable()
 finally:
     store.close()
 PY
@@ -3093,6 +3097,10 @@ cmd_doctor() {
             warn "The configured contribution database is not runtime-writable by the service account."
             ((failures += 1))
         }
+        verify_contribution_store_access "$app_dir" "$env_file" "$ACTIVE_USER" || {
+            warn "The contribution database accepts reads but refuses writes or is missing tables: approved contributors cannot be issued a token and every Sync fails."
+            ((failures += 1))
+        }
         "$app_dir/venv/bin/python" -m pip check || ((failures += 1))
         local actual_sha
         actual_sha=$(git -C "$app_dir" rev-parse HEAD 2>/dev/null || true)
@@ -4395,6 +4403,22 @@ else:
         raise SystemExit("Contribution store is not a regular file.")
     if metadata.st_uid != expected_uid:
         raise SystemExit("Contribution store is not owned by the instance service user.")
+# SQLite's WAL sidecars are created by whichever process writes first. One
+# root-run session leaves a root-owned -wal/-shm beside a correctly owned
+# database: the service can still read but every write fails.
+for suffix in ("-wal", "-shm", "-journal"):
+    sidecar = path.with_name(path.name + suffix)
+    try:
+        sidecar_metadata = os.lstat(sidecar)
+    except FileNotFoundError:
+        continue
+    if stat.S_ISLNK(sidecar_metadata.st_mode):
+        raise SystemExit(f"Contribution store sidecar is a symlink: {sidecar}")
+    if sidecar_metadata.st_uid != expected_uid:
+        raise SystemExit(
+            f"Contribution store sidecar {sidecar.name} is not owned by the instance service user; "
+            "remove it while the service is stopped or chown it to the service account."
+        )
 PY
 }
 

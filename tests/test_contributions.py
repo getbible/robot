@@ -397,6 +397,49 @@ class ContributionStoreTestCase(unittest.TestCase):
             }.issubset(tables)
         )
 
+    def test_current_version_store_missing_a_table_is_repaired_on_open(self) -> None:
+        # A store already at the current version takes no migration branch.
+        # Before self-healing, a capabilities table lost to an interrupted
+        # upgrade stayed missing forever: reads succeeded, so an approved
+        # contributor saw the panel, while every token issuance failed.
+        self.store.submit_application(42, first_name="Grace")
+        self.store.decide_application(42, "approved", actor="admin")
+        self.store.close()
+        with sqlite3.connect(self.path) as connection:
+            connection.executescript(
+                """
+                DROP TABLE contributor_capabilities;
+                PRAGMA user_version=5;
+                """
+            )
+
+        self.store = ContributionStore(path=str(self.path))
+        self.assertRegex(self.store.issue_capability(42), r"\Agbc_[A-Za-z0-9_-]{43}\Z")
+        self.store.verify_writable()
+
+    def test_verify_writable_names_missing_tables_and_passes_a_healthy_store(self) -> None:
+        self.store.verify_writable()
+        with sqlite3.connect(self.path) as connection:
+            before = connection.execute(
+                "SELECT COUNT(*) FROM contributor_capabilities"
+            ).fetchone()[0]
+        # The probe must not leave any domain change behind.
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM contributor_capabilities"
+                ).fetchone()[0],
+                before,
+            )
+
+        # Bypass the self-healing open to model a store damaged while running.
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute("DROP TABLE contributor_capabilities")
+        with self.assertRaises(sqlite3.DatabaseError) as raised:
+            self.store.verify_writable()
+        self.assertIn("contributor_capabilities", str(raised.exception))
+
     def test_v6_push_transport_schema_downgrades_without_losing_state(self) -> None:
         # A deployment that briefly ran the withdrawn web_app_data push
         # transport left its database at user_version 6 with two staging
