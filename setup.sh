@@ -1432,6 +1432,7 @@ for host in sorted(routes):
                 path + "/api-contract.json",
                 path + "/lib/*",
                 path + "/assets/*",
+                path + "/build/*",
             )
             lines.extend(
                 (
@@ -1464,7 +1465,7 @@ for host in sorted(routes):
         else:
             static_paths = (
                 "/", "/index.html", "/app.js", "/styles.css",
-                "/api-contract.json", "/lib/*", "/assets/*",
+                "/api-contract.json", "/lib/*", "/assets/*", "/build/*",
             )
             lines.extend(
                 (
@@ -1759,9 +1760,28 @@ PY
 probe_mini_app_url() {
     local url=$1
     local body
+    local module
     body=$(curl --fail --silent --show-error --location --max-time 10 "$url") ||
         return 1
-    grep -Fq '<title>getBible.Life</title>' <<<"$body"
+    grep -Fq '<title>getBible.Life</title>' <<<"$body" || return 1
+    # The shell names its JavaScript below build/<fingerprint>/. That prefix
+    # must reach Robot through the same route as the shell, or every launch
+    # renders a page whose modules the proxy answers with an empty 404.
+    module=$(grep -oE 'src="\./build/[a-f0-9]{16}/app\.js"' <<<"$body" || true)
+    module=${module%%$'\n'*}
+    module=${module#src=\"./}
+    module=${module%\"}
+    if [[ -z "$module" ]]; then
+        printf 'The Mini App shell at %s does not name a build-specific app.js.\n' \
+            "$url" >&2
+        return 1
+    fi
+    curl --fail --silent --show-error --location --max-time 10 \
+        "${url%/}/${module}" | grep -Fq 'import' || {
+        printf 'The Mini App module %s is not reachable through %s.\n' \
+            "$module" "$url" >&2
+        return 1
+    }
 }
 
 probe_mini_app_api_url() {

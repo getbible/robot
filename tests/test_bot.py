@@ -515,5 +515,50 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class MenuButtonTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_menu_button_names_the_packaged_client_build(self) -> None:
+        settings = SimpleNamespace(
+            bot_name="getBible.Life",
+            bot_description="Scripture",
+            bot_short_description="Scripture",
+            mini_app_enabled=True,
+            mini_app_public_url="https://bot.example.com/getbible",
+        )
+        telegram_bot = SimpleNamespace(
+            set_my_commands=AsyncMock(),
+            set_my_name=AsyncMock(),
+            set_my_description=AsyncMock(),
+            set_my_short_description=AsyncMock(),
+            set_chat_menu_button=AsyncMock(),
+        )
+        versioned = "https://bot.example.com/getbible/?build=0123456789abcdef"
+        application = SimpleNamespace(
+            bot=telegram_bot,
+            bot_data={
+                bot.SETTINGS_SLOT: settings,
+                bot.MINI_APP_SLOT: SimpleNamespace(menu_web_url=versioned),
+            },
+        )
+
+        await bot._synchronize_telegram_profile(application, settings)
+        menu_button = telegram_bot.set_chat_menu_button.await_args.kwargs["menu_button"]
+        self.assertEqual(menu_button.web_app.url, versioned)
+
+        # A menu launch carries no one-time token, so without the build query
+        # a WebView could keep replaying a cached shell. The fixed URL remains
+        # the fallback only when no Mini App listener exists to name a build.
+        application.bot_data.pop(bot.MINI_APP_SLOT)
+        telegram_bot.set_chat_menu_button.reset_mock()
+        await bot._synchronize_telegram_profile(application, settings)
+        fallback = telegram_bot.set_chat_menu_button.await_args.kwargs["menu_button"]
+        self.assertEqual(fallback.web_app.url, "https://bot.example.com/getbible/")
+
+        application.bot_data[bot.MINI_APP_SLOT] = Mock()
+        telegram_bot.set_chat_menu_button.reset_mock()
+        await bot._synchronize_telegram_profile(application, settings)
+        mocked = telegram_bot.set_chat_menu_button.await_args.kwargs["menu_button"]
+        self.assertEqual(mocked.web_app.url, "https://bot.example.com/getbible/")
+
+
 if __name__ == "__main__":
     unittest.main()

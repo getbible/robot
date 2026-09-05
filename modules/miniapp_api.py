@@ -12,7 +12,7 @@ import sqlite3
 import time
 from collections import Counter, OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 from weakref import WeakValueDictionary
@@ -657,7 +657,14 @@ class MiniAppApi:
             and principal.start_param is not None
             and supplied_launch != principal.start_param
         ):
-            raise MiniAppAuthenticationError("Invalid Mini App launch.")
+            # A Telegram client can carry an earlier launch's start_param into
+            # a later launch. The URL names the launch the user tapped; a token
+            # that no store knows degrades to a private session below instead
+            # of refusing every launch this user makes.
+            LOGGER.info(
+                "Mini App launch token differs from the signed start_param; "
+                "using the launch named by the URL"
+            )
         launch_token = supplied_launch or principal.start_param
         init_data_digest = hashlib.sha256(init_data.encode("utf-8")).digest()
 
@@ -677,11 +684,18 @@ class MiniAppApi:
                 if exact_session.launch.token == "generic-private"
                 else exact_session.launch.token
             )
-            if launch_token != expected_launch_token:
+            # The same signed initData names the same page. A private session
+            # that was degraded from a launch nobody knew any more is still
+            # that page's session when the URL repeats the forgotten token.
+            if (
+                expected_launch_token is not None
+                and launch_token != expected_launch_token
+            ):
                 raise MiniAppAuthenticationError("Invalid Mini App launch.")
             await self._limiter.acquire(
                 user_id=principal.user_id,
                 chat_id=principal.rate_limit_chat_id,
+                cost=self._navigation_rate_cost,
                 client_key=request.client_key,
             )
             if not self._sessions.rebind(
@@ -710,22 +724,27 @@ class MiniAppApi:
                 )
             if expired_launch is not None:
                 await self._cleanup_expired_launch(expired_launch)
-                raise MiniAppAuthenticationError("Invalid Mini App launch.")
-            pending_launch = self._launches.peek(
-                launch_token,
-                user_id=principal.user_id,
-            )
-            if pending_launch is None:
-                recovery_session = self._sessions.find_by_launch(
+                launch_token = self._degraded_launch("expired")
+            else:
+                pending_launch = self._launches.peek(
                     launch_token,
                     user_id=principal.user_id,
                 )
-                if recovery_session is None:
-                    raise MiniAppAuthenticationError("Invalid Mini App launch.")
+                if pending_launch is None:
+                    recovery_session = self._sessions.find_by_launch(
+                        launch_token,
+                        user_id=principal.user_id,
+                    )
+                    if recovery_session is None:
+                        launch_token = self._degraded_launch("unknown")
 
+        # An exchange is a read-shaped bootstrap that Telegram has already
+        # signed, and a person who relaunches a few times while something is
+        # wrong must not be treated like an automated flood.
         await self._limiter.acquire(
             user_id=principal.user_id,
             chat_id=principal.rate_limit_chat_id,
+            cost=self._navigation_rate_cost,
             client_key=request.client_key,
         )
         translation = self._preferences.translation_for(principal.user_id)
@@ -797,6 +816,20 @@ class MiniAppApi:
                 self._launches.restore(consumed_launch)
             raise
 
+    @staticmethod
+    def _degraded_launch(reason: str) -> None:
+        """Turn a launch nobody holds any more into an ordinary private launch.
+
+        Launch tokens live in process memory, so every button a user received
+        before a restart or upgrade names a launch the new process never saw.
+        Those buttons stay in the chat, and tapping one again is exactly what
+        a person does when the app "will not open". The signed initData still
+        proves who they are, so they get the same private session a menu
+        launch gets; only the launch's route and group target are lost.
+        """
+        LOGGER.info("Mini App launch token is %s; opening a private session", reason)
+        return None
+
     async def _cleanup_expired_launch(self, launch: MiniAppLaunch) -> None:
         """Remove stale Telegram launch rows without affecting auth failure."""
         if self._cleanup_launch is None:
@@ -825,10 +858,21 @@ class MiniAppApi:
         preferences = self._preferences.preferences_for(session.user_id)
         available = {option.code for option in options}
         if preferences.translation not in available and options:
-            preferences = self._preferences.update_preferences(
-                session.user_id,
-                translation=options[0].code,
-            )
+            try:
+                preferences = self._preferences.update_preferences(
+                    session.user_id,
+                    translation=options[0].code,
+                )
+            except (OSError, sqlite3.Error, RuntimeError):
+                # A preference store the service can read but no longer write
+                # (ownership left behind by an earlier deployment) must not
+                # keep a reader out of Scripture; the corrected translation
+                # simply lives in this session until the store is repaired.
+                LOGGER.warning(
+                    "Reader preferences could not be saved during session bootstrap",
+                    exc_info=True,
+                )
+                preferences = replace(preferences, translation=options[0].code)
         self._sessions.set_user_translation(
             session.user_id,
             preferences.translation,
@@ -1419,7 +1463,9 @@ class MiniAppApi:
             return _unavailable_contribution_status()
         try:
             return store.contribution_status(user_id)
-        except (OSError, sqlite3.Error, RuntimeError):
+        except (OSError, sqlite3.Error, RuntimeError, ValueError, TypeError):
+            # A damaged moderation row (unparseable canonical definition or
+            # aliases JSON) is a moderation problem, never a reading problem.
             LOGGER.warning(
                 "Contributor status is temporarily unavailable",
                 exc_info=True,

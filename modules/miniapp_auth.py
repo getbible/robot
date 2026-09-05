@@ -268,19 +268,23 @@ def _optional_text(value: str | None, maximum: int) -> str | None:
 
 
 def _optional_json_text(value: object, maximum: int) -> str | None:
-    """Keep signed Telegram profile text bounded and inert for private audit display."""
-    if value is None:
-        return None
+    """Keep signed Telegram profile text bounded and inert for private audit display.
+
+    Profile text is audit metadata, never identity: the HMAC has already proved
+    the user. Text that cannot be shown safely is trimmed or dropped rather than
+    failing the authorization, because nobody can respell their Telegram name
+    to get into a Bible reader.
+    """
     if not isinstance(value, str):
-        raise MiniAppAuthenticationError("Invalid Telegram authorization.")
-    result = value.strip()
-    if (
-        not result
-        or len(result) > maximum
-        or any(ord(character) < 32 or ord(character) == 127 for character in result)
-    ):
-        raise MiniAppAuthenticationError("Invalid Telegram authorization.")
-    return result
+        return None
+    cleaned = "".join(
+        character
+        for character in value
+        if ord(character) >= 32 and ord(character) != 127
+    ).strip()
+    if not cleaned:
+        return None
+    return cleaned[:maximum].rstrip() or None
 
 
 def _chat_type(value: str | None) -> str | None:

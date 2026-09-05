@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  SESSION_PUBLIC_TRANSLATIONS_TIMEOUT_MS,
   clearBoundSession,
   openBoundSession,
   readBoundSession,
@@ -152,4 +153,111 @@ test("malformed, mismatched, and explicitly cleared records cannot resume", asyn
   );
   clearBoundSession(storage);
   assert.equal(readBoundSession(storage, context), null);
+});
+
+// The robot's session response already carries the translation list. The
+// public catalogue is preferred, but a public origin that fails or stalls
+// must never keep a user out of an app whose server has just admitted them.
+const SERVER_TRANSLATIONS = [
+  {
+    code: "kjv",
+    name: "King James Version",
+    language: "English",
+    lang: "en",
+    direction: "ltr",
+  },
+];
+const PUBLIC_TRANSLATIONS = [
+  ...SERVER_TRANSLATIONS,
+  {
+    code: "aov",
+    name: "Afrikaans Ou Vertaling",
+    language: "Afrikaans",
+    lang: "af",
+    direction: "ltr",
+  },
+];
+
+function catalogueApi({ translations, serverTranslations = SERVER_TRANSLATIONS }) {
+  return {
+    calls: [],
+    async createSession(launchToken) {
+      this.calls.push(["create", launchToken]);
+      return {
+        session_token: "SessionToken_0123456789abcdef",
+        user: { id: 42 },
+        ...(serverTranslations ? { translations: serverTranslations } : {}),
+      };
+    },
+    async resumeSession(token) {
+      this.calls.push(["resume", token]);
+      return {
+        session_token: token,
+        user: { id: 42 },
+        ...(serverTranslations ? { translations: serverTranslations } : {}),
+      };
+    },
+    translations,
+  };
+}
+
+function openWithCatalogue(api, overrides = {}) {
+  return openBoundSession(api, {
+    initData: "signed-init-data",
+    storage: new MemoryStorage(),
+    publicTranslationsTimeoutMs: 20,
+    ...overrides,
+  });
+}
+
+test("the public translation catalogue is preferred when it arrives", async () => {
+  const api = catalogueApi({ translations: async () => PUBLIC_TRANSLATIONS });
+  const payload = await openWithCatalogue(api);
+  assert.deepEqual(payload.translations, PUBLIC_TRANSLATIONS);
+  assert.deepEqual(api.calls, [["create", null]]);
+});
+
+test("the robot's translations stand in when the public catalogue fails", async () => {
+  const api = catalogueApi({
+    translations: async () => {
+      throw new Error("public origin unreachable");
+    },
+  });
+  assert.deepEqual((await openWithCatalogue(api)).translations, SERVER_TRANSLATIONS);
+});
+
+test("the robot's translations stand in when the public catalogue stalls", async () => {
+  const api = catalogueApi({ translations: () => new Promise(() => {}) });
+  const started = Date.now();
+  const payload = await openWithCatalogue(api);
+  assert.deepEqual(payload.translations, SERVER_TRANSLATIONS);
+  assert.ok(Date.now() - started < 2_000);
+  assert.ok(SESSION_PUBLIC_TRANSLATIONS_TIMEOUT_MS >= 5_000);
+});
+
+test("an empty public catalogue also falls back to the robot's list", async () => {
+  const api = catalogueApi({ translations: async () => [] });
+  assert.deepEqual((await openWithCatalogue(api)).translations, SERVER_TRANSLATIONS);
+});
+
+test("without any translation source the public failure is raised", async () => {
+  const api = catalogueApi({
+    translations: async () => {
+      throw new Error("public origin unreachable");
+    },
+    serverTranslations: null,
+  });
+  await assert.rejects(openWithCatalogue(api), /public origin unreachable/);
+});
+
+test("a resumed session gets the same catalogue fallback", async () => {
+  const storage = new MemoryStorage();
+  await openWithCatalogue(
+    catalogueApi({ translations: async () => PUBLIC_TRANSLATIONS }),
+    { storage },
+  );
+  const api = catalogueApi({ translations: () => new Promise(() => {}) });
+  const payload = await openWithCatalogue(api, { storage });
+  assert.deepEqual(api.calls, [["resume", "SessionToken_0123456789abcdef"]]);
+  assert.deepEqual(payload.translations, SERVER_TRANSLATIONS);
 });
