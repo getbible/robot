@@ -724,3 +724,45 @@ test("accepts only this account's preference and mapping keys and keeps payloads
   assert.equal(other.getItem(GLOBAL_BOOKMARK_PREFERENCES_KEY), null);
   assert.equal(local.values.has(localMirrorKey("preferences", OTHER_SCOPE)), false);
 });
+
+test("a record with an impossible timestamp is damage, not the newest candidate", async () => {
+  const local = new MemoryStorage();
+  const localKey = `${GLOBAL_BOOKMARK_LOCAL_MIRROR_PREFIX}:${SCOPE}:preferences`;
+  local.values.set(localKey, JSON.stringify({
+    version: GLOBAL_BOOKMARK_DEVICE_ENVELOPE_VERSION,
+    record_updated_at: Number.MAX_SAFE_INTEGER,
+    deleted: false,
+    value: "poison",
+  }));
+  const storage = await GlobalBookmarkDeviceStorage.open({
+    instanceScope: INSTANCE_SCOPE,
+    scope: SCOPE,
+    webApp: null,
+    localStorage: local,
+  });
+  assert.equal(storage.getItem(GLOBAL_BOOKMARK_PREFERENCES_KEY), null);
+  assert.equal(local.values.has(localKey), false);
+  // The clock is intact, so ordinary writes continue.
+  storage.setItem(GLOBAL_BOOKMARK_PREFERENCES_KEY, "fresh");
+  assert.equal(storage.getItem(GLOBAL_BOOKMARK_PREFERENCES_KEY), "fresh");
+  assert.ok(local.values.has(localKey));
+});
+
+test("promoting an unscoped legacy record is best effort when the clock is exhausted", async () => {
+  const local = new MemoryStorage();
+  local.values.set(GLOBAL_BOOKMARK_PREFERENCES_KEY, "legacy-preferences");
+  local.values.set(MAPPING_KEY, "legacy-mapping");
+  const storage = await GlobalBookmarkDeviceStorage.open({
+    instanceScope: INSTANCE_SCOPE,
+    scope: SCOPE,
+    webApp: null,
+    localStorage: local,
+    clock: () => Number.MAX_SAFE_INTEGER,
+  });
+  // Opening succeeds; the reader can start even though nothing was promoted.
+  assert.equal(storage.getItem(GLOBAL_BOOKMARK_PREFERENCES_KEY), null);
+  assert.equal(storage.getItem(MAPPING_KEY), null);
+  assert.equal(storage.status.phase, "degraded");
+  assert.match(storage.status.lastError, /exhausted/);
+  assert.equal(local.values.get(GLOBAL_BOOKMARK_PREFERENCES_KEY), "legacy-preferences");
+});

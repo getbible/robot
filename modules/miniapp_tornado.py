@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from pathlib import Path
 from typing import TypeAlias
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from tornado.httpserver import HTTPServer
 from tornado.web import Application as TornadoApplication
@@ -51,6 +53,114 @@ from .service import ScriptureQuery, ScriptureService
 _IpAddress: TypeAlias = IPv4Address | IPv6Address
 CleanupSessionCallback = Callable[[MiniAppHttpRequest], Awaitable[int]]
 MAX_MINI_APP_REQUEST_BYTES = 64 * 1024
+# Every client file is also reachable below <public path>/build/<fingerprint>/.
+# The fingerprint is derived from the packaged client bytes, so the shell of
+# one deployment can only ever name module URLs that no other deployment used.
+MINI_APP_BUILD_SEGMENT = "build"
+MINI_APP_BUILD_ID_PATTERN = r"[a-f0-9]{16}"
+_BUILD_ID_RE = re.compile(rf"{MINI_APP_BUILD_ID_PATTERN}\Z")
+_BUILD_EXCLUDED_DIRECTORIES = frozenset({"node_modules", "tests"})
+_BUILD_EXCLUDED_FILES = frozenset({"package.json", "package-lock.json"})
+_SHELL_MODULE_ENTRY = 'src="./app.js"'
+# The shell references these entry files directly. Every module they import
+# resolves relative to their build-specific URL, so the complete graph moves
+# with them and a WebView can never combine files from two deployments.
+_SHELL_ENTRY_RE = re.compile(
+    r'(?P<attribute>src|href)="\./(?P<file>app\.js|boot\.js|styles\.css)"'
+)
+
+
+def mini_app_build_id(static_root: Path) -> str:
+    """Fingerprint the packaged Mini App tree so its URLs change with its bytes.
+
+    Telegram's embedded browsers keep an HTTP cache that does not reliably
+    revalidate, and a cached copy of one deployment's JavaScript can outlive
+    an upgrade even when the server forbids caching. A URL that carries the
+    content fingerprint of the complete client tree is one that no cache has
+    seen before the deployment that serves it, so the shell and every module
+    it imports are downloaded together from the running server.
+    """
+    root = static_root.resolve()
+    if not root.is_dir():
+        raise ValueError("Mini App static root is unavailable.")
+    digest = hashlib.sha256()
+    for directory, directories, files in os.walk(root):
+        directories[:] = sorted(
+            name
+            for name in directories
+            if name not in _BUILD_EXCLUDED_DIRECTORIES and not name.startswith(".")
+        )
+        for name in sorted(files):
+            if name in _BUILD_EXCLUDED_FILES or name.startswith("."):
+                continue
+            path = Path(directory) / name
+            if not path.is_file():
+                continue
+            digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
+def render_mini_app_shell(source: str, build_id: str) -> str:
+    """Point the shell's entry files at their build-specific URLs."""
+    if _BUILD_ID_RE.fullmatch(build_id) is None:
+        raise ValueError("Mini App build identifier is invalid.")
+    if source.count(_SHELL_MODULE_ENTRY) != 1:
+        raise ValueError("The Mini App shell must load ./app.js exactly once.")
+    return _SHELL_ENTRY_RE.sub(
+        lambda match: (
+            f'{match.group("attribute")}="./{MINI_APP_BUILD_SEGMENT}/{build_id}/'
+            f'{match.group("file")}"'
+        ),
+        source,
+    )
+
+
+def mini_app_menu_web_url(public_url: str, build_id: str) -> str:
+    """Build the fixed menu-button URL, unique per packaged client build.
+
+    A menu-button launch has no one-time launch token in its URL, so without
+    the build query a WebView that skipped revalidation could keep replaying a
+    shell cached from a previous deployment.
+    """
+    if _BUILD_ID_RE.fullmatch(build_id) is None:
+        raise ValueError("Mini App build identifier is invalid.")
+    return f"{miniapp_public_web_url(public_url)}?{urlencode({'build': build_id})}"
+
+
+def _apply_browser_hardening_headers(handler: RequestHandler) -> None:
+    handler.set_header("X-Content-Type-Options", "nosniff")
+    handler.set_header("Referrer-Policy", "no-referrer")
+    handler.set_header(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+    )
+    handler.set_header(
+        "Content-Security-Policy",
+        "default-src 'none'; script-src 'self' https://telegram.org; "
+        "style-src 'self'; img-src 'self' data:; connect-src 'self' "
+        "https://api.getbible.net https://query.getbible.net; "
+        "font-src 'self'; base-uri 'none'; form-action 'self'; "
+        "object-src 'none'; frame-ancestors https://web.telegram.org "
+        "https://*.telegram.org; upgrade-insecure-requests",
+    )
+    handler.set_header(
+        "Strict-Transport-Security",
+        "max-age=63072000; includeSubDomains",
+    )
+    handler.set_header("X-Robots-Tag", "noindex, nofollow, noarchive")
+    # Telegram's embedded browser keeps its WebView cache between launches
+    # and does not reliably perform conditional revalidation, so cached
+    # entries left phones running one deployment's index with another
+    # deployment's JavaScript modules. Every packaged file is uncacheable:
+    # each launch downloads the module graph the running server ships, and
+    # an instance upgrade followed by a relaunch can never execute stale
+    # code. The shell is a few hundred gzipped kilobytes, a price worth an
+    # always-current client. Build-specific module URLs cover the caches
+    # that ignore even this directive.
+    handler.set_header("Cache-Control", "no-store, max-age=0")
 
 
 def _header_value(headers: Mapping[str, str], name: str) -> str | None:
@@ -237,35 +347,26 @@ class MiniAppStaticHandler(StaticFileHandler):
     """Serve only packaged Mini App files with browser-hardening headers."""
 
     def set_extra_headers(self, path: str) -> None:
-        self.set_header("X-Content-Type-Options", "nosniff")
-        self.set_header("Referrer-Policy", "no-referrer")
-        self.set_header(
-            "Permissions-Policy",
-            "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
-        )
-        self.set_header(
-            "Content-Security-Policy",
-            "default-src 'none'; script-src 'self' https://telegram.org; "
-            "style-src 'self'; img-src 'self' data:; connect-src 'self' "
-            "https://api.getbible.net https://query.getbible.net; "
-            "font-src 'self'; base-uri 'none'; form-action 'self'; "
-            "object-src 'none'; frame-ancestors https://web.telegram.org "
-            "https://*.telegram.org; upgrade-insecure-requests",
-        )
-        self.set_header(
-            "Strict-Transport-Security",
-            "max-age=63072000; includeSubDomains",
-        )
-        self.set_header("X-Robots-Tag", "noindex, nofollow, noarchive")
-        # Telegram's embedded browser keeps its WebView cache between launches
-        # and does not reliably perform conditional revalidation, so cached
-        # entries left phones running one deployment's index with another
-        # deployment's JavaScript modules. Every packaged file is uncacheable:
-        # each launch downloads the module graph the running server ships, and
-        # an instance upgrade followed by a relaunch can never execute stale
-        # code. The shell is a few hundred gzipped kilobytes, a price worth an
-        # always-current client.
-        self.set_header("Cache-Control", "no-store, max-age=0")
+        _apply_browser_hardening_headers(self)
+
+
+class MiniAppShellHandler(RequestHandler):
+    """Serve the rendered shell whose entry files carry the build identifier."""
+
+    def initialize(self, *, shell: bytes) -> None:
+        self._shell = shell
+
+    def get(self, _path: str | None = None) -> None:
+        self._set_shell_headers()
+        self.write(self._shell)
+
+    def head(self, _path: str | None = None) -> None:
+        self._set_shell_headers()
+        self.set_header("Content-Length", str(len(self._shell)))
+
+    def _set_shell_headers(self) -> None:
+        _apply_browser_hardening_headers(self)
+        self.set_header("Content-Type", "text/html; charset=utf-8")
 
 
 class MiniAppServer:
@@ -377,12 +478,30 @@ class MiniAppServer:
         if not root.is_dir():
             raise ValueError("Mini App static root is unavailable.")
         self._static_root = root.resolve()
+        self._build_id = mini_app_build_id(self._static_root)
+        try:
+            shell_source = (self._static_root / "index.html").read_text(
+                encoding="utf-8"
+            )
+        except OSError as error:
+            raise ValueError("Mini App shell is unavailable.") from error
+        self._shell = render_mini_app_shell(shell_source, self._build_id).encode(
+            "utf-8"
+        )
         self._server: HTTPServer | None = None
 
-    async def start(self) -> None:
-        """Bind the private HTTP listener; repeated calls are safe."""
-        if self._server is not None:
-            return
+    @property
+    def build_id(self) -> str:
+        """Content fingerprint of the packaged client this listener serves."""
+        return self._build_id
+
+    @property
+    def menu_web_url(self) -> str:
+        """Fixed Web App URL for Telegram's menu button, unique per client build."""
+        return mini_app_menu_web_url(self._public_url, self._build_id)
+
+    def handlers(self) -> Sequence[URLSpec]:
+        """Return the complete route table the private listener serves."""
         prefix = re.escape(self._public_path)
         handlers: list[URLSpec] = list(
             miniapp_api_handlers(
@@ -400,13 +519,38 @@ class MiniAppServer:
                     {"url": f"{self._public_path}/", "permanent": True},
                 )
             )
+        # The shell is rendered, never streamed from disk: its entry files point
+        # at this deployment's build-specific URLs. Those URLs resolve to the
+        # same packaged tree, and the plain paths remain for images the shell
+        # references directly and for operators probing the tree.
         handlers.append(
             URLSpec(
-                rf"{prefix}/(.*)" if self._public_path else r"/(.*)",
-                MiniAppStaticHandler,
-                {"path": str(self._static_root), "default_filename": "index.html"},
+                rf"{prefix}/(index\.html)?",
+                MiniAppShellHandler,
+                {"shell": self._shell},
             )
         )
+        handlers.append(
+            URLSpec(
+                rf"{prefix}/{MINI_APP_BUILD_SEGMENT}/{MINI_APP_BUILD_ID_PATTERN}/(.*)",
+                MiniAppStaticHandler,
+                {"path": str(self._static_root)},
+            )
+        )
+        handlers.append(
+            URLSpec(
+                rf"{prefix}/(.*)",
+                MiniAppStaticHandler,
+                {"path": str(self._static_root)},
+            )
+        )
+        return tuple(handlers)
+
+    async def start(self) -> None:
+        """Bind the private HTTP listener; repeated calls are safe."""
+        if self._server is not None:
+            return
+        handlers = list(self.handlers())
         application = TornadoApplication(
             handlers,
             compress_response=True,

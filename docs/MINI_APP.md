@@ -412,7 +412,11 @@ requests.
 
 ## Deployment consistency
 
-Deploy HTML, JavaScript modules, server code, and documentation from one validated commit. Every packaged file, `index.html` and all static modules alike, is served with `no-store`, because Telegram WebViews do not reliably perform conditional revalidation. A launch therefore always downloads the running server's complete module graph, and a WebView can never combine a new shell with old modules.
+Deploy HTML, JavaScript modules, server code, and documentation from one validated commit. Every packaged file, `index.html` and all static modules alike, is served with `no-store`, because Telegram WebViews do not reliably perform conditional revalidation. Some WebViews keep serving a cached module even against `no-store`, so the shell is rendered by the server and loads `app.js`, `boot.js`, and `styles.css` from `build/<fingerprint>/`, a segment derived from the bytes of the complete packaged client tree; every relative import resolves below the same prefix. A launch therefore always downloads the running server's complete module graph, and a WebView can never combine a new shell with old modules because a new shell never names an old address. The `build/<fingerprint>/` segment is a cache key, not a version selector: the running server answers any well-formed fingerprint from its own tree. Telegram's menu button is pointed at `<public URL>/?build=<fingerprint>` for the same reason. A Main Mini App URL configured in `@BotFather` is fixed by Telegram; it is served `no-store`, and direct links carry a unique `tgWebAppStartParam` query.
+
+The shell also loads a dependency-free classic `boot.js` before the module graph. If `boot()` has not been entered by `DOMContentLoaded`, a module failed to download or threw while evaluating, and the watchdog shows the ordinary gate with **Try again** instead of leaving the opening spinner up forever.
+
+Opening personal storage during boot is bounded and fault-isolated. Telegram `CloudStorage` and `DeviceStorage` reads, IndexedDB opens, the live catalogue, and the contributor journal each have their own bound, and the whole personal-storage step has a ten-second deadline; a store that does not answer degrades that launch to the scoped browser copy, or to memory, and the reader opens with the bookmark storage warning visible. The public translation catalogue is preferred at boot but the robot's own list from the session response stands in when the public origin fails or stalls.
 
 After deployment, verify:
 

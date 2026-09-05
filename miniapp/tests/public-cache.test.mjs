@@ -3,9 +3,109 @@ import test from "node:test";
 
 import {
   BrowserPublicCache,
+  IndexedDbPublicStore,
   MemoryPublicStore,
   publicCacheKey,
 } from "../lib/public-cache.js";
+
+function stallingIndexedDB() {
+  return { open: () => ({ addEventListener() {} }) };
+}
+
+function settlingIndexedDB(event, database = null) {
+  return {
+    open() {
+      const listeners = new Map();
+      const request = {
+        result: database,
+        error: null,
+        addEventListener(name, handler) {
+          listeners.set(name, handler);
+        },
+      };
+      queueMicrotask(() => listeners.get(event)?.());
+      return request;
+    },
+  };
+}
+
+class StallingDatabase {
+  closed = false;
+  listeners = new Map();
+  objectStoreNames = { contains: () => true };
+
+  addEventListener(name, handler) {
+    this.listeners.set(name, handler);
+  }
+
+  close() {
+    this.closed = true;
+  }
+
+  transaction() {
+    const request = { addEventListener() {} };
+    return {
+      addEventListener() {},
+      objectStore: () => ({
+        get: () => request,
+        getAll: () => request,
+        put() {},
+        delete() {},
+      }),
+    };
+  }
+}
+
+test("an IndexedDB that never opens fails within its bound and the cache falls back to memory", async () => {
+  const store = new IndexedDbPublicStore({
+    indexedDBImplementation: stallingIndexedDB(),
+    timeoutMs: 20,
+  });
+  const key = publicCacheKey("translations");
+  await assert.rejects(store.get(key), /IndexedDB open timed out/);
+
+  const cache = new BrowserPublicCache({ store });
+  assert.equal(await cache.get(key), null);
+  assert.equal(await cache.put(key, { ok: true }), true);
+  assert.deepEqual((await cache.get(key)).value, { ok: true });
+});
+
+test("IndexedDB requests that never settle fail within their bound", async () => {
+  const database = new StallingDatabase();
+  const store = new IndexedDbPublicStore({
+    indexedDBImplementation: settlingIndexedDB("success", database),
+    timeoutMs: 20,
+  });
+  const key = publicCacheKey("translations");
+  await assert.rejects(store.get(key), /IndexedDB read timed out/);
+  await assert.rejects(store.entries(), /IndexedDB scan timed out/);
+  await assert.rejects(store.put({ key, value: 1 }), /IndexedDB write timed out/);
+  await assert.rejects(store.delete(key), /IndexedDB delete timed out/);
+
+  // A newer client's upgrade is never held hostage by this connection.
+  database.listeners.get("versionchange")();
+  assert.equal(database.closed, true);
+});
+
+test("a blocked IndexedDB open rejects instead of waiting", async () => {
+  const store = new IndexedDbPublicStore({
+    indexedDBImplementation: settlingIndexedDB("blocked"),
+    timeoutMs: 1_000,
+  });
+  await assert.rejects(store.get(publicCacheKey("translations")), /blocked/);
+});
+
+test("the IndexedDB store validates its operation bound", () => {
+  for (const timeoutMs of [0, 60_001, 1.5, "4000"]) {
+    assert.throws(
+      () => new IndexedDbPublicStore({
+        indexedDBImplementation: stallingIndexedDB(),
+        timeoutMs,
+      }),
+      RangeError,
+    );
+  }
+});
 
 test("public cache persists identity-free data and returns defensive copies", async () => {
   let now = 100;

@@ -142,9 +142,21 @@ class TelegramInitDataValidatorTestCase(unittest.TestCase):
         self.assertEqual(principal.username, "grace_reader")
         self.assertEqual(principal.language_code, "en")
 
-        for value in ("x" * 65, "Grace\nAdmin", 42):
-            with self.subTest(value=value), self.assertRaises(MiniAppAuthenticationError):
-                self.validator.validate(
+        # Profile text is audit metadata, never identity. A name Telegram signed
+        # is trimmed or dropped when it cannot be shown safely; it never fails
+        # the authorization, because a person cannot respell their own name to
+        # get in.
+        for value, expected in (
+            ("x" * 65, "x" * 64),
+            ("Grace\nAdmin", "GraceAdmin"),
+            ("Grace\tReader\x7f", "GraceReader"),
+            (" 　  ", None),
+            ("", None),
+            (42, None),
+            (["Grace"], None),
+        ):
+            with self.subTest(value=value):
+                principal = self.validator.validate(
                     _init_data(
                         extra={
                             "user": json.dumps(
@@ -154,6 +166,8 @@ class TelegramInitDataValidatorTestCase(unittest.TestCase):
                         }
                     )
                 )
+                self.assertEqual(principal.user_id, 42)
+                self.assertEqual(principal.first_name, expected)
 
 
 if __name__ == "__main__":
