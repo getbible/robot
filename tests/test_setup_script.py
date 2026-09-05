@@ -626,6 +626,73 @@ cat "$dropin_root/alpha.conf"
             context,
         )
 
+    def test_mini_app_shell_probe_requires_the_build_specific_module(self) -> None:
+        build_id = "0123456789abcdef"
+        versioned_shell = (
+            "<html><title>getBible.Life</title>"
+            f'<script type="module" src="./build/{build_id}/app.js"></script></html>'
+        ).encode()
+        plain_shell = (
+            b'<html><title>getBible.Life</title>'
+            b'<script type="module" src="./app.js"></script></html>'
+        )
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                if self.path == "/versioned/":
+                    body, content_type = versioned_shell, "text/html; charset=utf-8"
+                elif self.path == "/plain/":
+                    body, content_type = plain_shell, "text/html; charset=utf-8"
+                elif self.path == f"/versioned/build/{build_id}/app.js":
+                    body, content_type = b'import "./lib/model.js";', "text/javascript"
+                elif self.path == "/stranded/":
+                    body, content_type = versioned_shell, "text/html; charset=utf-8"
+                else:
+                    # An empty 404 is exactly what a proxy answers for a path it
+                    # does not forward.
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *args: object) -> None:
+                del args
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            outcomes = {}
+            for name in ("versioned", "plain", "stranded"):
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; probe_mini_app_url "$2"',
+                        "setup-shell-postflight-test",
+                        str(SETUP),
+                        f"{base_url}/{name}/",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                outcomes[name] = (result.returncode, result.stderr)
+            self.assertEqual(outcomes["versioned"][0], 0, msg=outcomes["versioned"][1])
+            self.assertNotEqual(outcomes["plain"][0], 0)
+            self.assertIn("build-specific app.js", outcomes["plain"][1])
+            self.assertNotEqual(outcomes["stranded"][0], 0)
+            self.assertIn("is not reachable through", outcomes["stranded"][1])
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_mini_app_postflight_requires_robot_json_from_sync_routes(self) -> None:
         class Handler(http.server.BaseHTTPRequestHandler):
             def _respond(self) -> None:
@@ -723,6 +790,8 @@ cat "$dropin_root/alpha.conf"
         caddy_renderer = script[render_start:render_end]
         self.assertEqual(caddy_renderer.count("path {path}/api/v1/*"), 1)
         self.assertEqual(caddy_renderer.count("path /api/v1/*"), 1)
+        self.assertEqual(caddy_renderer.count('path + "/build/*",'), 1)
+        self.assertEqual(caddy_renderer.count('"/assets/*", "/build/*",'), 1)
         # Contribution routes ride the general bounded API matcher: the drip
         # transport needs no dedicated path or body budget in the proxy.
         self.assertNotIn("contributions", caddy_renderer)
@@ -800,6 +869,14 @@ render_caddy_routes "$4"
             routes = destination.read_text(encoding="utf-8")
             self.assertIn("path /getbible/app/api/v1/*", routes)
             self.assertIn("path /api/v1/*", routes)
+            # The shell names its modules below build/<fingerprint>/; a proxy
+            # that answered that prefix with its empty 404 would break every
+            # launch while the shell itself still loaded.
+            self.assertRegex(
+                routes,
+                r"@gb_nested_static path [^\n]* /getbible/app/build/\*",
+            )
+            self.assertRegex(routes, r"@gb_root_static path [^\n]* /build/\*")
             self.assertNotIn("contributions", routes)
             self.assertEqual(routes.count("max_size 1MiB"), 0)
             self.assertEqual(routes.count("max_size 5MB"), 2)

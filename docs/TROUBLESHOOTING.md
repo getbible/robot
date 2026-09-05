@@ -129,9 +129,44 @@ malformed, or user-mismatched authorization. Raw Telegram `initData` is
 validated at the initial session exchange only; later protected requests use
 Robot-issued opaque bearers. Launch the app
 again from the bot, verify the server clock, and check that the configured bot
-token belongs to the bot that opened the app. For group launch failures,
+token belongs to the bot that opened the app. A button from before a restart
+or upgrade still opens the Mini App: its launch token is gone from memory, so
+the exchange logs that it is opening a private session at Home instead of the
+route the button once promised. For group launch failures,
 confirm the Main Mini App URL in `@BotFather`. See
 [Mini App deployment](MINI_APP.md).
+
+### The opening spinner never ends on Android
+
+Telegram's Android WebView can keep serving a JavaScript module it cached
+under an earlier deployment even after the server forbids caching. A shell
+fetched fresh then ran the previous deployment's `app.js` or `lib/*.js`: the
+old code looked for markup the new shell no longer has, or imported a module
+the new deployment retired, and the module graph failed before a single line
+of the app ran. Nothing was left to show an error, so the user saw the
+opening spinner forever, and closing or reopening the Mini App or Telegram
+changed nothing because the cache entry survived all of it.
+
+The shell now loads its scripts from `build/<fingerprint>/`, a prefix derived
+from the packaged client's bytes, and the menu button carries the same
+fingerprint as a query. A launch after an upgrade therefore names addresses no
+earlier deployment used, so the stale entries are never consulted again; the
+user only has to open the Mini App from a fresh `/bible` or `/search` message
+or the menu button. If a module still cannot be loaded, the `boot.js` watchdog
+shows the ordinary gate with **Try again** instead of the spinner.
+
+If a report persists after the upgrade:
+
+```bash
+curl -fsS "$MINI_APP_PUBLIC_URL/" | grep -o 'src="./build/[a-f0-9]*/app.js"'
+curl -fsSI "$MINI_APP_PUBLIC_URL/build/<fingerprint>/app.js"
+```
+
+The shell must name a fingerprint and the module must answer `200` with
+`Cache-Control: no-store` through the public route. An empty `404` for the
+module means the reverse proxy does not forward `build/*`; rerun the upgrade or
+regenerate the managed Caddy route, or add the prefix to an external proxy.
+`doctor` and the upgrade postflight perform this exact check.
 
 If **Sync now** fails, first verify the user remains approved with
 `sudo getbible-robot contributions INSTANCE status`, then rerun

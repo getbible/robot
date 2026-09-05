@@ -1,6 +1,14 @@
 const SESSION_STORAGE_KEY = "getbible.miniapp.session";
 const SESSION_RECORD_VERSION = 1;
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+// The public catalogue is preferred because it is what the reader uses next,
+// but the session response already carries the same translation list from
+// the robot. Waiting on the public origin beyond this bound, or failing it,
+// must not keep a user out of an app whose server has just admitted them.
+const PUBLIC_TRANSLATIONS_TIMEOUT_MS = 8_000;
+
+export const SESSION_PUBLIC_TRANSLATIONS_TIMEOUT_MS =
+  PUBLIC_TRANSLATIONS_TIMEOUT_MS;
 
 export async function openBoundSession(
   api,
@@ -9,6 +17,7 @@ export async function openBoundSession(
     launchToken = null,
     storage = window.sessionStorage,
     cryptoProvider = globalThis.crypto,
+    publicTranslationsTimeoutMs = PUBLIC_TRANSLATIONS_TIMEOUT_MS,
   },
 ) {
   const context = await sessionContext(
@@ -20,7 +29,9 @@ export async function openBoundSession(
   if (stored) {
     try {
       const payload = await api.resumeSession(stored.token);
-      return await withPublicTranslations(api, payload);
+      return await withPublicTranslations(api, payload, {
+        timeoutMs: publicTranslationsTimeoutMs,
+      });
     } catch (error) {
       if (isAuthorizationFailure(error)) {
         clearBoundSession(storage);
@@ -37,7 +48,9 @@ export async function openBoundSession(
       context,
     });
   }
-  return withPublicTranslations(api, payload);
+  return withPublicTranslations(api, payload, {
+    timeoutMs: publicTranslationsTimeoutMs,
+  });
 }
 
 export async function sessionContext(
@@ -128,15 +141,62 @@ export function clearBoundSession(storage = window.sessionStorage) {
   }
 }
 
-async function withPublicTranslations(api, payload) {
+async function withPublicTranslations(
+  api,
+  payload,
+  { timeoutMs = PUBLIC_TRANSLATIONS_TIMEOUT_MS } = {},
+) {
   if (!api || typeof api.translations !== "function") {
     return payload;
   }
-  const translations = await api.translations();
-  return {
-    ...payload,
-    translations,
-  };
+  const serverTranslations = Array.isArray(payload?.translations)
+    ? payload.translations
+    : [];
+  let failure;
+  try {
+    const translations = await withDeadline(api.translations(), timeoutMs);
+    if (Array.isArray(translations) && translations.length > 0) {
+      return { ...payload, translations };
+    }
+    failure = new TypeError("The public translation catalogue is empty.");
+  } catch (error) {
+    failure = error;
+  }
+  if (serverTranslations.length > 0) {
+    return { ...payload, translations: serverTranslations };
+  }
+  throw failure;
+}
+
+function withDeadline(operation, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return operation;
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error("The public translation catalogue timed out."));
+      }
+    }, timeoutMs);
+    Promise.resolve(operation).then(
+      (value) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        }
+      },
+      (error) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        }
+      },
+    );
+  });
 }
 
 function isAuthorizationFailure(error) {

@@ -25,9 +25,237 @@ from modules.miniapp_tornado import (
     ClientAddressResolver,
     MiniAppServer,
     MiniAppStaticHandler,
+    mini_app_build_id,
+    mini_app_menu_web_url,
     miniapp_api_handlers,
+    render_mini_app_shell,
 )
 from modules.preferences import SearchDefaults, UserPreferences
+
+_SHELL_SOURCE = (
+    "<!doctype html>\n<html><head><title>getBible.Life</title>\n"
+    '<link rel="stylesheet" href="./styles.css">\n'
+    '<script src="https://telegram.org/js/telegram-web-app.js?63"></script>\n'
+    '<script type="module" src="./app.js"></script>\n'
+    '</head><body><img src="./assets/mark.png" alt=""></body></html>\n'
+)
+
+
+def _write_client_tree(root: Path) -> None:
+    """Create the smallest packaged client the server accepts."""
+    (root / "index.html").write_text(_SHELL_SOURCE, encoding="utf-8")
+    (root / "app.js").write_text(
+        'import { mark } from "./lib/model.js";\nexport { mark };\n',
+        encoding="utf-8",
+    )
+    (root / "styles.css").write_text("body { margin: 0; }\n", encoding="utf-8")
+    (root / "lib").mkdir()
+    (root / "lib" / "model.js").write_text(
+        'export const mark = "model";\n',
+        encoding="utf-8",
+    )
+    (root / "assets").mkdir()
+    (root / "assets" / "mark.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+
+def _lifecycle_settings(**changes: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "mini_app_enabled": True,
+        "mini_app_public_url": "https://robot.example/getbible",
+        "mini_app_trusted_proxy_cidrs": ("127.0.0.1/32", "::1/128"),
+        "mini_app_launch_ttl_seconds": 300,
+        "mini_app_session_limit": 20,
+        "mini_app_session_ttl_seconds": 10_800,
+        "mini_app_sessions_per_user": 2,
+        "mini_app_max_searches_per_session": 2,
+        "mini_app_max_available_selections": 256,
+        "mini_app_max_selections": 100,
+        "telegram_api_token": (
+            "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+        ),
+        "mini_app_init_data_max_age_seconds": 300,
+        "mini_app_session_exchange_rate_capacity": 10,
+        "mini_app_session_exchange_rate_refill_per_second": 0.2,
+        "rate_limit_cache_size": 100,
+        "contribution_rate_capacity": 60,
+        "contribution_rate_refill_per_second": 5.0,
+        "mini_app_navigation_rate_cost": 0.25,
+        "mini_app_access_log": True,
+        "mini_app_max_header_bytes": 16 * 1024,
+        "mini_app_idle_timeout_seconds": 30.0,
+        "mini_app_body_timeout_seconds": 10.0,
+        "mini_app_port": 9201,
+        "mini_app_listen": "127.0.0.1",
+    }
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+def _build_lifecycle_server(root: Path) -> MiniAppServer:
+    _write_client_tree(root)
+    return MiniAppServer(
+        settings=_lifecycle_settings(),
+        service=Mock(),
+        preferences=Mock(),
+        limiter=Mock(),
+        post_scripture=AsyncMock(return_value=(101,)),
+        cleanup_launch=AsyncMock(),
+        static_root=root,
+    )
+
+
+class MiniAppClientBuildTestCase(unittest.TestCase):
+    def test_build_id_follows_the_packaged_client_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_client_tree(root)
+            first = mini_app_build_id(root)
+            self.assertRegex(first, r"^[a-f0-9]{16}$")
+            self.assertEqual(mini_app_build_id(root), first)
+
+            # Development-only files never change what phones download.
+            (root / "node_modules").mkdir()
+            (root / "node_modules" / "left-pad.js").write_text("x", encoding="utf-8")
+            (root / "tests").mkdir()
+            (root / "tests" / "x.test.mjs").write_text("x", encoding="utf-8")
+            (root / "package.json").write_text("{}", encoding="utf-8")
+            (root / "package-lock.json").write_text("{}", encoding="utf-8")
+            (root / ".hidden").write_text("x", encoding="utf-8")
+            self.assertEqual(mini_app_build_id(root), first)
+
+            # Any served byte does, including one deep inside the module graph.
+            (root / "lib" / "model.js").write_text(
+                'export const mark = "changed";\n',
+                encoding="utf-8",
+            )
+            second = mini_app_build_id(root)
+            self.assertNotEqual(second, first)
+            (root / "lib" / "extra.js").write_text("export {};\n", encoding="utf-8")
+            self.assertNotEqual(mini_app_build_id(root), second)
+
+            with self.assertRaisesRegex(ValueError, "static root"):
+                mini_app_build_id(root / "missing")
+
+    def test_shell_rendering_moves_every_entry_file_below_the_build(self) -> None:
+        build_id = "0123456789abcdef"
+        rendered = render_mini_app_shell(_SHELL_SOURCE, build_id)
+        self.assertIn(f'src="./build/{build_id}/app.js"', rendered)
+        self.assertIn(f'href="./build/{build_id}/styles.css"', rendered)
+        self.assertNotIn('src="./app.js"', rendered)
+        self.assertNotIn('href="./styles.css"', rendered)
+        # Images and the Telegram SDK keep their addresses.
+        self.assertIn('src="./assets/mark.png"', rendered)
+        self.assertIn("https://telegram.org/js/telegram-web-app.js?63", rendered)
+        with_watchdog = _SHELL_SOURCE.replace(
+            '<script type="module"',
+            '<script src="./boot.js"></script>\n<script type="module"',
+        )
+        self.assertIn(
+            f'src="./build/{build_id}/boot.js"',
+            render_mini_app_shell(with_watchdog, build_id),
+        )
+
+        with self.assertRaisesRegex(ValueError, "exactly once"):
+            render_mini_app_shell(_SHELL_SOURCE.replace("./app.js", "./main.js"), build_id)
+        with self.assertRaisesRegex(ValueError, "exactly once"):
+            render_mini_app_shell(_SHELL_SOURCE + _SHELL_SOURCE, build_id)
+        with self.assertRaisesRegex(ValueError, "build identifier"):
+            render_mini_app_shell(_SHELL_SOURCE, "not-a-build")
+
+    def test_menu_button_url_names_the_client_build(self) -> None:
+        self.assertEqual(
+            mini_app_menu_web_url("https://robot.example/getbible", "0123456789abcdef"),
+            "https://robot.example/getbible/?build=0123456789abcdef",
+        )
+        self.assertEqual(
+            mini_app_menu_web_url("https://robot.example/", "0123456789abcdef"),
+            "https://robot.example/?build=0123456789abcdef",
+        )
+        with self.assertRaisesRegex(ValueError, "build identifier"):
+            mini_app_menu_web_url("https://robot.example/getbible", "0123456789ABCDEF")
+
+
+class MiniAppShellRoutingTestCase(AsyncHTTPTestCase):
+    def setUp(self) -> None:
+        self.static_directory = tempfile.TemporaryDirectory()
+        self.server = _build_lifecycle_server(Path(self.static_directory.name))
+        super().setUp()
+
+    def tearDown(self) -> None:
+        super().tearDown()
+        self.static_directory.cleanup()
+
+    def get_app(self) -> Application:
+        return Application(list(self.server.handlers()), serve_traceback=False)
+
+    def test_shell_names_build_specific_module_urls(self) -> None:
+        build_id = self.server.build_id
+        shell = self.fetch("/getbible/")
+        self.assertEqual(shell.code, 200)
+        self.assertEqual(shell.headers["Cache-Control"], "no-store, max-age=0")
+        self.assertEqual(shell.headers["Content-Type"], "text/html; charset=utf-8")
+        self.assertIn("default-src 'none'", shell.headers["Content-Security-Policy"])
+        body = shell.body.decode("utf-8")
+        self.assertIn(f'src="./build/{build_id}/app.js"', body)
+        self.assertIn(f'href="./build/{build_id}/styles.css"', body)
+        self.assertNotIn('src="./app.js"', body)
+
+        # index.html is the same rendered shell, never the raw file.
+        self.assertEqual(self.fetch("/getbible/index.html").body, shell.body)
+        head = self.fetch("/getbible/", method="HEAD")
+        self.assertEqual(head.code, 200)
+        self.assertEqual(head.headers["Content-Length"], str(len(shell.body)))
+        self.assertEqual(head.headers["Cache-Control"], "no-store, max-age=0")
+        self.assertEqual(head.body, b"")
+
+        redirect = self.fetch("/getbible", follow_redirects=False)
+        self.assertEqual(redirect.code, 301)
+        self.assertEqual(redirect.headers["Location"], "/getbible/")
+
+        self.assertEqual(
+            self.server.menu_web_url,
+            f"https://robot.example/getbible/?build={build_id}",
+        )
+
+    def test_build_prefix_serves_the_complete_module_graph(self) -> None:
+        build_id = self.server.build_id
+        root = Path(self.static_directory.name)
+        module = self.fetch(f"/getbible/build/{build_id}/app.js")
+        self.assertEqual(module.code, 200)
+        self.assertEqual(module.body, (root / "app.js").read_bytes())
+        self.assertEqual(module.headers["Cache-Control"], "no-store, max-age=0")
+        self.assertIn("javascript", module.headers["Content-Type"])
+        self.assertEqual(
+            self.fetch(f"/getbible/build/{build_id}/lib/model.js").body,
+            (root / "lib" / "model.js").read_bytes(),
+        )
+        self.assertEqual(
+            self.fetch(f"/getbible/build/{build_id}/styles.css").code,
+            200,
+        )
+        self.assertEqual(
+            self.fetch(f"/getbible/build/{build_id}/assets/mark.png").body,
+            (root / "assets" / "mark.png").read_bytes(),
+        )
+        # The segment is a cache key, not a version selector: a shell cached
+        # from an earlier deployment still receives the running tree instead
+        # of an empty answer.
+        self.assertEqual(
+            self.fetch("/getbible/build/ffffffffffffffff/lib/model.js").code,
+            200,
+        )
+        for path in (
+            "/getbible/build/short/app.js",
+            "/getbible/build/0123456789ABCDEF/app.js",
+            f"/getbible/build/{build_id}/",
+            f"/getbible/build/{build_id}/missing.js",
+            "/getbible/lib/",
+            "/getbible/missing.js",
+        ):
+            self.assertIn(self.fetch(path).code, (403, 404), path)
+        # Plain module paths remain reachable for operators and probes.
+        self.assertEqual(self.fetch("/getbible/app.js").code, 200)
+        self.assertEqual(self.fetch("/getbible/assets/mark.png").code, 200)
 
 _INTEGRATION_TOKEN = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
 _INTEGRATION_ORIGIN = "https://robot.example"
@@ -414,47 +642,10 @@ class ContributionTransportIntegrationTestCase(AsyncHTTPTestCase):
 
 class MiniAppServerLifecycleTestCase(unittest.IsolatedAsyncioTestCase):
     def settings(self, **changes: object) -> SimpleNamespace:
-        values: dict[str, object] = {
-            "mini_app_enabled": True,
-            "mini_app_public_url": "https://robot.example/getbible",
-            "mini_app_trusted_proxy_cidrs": ("127.0.0.1/32", "::1/128"),
-            "mini_app_launch_ttl_seconds": 300,
-            "mini_app_session_limit": 20,
-            "mini_app_session_ttl_seconds": 10_800,
-            "mini_app_sessions_per_user": 2,
-            "mini_app_max_searches_per_session": 2,
-            "mini_app_max_available_selections": 256,
-            "mini_app_max_selections": 100,
-            "telegram_api_token": (
-                "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
-            ),
-            "mini_app_init_data_max_age_seconds": 300,
-            "mini_app_session_exchange_rate_capacity": 10,
-            "mini_app_session_exchange_rate_refill_per_second": 0.2,
-            "rate_limit_cache_size": 100,
-            "contribution_rate_capacity": 60,
-            "contribution_rate_refill_per_second": 5.0,
-            "mini_app_navigation_rate_cost": 0.25,
-            "mini_app_access_log": True,
-            "mini_app_max_header_bytes": 16 * 1024,
-            "mini_app_idle_timeout_seconds": 30.0,
-            "mini_app_body_timeout_seconds": 10.0,
-            "mini_app_port": 9201,
-            "mini_app_listen": "127.0.0.1",
-        }
-        values.update(changes)
-        return SimpleNamespace(**values)
+        return _lifecycle_settings(**changes)
 
     def build_server(self, root: Path) -> MiniAppServer:
-        return MiniAppServer(
-            settings=self.settings(),
-            service=Mock(),
-            preferences=Mock(),
-            limiter=Mock(),
-            post_scripture=AsyncMock(return_value=(101,)),
-            cleanup_launch=AsyncMock(),
-            static_root=root,
-        )
+        return _build_lifecycle_server(root)
 
     async def test_constructor_validates_enablement_and_packaged_static_root(self) -> None:
         with self.assertRaisesRegex(ValueError, "not enabled"):

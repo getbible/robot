@@ -582,10 +582,25 @@ async def _synchronize_telegram_profile(
     )
     mini_app_enabled = getattr(settings, "mini_app_enabled", False)
     mini_app_public_url = getattr(settings, "mini_app_public_url", None)
+    # The menu button carries no one-time launch token, so its URL is the one
+    # a Telegram WebView could keep replaying from its cache. Naming the
+    # packaged client build in the query makes every deployment's menu launch
+    # a URL that no earlier deployment ever served.
+    menu_web_url = getattr(
+        application.bot_data.get(MINI_APP_SLOT),
+        "menu_web_url",
+        None,
+    )
     if mini_app_enabled and isinstance(mini_app_public_url, str):
         menu_button: MenuButtonWebApp | MenuButtonCommands = MenuButtonWebApp(
             text="Open getBible.Life",
-            web_app=WebAppInfo(url=f"{mini_app_public_url.rstrip('/')}/"),
+            web_app=WebAppInfo(
+                url=(
+                    menu_web_url
+                    if isinstance(menu_web_url, str)
+                    else f"{mini_app_public_url.rstrip('/')}/"
+                )
+            ),
         )
     else:
         menu_button = MenuButtonCommands()
