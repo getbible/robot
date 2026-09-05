@@ -4,6 +4,93 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Android launches that could never open again
+
+- Found the mechanism behind Android users who "cannot get the bot to run"
+  no matter how often they close and reopen it. Telegram's Android WebView
+  kept serving `app.js` and `lib/*.js` files it had cached under an earlier
+  deployment, even after every packaged file was served `no-store`. Because
+  each command launch URL is unique, the shell itself was always fresh, so a
+  new `index.html` ran the previous deployment's modules: the old `app.js`
+  threw while looking for markup the new shell no longer has, or a cached
+  module imported the retired `lib/contribution-push.js`, which now answers
+  `404`. Either way the module graph failed before a single line of the app
+  ran, nothing was left to show an error, and the opening spinner stayed up
+  forever. Closing the Mini App, force-stopping Telegram, and relaunching
+  changed nothing, because the cache entry outlived all of it and the shell
+  kept asking for the same address.
+- The server now renders the shell so that `app.js`, `boot.js`, and
+  `styles.css` load from `build/<fingerprint>/`, where the fingerprint is a
+  content hash of the complete packaged client tree; every relative import
+  resolves below the same prefix, so a launch after an upgrade names
+  addresses no earlier deployment ever used and stale cache entries are
+  never consulted again. The managed Caddy route forwards `build/*`, the
+  Telegram menu button is pointed at `<public URL>/?build=<fingerprint>` so
+  its fixed launch is a new address too, and the install/upgrade postflight
+  now fetches the shell and then the module it names, failing loudly when a
+  proxy answers the module with an empty `404`. No user action is needed
+  beyond opening the Mini App again.
+- Added a dependency-free classic `boot.js` watchdog ahead of the module
+  graph. If `boot()` has not been entered by `DOMContentLoaded`, a module
+  failed to download or threw while evaluating, and the watchdog shows the
+  ordinary gate with **Try again** instead of the spinner; a launch that has
+  not settled after two minutes gets the same gate.
+- Opening personal storage during boot is now bounded and fault-isolated,
+  because persisted browser state from an earlier session survives every
+  restart as well. IndexedDB opens and requests in the public Scripture cache
+  and the contributor journal fail within four seconds (and on `blocked`)
+  and fall back to memory or the scoped browser journal; the live catalogue,
+  Telegram `DeviceStorage`, and Telegram `CloudStorage` opens run under a
+  ten-second deadline with a local-only and then a memory-only fallback, so
+  a store that never answers, or a `CloudStorage` holding a thousand slow
+  keys, degrades bookmarks for that launch instead of blocking the reader;
+  the last-read lookup and the contributor open are bounded the same way;
+  the public translation catalogue stands behind an eight-second bound with
+  the robot's own list from the session response as the fallback; and a
+  global-topic envelope carrying an impossible timestamp is discarded as
+  damage instead of exhausting the storage clock, while promoting an
+  unscoped record from an earlier client is best effort.
+- Tapping an **Open getBible.Life** button from before a restart or upgrade
+  now opens the Mini App. Launch tokens live in process memory, so every
+  button a user had received before the restart named a launch the new
+  process had never seen; the exchange answered `401`, the client showed
+  the "no longer active" gate with only **Close**, and reopening from the
+  same message repeated it. Because a signed `initData` still proves who
+  the user is, an unknown or expired launch token now degrades to the same
+  private session a menu launch receives (at Home, posting to the private
+  chat), the expired prompt is still cleaned up, a reload of that page
+  lands in the same session, and a launch the process does hold keeps its
+  route even when the signed `start_param` still names an earlier launch.
+- Relaunching a few times can no longer earn a five-minute abuse block. The
+  session exchange was charged the full cost of a search, so five launches
+  within twenty seconds hit `429`, each **Try again** was a further
+  rejection, and six rejections in a minute blocked the user and posted an
+  abuse warning into their chat. The exchange is now charged navigation
+  cost, and the client disables **Try again** for the server's
+  `Retry-After` instead of letting a tap earn the next refusal; a `403` at
+  the exchange (a refused origin from a retired entry point) is shown as a
+  terminal gate rather than a reload loop.
+- A Telegram profile name that cannot be displayed safely no longer fails
+  the whole authorization. Names made only of Unicode whitespace, or
+  carrying a control character, made `initData` validation raise for that
+  user on every launch, on every device. Profile text is audit metadata,
+  never identity, so it is now trimmed or dropped instead.
+- Two more durable-state faults that turned the exchange into a permanent
+  `500` for particular users now fail open: a preference store the service
+  can read but no longer write (ownership left behind by an earlier
+  deployment) keeps the corrected translation in the session instead of
+  failing the bootstrap, and a damaged contributor moderation row whose
+  JSON cannot be parsed yields the "unavailable" contributor status
+  instead of blocking Scripture.
+- Real Chromium tests now prove a module that `404`s and a module that
+  throws both end in the retry gate, that the reader opens when Telegram
+  storage and IndexedDB never answer, and that a slow thousand-key
+  `CloudStorage` cannot hold the reader past the deadline. Tornado routing
+  tests pin the rendered shell, the `build/<fingerprint>/` module graph,
+  and the menu URL; setup tests pin the Caddy prefix and the stricter shell
+  probe; API tests pin the degraded private launch, the stale
+  `start_param`, and the exchange cost.
+
 ### The first contributor Sync no longer fails before it starts
 
 - Found and fixed the defect behind every newly approved contributor's Sync

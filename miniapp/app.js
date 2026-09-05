@@ -63,6 +63,13 @@ import {
   openBoundSession,
 } from "./lib/session.js";
 
+// boot.js watches these flags: `started` proves the module graph evaluated,
+// `booting` that boot() was entered, `settled` that the reader or a gate is
+// on screen. Anything else after the watchdog's deadline is a client that
+// cannot start and must be shown as a retryable gate, never as a spinner.
+const bootSignal = window.__getbibleBoot ?? (window.__getbibleBoot = {});
+bootSignal.started = true;
+
 const bridge = new TelegramBridge();
 const i18n = new I18n();
 const instanceScope = miniAppInstanceScope(document.baseURI);
@@ -388,9 +395,15 @@ const clipboard = new ClipboardController({
 
 attachListeners();
 i18n.apply();
-void boot();
+boot().catch((error) => {
+  // Everything before boot()'s own try (the Telegram bridge, the API client)
+  // must still end in a gate rather than a spinner nobody can dismiss.
+  console.error("getBible.Life could not start.", error);
+  showAccessDenied(i18n.t("gate.verify_failed"));
+});
 
 async function boot() {
+  bootSignal.booting = true;
   elements.boot.hidden = false;
   elements.accessDenied.hidden = true;
   elements.app.hidden = true;
@@ -433,27 +446,7 @@ async function boot() {
     bookmarkStorageScopeValue = storageScope;
     readingHistory = new ReadingHistoryStore({ scope: storageScope });
     const [liveCatalog, globalBookmarkStorage, synchronizedBookmarkStorage] =
-      await Promise.all([
-        loadLiveGlobalBookmarkCatalog({
-          api,
-          scope: storageScope,
-          instanceScope,
-        }),
-        GlobalBookmarkDeviceStorage.open({
-          scope: storageScope,
-          instanceScope,
-          webApp: bridge.webApp,
-        }),
-        TelegramBookmarkStorage.open({
-          scope: storageScope,
-          webApp: bridge.webApp,
-          hydrateLastRead: true,
-          onStatus: (status) => {
-            state.bookmarks.storageStatus = status;
-            updateBookmarkStorageWarning();
-          },
-        }),
-      ]);
+      await openPersonalStorage(storageScope);
     globalBookmarkCatalog = liveCatalog.catalog;
     globalBookmarkCatalogChecksum = liveCatalog.checksum;
     globalBookmarkCatalogAuthoritative = liveCatalog.source === "network";
@@ -478,9 +471,27 @@ async function boot() {
     });
     contributionStatus = session.contributions;
     if (contributionStatus?.can_contribute) {
-      await ensureContributionSync(contributionStatus);
+      try {
+        await withDeadline(
+          ensureContributionSync(contributionStatus),
+          BOOT_STORAGE_DEADLINE_MS,
+          "contribution storage",
+        );
+      } catch (error) {
+        // The open task keeps running; the first Sync tap joins it.
+        reportBootDegradation("contribution storage", error);
+      }
     }
-    const storedLastRead = await bookmarkStorage.readLastRead();
+    let storedLastRead = null;
+    try {
+      storedLastRead = await withDeadline(
+        bookmarkStorage.readLastRead(),
+        BOOT_LAST_READ_DEADLINE_MS,
+        "last-read position",
+      );
+    } catch (error) {
+      reportBootDegradation("last-read position", error);
+    }
     const synchronizedLastReadWasCleared = Boolean(
       bookmarkStorage.status.lastReadCleared,
     );
@@ -528,7 +539,9 @@ async function boot() {
     }
 
     elements.boot.hidden = true;
+    elements.accessDenied.hidden = true;
     elements.app.hidden = false;
+    bootSignal.settled = true;
     loadHeroAsset();
     const entrypoint = entrypointIntent(session.entrypoint);
     if (entrypoint.bible_reference) {
@@ -544,7 +557,9 @@ async function boot() {
     }
     void initializeContributionSync();
   } catch (error) {
-    if (error instanceof ApiError && [401, 409].includes(error.status)) {
+    // A refused authorization, a replayed launch, or a refused origin cannot
+    // be repaired by reloading the same page; only a fresh launch can.
+    if (error instanceof ApiError && [401, 403, 409].includes(error.status)) {
       showExpiredAccess();
       return;
     }
@@ -552,7 +567,9 @@ async function boot() {
       error instanceof ApiError
         ? localizedErrorMessage(error)
         : i18n.t("gate.verify_failed");
-    showAccessDenied(message);
+    showAccessDenied(message, {
+      retryAfterSeconds: error instanceof ApiError ? error.retryAfter : null,
+    });
   }
 }
 
@@ -642,6 +659,134 @@ function contributionControlVisible(status = contributionStatus) {
     contributionAuthorityUnknown(status) ||
     ["pending", "deferred", "rejected", "revoked"].includes(status.state)
   );
+}
+
+// Personal storage opens with an upper bound and a fallback at every step.
+// Telegram storage that never answers, a browser store left damaged by an
+// earlier session, or a record an older client wrote may degrade bookmarks
+// for this launch; none of it may keep the reader from opening.
+const BOOT_STORAGE_DEADLINE_MS = 10_000;
+const BOOT_LAST_READ_DEADLINE_MS = 5_000;
+
+async function openPersonalStorage(storageScope) {
+  const bookmarkStatusListener = (attempt) => (status) => {
+    if (attempt.superseded) {
+      return;
+    }
+    state.bookmarks.storageStatus = status;
+    updateBookmarkStorageWarning();
+  };
+  return Promise.all([
+    bootStep("global catalogue", [
+      () => loadLiveGlobalBookmarkCatalog({
+        api,
+        scope: storageScope,
+        instanceScope,
+      }),
+      () => bundledGlobalBookmarkCatalog(),
+    ]),
+    bootStep("global bookmark storage", [
+      () => GlobalBookmarkDeviceStorage.open({
+        scope: storageScope,
+        instanceScope,
+        webApp: bridge.webApp,
+      }),
+      () => GlobalBookmarkDeviceStorage.open({
+        scope: storageScope,
+        instanceScope,
+        webApp: null,
+      }),
+      () => GlobalBookmarkDeviceStorage.open({
+        scope: storageScope,
+        instanceScope,
+        webApp: null,
+        localStorage: null,
+      }),
+    ]),
+    bootStep("bookmark storage", [
+      (attempt) => TelegramBookmarkStorage.open({
+        scope: storageScope,
+        webApp: bridge.webApp,
+        hydrateLastRead: true,
+        onStatus: bookmarkStatusListener(attempt),
+      }),
+      (attempt) => TelegramBookmarkStorage.open({
+        scope: storageScope,
+        webApp: null,
+        hydrateLastRead: true,
+        onStatus: bookmarkStatusListener(attempt),
+      }),
+      (attempt) => TelegramBookmarkStorage.open({
+        scope: storageScope,
+        webApp: null,
+        localStorage: null,
+        hydrateLastRead: true,
+        onStatus: bookmarkStatusListener(attempt),
+      }),
+    ]),
+  ]);
+}
+
+async function bootStep(label, attempts) {
+  let failure = null;
+  for (const attempt of attempts) {
+    const context = { superseded: false };
+    try {
+      return await withDeadline(
+        attempt(context),
+        BOOT_STORAGE_DEADLINE_MS,
+        label,
+      );
+    } catch (error) {
+      context.superseded = true;
+      failure = error;
+      reportBootDegradation(label, error);
+    }
+  }
+  throw failure;
+}
+
+function bundledGlobalBookmarkCatalog() {
+  return Object.freeze({
+    catalog: GLOBAL_BOOKMARK_CATALOG,
+    revision: 0,
+    checksum: null,
+    etag: null,
+    source: "bundled",
+  });
+}
+
+function withDeadline(operation, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(`${label} did not answer within ${timeoutMs} ms.`));
+      }
+    }, timeoutMs);
+    Promise.resolve(operation).then(
+      (value) => {
+        if (!settled) {
+          settled = true;
+          window.clearTimeout(timer);
+          resolve(value);
+        }
+      },
+      (error) => {
+        if (!settled) {
+          settled = true;
+          window.clearTimeout(timer);
+          reject(error);
+        }
+      },
+    );
+  });
+}
+
+function reportBootDegradation(label, error) {
+  bootSignal.degraded = [...(bootSignal.degraded ?? []), label];
+  console.warn(`getBible.Life: ${label} degraded for this launch.`, error);
 }
 
 async function ensureContributionSync(initialStatus) {
@@ -2197,11 +2342,15 @@ function loadHeroAsset() {
   image.src = new URL("assets/ocean-light-hero.webp", document.baseURI).href;
 }
 
+let accessRetryTimer = null;
+const ACCESS_RETRY_MAX_WAIT_SECONDS = 120;
+
 function showAccessDenied(
   message,
   {
     actionLabel = i18n.t("common.try_again"),
     onAction = () => window.location.reload(),
+    retryAfterSeconds = null,
   } = {},
 ) {
   closeOpenDialogs();
@@ -2211,6 +2360,24 @@ function showAccessDenied(
   elements.accessMessage.textContent = message;
   elements.accessRetry.textContent = actionLabel;
   accessAction = onAction;
+  bootSignal.settled = true;
+  if (accessRetryTimer !== null) {
+    window.clearTimeout(accessRetryTimer);
+    accessRetryTimer = null;
+  }
+  // A server that asked us to wait is answered by waiting, not by a tap that
+  // earns the next refusal.
+  const waitSeconds = Math.min(
+    Number(retryAfterSeconds) || 0,
+    ACCESS_RETRY_MAX_WAIT_SECONDS,
+  );
+  elements.accessRetry.disabled = waitSeconds > 0;
+  if (waitSeconds > 0) {
+    accessRetryTimer = window.setTimeout(() => {
+      accessRetryTimer = null;
+      elements.accessRetry.disabled = false;
+    }, waitSeconds * 1000);
+  }
   bridge.notifyError();
   window.requestAnimationFrame(() => {
     elements.accessRetry.focus({ preventScroll: true });

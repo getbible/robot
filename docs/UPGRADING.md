@@ -39,12 +39,19 @@ checkout must not require `chmod`. Although the manager itself runs through
 locks disabled. The deployment must not refresh or change ownership of
 `.git/index`.
 
-Every packaged Mini App file is served `no-store`, so a launch downloads the
-exact JavaScript, CSS, locale catalogs, and branding the running server ships;
-the new deployment cannot reuse any file from the previous commit even in a
-WebView that skips conditional revalidation. Sessions live in server memory,
-so the upgrade restart also signs out any Mini App view that was already open —
-launching `/bible` or `/search` again always runs the deployed commit.
+Every packaged Mini App file is served `no-store`, and the shell loads its
+JavaScript and stylesheet from `build/<fingerprint>/`, a prefix derived from
+the bytes of the complete packaged client. A launch therefore downloads the
+exact JavaScript, CSS, locale catalogs, and branding the running server ships,
+and a WebView that ignores `no-store` and keeps the previous commit's modules
+in its cache never has them asked for again: the new shell names addresses no
+earlier deployment used. The menu button's fixed URL carries the same
+fingerprint as a query so a menu launch is a new address as well. Sessions
+live in server memory, so the upgrade restart also signs out any Mini App view
+that was already open — launching `/bible` or `/search` again always runs the
+deployed commit. The postflight fetches the shell and then the module it
+names, so a proxy that stopped forwarding `build/*` fails the upgrade instead
+of shipping a shell whose scripts answer with an empty 404.
 
 For a separately reviewed checkout pinned to an exact commit:
 

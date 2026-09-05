@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import sqlite3
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -402,7 +403,10 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         token = await self.exchange()
-        self.assertEqual(self.limiter.details[-1][2:], (1.0, "192.0.2.1"))
+        # The exchange is a signed, read-shaped bootstrap. A person relaunching
+        # a few times while something is wrong pays navigation cost, so those
+        # taps can never add up to an abuse block.
+        self.assertEqual(self.limiter.details[-1][2:], (0.25, "192.0.2.1"))
 
         response = await self.api.handle(
             self.request(
@@ -1603,18 +1607,18 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             "observe_identity",
             wraps=original_observer,
         ) as observer:
-            invalid_init_data = _init_data(query_id="invalid-launch")
-            invalid_launch = await self.api.handle(
+            forged_init_data = _init_data(query_id="forged-launch").replace(
+                "Grace",
+                "Mallory",
+            )
+            forged_launch = await self.api.handle(
                 self.request(
                     "POST",
                     "/getbible/api/v1/session",
-                    body={
-                        "init_data": invalid_init_data,
-                        "launch_token": "abcdefghijklmnop",
-                    },
+                    body={"init_data": forged_init_data},
                 )
             )
-            self.assertEqual(invalid_launch.status, 401)
+            self.assertEqual(forged_launch.status, 401)
             observer.assert_not_called()
 
             limited_init_data = _init_data(query_id="limited-launch")
@@ -1782,7 +1786,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resumed.status, 200)
 
-    async def test_expired_session_cleans_stale_launch_rows_before_rejection(
+    async def test_expired_launch_is_cleaned_up_and_still_opens_privately(
         self,
     ) -> None:
         launch = self.launches.create_launch(
@@ -1811,8 +1815,13 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(response.status, 401)
+        # The stale prompt is still cleaned up, but the person who tapped it
+        # gets in: the group launch has lapsed, so this is a private session
+        # at Home rather than the group search the button once promised.
+        self.assertEqual(response.status, 201)
         self.assertEqual(self.cleaned_launches, [launch])
+        payload = json.loads(response.body)
+        self.assertEqual(payload["entrypoint"], {"route": "home", "query": ""})
 
     async def test_exact_session_exchange_retry_returns_the_same_session(self) -> None:
         self.contributions.submit_application(42, first_name="Grace")
@@ -1841,11 +1850,15 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("X-Contribution-Token", first.headers)
         self.assertNotIn("X-Contribution-Token", second.headers)
 
-    async def test_invalid_launch_and_bootstrap_failure_do_not_burn_init_data(
+    async def test_unknown_launch_opens_a_private_session_and_reloads_cleanly(
         self,
     ) -> None:
+        # Launch tokens live in process memory: every button a user received
+        # before a restart names a launch this process never saw. Tapping it
+        # again is what a person does when the app "will not open", so it
+        # must open, as the private session a menu launch would get.
         raw = _init_data()
-        invalid_launch = await self.api.handle(
+        unknown_launch = await self.api.handle(
             self.request(
                 "POST",
                 "/getbible/api/v1/session",
@@ -1855,8 +1868,115 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
-        self.assertEqual(invalid_launch.status, 401)
+        self.assertEqual(unknown_launch.status, 201)
+        degraded = json.loads(unknown_launch.body)
+        self.assertEqual(degraded["entrypoint"], {"route": "home", "query": ""})
+        self.assertEqual(degraded["user"], {"id": 42})
 
+        # A reload of that same page repeats the forgotten token with the same
+        # signed initData and must land in the same session, not a 401.
+        reloaded = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={
+                    "init_data": raw,
+                    "launch_token": "abcdefghijklmnop",
+                },
+            )
+        )
+        self.assertEqual(reloaded.status, 200)
+        self.assertEqual(
+            json.loads(reloaded.body)["session_token"],
+            degraded["session_token"],
+        )
+        recovered = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": raw},
+            )
+        )
+        self.assertEqual(recovered.status, 200)
+
+        # A launch this process does hold keeps its route, even when the
+        # signed start_param still names an earlier launch.
+        launch = self.launches.create_launch(
+            user_id=42,
+            target_chat_id=42,
+            initial_route="search",
+            initial_query="grace",
+        )
+        stale_param = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={
+                    "init_data": _init_data(
+                        query_id="stale-start-param",
+                        start_param="abcdefghijklmnop",
+                    ),
+                    "launch_token": launch.token,
+                },
+            )
+        )
+        self.assertEqual(stale_param.status, 201)
+        self.assertEqual(
+            json.loads(stale_param.body)["entrypoint"],
+            {"route": "search", "query": "grace"},
+        )
+        self.assertIsNone(self.launches.peek(launch.token, user_id=42))
+
+    async def test_durable_state_faults_fail_open_at_the_exchange(self) -> None:
+        # A preference store the service can read but no longer write must
+        # not keep a reader out: the corrected translation lives in the
+        # session until the store is repaired.
+        self.preferences.values[42] = "retired-translation"
+        with patch.object(
+            self.preferences,
+            "update_preferences",
+            side_effect=sqlite3.OperationalError(
+                "attempt to write a readonly database"
+            ),
+        ):
+            response = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/session",
+                    body={"init_data": _init_data(query_id="readonly-store")},
+                )
+            )
+        self.assertEqual(response.status, 201)
+        payload = json.loads(response.body)
+        self.assertEqual(
+            payload["preferences"]["translation"],
+            payload["translations"][0]["code"],
+        )
+
+        # A damaged moderation row is a moderation problem, never a reading
+        # problem.
+        with patch.object(
+            self.contributions,
+            "contribution_status",
+            side_effect=ValueError("Expecting value: line 1 column 1 (char 0)"),
+        ):
+            damaged = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/session",
+                    body={"init_data": _init_data(query_id="damaged-row")},
+                )
+            )
+        self.assertEqual(damaged.status, 201)
+        self.assertEqual(
+            json.loads(damaged.body)["contributions"]["state"],
+            "unavailable",
+        )
+
+    async def test_bootstrap_failure_does_not_burn_init_data(
+        self,
+    ) -> None:
+        raw = _init_data()
         recovered = await self.api.handle(
             self.request(
                 "POST",

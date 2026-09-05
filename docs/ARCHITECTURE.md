@@ -383,7 +383,7 @@ Synchronous Librarian work runs in fixed executors. Timeouts do not release capa
 
 ## Deployment
 
-HTML, modules, server code, and documentation must deploy from one validated commit. `index.html` is served with `no-store`; static assets revalidate through ETags. This prevents a Telegram WebView from combining incompatible generations.
+HTML, modules, server code, and documentation must deploy from one validated commit. Every packaged client file is served with `no-store`, and the shell names its script and stylesheet below `build/<fingerprint>/`, where the fingerprint is a content hash of the complete packaged client tree; relative imports resolve below the same prefix. A Telegram WebView that keeps cache entries without revalidating them therefore never finds a previous deployment's module at the address a current shell asks for, so it can never combine incompatible generations. A classic `boot.js` watchdog turns a module graph that still fails to load into the ordinary retry gate instead of an endless opening spinner.
 
 Host deployment uses separate private listeners for health, webhook delivery, and Mini App HTTPS proxying. Health stays on loopback; a webhook or Mini App behind a remote proxy binds a specific bot-host IP and is firewall-restricted to that proxy. Docker deployments expose application listeners only to private ingress. Polling and the Mini App are independent and may run together.
 

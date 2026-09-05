@@ -11,6 +11,8 @@ const ENVELOPE_VERSION = 1;
 const DEFAULT_TIMEOUT_MS = 2_500;
 const MAX_TIMEOUT_MS = 30_000;
 const DEVICE_WRITE_ATTEMPTS = 3;
+// Milliseconds well past any plausible wall clock (about the year 4200).
+const MAX_RECORD_TIMESTAMP = 2 ** 46;
 
 export const GLOBAL_BOOKMARK_DEVICE_ENVELOPE_VERSION = ENVELOPE_VERSION;
 export const GLOBAL_BOOKMARK_DEVICE_KEY_PREFIX = "gb_global_local_v1";
@@ -338,10 +340,15 @@ export class GlobalBookmarkDeviceStorage {
         candidate(legacyCandidate, "legacy", 1),
       ]);
       if (winner?.source === "legacy") {
-        winner = {
-          ...winner,
-          record: valueEnvelope(this.#nextTimestamp(), winner.record.value),
-        };
+        // Promoting an unscoped record from an earlier client is best effort:
+        // a poisoned clock must not turn opening the reader into a failure.
+        let promoted = null;
+        try {
+          promoted = valueEnvelope(this.#nextTimestamp(), winner.record.value);
+        } catch (error) {
+          lastError = errorMessage(error);
+        }
+        winner = promoted ? { ...winner, record: promoted } : null;
       }
       if (!winner) {
         continue;
@@ -552,11 +559,11 @@ export class GlobalBookmarkDeviceStorage {
     if (!Number.isSafeInteger(clockValue) || clockValue < 0) {
       throw new TypeError("The global bookmark storage clock is invalid.");
     }
-    if (this.#lastTimestamp >= Number.MAX_SAFE_INTEGER) {
+    if (this.#lastTimestamp >= MAX_RECORD_TIMESTAMP) {
       throw new RangeError("The global bookmark storage timestamp is exhausted.");
     }
     const timestamp = Math.max(clockValue, this.#lastTimestamp + 1, 1);
-    if (!Number.isSafeInteger(timestamp)) {
+    if (!Number.isSafeInteger(timestamp) || timestamp > MAX_RECORD_TIMESTAMP) {
       throw new RangeError("The global bookmark storage timestamp is exhausted.");
     }
     this.#lastTimestamp = timestamp;
@@ -654,6 +661,9 @@ function parseEnvelope(raw) {
       value.version !== ENVELOPE_VERSION ||
       !Number.isSafeInteger(value.record_updated_at) ||
       value.record_updated_at < 1 ||
+      // A timestamp beyond any real clock would exhaust the monotonic clock
+      // on the next write; such a record is damage, not data.
+      value.record_updated_at > MAX_RECORD_TIMESTAMP ||
       typeof value.deleted !== "boolean"
     ) {
       return null;

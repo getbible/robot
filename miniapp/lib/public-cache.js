@@ -4,6 +4,14 @@ const DEFAULT_STORE_NAME = "resources";
 const DEFAULT_MAX_ENTRIES = 160;
 const DEFAULT_MAX_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MAX_RECORD_BYTES = 2 * 1024 * 1024;
+// An IndexedDB request that never settles is a real failure mode of a WebView
+// whose backing store was left damaged or locked by an earlier session, and
+// that state survives closing the Mini App and restarting Telegram. Every
+// database operation therefore has an upper bound; past it the cache falls
+// back to memory exactly as it does when the database rejects.
+const DEFAULT_OPERATION_TIMEOUT_MS = 4_000;
+
+export const PUBLIC_CACHE_OPERATION_TIMEOUT_MS = DEFAULT_OPERATION_TIMEOUT_MS;
 
 /**
  * Minimal asynchronous store used when IndexedDB is unavailable or fails.
@@ -33,61 +41,69 @@ export class MemoryPublicStore {
  * IndexedDB adapter isolated behind a small store contract for testability.
  */
 export class IndexedDbPublicStore {
+  #clearTimeout;
   #databaseName;
   #indexedDB;
   #openPromise = null;
+  #setTimeout;
   #storeName;
+  #timeoutMs;
 
   constructor({
     indexedDBImplementation = globalThis.indexedDB,
     databaseName = DEFAULT_DATABASE_NAME,
     storeName = DEFAULT_STORE_NAME,
+    timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS,
+    setTimeoutImplementation = globalThis.setTimeout,
+    clearTimeoutImplementation = globalThis.clearTimeout,
   } = {}) {
     if (!indexedDBImplementation || typeof indexedDBImplementation.open !== "function") {
       throw new TypeError("IndexedDB is unavailable.");
     }
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
+      throw new RangeError("IndexedDB operation timeout is invalid.");
+    }
+    if (
+      typeof setTimeoutImplementation !== "function" ||
+      typeof clearTimeoutImplementation !== "function"
+    ) {
+      throw new TypeError("Browser timer implementations are required.");
+    }
     this.#indexedDB = indexedDBImplementation;
     this.#databaseName = databaseName;
     this.#storeName = storeName;
+    this.#timeoutMs = timeoutMs;
+    this.#setTimeout = (...args) =>
+      Reflect.apply(setTimeoutImplementation, globalThis, args);
+    this.#clearTimeout = (...args) =>
+      Reflect.apply(clearTimeoutImplementation, globalThis, args);
   }
 
   async get(key) {
     const database = await this.#open();
-    const transaction = database.transaction(this.#storeName, "readonly");
-    const request = transaction.objectStore(this.#storeName).get(key);
-    const result = await requestResult(request);
-    await transactionDone(transaction);
-    return cloneRecord(result ?? null);
+    return this.#bounded(readRecord(database, this.#storeName, key), "read");
   }
 
   async put(record) {
     const database = await this.#open();
-    const transaction = database.transaction(this.#storeName, "readwrite");
-    transaction.objectStore(this.#storeName).put(cloneRecord(record));
-    await transactionDone(transaction);
+    await this.#bounded(putRecord(database, this.#storeName, record), "write");
   }
 
   async delete(key) {
     const database = await this.#open();
-    const transaction = database.transaction(this.#storeName, "readwrite");
-    transaction.objectStore(this.#storeName).delete(key);
-    await transactionDone(transaction);
+    await this.#bounded(deleteRecord(database, this.#storeName, key), "delete");
   }
 
   async entries() {
     const database = await this.#open();
-    const transaction = database.transaction(this.#storeName, "readonly");
-    const request = transaction.objectStore(this.#storeName).getAll();
-    const result = await requestResult(request);
-    await transactionDone(transaction);
-    return Array.isArray(result) ? result.map(cloneRecord) : [];
+    return this.#bounded(allRecords(database, this.#storeName), "scan");
   }
 
-  async #open() {
+  #open() {
     if (this.#openPromise) {
       return this.#openPromise;
     }
-    this.#openPromise = new Promise((resolve, reject) => {
+    const opening = new Promise((resolve, reject) => {
       const request = this.#indexedDB.open(this.#databaseName, 1);
       request.addEventListener("upgradeneeded", () => {
         const database = request.result;
@@ -95,7 +111,12 @@ export class IndexedDbPublicStore {
           database.createObjectStore(this.#storeName, { keyPath: "key" });
         }
       }, { once: true });
-      request.addEventListener("success", () => resolve(request.result), { once: true });
+      request.addEventListener("success", () => {
+        const database = request.result;
+        // Never hold a newer client's upgrade hostage from a background tab.
+        database.addEventListener?.("versionchange", () => database.close?.());
+        resolve(database);
+      }, { once: true });
       request.addEventListener(
         "error",
         () => reject(request.error ?? new Error("IndexedDB could not be opened.")),
@@ -106,12 +127,69 @@ export class IndexedDbPublicStore {
         () => reject(new Error("IndexedDB upgrade was blocked.")),
         { once: true },
       );
-    }).catch((error) => {
+    });
+    this.#openPromise = this.#bounded(opening, "open").catch((error) => {
       this.#openPromise = null;
       throw error;
     });
     return this.#openPromise;
   }
+
+  #bounded(operation, label) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = this.#setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error(`IndexedDB ${label} timed out.`));
+        }
+      }, this.#timeoutMs);
+      operation.then(
+        (value) => {
+          if (!settled) {
+            settled = true;
+            this.#clearTimeout(timer);
+            resolve(value);
+          }
+        },
+        (error) => {
+          if (!settled) {
+            settled = true;
+            this.#clearTimeout(timer);
+            reject(error);
+          }
+        },
+      );
+    });
+  }
+}
+
+async function readRecord(database, storeName, key) {
+  const transaction = database.transaction(storeName, "readonly");
+  const request = transaction.objectStore(storeName).get(key);
+  const result = await requestResult(request);
+  await transactionDone(transaction);
+  return cloneRecord(result ?? null);
+}
+
+async function putRecord(database, storeName, record) {
+  const transaction = database.transaction(storeName, "readwrite");
+  transaction.objectStore(storeName).put(cloneRecord(record));
+  await transactionDone(transaction);
+}
+
+async function deleteRecord(database, storeName, key) {
+  const transaction = database.transaction(storeName, "readwrite");
+  transaction.objectStore(storeName).delete(key);
+  await transactionDone(transaction);
+}
+
+async function allRecords(database, storeName) {
+  const transaction = database.transaction(storeName, "readonly");
+  const request = transaction.objectStore(storeName).getAll();
+  const result = await requestResult(request);
+  await transactionDone(transaction);
+  return Array.isArray(result) ? result.map(cloneRecord) : [];
 }
 
 /**
