@@ -1,10 +1,10 @@
 -r requirements.in
 bandit==1.9.4
-coverage==7.15.4
+coverage==7.16.0
 detect-secrets==1.5.0
 mypy==2.3.1
 pip-audit==2.10.1
 pip-tools==7.6.1
-ruff==0.16.5
-types-regex==2026.7.19.20260720
+ruff==0.16.6
+types-regex==2026.9.3.20260903
 types-requests==2.33.0.20260712
