@@ -2,7 +2,7 @@
 getbible>=2.0.0,<3
 # Imported directly for Unicode grapheme segmentation, so search-term
 # highlighting can compose and fold exactly the way Librarian analyses.
-regex>=2024.11,<2027
+regex>=2026.9.3,<2027
 # Keep these compatibility dependencies explicit so the Python 3.14 canonical
 # lock also contains dependencies selected only on older supported interpreters.
 exceptiongroup==1.3.1
