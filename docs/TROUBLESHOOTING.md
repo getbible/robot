@@ -138,6 +138,16 @@ confirm the Main Mini App URL in `@BotFather`. See
 
 ### Users cannot open the Mini App after an upgrade
 
+"This launch is no longer active" after a *fresh* `/bible` means the exchange
+refused signed launch data, not the button. Telegram clients reuse the same
+signed data from one launch to the next; releases before this one refused it
+when it named an earlier session or was older than five minutes, so later
+launches on such a phone failed, on iPhone and Android alike. The launch token
+the robot issued now proves the live tap and such data is accepted with it. If
+the message persists on a current release, the server clock is the next
+suspect: `doctor` reports it, and signed data more than thirty seconds in the
+future is refused.
+
 Launch tokens live in process memory. After an upgrade restart, every **Open
 getBible.Life** button already sitting in a chat names a launch the new
 process has never seen. Older releases answered that tap with `401` and a

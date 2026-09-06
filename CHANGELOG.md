@@ -4,8 +4,26 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
-### Android launches that could never open again
+### Launches that could never open again
 
+- Fixed the failure, reported on iPhone and Android alike, where even a
+  fresh `/bible` answered "This launch is no longer active". Telegram
+  clients reuse the same signed launch data from one launch to the next.
+  Since the contribution work made the exchange look up the session created
+  from the exact same signed data and refuse it when the launch token
+  differed, and sessions began to last ninety days, a later `/bible` on such
+  a client matched the previous session, carried a new token, and was
+  refused with `401`; signed data older than five minutes was refused
+  outright as well. The exchange is now
+  built around one rule: the one-time launch token the robot itself issued
+  is the proof of a live tap, and the signed data proves only who is
+  tapping. A launch the process still holds always opens the session it
+  promised, whatever earlier session or replay record the reused signed
+  data has, and such data is accepted up to a week old. Without a live
+  launch the strict rules stand: fresh data, rejoin the exact page's
+  session, otherwise a private session at Home. Opening the app involves no
+  contributor token for anyone; approved contributors alone receive one,
+  inside JSON payloads, after the session exists.
 - Closed every way a launch could keep failing after an upgrade for users
   who "cannot get the bot to run" no matter how often they close and reopen
   it. The one mechanism proven end to end is a dead launch button. Launch

@@ -75,6 +75,12 @@ from .rate_limit import InboundRateLimiter
 from .service import ScriptureQuery, ScriptureService
 
 LOGGER = logging.getLogger(__name__)
+# Telegram clients reuse signed launch data across launches for far longer
+# than the strict freshness bound. When the exchange also carries a one-time
+# launch token this process issued for that user minutes ago, the token proves
+# the live tap and the signed data proves the identity; its age then only has
+# to rule out the absurd.
+LAUNCHED_INIT_DATA_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
 _BEARER_RE = re.compile(r"Bearer ([A-Za-z0-9_-]{16,128})\Z")
 _ERROR_CODE_RE = re.compile(r"[a-z0-9_]{1,64}\Z")
@@ -648,10 +654,14 @@ class MiniAppApi:
         if set(payload) - {"init_data", "launch_token"}:
             raise MiniAppApiInputError("Session request contains unsupported fields.")
         init_data = _required_text(payload, "init_data", 8 * 1024)
-        principal = self._validator.validate(init_data)
         supplied_launch = payload.get("launch_token")
         if supplied_launch is not None and not isinstance(supplied_launch, str):
             raise MiniAppApiInputError("launch_token must be text.")
+        # Identity first. How fresh the signed data must be is decided once the
+        # launch it accompanies is known: a one-time launch token this process
+        # issued for this user minutes ago is stronger evidence of a live tap
+        # than the age of signed data a Telegram client reuses across launches.
+        principal = self._validator.validate(init_data, check_freshness=False)
         if (
             supplied_launch is not None
             and principal.start_param is not None
@@ -668,30 +678,133 @@ class MiniAppApi:
         launch_token = supplied_launch or principal.start_param
         init_data_digest = hashlib.sha256(init_data.encode("utf-8")).digest()
 
+        pending_launch = (
+            self._launches.peek(launch_token, user_id=principal.user_id)
+            if launch_token is not None
+            else None
+        )
+        if pending_launch is not None:
+            self._validator.require_fresh(
+                principal,
+                max_age_seconds=LAUNCHED_INIT_DATA_MAX_AGE_SECONDS,
+            )
+            return await self._open_launched_session(
+                request,
+                principal,
+                pending_launch,
+                init_data,
+                init_data_digest,
+            )
+        self._validator.require_fresh(principal)
+        return await self._open_unlaunched_session(
+            request,
+            principal,
+            launch_token,
+            init_data,
+            init_data_digest,
+        )
+
+    async def _open_launched_session(
+        self,
+        request: MiniAppHttpRequest,
+        principal: TelegramMiniAppPrincipal,
+        pending_launch: MiniAppLaunch,
+        init_data: str,
+        init_data_digest: bytes,
+    ) -> MiniAppHttpResponse:
+        """Open the session a launch this process issued promised.
+
+        The launch token is a one-time capability bound to its Telegram user.
+        Its presence outranks anything the signed data says about earlier
+        launches: the same signed data may already have opened a previous
+        session, or sit in the replay cache, because Telegram clients reuse it
+        from one launch to the next. Neither may refuse the button the user
+        has just tapped.
+        """
+        await self._limiter.acquire(
+            user_id=principal.user_id,
+            chat_id=principal.rate_limit_chat_id,
+            cost=self._navigation_rate_cost,
+            client_key=request.client_key,
+        )
+        translation = self._preferences.translation_for(principal.user_id)
+        translations = await self._service.translations()
+        consumed_launch = self._launches.consume(
+            pending_launch.token,
+            user_id=principal.user_id,
+        )
+        if consumed_launch is None:
+            # A concurrent request for the same launch won the race (a client
+            # that opens the page twice) and opened its session; join it.
+            session = self._sessions.find_by_init_data(
+                init_data_digest,
+                user_id=principal.user_id,
+            ) or self._sessions.find_by_launch(
+                pending_launch.token,
+                user_id=principal.user_id,
+            )
+            if session is None or not self._sessions.rebind(
+                session,
+                principal,
+                init_data_digest=init_data_digest,
+            ):
+                raise MiniAppAuthenticationError("Invalid Mini App launch.")
+            return await self._session_bootstrap(
+                session,
+                status=200,
+                translations=translations,
+                principal=principal,
+            )
+        newly_remembered = self._replay_guard.remember(init_data)
+        session = None
+        try:
+            session = self._sessions.create(
+                principal,
+                translation=translation,
+                launch=consumed_launch,
+                init_data_digest=init_data_digest,
+            )
+            return await self._session_bootstrap(
+                session,
+                status=201,
+                translations=translations,
+                principal=principal,
+            )
+        except BaseException:
+            if session is not None:
+                self._sessions.revoke(session.token)
+            if newly_remembered:
+                self._replay_guard.release(init_data)
+            self._launches.restore(consumed_launch)
+            raise
+
+    async def _open_unlaunched_session(
+        self,
+        request: MiniAppHttpRequest,
+        principal: TelegramMiniAppPrincipal,
+        launch_token: str | None,
+        init_data: str,
+        init_data_digest: bytes,
+    ) -> MiniAppHttpResponse:
+        """Reopen or open a session without a launch this process still holds.
+
+        Fresh signed data alone is the credential here, so every branch is
+        bound to it: a reload rejoins the session created from the exact same
+        signed data, replayed data without such a session is refused, a launch
+        that lapsed or that this process never saw degrades to the private
+        session a menu launch receives, and a launch whose session is still
+        alive rejoins it.
+        """
         # A successful exchange may commit its in-memory session immediately
-        # before the HTTP response is lost.  Recover that exact exchange by
-        # the validated Telegram user plus the digest of the complete signed
-        # initData.  This is deliberately checked independently of the replay
-        # cache so retryability lasts for the active session, not just for the
-        # replay-cache TTL.
+        # before the HTTP response is lost, and a reload repeats the exact
+        # signed data of the page. Whatever token the URL repeats (the one
+        # that exchange consumed, or one that has since lapsed), same signed
+        # data means the same page and the same session.
         exact_session = self._sessions.find_by_init_data(
             init_data_digest,
             user_id=principal.user_id,
         )
         if exact_session is not None:
-            expected_launch_token = (
-                None
-                if exact_session.launch.token == "generic-private"
-                else exact_session.launch.token
-            )
-            # The same signed initData names the same page. A private session
-            # that was degraded from a launch nobody knew any more is still
-            # that page's session when the URL repeats the forgotten token.
-            if (
-                expected_launch_token is not None
-                and launch_token != expected_launch_token
-            ):
-                raise MiniAppAuthenticationError("Invalid Mini App launch.")
             await self._limiter.acquire(
                 user_id=principal.user_id,
                 chat_id=principal.rate_limit_chat_id,
@@ -704,10 +817,7 @@ class MiniAppApi:
                 init_data_digest=init_data_digest,
             ):
                 raise MiniAppAuthenticationError("Invalid Mini App launch.")
-            return await self._session_bootstrap(
-                exact_session,
-                status=200,
-            )
+            return await self._session_bootstrap(exact_session, status=200)
 
         if self._replay_guard.contains(init_data):
             raise MiniAppReplayError("Telegram authorization was replayed.")
@@ -724,19 +834,14 @@ class MiniAppApi:
                 )
             if expired_launch is not None:
                 await self._cleanup_expired_launch(expired_launch)
-                launch_token = self._degraded_launch("expired")
+                self._degraded_launch("expired")
             else:
-                pending_launch = self._launches.peek(
+                recovery_session = self._sessions.find_by_launch(
                     launch_token,
                     user_id=principal.user_id,
                 )
-                if pending_launch is None:
-                    recovery_session = self._sessions.find_by_launch(
-                        launch_token,
-                        user_id=principal.user_id,
-                    )
-                    if recovery_session is None:
-                        launch_token = self._degraded_launch("unknown")
+                if recovery_session is None:
+                    self._degraded_launch("unknown")
 
         # An exchange is a read-shaped bootstrap that Telegram has already
         # signed, and a person who relaunches a few times while something is
@@ -750,9 +855,9 @@ class MiniAppApi:
         translation = self._preferences.translation_for(principal.user_id)
         translations = await self._service.translations()
 
-        if recovery_session is not None:
-            self._replay_guard.claim(init_data)
-            try:
+        self._replay_guard.claim(init_data)
+        try:
+            if recovery_session is not None:
                 if not self._sessions.rebind(
                     recovery_session,
                     principal,
@@ -765,60 +870,39 @@ class MiniAppApi:
                     translations=translations,
                     principal=principal,
                 )
+            session: MiniAppSession | None = None
+            try:
+                session = self._sessions.create(
+                    principal,
+                    translation=translation,
+                    launch=MiniAppLaunch(
+                        token="generic-private",
+                        user_id=principal.user_id,
+                        target_chat_id=principal.user_id,
+                        message_thread_id=None,
+                        initial_route="home",
+                        initial_query="",
+                        created_at=time.monotonic(),
+                    ),
+                    init_data_digest=init_data_digest,
+                )
+                return await self._session_bootstrap(
+                    session,
+                    status=201,
+                    translations=translations,
+                    principal=principal,
+                )
             except BaseException:
-                self._replay_guard.release(init_data)
+                if session is not None:
+                    self._sessions.revoke(session.token)
                 raise
-
-        consumed_launch: MiniAppLaunch | None = None
-        if launch_token is None:
-            launch = MiniAppLaunch(
-                token="generic-private",
-                user_id=principal.user_id,
-                target_chat_id=principal.user_id,
-                message_thread_id=None,
-                initial_route="home",
-                initial_query="",
-                created_at=time.monotonic(),
-            )
-        else:
-            if self._replay_guard.contains(init_data):
-                raise MiniAppReplayError("Telegram authorization was replayed.")
-            self._replay_guard.claim(init_data)
-            consumed_launch = self._launches.consume(
-                launch_token,
-                user_id=principal.user_id,
-            )
-            if consumed_launch is None:
-                self._replay_guard.release(init_data)
-                raise MiniAppAuthenticationError("Invalid Mini App launch.")
-            launch = consumed_launch
-        if launch_token is None:
-            self._replay_guard.claim(init_data)
-        session: MiniAppSession | None = None
-        try:
-            session = self._sessions.create(
-                principal,
-                translation=translation,
-                launch=launch,
-                init_data_digest=init_data_digest,
-            )
-            return await self._session_bootstrap(
-                session,
-                status=201,
-                translations=translations,
-                principal=principal,
-            )
         except BaseException:
-            if session is not None:
-                self._sessions.revoke(session.token)
             self._replay_guard.release(init_data)
-            if consumed_launch is not None:
-                self._launches.restore(consumed_launch)
             raise
 
     @staticmethod
     def _degraded_launch(reason: str) -> None:
-        """Turn a launch nobody holds any more into an ordinary private launch.
+        """Record that a launch nobody holds any more opens as a private launch.
 
         Launch tokens live in process memory, so every button a user received
         before a restart or upgrade names a launch the new process never saw.
@@ -828,7 +912,6 @@ class MiniAppApi:
         launch gets; only the launch's route and group target are lost.
         """
         LOGGER.info("Mini App launch token is %s; opening a private session", reason)
-        return None
 
     async def _cleanup_expired_launch(self, launch: MiniAppLaunch) -> None:
         """Remove stale Telegram launch rows without affecting auth failure."""

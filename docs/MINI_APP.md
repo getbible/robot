@@ -320,11 +320,20 @@ No ordinary click may create server basket state. Legacy per-click basket and Ro
 
 ## Security boundary
 
-The public HTML shell is not an authentication boundary. Robot validates fresh
+The public HTML shell is not an authentication boundary. Robot validates
 Telegram-signed `initData` and the owner-bound launch during the initial session
-exchange only. It then issues an active opaque session bearer for ordinary
-actions; approved-contributor synchronization uses that same bearer. The bot
-token remains server-side.
+exchange only. The one-time launch token the robot issued is the proof of a
+live tap and the signed data proves who is tapping: Telegram clients reuse
+signed launch data from one launch to the next, so a launch the process still
+holds always opens the session it promised, whatever earlier session or replay
+record that data has, and the data may then be up to a week old. Without a
+live launch (a menu launch, an old button, a reload) the signed data must be
+fresh, a reload rejoins the exact page's session, and an unknown or lapsed
+launch opens a private session at Home. Robot then issues an active opaque
+session bearer for ordinary actions; approved-contributor synchronization uses
+that same bearer plus a contributor token that only approved contributors ever
+receive, after the session exists. Opening the app involves no contributor
+token for anyone. The bot token remains server-side.
 
 The browser is untrusted for final output. It may control display state, but it cannot determine the authoritative text delivered to Telegram. Final output remains bounded, escaped, idempotent, and tied to the originating user, chat, and topic.
 

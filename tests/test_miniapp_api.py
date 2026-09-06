@@ -61,9 +61,10 @@ def _init_data(
     *,
     start_param: str | None = None,
     query_id: str = "query-id",
+    auth_date: int = 1_700_000_000,
 ) -> str:
     fields = {
-        "auth_date": "1700000000",
+        "auth_date": str(auth_date),
         "query_id": query_id,
         "user": json.dumps({"id": user_id, "first_name": "Grace"}, separators=(",", ":")),
     }
@@ -1972,6 +1973,144 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             json.loads(damaged.body)["contributions"]["state"],
             "unavailable",
         )
+
+    async def test_a_live_launch_outranks_reused_signed_data(self) -> None:
+        # Telegram iOS reuses the same signed launch data from one launch to
+        # the next. The second /bible therefore arrives with a new one-time
+        # token but the signed data of the previous session; it must open the
+        # launch the user tapped, not be refused for not matching that
+        # session.
+        raw = _init_data(query_id="reused-by-the-client")
+        first_launch = self.launches.create_launch(user_id=42, target_chat_id=42)
+        first = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": raw, "launch_token": first_launch.token},
+            )
+        )
+        self.assertEqual(first.status, 201)
+
+        second_launch = self.launches.create_launch(
+            user_id=42,
+            target_chat_id=42,
+            initial_route="search",
+            initial_query="grace",
+        )
+        second = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": raw, "launch_token": second_launch.token},
+            )
+        )
+        self.assertEqual(second.status, 201)
+        second_payload = json.loads(second.body)
+        self.assertNotEqual(
+            second_payload["session_token"],
+            json.loads(first.body)["session_token"],
+        )
+        self.assertEqual(
+            second_payload["entrypoint"],
+            {"route": "search", "query": "grace"},
+        )
+        self.assertIsNone(self.launches.peek(second_launch.token, user_id=42))
+
+        # A reload of that page repeats the consumed token with the same
+        # signed data and rejoins the session it opened.
+        reloaded = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": raw, "launch_token": second_launch.token},
+            )
+        )
+        self.assertEqual(reloaded.status, 200)
+        self.assertEqual(
+            json.loads(reloaded.body)["session_token"],
+            second_payload["session_token"],
+        )
+
+    async def test_old_signed_data_opens_only_a_launch_the_robot_issued(self) -> None:
+        hours_old = _init_data(query_id="hours-old", auth_date=1_700_000_000 - 3 * 3600)
+        launch = self.launches.create_launch(user_id=42, target_chat_id=42)
+        opened = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": hours_old, "launch_token": launch.token},
+            )
+        )
+        self.assertEqual(opened.status, 201)
+
+        # Without a launch this process holds, the age bound is strict again:
+        # a menu launch, an unknown token, and the consumed token on a new
+        # page are all refused, because old signed data alone proves nothing
+        # about a live tap.
+        for body in (
+            {"init_data": _init_data(query_id="menu-old", auth_date=1_700_000_000 - 3600)},
+            {
+                "init_data": _init_data(query_id="unknown-old", auth_date=1_700_000_000 - 3600),
+                "launch_token": "abcdefghijklmnop",
+            },
+            {
+                "init_data": _init_data(query_id="consumed-old", auth_date=1_700_000_000 - 3600),
+                "launch_token": launch.token,
+            },
+        ):
+            with self.subTest(body=body):
+                refused = await self.api.handle(
+                    self.request("POST", "/getbible/api/v1/session", body=body)
+                )
+                self.assertEqual(refused.status, 401)
+
+        # Even a live launch cannot revive signed data from the distant past.
+        ancient = _init_data(query_id="ancient", auth_date=1_700_000_000 - 8 * 86_400)
+        later_launch = self.launches.create_launch(user_id=42, target_chat_id=42)
+        refused = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": ancient, "launch_token": later_launch.token},
+            )
+        )
+        self.assertEqual(refused.status, 401)
+        self.assertIsNotNone(self.launches.peek(later_launch.token, user_id=42))
+
+    async def test_a_live_launch_is_never_a_replay(self) -> None:
+        # Signed data that already opened a session (and now sits in the
+        # replay cache) returns with the next launch on a client that reuses
+        # it. Once that session is gone, the launch must still open.
+        raw = _init_data(query_id="generic-then-launch")
+        generic = await self.api.handle(
+            self.request("POST", "/getbible/api/v1/session", body={"init_data": raw})
+        )
+        self.assertEqual(generic.status, 201)
+        token = json.loads(generic.body)["session_token"]
+        signed_out = await self.api.handle(
+            self.request(
+                "DELETE",
+                "/getbible/api/v1/session",
+                token=token,
+                include_init_data=False,
+            )
+        )
+        self.assertIn(signed_out.status, (200, 204))
+
+        replayed = await self.api.handle(
+            self.request("POST", "/getbible/api/v1/session", body={"init_data": raw})
+        )
+        self.assertEqual(replayed.status, 409)
+
+        launch = self.launches.create_launch(user_id=42, target_chat_id=42)
+        relaunched = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/session",
+                body={"init_data": raw, "launch_token": launch.token},
+            )
+        )
+        self.assertEqual(relaunched.status, 201)
 
     async def test_bootstrap_failure_does_not_burn_init_data(
         self,
