@@ -136,24 +136,28 @@ route the button once promised. For group launch failures,
 confirm the Main Mini App URL in `@BotFather`. See
 [Mini App deployment](MINI_APP.md).
 
-### The opening spinner never ends on Android
+### Users cannot open the Mini App after an upgrade
 
-Telegram's Android WebView can keep serving a JavaScript module it cached
-under an earlier deployment even after the server forbids caching. A shell
-fetched fresh then ran the previous deployment's `app.js` or `lib/*.js`: the
-old code looked for markup the new shell no longer has, or imported a module
-the new deployment retired, and the module graph failed before a single line
-of the app ran. Nothing was left to show an error, so the user saw the
-opening spinner forever, and closing or reopening the Mini App or Telegram
-changed nothing because the cache entry survived all of it.
+Launch tokens live in process memory. After an upgrade restart, every **Open
+getBible.Life** button already sitting in a chat names a launch the new
+process has never seen. Older releases answered that tap with `401` and a
+gate offering only **Close**, and tapping the same button again repeated it,
+which is exactly what "closing and reopening" means to a reader. Such a tap
+now opens a private session at Home and logs that the launch was unknown; a
+fresh `/bible` or `/search` message still gives the full launch. Telegram's
+Android client also brings back a minimized Mini App tab whenever the
+requested URL matches it; the menu button's URL now carries the packaged
+client's fingerprint, so a tab minimized before an upgrade is not reused.
 
-The shell now loads its scripts from `build/<fingerprint>/`, a prefix derived
-from the packaged client's bytes, and the menu button carries the same
-fingerprint as a query. A launch after an upgrade therefore names addresses no
-earlier deployment used, so the stale entries are never consulted again; the
-user only has to open the Mini App from a fresh `/bible` or `/search` message
-or the menu button. If a module still cannot be loaded, the `boot.js` watchdog
-shows the ordinary gate with **Try again** instead of the spinner.
+A shell that runs a previous deployment's JavaScript is a separate failure:
+the module graph fails before a single line of the app runs, nothing is left
+to show an error, and the opening spinner never ends. Whether a Telegram
+WebView ever serves such a stale module is not confirmed, so the possibility
+is removed instead. The shell loads its scripts from `build/<fingerprint>/`,
+a prefix derived from the packaged client's bytes, so a launch after an
+upgrade names addresses no earlier deployment used. If a module still cannot
+be loaded, the `boot.js` watchdog shows the ordinary gate with **Try again**
+instead of the spinner.
 
 If a report persists after the upgrade:
 
