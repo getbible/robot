@@ -6,30 +6,40 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ### Android launches that could never open again
 
-- Found the mechanism behind Android users who "cannot get the bot to run"
-  no matter how often they close and reopen it. Telegram's Android WebView
-  kept serving `app.js` and `lib/*.js` files it had cached under an earlier
-  deployment, even after every packaged file was served `no-store`. Because
-  each command launch URL is unique, the shell itself was always fresh, so a
-  new `index.html` ran the previous deployment's modules: the old `app.js`
-  threw while looking for markup the new shell no longer has, or a cached
-  module imported the retired `lib/contribution-push.js`, which now answers
-  `404`. Either way the module graph failed before a single line of the app
-  ran, nothing was left to show an error, and the opening spinner stayed up
-  forever. Closing the Mini App, force-stopping Telegram, and relaunching
-  changed nothing, because the cache entry outlived all of it and the shell
-  kept asking for the same address.
-- The server now renders the shell so that `app.js`, `boot.js`, and
-  `styles.css` load from `build/<fingerprint>/`, where the fingerprint is a
-  content hash of the complete packaged client tree; every relative import
-  resolves below the same prefix, so a launch after an upgrade names
-  addresses no earlier deployment ever used and stale cache entries are
-  never consulted again. The managed Caddy route forwards `build/*`, the
-  Telegram menu button is pointed at `<public URL>/?build=<fingerprint>` so
-  its fixed launch is a new address too, and the install/upgrade postflight
-  now fetches the shell and then the module it names, failing loudly when a
-  proxy answers the module with an empty `404`. No user action is needed
-  beyond opening the Mini App again.
+- Closed every way a launch could keep failing after an upgrade for users
+  who "cannot get the bot to run" no matter how often they close and reopen
+  it. The one mechanism proven end to end is a dead launch button. Launch
+  tokens live in process memory, so after the upgrade restart every **Open
+  getBible.Life** button already sitting in a chat named a launch the new
+  process had never seen. Tapping it answered `401`, the client showed
+  "This launch is no longer active" with only **Close**, and tapping the
+  same button again — which is what closing and reopening means to a
+  reader — repeated it exactly, on every platform. Telegram's Android
+  client adds a twist of its own: it brings back a minimized Mini App tab
+  whenever the requested URL matches it, and the menu button's URL never
+  changed, so a tab minimized before the upgrade could reappear with its
+  dead session instead of being reloaded.
+- A second family is closed as defence in depth rather than as a proven
+  trigger. A shell that runs a previous deployment's `app.js` or `lib/*.js`
+  fails while evaluating — the old code looks for markup the new shell no
+  longer has, or imports the retired `lib/contribution-push.js`, which now
+  answers `404` — before a single line of the app runs, nothing is left to
+  show an error, and the opening spinner stays up forever. Whether
+  Telegram's Android WebView ever serves such a stale module could not be
+  confirmed: its bot WebView uses the stock cache policy, and Chromium
+  revalidates the headers the previous deployment sent. The possibility is
+  removed instead of argued about. The server now renders the shell so that
+  `app.js`, `boot.js`, and `styles.css` load from `build/<fingerprint>/`,
+  where the fingerprint is a content hash of the complete packaged client
+  tree; every relative import resolves below the same prefix, so a launch
+  after an upgrade names addresses no earlier deployment ever used. The
+  managed Caddy route forwards `build/*`, the Telegram menu button is
+  pointed at `<public URL>/?build=<fingerprint>` so its fixed launch is a
+  new address too (which also defeats the minimized-tab reuse above after
+  an upgrade), and the install/upgrade postflight now fetches the shell and
+  then the module it names, failing loudly when a proxy answers the module
+  with an empty `404`. No user action is needed beyond opening the Mini App
+  again.
 - Added a dependency-free classic `boot.js` watchdog ahead of the module
   graph. If `boot()` has not been entered by `DOMContentLoaded`, a module
   failed to download or threw while evaluating, and the watchdog shows the
