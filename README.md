@@ -130,7 +130,8 @@ The public Mini App shell is not an authentication boundary.
 
 Robot protects actions with:
 
-- fresh Telegram-signed `initData` at the initial session exchange;
+- Telegram-signed `initData` at the initial session exchange, fresh unless
+  a one-time launch token the robot itself issued proves the live tap;
 - owner-bound, one-time launch tokens;
 - bounded opaque sessions with a ninety-day default absolute lifetime;
 - per-batch contributor-authority rechecks in the durable contribution store;

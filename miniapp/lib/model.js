@@ -113,6 +113,24 @@ export function normalizeSession(payload) {
  * process is completing its own atomic upgrade.
  */
 export function normalizeContributionStatus(value) {
+  try {
+    return parseContributionStatus(value);
+  } catch (error) {
+    if (!(error instanceof TypeError) && !(error instanceof RangeError)) {
+      throw error;
+    }
+    // Opening the reader never depends on the contributor pipeline. A status
+    // this client cannot read (a newer server, a damaged row, an unknown
+    // state) is the same as no status: the reader opens, and the contributor
+    // panel simply stays unavailable until a readable status arrives.
+    return markContributionReviewDetails(
+      unavailableContributionStatus(),
+      false,
+    );
+  }
+}
+
+function parseContributionStatus(value) {
   if (value === undefined || value === null) {
     return markContributionReviewDetails(
       unavailableContributionStatus(),

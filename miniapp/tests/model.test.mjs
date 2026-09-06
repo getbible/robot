@@ -221,29 +221,50 @@ test("rejects unsafe contributor review outcomes", () => {
       applied: 1,
     },
   };
-  assert.throws(() => normalizeContributionStatus({
-    enabled: true,
-    state: "approved",
-    can_contribute: true,
-    disclosure_required: false,
-    topics: [{
-      local_topic_id: "personal-topic",
-      state: "pending",
-      published: true,
-    }],
-    summary,
-  }), /topic outcome/i);
-  assert.throws(() => normalizeContributionStatus({
-    enabled: true,
-    state: "approved",
-    can_contribute: true,
-    disclosure_required: false,
-    topics: [],
-    summary: {
-      ...summary,
-      events: { ...summary.events, pending: -1 },
+  // A status this client cannot read never keeps the reader closed: it is
+  // the same as no status, for contributors and ordinary readers alike.
+  for (const damaged of [
+    {
+      enabled: true,
+      state: "approved",
+      can_contribute: true,
+      disclosure_required: false,
+      topics: [{
+        local_topic_id: "personal-topic",
+        state: "pending",
+        published: true,
+      }],
+      summary,
     },
-  }), /review summary/i);
+    {
+      enabled: true,
+      state: "approved",
+      can_contribute: true,
+      disclosure_required: false,
+      topics: [],
+      summary: {
+        ...summary,
+        events: { ...summary.events, pending: -1 },
+      },
+    },
+    "approved",
+    ["approved"],
+    { enabled: true, state: "brand-new-state", can_contribute: false, disclosure_required: false },
+    {
+      enabled: true,
+      state: "not_applied",
+      can_contribute: false,
+      disclosure_required: false,
+      newer_server_field: true,
+    },
+    { enabled: true, state: "approved", can_contribute: true, disclosure_required: false, contribution_token: "gbc_short" },
+  ]) {
+    const status = normalizeContributionStatus(damaged);
+    assert.equal(status.state, "unavailable");
+    assert.equal(status.can_contribute, false);
+    assert.equal(status.enabled, false);
+    assert.equal(contributionReviewDetailsAvailable(status), false);
+  }
 });
 
 test("normalizes current backend book and chapter item envelopes", () => {

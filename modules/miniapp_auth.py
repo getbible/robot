@@ -131,9 +131,7 @@ class TelegramInitDataValidator:
 
         auth_date = _integer(fields.get("auth_date"), "auth_date")
         if check_freshness:
-            now = int(self._wall_clock())
-            if auth_date > now + self._future_skew or now - auth_date > self._max_age:
-                raise MiniAppAuthenticationError("Telegram authorization has expired.")
+            self._assert_fresh(auth_date, self._max_age)
 
         user = _json_object(fields.get("user"), "user")
         user_id = _telegram_id(user.get("id"), "user.id")
@@ -159,6 +157,37 @@ class TelegramInitDataValidator:
             chat_type=_chat_type(fields.get("chat_type")),
             start_param=_optional_text(fields.get("start_param"), 512),
         )
+
+
+    def require_fresh(
+        self,
+        principal: TelegramMiniAppPrincipal,
+        *,
+        max_age_seconds: int | None = None,
+    ) -> None:
+        """Fail closed when signed data is from the future or older than allowed.
+
+        ``max_age_seconds`` widens the configured bound for this one check. The
+        session exchange uses it when a one-time launch token the robot itself
+        issued proves a live tap: Telegram clients reuse signed launch data
+        across launches for far longer than the strict bound, and the signed
+        data then only has to prove who is tapping, not when.
+        """
+        if max_age_seconds is not None and (
+            isinstance(max_age_seconds, bool)
+            or not isinstance(max_age_seconds, int)
+            or max_age_seconds < self._max_age
+        ):
+            raise ValueError("max_age_seconds may only widen the configured bound.")
+        self._assert_fresh(
+            principal.auth_date,
+            self._max_age if max_age_seconds is None else max_age_seconds,
+        )
+
+    def _assert_fresh(self, auth_date: int, max_age_seconds: int) -> None:
+        now = int(self._wall_clock())
+        if auth_date > now + self._future_skew or now - auth_date > max_age_seconds:
+            raise MiniAppAuthenticationError("Telegram authorization has expired.")
 
 
 class TelegramInitDataReplayGuard:
@@ -192,6 +221,24 @@ class TelegramInitDataReplayGuard:
             self._digests[digest] = now
             while len(self._digests) > self._max_entries:
                 self._digests.popitem(last=False)
+
+    def remember(self, raw_init_data: str) -> bool:
+        """Remember exact validated data; return whether this call added it.
+
+        A launch the robot itself issued is not a replay even when the signed
+        data accompanying it was exchanged before, so that path remembers the
+        data without refusing it and releases only a claim it made.
+        """
+        digest = self._digest(raw_init_data)
+        now = self._clock()
+        with self._guard:
+            self._purge_locked(now)
+            if digest in self._digests:
+                return False
+            self._digests[digest] = now
+            while len(self._digests) > self._max_entries:
+                self._digests.popitem(last=False)
+            return True
 
     def contains(self, raw_init_data: str) -> bool:
         """Return whether exact validated data was already claimed."""
