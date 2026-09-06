@@ -637,6 +637,14 @@ cat "$dropin_root/alpha.conf"
             b'<script type="module" src="./app.js"></script></html>'
         )
 
+        # The packaged app.js is hundreds of kilobytes. A probe that stops
+        # reading after the first match makes curl fail to write the rest,
+        # which under pipefail looked like an unreachable module and rolled a
+        # healthy upgrade back in production.
+        module_body = (
+            'import "./lib/model.js";\n' + ("// packaged client padding\n" * 20_000)
+        ).encode()
+
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 if self.path == "/versioned/":
@@ -644,7 +652,7 @@ cat "$dropin_root/alpha.conf"
                 elif self.path == "/plain/":
                     body, content_type = plain_shell, "text/html; charset=utf-8"
                 elif self.path == f"/versioned/build/{build_id}/app.js":
-                    body, content_type = b'import "./lib/model.js";', "text/javascript"
+                    body, content_type = module_body, "text/javascript"
                 elif self.path == "/stranded/":
                     body, content_type = versioned_shell, "text/html; charset=utf-8"
                 else:
