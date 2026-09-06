@@ -1776,9 +1776,19 @@ probe_mini_app_url() {
             "$url" >&2
         return 1
     fi
-    curl --fail --silent --show-error --location --max-time 10 \
-        "${url%/}/${module}" | grep -Fq 'import' || {
+    # Read the whole module before inspecting it. Piping curl into grep -q
+    # made grep stop at the first match, curl then failed to write the rest
+    # of a large module (exit 23), and pipefail reported a reachable module
+    # as unreachable, rolling a healthy upgrade back.
+    local module_body
+    module_body=$(curl --fail --silent --show-error --location --max-time 10 \
+        "${url%/}/${module}") || {
         printf 'The Mini App module %s is not reachable through %s.\n' \
+            "$module" "$url" >&2
+        return 1
+    }
+    grep -Fq 'import' <<<"$module_body" || {
+        printf 'The Mini App module %s through %s is not the packaged client.\n' \
             "$module" "$url" >&2
         return 1
     }
