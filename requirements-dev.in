@@ -5,6 +5,6 @@ detect-secrets==1.5.0
 mypy==2.3.1
 pip-audit==2.10.1
 pip-tools==7.6.1
-ruff==0.16.6
+ruff==0.16.7
 types-regex==2026.9.3.20260903
-types-requests==2.33.0.20260712
+types-requests==2.33.0.20260906
