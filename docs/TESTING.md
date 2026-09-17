@@ -34,6 +34,14 @@ This command is the local equivalent of the permanent CI quality job. It must pa
 - strict mypy and Ruff;
 - enforced branch coverage;
 - setup-manager and lifecycle checks;
+- contribution review against a catalogue document downloaded from the
+  Bookmarks API (`fetch-catalog` with a fake client), acceptance into the
+  submission ledger, the publisher against the builder layout (origin
+  `getbible/v1_bookmark_builder`, Python 3.12 or newer, `import-bundle` and
+  `validate`, only `data/topics.json` and `data/links/*.json` changed),
+  pull-request creation against a fake GitHub API with success, no token, and
+  API failure, and the catalogue watcher marking applied events live with one
+  notice per contributor and no change on an unchanged checksum;
 - production container build and smoke test;
 - Bandit/static security;
 - exact dependency audit;
@@ -49,8 +57,12 @@ Tests must prove:
 - explicit and grouped references use `query.getbible.net/v2` directly;
 - full-text search uses `search.getbible.net/v2` directly, with the filters as
   query parameters, offset pagination, and the exact total;
+- the global topic catalogue uses `bookmarks.getbible.net/v1` directly:
+  `index.json` at most daily, `all.json` only when the checksum changed and
+  only when its SHA-256 equals the index checksum, IndexedDB as the cache,
+  and network-required refresh on an explicit pull;
 - no Telegram init data, Robot token, cookie, or credential reaches any of the
-  three public origins;
+  four public origins;
 - the CSP meta element and response header contain the same fixed allowlist;
 - redirects, oversized responses, malformed schemas, coordinate mismatches, and checksum mismatches are rejected;
 - exact-scope hashes are stored and revalidated at least weekly;
@@ -86,7 +98,7 @@ Tests must prove:
 - highlighting in the browser and in the robot mirrors the service's script
   analysis: no word boundary is tested in a continuous script, an abjad stem
   is marked behind its attached particle, and Brahmic marks are kept;
-- both CSP layers list the same three public origins;
+- both CSP layers list the same four public origins;
 - the removed Librarian settings are ignored with a warning, and the robot
   serves no `/api/v1/search` route.
 
@@ -129,16 +141,18 @@ Tests must prove:
 
 `BookmarkStore` and `TelegramBookmarkStorage` tests must cover:
 
-- the shipped default topic definitions and localized core-name keys, read-only
-  built-in names, detail-level recoloring for built-in and custom topics,
-  bounded custom add/inline-rename, confirm/cancel behavior, removal warnings,
-  and global-topic restoration through **Add all** without overwriting user
+- new stores start with no topics, the catalogue's default topics are seeded
+  once per scope and never reseeded, the fixed colour palette, read-only
+  global names shown in the reader's locale with English fallback,
+  detail-level recoloring for global and custom topics, bounded custom
+  add/inline-rename, confirm/cancel behavior, removal warnings, and
+  global-topic restoration through **Add all** without overwriting user
   changes;
-- complete Home-summary, History, and Bookmark locale-key coverage, including
-  canonical English fallback for newly published topic keys, with each governed
-  alias/fallback reusing the established whole-application
-  language source, policy catalogs excluded from native-translation claims,
-  and integer `few` forms exercised for Czech, Polish, Russian, and Ukrainian;
+- complete Home-summary, History, and Bookmark locale-key coverage, with no
+  topic-name keys in any message catalogue, each governed alias/fallback
+  reusing the established whole-application language source, policy catalogs
+  excluded from native-translation claims, and integer `few` forms exercised
+  for Czech, Polish, Russian, and Ukrainian;
 - at most 800 personal records, each unique by canonical
   book/chapter/verse across translations and assignable to multiple topics
   without consuming another verse slot;
@@ -149,12 +163,19 @@ Tests must prove:
   compatible-format merge, worst-case UTF-8 pretty-JSON size,
   cross-translation deduplication, malformed input rejection, and no partial
   mutation on failure;
-- the source-derived global catalogue topic and link totals, generated-file
-  freshness, unified personal/global ordering,
+- the catalogue built from an API-shaped fixture (ids, names, colours,
+  aliases, per-locale names, default flag, sorted unique verses, bounds),
+  cache-first loading with daily `index.json` revalidation, rejection of an
+  `all.json` whose SHA-256 differs from the index, `requireNetwork`
+  semantics, malformed documents, unified personal/global ordering,
   **G** marker, compact add-all/remove-all controls before search, and
   idempotent per-link, whole-topic, and all-catalog removal/restoration without
   personal sync or backup, including renamed numeric-topic remapping and
   display-only active-translation excerpts;
+- the coverage record behind the personal-to-global merge: coverage is
+  recorded on every successful network refresh, a personal bookmark is
+  removed only after a day of stable coverage on a network-verified
+  catalogue, and never from a cache-only or unavailable one;
 - authenticated-scope global-preference reconciliation across localStorage and
   Telegram `DeviceStorage`, including legacy migration, fresh-WebView restore,
   deterministic timestamp ties, tombstones, coalescing, bounded retry, and a
@@ -215,7 +236,10 @@ modules, and browser APIs. It verifies:
 8. personal and global links share one topic list, global links carry **G**,
    compact all-catalog controls precede search, the **G** badge is centered,
    per-link hide and per-topic/all reset stay device-local, and no global link
-   enters personal backup or CloudStorage;
+   enters personal backup or CloudStorage; the catalogue is served by fixtures
+   routed at `https://bookmarks.getbible.net/v1/*` whose `all.json` SHA-256
+   is computed in the test, boot loads it, **Add all** revalidates on the
+   network, and a personal bookmark covered for a day is merged;
 9. the add-topic plus-card is the only topic-creation panel; opened custom
    topics support inline name confirm/cancel and color editing, opened global
    topics keep their name read-only while allowing color editing, and topic
@@ -224,8 +248,8 @@ modules, and browser APIs. It verifies:
     approved contributor and remains separate from topic creation; and
 11. **Sync now** drips sequential bounded event batches to the same-origin
     `/contributions/events` endpoint, the final response settles receipt
-    counts, contributor status, and catalogue revision, and redelivered
-    events replay idempotently after a lost response; and
+    counts, contributor status, and the accepted-ledger revision, and
+    redelivered events replay idempotently after a lost response; and
 12. no legacy Robot Scripture or history request is emitted.
 
 Focused model, storage, API, and backend tests separately verify selection
@@ -256,6 +280,9 @@ Inject and verify independent failures for:
 - IndexedDB failure with in-memory fallback;
 - cache hash changes during download;
 - Search API timeout, `429` with `Retry-After`, and `503 busy`;
+- Bookmarks API unavailable at boot and on an explicit pull, an `all.json`
+  whose SHA-256 differs from the index, a malformed catalogue document, and a
+  failed catalogue check on the robot;
 - Robot session expiry;
 - unavailable or corrupt scoped browser-local history storage;
 - unavailable, partial, stale, or corrupt Telegram DeviceStorage/CloudStorage,

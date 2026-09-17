@@ -15,16 +15,18 @@ Use this index as the starting point for development and production operation.
 - [Dependencies](DEPENDENCIES.md) — input files, hashed locks, Dependabot, and the runtime dependency set.
 - [Troubleshooting](TROUBLESHOOTING.md) — startup, Telegram, API, readiness, and lockfile diagnosis.
 - [Architecture](ARCHITECTURE.md) — request flow, trust boundaries, concurrency, and privacy.
-- [Operations](OPERATIONS.md) — instance selection, start/stop/status, runtime, JSON logs, diagnostics, monitoring, and incident response.
+- [Browser data](BROWSER_DATA.md) — the four public origins, what the browser keeps, the global bookmark catalogue, and the contribution mirror.
+- [Operations](OPERATIONS.md) — instance selection, start/stop/status, runtime, JSON logs, diagnostics, monitoring, contributor moderation and catalogue publication, and incident response.
 - [Release gate](RELEASE_GATE.md) — the complete deployability checklist.
 
 The external URL roles are intentionally different throughout the project:
 
 ```text
-Catalogues and chapters: https://api.getbible.net
-Reference resolution:    https://query.getbible.net
-Full-text search:        https://search.getbible.net
-Telegram web links:      https://getbible.life
+Catalogues and chapters:  https://api.getbible.net
+Reference resolution:     https://query.getbible.net
+Full-text search:         https://search.getbible.net
+Bookmark topic catalogue: https://bookmarks.getbible.net
+Telegram web links:       https://getbible.life
 ```
 
 Security reports must follow [`SECURITY.md`](../SECURITY.md).

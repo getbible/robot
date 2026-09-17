@@ -121,15 +121,18 @@ chosen topic.
    review its verses, or use the plus-card after the list to add a topic. In
    topic detail, change any topic's color, inline-edit a custom name with
    confirm/cancel, or remove the topic after confirming removal of its linked
-   verses. Global names remain read-only and server-owned; removing one is a
+   verses. Global names remain read-only catalogue metadata; removing one is a
    user-local choice that **Add all** can restore.
 5. Open a bookmarked verse in Bible or remove it from the topic detail view.
 
-Above topic search, **Add all** and **Remove all** control the complete bundled
-global-topic catalog. The adjacent information disclosure explains that these
+Above topic search, **Add all** and **Remove all** control the complete
+global-topic catalogue, read from the public Bookmarks API and verified in the
+browser. The adjacent information disclosure explains that these
 are curated sets of verses matching each topic. The same add/remove choice
 remains available inside each topic, and personal topics and bookmarks are
-preserved when global topics are removed.
+preserved when global topics are removed. A personal bookmark that a loaded
+global topic also links is merged into the global row once a network-verified
+catalogue has covered it for a day; the status line says how many were merged.
 
 The browser writes each change to its scoped local copy immediately. On a
 supported Telegram client it asynchronously reconciles the newest timestamped

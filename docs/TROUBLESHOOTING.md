@@ -237,6 +237,81 @@ Run `setup.sh doctor <instance>`; the store checks name the fault. Every other
 part of the contribution path is exercised end to end by the real-server
 browser test (`miniapp/tests/browser/contributor-real-server.test.mjs`).
 
+## Global topics are unavailable in the Mini App
+
+The Bookmarks surface says that global topics are unavailable until online,
+or **Add all** fails while reading works.
+
+The global catalogue is read by the browser from
+`https://bookmarks.getbible.net/v1`, not from the robot. The reader's device
+needs that origin, and a proxy that rewrites the Mini App's
+`Content-Security-Policy` header must list it in `connect-src`. Check from
+any machine:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' https://bookmarks.getbible.net/v1/index.json
+```
+
+A `200` whose JSON carries `catalog_version` and `checksum` means the API is
+up. The browser keeps the last verified catalogue in IndexedDB and only an
+explicit **Add all** or per-topic load insists on the network, so a message
+that persists on one device means that WebView has no cached catalogue and no
+route to the origin. Nothing on the robot host is on this path; the robot's
+own check of the same origin is the next section.
+
+## Contributions were published but contributors were not told they are live
+
+**Status** in `sudo getbible-robot contributions <instance>` shows a pull
+request but no observed catalogue version, or one older than the merge, and
+the Mini App still shows the **P** marker.
+
+The robot marks contributions live only after reading them from the Bookmarks
+API. In order:
+
+1. The pull request must be merged on GitHub and the builder's publication
+   workflow must have run; `catalog_version` in
+   `https://bookmarks.getbible.net/v1/index.json` increases with every content
+   change.
+2. The robot reads that index every `BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS`
+   (six hours by default). Wait one interval, or restart the instance: the
+   first check runs shortly after start.
+3. The host must reach `GETBIBLE_BOOKMARKS_BASE_URL`. A failed check is a
+   `WARNING` in the instance log and is retried at the next interval; a
+   firewall or proxy that blocks `bookmarks.getbible.net` keeps every
+   contribution pending indefinitely.
+4. `CONTRIBUTION_STORE_FILE` must be set; the watcher does not run without a
+   contribution store.
+
+Once a check observes the new catalogue, **Status** shows its version and
+checksum, the events are stamped live, and each contributor receives one
+private notice through the same outbox as application decisions; if the
+notice itself does not arrive, see the pending-notification bullet under
+[Monitoring](OPERATIONS.md#monitoring).
+
+## Publish pushed the branch but opened no pull request
+
+**Publish** ends with a compare URL instead of a pull request URL, or reports
+that the pull request could not be created.
+
+The branch is already on GitHub; nothing is lost. Open the printed compare
+URL in a browser and create the pull request by hand, or fix the cause and
+publish again (a new branch is created; close the first). Causes:
+
+- `CONTRIBUTION_GITHUB_TOKEN` is empty. This is the documented no-token
+  behaviour, not an error.
+- The token lacks **Pull requests: read/write** on
+  `getbible/v1_bookmark_builder`, has expired, or is scoped to another
+  repository; GitHub answers `403` or `404`.
+- The publisher account cannot reach `https://api.github.com` although
+  `git push` succeeded through another route.
+
+A failure earlier in the run — a checkout that is not a clean clone of
+`getbible/v1_bookmark_builder`, an interpreter older than Python 3.12, a
+`validate` failure, or a change outside `data/topics.json` and
+`data/links/` — stops before any push; the message names it, the export is
+retained, and the acceptance in the ledger stands. Rerun **Publish** after
+correcting the checkout or `CONTRIBUTION_BUILDER_PYTHON`.
+
 ## Service fails with `status=200/CHDIR`
 
 This status means systemd could not enter the configured application directory
@@ -407,11 +482,13 @@ Expected boundaries:
 GETBIBLE_API_BASE_URL=https://api.getbible.net
 GETBIBLE_QUERY_BASE_URL=https://query.getbible.net
 GETBIBLE_SEARCH_BASE_URL=https://search.getbible.net
+GETBIBLE_BOOKMARKS_BASE_URL=https://bookmarks.getbible.net
 GETBIBLE_WEB_BASE_URL=https://getbible.life
 ```
 
 Catalogues come from the Main API, references from the Query API, search
-results from the Search API; Telegram links use the website host. Run the renderer, service, catalog, and command tests before deploying any fix.
+results from the Search API, the shared bookmark topics from the Bookmarks
+API; Telegram links use the website host. Run the renderer, service, catalog, and command tests before deploying any fix.
 
 ## Search answers `429` or `503`
 

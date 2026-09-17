@@ -145,8 +145,8 @@ TTL-bounded Telegram interaction session and vanish with it.
 
 ## The Mini App
 
-`miniapp/lib/getbible-transport.js` holds three fixed origins — Main, Query,
-and Search — each validated against its expected host. A search is a `GET`
+`miniapp/lib/getbible-transport.js` holds four fixed origins — Main, Query,
+Search, and Bookmarks — each validated against its expected host. A search is a `GET`
 with `Accept: application/json`, credentials omitted, `redirect: "error"`,
 `referrerPolicy: "no-referrer"`, the same stall and total deadlines as a
 chapter download, and the same bounded retry: `429`, `503`, and other `5xx`
@@ -166,8 +166,8 @@ to wait. No session limit is involved; the robot never sees the request.
 
 The Content Security Policy — the `<meta>` element in `miniapp/index.html`
 and the header set by the Tornado static handler — allows exactly
-`'self' https://api.getbible.net https://query.getbible.net https://search.getbible.net`
-for connections. A proxy that rewrites the header must keep all three.
+`'self' https://api.getbible.net https://query.getbible.net https://search.getbible.net https://bookmarks.getbible.net`
+for connections. A proxy that rewrites the header must keep all four.
 
 ## Telegram-native `/search`
 
@@ -241,5 +241,5 @@ The robot no longer publishes an engine version of its own.
 - [Configuration](CONFIGURATION.md) — every search bound and its range.
 - [Interactive workflows](INTERACTIONS.md) — the filter dashboard and result flow.
 - [Architecture](ARCHITECTURE.md) — where search sits in the two data planes.
-- [Browser data](BROWSER_DATA.md) — the three public origins and what the browser keeps.
+- [Browser data](BROWSER_DATA.md) — the four public origins and what the browser keeps.
 - [Mini App deployment](MINI_APP.md) — the CSP allowlist and its two enforcement layers.

@@ -195,6 +195,13 @@ class ContainerRuntimeTestCase(unittest.TestCase):
                 self.assertIn(
                     "GETBIBLE_SEARCH_BASE_URL:-https://search.getbible.net", single
                 )
+                self.assertIn(
+                    "GETBIBLE_BOOKMARKS_BASE_URL:-https://bookmarks.getbible.net",
+                    single,
+                )
+                self.assertIn(
+                    "BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS:-21600", single
+                )
                 for removed in (
                     "PREWARM_DEFAULT_TRANSLATION",
                     "SEARCH_INDEX_BUILD_SECONDS",
@@ -214,8 +221,6 @@ class ContainerRuntimeTestCase(unittest.TestCase):
         self.assertIn('ROBOT_MODE: "single"', single_compose)
         self.assertNotIn("build:", single_compose)
         self.assertIn("scripts/contribution_review.py", dockerfile)
-        self.assertIn("data/global-bookmarks/topics.json", dockerfile)
-        self.assertIn("data/global-bookmarks/tag-verse.csv", dockerfile)
         self.assertIn("environment: TELEGRAM_API_TOKEN", secret_compose)
         self.assertTrue(container_setup.stat().st_mode & stat.S_IXUSR)
 
