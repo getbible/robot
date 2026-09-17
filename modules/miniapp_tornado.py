@@ -141,7 +141,8 @@ def _apply_browser_hardening_headers(handler: RequestHandler) -> None:
         "Content-Security-Policy",
         "default-src 'none'; script-src 'self' https://telegram.org; "
         "style-src 'self'; img-src 'self' data:; connect-src 'self' "
-        "https://api.getbible.net https://query.getbible.net; "
+        "https://api.getbible.net https://query.getbible.net "
+        "https://search.getbible.net; "
         "font-src 'self'; base-uri 'none'; form-action 'self'; "
         "object-src 'none'; frame-ancestors https://web.telegram.org "
         "https://*.telegram.org; upgrade-insecure-requests",
@@ -418,7 +419,6 @@ class MiniAppServer:
             max_sessions=settings.mini_app_session_limit,
             ttl_seconds=settings.mini_app_session_ttl_seconds,
             max_sessions_per_user=settings.mini_app_sessions_per_user,
-            max_searches_per_session=settings.mini_app_max_searches_per_session,
             max_available_selections=settings.mini_app_max_available_selections,
             max_basket_selections=settings.mini_app_max_selections,
         )

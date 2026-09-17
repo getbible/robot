@@ -19,12 +19,11 @@ from modules.catalog import (
 )
 from modules.contributions import ContributionStore
 from modules.errors import RobotRateLimited, ScriptureUnavailable
-from modules.interactions import SearchOptions, SearchResult
 from modules.miniapp_api import MiniAppApi, MiniAppHttpRequest
 from modules.miniapp_auth import TelegramInitDataValidator
 from modules.miniapp_sessions import MiniAppLaunchStore, MiniAppSessionStore
 from modules.preferences import ReaderLocation, SearchDefaults, UserPreferences
-from modules.service import ScriptureQuery, SearchPage
+from modules.service import ScriptureQuery
 
 TOKEN = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
 PUBLIC_URL = "https://robot.example/getbible"
@@ -180,10 +179,8 @@ class _Service:
             max_total_verses=50,
             max_verses_per_reference=50,
             mini_app_max_selections=50,
-            search_timeout=150.0,
         )
         self.selected: list[ScriptureQuery] = []
-        self.search_requests: list[tuple[str, SearchOptions]] = []
         self.chapter_requests: list[tuple[str, int, int]] = []
         self.long_chapter = False
         self.fail_translations_once = False
@@ -283,25 +280,6 @@ class _Service:
             reference=f"{book.name} {chapter.number}",
             verses=verses,
             sha="c" * 40,
-        )
-
-    async def search(self, query: str, options: SearchOptions) -> SearchPage:
-        self.search_requests.append((query, options))
-        return SearchPage(
-            query=query,
-            translation=options.translation,
-            total=1,
-            items=(
-                SearchResult(
-                    reference="John 3:16",
-                    book_number=43,
-                    book_name="John",
-                    chapter=3,
-                    verse=16,
-                    text="For God so loved the world.",
-                    terms=("loved",),
-                ),
-            ),
         )
 
     async def translation_exists(self, translation: str) -> bool:
@@ -423,13 +401,39 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         response = await self.api.handle(
             self.request(
                 "POST",
-                "/getbible/api/v1/search",
+                "/getbible/api/v1/scripture",
                 token=token,
-                body={"query": "grace"},
+                body={"translation": "kjv", "book": 43, "chapter": 3, "verse": 16},
             )
         )
         self.assertEqual(response.status, 200)
         self.assertEqual(self.limiter.details[-1][2:], (1.0, "192.0.2.1"))
+
+    async def test_retired_search_routes_are_unknown_before_authentication(
+        self,
+    ) -> None:
+        # The browser searches https://search.getbible.net directly, so the
+        # robot's former search endpoints are ordinary unknown routes: refused
+        # before any session or rate-limit work, exactly like any other typo.
+        token = await self.exchange()
+        calls_before = len(self.limiter.calls)
+        search_id = "a" * 24
+        for method, path, body in (
+            ("POST", "/getbible/api/v1/search", {"query": "loved"}),
+            ("GET", f"/getbible/api/v1/search/{search_id}", None),
+            ("GET", f"/getbible/api/v1/search/{search_id}?page=1", None),
+            ("OPTIONS", "/getbible/api/v1/search", None),
+        ):
+            with self.subTest(method=method, path=path):
+                response = await self.api.handle(
+                    self.request(method, path, token=token, body=body)
+                )
+                self.assertEqual(response.status, 404)
+                self.assertEqual(
+                    json.loads(response.body),
+                    {"error": "not_found", "message": "Resource not found."},
+                )
+        self.assertEqual(len(self.limiter.calls), calls_before)
 
     async def test_unknown_routes_and_wrong_methods_are_rejected_before_auth(self) -> None:
         invalid = await self.api.handle(
@@ -625,6 +629,72 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             (ScriptureQuery("John 3:1;John 3:2;John 3:16", "kjv"),),
         )
 
+    async def test_basket_order_is_replaced_atomically_from_the_page(self) -> None:
+        token = await self.exchange()
+        scripture = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/scripture",
+                token=token,
+                body={"translation": "kjv", "book": 43, "chapter": 3},
+            )
+        )
+        ids = [item["selection_id"] for item in json.loads(scripture.body)["items"]]
+        self.assertEqual(len(ids), 3)
+        for selection_id in ids[:2]:
+            added = await self.api.handle(
+                self.request(
+                    "POST",
+                    "/getbible/api/v1/basket/items",
+                    token=token,
+                    body={"selection_id": selection_id},
+                )
+            )
+            self.assertEqual(added.status, 200)
+
+        reordered = await self.api.handle(
+            self.request(
+                "PATCH",
+                "/getbible/api/v1/basket/order",
+                token=token,
+                body={"selection_ids": [ids[1], ids[0]]},
+            )
+        )
+        self.assertEqual(reordered.status, 200)
+        payload = json.loads(reordered.body)
+        self.assertEqual(
+            [item["selection_id"] for item in payload["items"]],
+            [ids[1], ids[0]],
+        )
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(payload["maximum"], 50)
+
+        for body in (
+            {"selection_ids": "x"},
+            {"selection_ids": [1]},
+            {"order": []},
+            {"selection_ids": [ids[2], ids[0]]},
+        ):
+            with self.subTest(body=body):
+                rejected = await self.api.handle(
+                    self.request(
+                        "PATCH",
+                        "/getbible/api/v1/basket/order",
+                        token=token,
+                        body=body,
+                    )
+                )
+                self.assertEqual(rejected.status, 400)
+                self.assertEqual(json.loads(rejected.body)["error"], "invalid_request")
+
+        basket = await self.api.handle(
+            self.request("GET", "/getbible/api/v1/basket", token=token)
+        )
+        self.assertEqual(
+            [item["selection_id"] for item in json.loads(basket.body)["items"]],
+            [ids[1], ids[0]],
+        )
+
     async def test_books_include_canonical_testament_metadata(self) -> None:
         token = await self.exchange()
 
@@ -643,10 +713,9 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             [{"number": 43, "name": "John", "testament": "new"}],
         )
 
-    async def test_miniapp_edge_bounds_catalogs_and_search_payloads(self) -> None:
+    async def test_miniapp_edge_bounds_catalogs_and_selection_payloads(self) -> None:
         token = await self.exchange()
         original_chapters = self.service.chapters
-        original_search = self.service.search
 
         async def oversized_chapters(
             translation: str,
@@ -663,79 +732,48 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(oversized.status, 503)
-
-        async def bounded_search(
-            query: str,
-            options: SearchOptions,
-        ) -> SearchPage:
-            return SearchPage(
-                query=query,
-                translation=options.translation,
-                total=1,
-                items=(
-                    SearchResult(
-                        reference="r" * 300,
-                        book_number=43,
-                        book_name="John",
-                        chapter=3,
-                        verse=501,
-                        text="A bounded result.",
-                        terms=tuple(
-                            f"term-{index}-{'x' * 70}"
-                            for index in range(64)
-                        ),
-                    ),
-                ),
+        oversized_read = await self.api.handle(
+            self.request(
+                "POST",
+                "/getbible/api/v1/scripture",
+                token=token,
+                body={"translation": "kjv", "book": 43, "chapter": 3},
             )
-
+        )
+        self.assertEqual(oversized_read.status, 503)
         self.service.chapters = original_chapters  # type: ignore[method-assign]
-        self.service.search = bounded_search  # type: ignore[method-assign]
-        bounded = await self.api.handle(
+
+        # Search highlights are computed in the browser from the public Search
+        # API's own match terms, so a verse the robot serves carries exactly
+        # its authoritative coordinates and text: nothing else rides along.
+        scripture = await self.api.handle(
             self.request(
                 "POST",
-                "/getbible/api/v1/search",
+                "/getbible/api/v1/scripture",
                 token=token,
-                body={"query": "bounded"},
+                body={"translation": "kjv", "book": 43, "chapter": 3},
             )
         )
-        self.assertEqual(bounded.status, 200)
-        item = json.loads(bounded.body)["items"][0]
-        self.assertEqual(item["verse"], 501)
-        self.assertLessEqual(len(item["reference"]), 180)
-        self.assertLessEqual(len(item["terms"]), 20)
-        self.assertTrue(all(len(term) <= 80 for term in item["terms"]))
-
-        async def invalid_book_search(
-            query: str,
-            options: SearchOptions,
-        ) -> SearchPage:
-            return SearchPage(
-                query=query,
-                translation=options.translation,
-                total=1,
-                items=(
-                    SearchResult(
-                        reference="Book 1:1",
-                        book_number=201,
-                        book_name="Book",
-                        chapter=1,
-                        verse=1,
-                        text="Invalid edge book.",
-                    ),
-                ),
-            )
-
-        self.service.search = invalid_book_search  # type: ignore[method-assign]
-        invalid = await self.api.handle(
-            self.request(
-                "POST",
-                "/getbible/api/v1/search",
-                token=token,
-                body={"query": "invalid"},
-            )
+        self.assertEqual(scripture.status, 200)
+        payload = json.loads(scripture.body)
+        self.assertEqual(payload["target_verse"], 1)
+        item = payload["items"][-1]
+        self.assertEqual(
+            set(item),
+            {
+                "selection_id",
+                "reference",
+                "translation",
+                "book_number",
+                "book_name",
+                "chapter",
+                "verse",
+                "text",
+            },
         )
-        self.assertEqual(invalid.status, 503)
-        self.service.search = original_search  # type: ignore[method-assign]
+        self.assertEqual(item["reference"], "John 3:16")
+        self.assertEqual(item["text"], "For God so loved the world.")
+        self.assertEqual(self.service.chapter_requests, [("kjv", 43, 3)])
 
     async def test_new_abuse_block_sends_one_private_warning(self) -> None:
         token = await self.exchange()
@@ -1700,13 +1738,10 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             payload["session_token"],
         )
 
-    async def test_session_declares_the_search_budget_the_page_must_wait_out(
-        self,
-    ) -> None:
-        # The browser cannot infer how long the robot will work on a search, and
-        # a page that gives up first reports a timeout for work still in flight.
-        # The budget is stated once, at bootstrap, and again on resume so a
-        # reopened WebView does not fall back to a guess.
+    async def test_session_payload_declares_no_search_limits(self) -> None:
+        # Search runs in the browser against the public Search API, so the
+        # robot has no search budget to declare: a page waiting on a
+        # server-stated timeout would be waiting for work the robot never does.
         created = await self.api.handle(
             self.request(
                 "POST",
@@ -1716,9 +1751,19 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         payload = json.loads(created.body)
         self.assertEqual(created.status, 201)
+        self.assertNotIn("limits", payload)
         self.assertEqual(
-            payload["limits"],
-            {"search_timeout_seconds": self.service.settings.search_timeout},
+            set(payload),
+            {
+                "session_token",
+                "expires_in",
+                "user",
+                "contributions",
+                "preferences",
+                "entrypoint",
+                "translations",
+                "basket",
+            },
         )
 
         resumed = await self.api.handle(
@@ -1728,10 +1773,8 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 token=payload["session_token"],
             )
         )
-        self.assertEqual(
-            json.loads(resumed.body)["limits"],
-            payload["limits"],
-        )
+        self.assertEqual(resumed.status, 200)
+        self.assertEqual(set(json.loads(resumed.body)), set(payload))
 
     async def test_reopened_webview_recovers_the_active_owner_bound_session(
         self,
@@ -2224,7 +2267,11 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(foreign_origin.status, 403)
 
-    async def test_search_selection_posts_only_server_resolved_scripture(self) -> None:
+    async def test_search_result_post_resolves_direct_selection_ids(self) -> None:
+        # The browser searches the public Search API itself and names each
+        # result by its canonical coordinates. The robot never trusts the text
+        # the page holds: every identity is resolved through the catalogue and
+        # posted as the Scripture the launch's target chat asked for.
         launch = self.launches.create_launch(
             user_id=42,
             target_chat_id=-100,
@@ -2232,70 +2279,86 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             initial_query="loved",
         )
         token = await self.exchange(launch_token=launch.token)
-        search_response = await self.api.handle(
-            self.request(
-                "POST",
-                "/getbible/api/v1/search",
-                token=token,
-                body={"query": "loved"},
-            )
-        )
-        search_payload = json.loads(search_response.body)
-
-        selection_id = search_payload["items"][0]["selection_id"]
-        basket_response = await self.api.handle(
-            self.request(
-                "POST",
-                "/getbible/api/v1/basket/items",
-                token=token,
-                body={"selection_id": selection_id},
-            )
-        )
-        basket_payload = json.loads(basket_response.body)
-        self.assertEqual(basket_response.status, 200)
-        self.assertEqual(
-            basket_payload["items"][0]["text"],
-            "For God so loved the world.",
-        )
-
+        body = {
+            "idempotency_key": "abcdef0123456789",
+            "selection_ids": ["gbd_kjv_043_0003_0016"],
+        }
         post_response = await self.api.handle(
-            self.request(
-                "POST",
-                "/getbible/api/v1/post",
-                token=token,
-                body={"idempotency_key": "abcdef0123456789"},
-            )
+            self.request("POST", "/getbible/api/v1/post", token=token, body=body)
         )
         self.assertEqual(post_response.status, 200)
+        self.assertEqual(
+            json.loads(post_response.body),
+            {"status": "posted", "message_ids": [101], "idempotent_replay": False},
+        )
+        self.assertEqual(self.limiter.details[-1][2], 1.0)
         self.assertEqual(len(self.posted), 1)
         posted_launch, posted_queries = self.posted[0]
         self.assertEqual(posted_launch.target_chat_id, -100)
         self.assertEqual(posted_queries, (ScriptureQuery("John 3:16", "kjv"),))
 
         replay = await self.api.handle(
-            self.request(
-                "POST",
-                "/getbible/api/v1/post",
-                token=token,
-                body={"idempotency_key": "abcdef0123456789"},
-            )
+            self.request("POST", "/getbible/api/v1/post", token=token, body=body)
         )
         self.assertEqual(replay.status, 200)
         self.assertTrue(json.loads(replay.body)["idempotent_replay"])
+        self.assertEqual(len(self.posted), 1)
+
+    async def test_direct_selection_ids_are_validated_against_the_catalogue(
+        self,
+    ) -> None:
+        token = await self.exchange()
+        rejected: tuple[tuple[object, str], ...] = (
+            ([], "selection_ids must be a non-empty array."),
+            ("gbd_kjv_043_0003_0016", "selection_ids must be a non-empty array."),
+            ([42], "A selection identity is invalid."),
+            (["John 3:16"], "A selection identity is invalid."),
+            (["gbd_KJV_043_0003_0016"], "A selection identity is invalid."),
+            (
+                ["gbd_kjv_043_0003_0016", "gbd_kjv_043_0003_0016"],
+                "Duplicate Scripture selections are not allowed.",
+            ),
+            (["gbd_kjv_044_0001_0001"], "A selected book is unavailable."),
+            (["gbd_kjv_043_0004_0001"], "A selected verse is unavailable."),
+            (["gbd_kjv_043_0003_0017"], "A selected verse is unavailable."),
+            (
+                [f"gbd_kjv_043_0003_{verse:04d}" for verse in range(1, 52)],
+                "The Scripture basket is full.",
+            ),
+        )
+        for selection_ids, message in rejected:
+            with self.subTest(selection_ids=selection_ids):
+                response = await self.api.handle(
+                    self.request(
+                        "POST",
+                        "/getbible/api/v1/post",
+                        token=token,
+                        body={
+                            "idempotency_key": "abcdef0123456789",
+                            "selection_ids": selection_ids,
+                        },
+                    )
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(
+                    json.loads(response.body),
+                    {"error": "invalid_request", "message": message},
+                )
+        self.assertEqual(self.posted, [])
 
     async def test_failed_post_attempt_cannot_be_retried_under_a_new_key(
         self,
     ) -> None:
         token = await self.exchange()
-        search = await self.api.handle(
+        scripture = await self.api.handle(
             self.request(
                 "POST",
-                "/getbible/api/v1/search",
+                "/getbible/api/v1/scripture",
                 token=token,
-                body={"query": "loved"},
+                body={"translation": "kjv", "book": 43, "chapter": 3, "verse": 16},
             )
         )
-        selection_id = json.loads(search.body)["items"][0]["selection_id"]
+        selection_id = json.loads(scripture.body)["items"][-1]["selection_id"]
         await self.api.handle(
             self.request(
                 "POST",
@@ -2609,41 +2672,6 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 401)
         self.assertEqual(json.loads(response.body)["error"], "unauthorized")
 
-    async def test_delayed_search_returns_unauthorized_after_session_eviction(
-        self,
-    ) -> None:
-        token = await self.exchange()
-        started = asyncio.Event()
-        release = asyncio.Event()
-        original_search = self.service.search
-
-        async def controlled_search(
-            query: str,
-            options: SearchOptions,
-        ) -> SearchPage:
-            started.set()
-            await release.wait()
-            return await original_search(query, options)
-
-        self.service.search = controlled_search  # type: ignore[method-assign]
-        searching = asyncio.create_task(
-            self.api.handle(
-                self.request(
-                    "POST",
-                    "/getbible/api/v1/search",
-                    token=token,
-                    body={"query": "loved"},
-                )
-            )
-        )
-        await started.wait()
-        self.sessions.revoke(token)
-        release.set()
-        response = await searching
-
-        self.assertEqual(response.status, 401)
-        self.assertEqual(json.loads(response.body)["error"], "unauthorized")
-
     async def test_full_psalm_119_uses_one_main_api_chapter_read(self) -> None:
         self.service.long_chapter = True
         token = await self.exchange()
@@ -2695,110 +2723,19 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
-        search = await self.api.handle(
+        books = await self.api.handle(
             self.request(
-                "POST",
-                "/getbible/api/v1/search",
+                "GET",
+                "/getbible/api/v1/books?translation=kjv",
                 token=token,
-                body={
-                    "query": "loved",
-                    "options": {
-                        "translation": "kjv",
-                        "words": "all",
-                        "match": "whole_word",
-                        "scope": "bible",
-                        "case_sensitive": False,
-                        "diacritics": "exact",
-                        "sort": "canonical",
-                        "books": [],
-                        "exclude": [],
-                        "proximity": None,
-                    },
-                },
             )
         )
 
         self.assertEqual(scripture.status, 200)
-        self.assertEqual(search.status, 200)
+        self.assertEqual(books.status, 200)
+        self.assertEqual(json.loads(books.body)["translation"], "kjv")
         self.assertEqual(self.preferences.translation_for(42), "aov")
         self.assertNotIn(42, self.preferences.reader_locations)
-
-    async def test_search_speaks_only_librarians_diacritics_vocabulary(self) -> None:
-        """The API forwards the engine's own values rather than mapping onto them."""
-        token = await self.exchange()
-        for value in ("fold", "exact"):
-            with self.subTest(value=value):
-                response = await self.api.handle(
-                    self.request(
-                        "POST",
-                        "/getbible/api/v1/search",
-                        token=token,
-                        body={
-                            "query": "loved",
-                            "options": {"diacritics": value},
-                        },
-                    )
-                )
-
-                self.assertEqual(response.status, 200)
-                self.assertEqual(
-                    self.service.search_requests[-1][1].diacritics,
-                    value,
-                )
-
-        for rejected in ("insensitive", "sensitive", "folded"):
-            with self.subTest(rejected=rejected):
-                response = await self.api.handle(
-                    self.request(
-                        "POST",
-                        "/getbible/api/v1/search",
-                        token=token,
-                        body={
-                            "query": "loved",
-                            "options": {"diacritics": rejected},
-                        },
-                    )
-                )
-                self.assertEqual(response.status, 400)
-
-    async def test_search_forwards_the_requested_match_mode_unchanged(self) -> None:
-        """The API must not second-guess the writing system on Librarian's behalf."""
-        token = await self.exchange()
-        queries = (
-            "神",  # Han
-            "イエス",  # Katakana
-            "예수",  # Hangul
-            "พระ",  # Thai
-            "ພຣະ",  # Lao
-            "ព្រះ",  # Khmer
-            "ယေရှု",  # Myanmar
-            "المسيح",  # Arabic
-            "משיח",  # Hebrew
-            "यीशु",  # Devanagari
-            "Jesus",  # Latin
-            "Jesus 耶稣",  # mixed Latin and Han
-        )
-
-        for requested in ("whole_word", "substring"):
-            for query in queries:
-                with self.subTest(query=query, match=requested):
-                    response = await self.api.handle(
-                        self.request(
-                            "POST",
-                            "/getbible/api/v1/search",
-                            token=token,
-                            body={
-                                "query": query,
-                                "options": {"match": requested},
-                            },
-                        )
-                    )
-
-                    self.assertEqual(response.status, 200)
-                    self.assertEqual(
-                        self.service.search_requests[-1][1].match,
-                        requested,
-                    )
 
     async def test_preferences_accept_only_non_content_allow_list(self) -> None:
         token = await self.exchange()
