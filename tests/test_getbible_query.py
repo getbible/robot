@@ -1,3 +1,4 @@
+import io
 import json
 import math
 import unittest
@@ -13,6 +14,7 @@ from modules.getbible_query import (
     MissingVerseError,
     QueryHTTPError,
     QueryInputError,
+    QueryLimitError,
     QueryResponseError,
     QueryTransportError,
     VerseReference,
@@ -413,6 +415,396 @@ class GetBibleQueryClientTestCase(unittest.TestCase):
             opener=ScriptedOpener(response)
         ).fetch_verses([(1, 1, 1)])
         self.assertEqual(result[VerseReference(1, 1, 1)].text, "Beginning")
+
+
+class _FailingBody:
+    """A problem body whose read fails after the headers arrived."""
+
+    def read(self, amount: int = -1) -> bytes:
+        raise OSError("connection reset")
+
+    def close(self) -> None:
+        return None
+
+
+def problem(
+    status: int,
+    document: object,
+    *,
+    headers: Mapping[str, str] | None = None,
+    body: bytes | None = None,
+    fp: object | None = None,
+) -> HTTPError:
+    if fp is None:
+        fp = io.BytesIO(encoded_document(document) if body is None else body)
+    return HTTPError(
+        "https://query.getbible.net/v2/kjv/John%203:16",
+        status,
+        "Problem",
+        dict(headers or {"Content-Type": "application/problem+json"}),
+        fp,  # type: ignore[arg-type]
+    )
+
+
+class FetchScriptureTestCase(unittest.TestCase):
+    """The free-form reference route the robot's ``/bible`` command relies on."""
+
+    def test_returns_the_chapter_grouped_document_with_normalised_names(self) -> None:
+        john = chapter_payload(43, "John", 3, [(16, "  For God so loved\n the world.  ")])
+        del john["name"]
+        del john["verses"][0]["name"]
+        first_john = chapter_payload(62, "1 John", 3, [(16, "Hereby perceive we the love.")])
+        first_john["verses"][0]["chapter"] = 3
+        opener = ScriptedOpener(FakeResponse({"kjv_43_3": john, "kjv_62_3": first_john}))
+        client = GetBibleQueryClient(opener=opener, timeout_seconds=2.5)
+
+        document = client.fetch_scripture("John 3:16;1 John 3:16", max_verses=100)
+
+        self.assertEqual(list(document), ["kjv_43_3", "kjv_62_3"])
+        self.assertEqual(
+            document["kjv_43_3"],
+            {
+                "translation": "King James Version",
+                "abbreviation": "kjv",
+                "book_nr": 43,
+                "book_name": "John",
+                "chapter": 3,
+                "name": "John 3",
+                "verses": [
+                    {
+                        "chapter": 3,
+                        "verse": 16,
+                        "name": "John 3:16",
+                        "text": "For God so loved the world.",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(document["kjv_62_3"]["name"], "1 John 3")
+        self.assertEqual(document["kjv_62_3"]["verses"][0]["name"], "1 John 3:16")
+        # Fields the renderer never reads are dropped rather than trusted.
+        self.assertNotIn("ref", document["kjv_43_3"])
+        self.assertNotIn("lang", document["kjv_62_3"])
+        self.assertEqual(opener.timeouts, [2.5])
+        request = opener.requests[0]
+        self.assertEqual(
+            request.full_url,
+            "https://query.getbible.net/v2/kjv/John%203:16;1%20John%203:16",
+        )
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertEqual(request.get_header("User-agent"), "getbible-robot/2.2")
+
+    def test_reference_url_keeps_query_punctuation_and_encodes_the_rest(self) -> None:
+        opener = ScriptedOpener(
+            FakeResponse({"kjv_1_1": chapter_payload(1, "Genesis", 1, [(1, "Beginning")])}),
+        )
+        client = GetBibleQueryClient(opener=opener)
+
+        client.fetch_scripture("  Genesis   1:1-3,5;  Génesis 1:1–2  ")
+
+        self.assertEqual(
+            opener.requests[0].full_url,
+            "https://query.getbible.net/v2/kjv/Genesis%201:1-3,5;%20G%C3%A9nesis%201:1%E2%80%932",
+        )
+        # A slash is not reference syntax: it is refused before it could ever
+        # be encoded into, or escape from, the reference path segment.
+        with self.assertRaises(QueryInputError):
+            client.fetch_scripture("Gen 1:1 / 2")
+        with self.assertRaises(QueryInputError):
+            client.fetch_scripture("Gen 1:1/../../aov/Gen 1:1")
+        self.assertEqual(len(opener.requests), 1)
+
+    def test_translation_override_and_base_url_are_honoured(self) -> None:
+        opener = ScriptedOpener(
+            FakeResponse(
+                {
+                    "aov_43_3": chapter_payload(
+                        43,
+                        "Johannes",
+                        3,
+                        [(16, "Want so lief het God die wêreld gehad.")],
+                        abbreviation="AOV",
+                        translation="Afrikaanse Ou Vertaling",
+                    )
+                }
+            )
+        )
+        client = GetBibleQueryClient(
+            base_url="https://query.example.test/custom/",
+            opener=opener,
+        )
+
+        document = client.fetch_scripture("Johannes 3:16", translation=" AOV ")
+
+        self.assertEqual(
+            opener.requests[0].full_url,
+            "https://query.example.test/custom/aov/Johannes%203:16",
+        )
+        self.assertEqual(document["aov_43_3"]["abbreviation"], "aov")
+        self.assertEqual(document["aov_43_3"]["translation"], "Afrikaanse Ou Vertaling")
+
+        for translation in ("../kjv", "", "k" * 65, "kjv/x", 5):
+            with self.subTest(translation=translation), self.assertRaises(QueryInputError):
+                client.fetch_scripture("John 3:16", translation=translation)  # type: ignore[arg-type]
+        self.assertEqual(len(opener.requests), 1)
+
+    def test_reference_syntax_is_refused_before_any_request(self) -> None:
+        opener = ScriptedOpener()
+        client = GetBibleQueryClient(opener=opener, max_url_length=128)
+        invalid: list[object] = [
+            "",
+            "   ",
+            "John <3",
+            "John 3:16!",
+            "!!!",
+            "---",
+            "\x00John 3:16",
+            "John\x1b[31m 3:16",
+            "x" * 513,
+            "Genesis 1:1-3;" * 10,
+            5,
+            None,
+        ]
+        for reference in invalid:
+            with self.subTest(reference=reference), self.assertRaises(QueryInputError) as raised:
+                client.fetch_scripture(reference)  # type: ignore[arg-type]
+            self.assertFalse(raised.exception.retryable)
+        for max_verses in (0, -1, True, "5", 2.0):
+            with self.subTest(max_verses=max_verses), self.assertRaises(QueryInputError):
+                client.fetch_scripture("John 3:16", max_verses=max_verses)  # type: ignore[arg-type]
+        self.assertEqual(opener.requests, [])
+
+    def test_max_verses_bounds_the_whole_selection(self) -> None:
+        def document() -> dict[str, Any]:
+            return {
+                "kjv_43_3": chapter_payload(43, "John", 3, [(16, "Loved"), (17, "Sent")]),
+                "kjv_62_3": chapter_payload(62, "1 John", 3, [(16, "Perceive")]),
+            }
+
+        client = GetBibleQueryClient(opener=ScriptedOpener(FakeResponse(document())))
+        with self.assertRaises(QueryLimitError) as raised:
+            client.fetch_scripture("John 3:16-17;1 John 3:16", max_verses=2)
+        self.assertIsInstance(raised.exception, QueryInputError)
+        self.assertFalse(raised.exception.retryable)
+        self.assertIn("2-verse limit", str(raised.exception))
+
+        exact = GetBibleQueryClient(opener=ScriptedOpener(FakeResponse(document())))
+        self.assertEqual(
+            len(exact.fetch_scripture("John 3:16-17;1 John 3:16", max_verses=3)),
+            2,
+        )
+        unbounded = GetBibleQueryClient(opener=ScriptedOpener(FakeResponse(document())))
+        self.assertEqual(len(unbounded.fetch_scripture("John 3:16-17;1 John 3:16")), 2)
+
+    def test_rejects_documents_that_do_not_describe_the_request(self) -> None:
+        wrong_translation = chapter_payload(43, "John", 3, [(16, "Loved")], abbreviation="web")
+        duplicate = chapter_payload(43, "John", 3, [(16, "Loved"), (16, "Loved again")])
+        inconsistent_chapter = chapter_payload(43, "John", 3, [(16, "Loved")])
+        inconsistent_chapter["verses"][0]["chapter"] = 4
+        zero_verse = chapter_payload(43, "John", 3, [(0, "Nothing")])
+        huge_verse = chapter_payload(43, "John", 3, [(1000, "Nothing")])
+        empty_verses = chapter_payload(43, "John", 3, [])
+        verse_not_object = chapter_payload(43, "John", 3, [(16, "Loved")])
+        verse_not_object["verses"] = ["16"]
+        unsafe_text = chapter_payload(43, "John", 3, [(16, "Loved\x1b[31m")])
+        blank_text = chapter_payload(43, "John", 3, [(16, "   ")])
+        missing_text = chapter_payload(43, "John", 3, [(16, "Loved")])
+        del missing_text["verses"][0]["text"]
+        bad_book_number = chapter_payload(43, "John", 3, [(16, "Loved")])
+        bad_book_number["book_nr"] = "43"
+        bad_book_name = chapter_payload(43, "John", 3, [(16, "Loved")])
+        bad_book_name["book_name"] = ""
+        bad_verse_name = chapter_payload(43, "John", 3, [(16, "Loved")])
+        bad_verse_name["verses"][0]["name"] = "x" * 257
+        too_many_chapters = {
+            f"kjv_19_{chapter}": chapter_payload(19, "Psalms", chapter, [(1, "Praise")])
+            for chapter in range(1, 66)
+        }
+        invalid_cases: list[bytes] = [
+            b"not-json",
+            b"[NaN]",
+            encoded_document([]),
+            encoded_document({}),
+            encoded_document({"error": "Invalid reference"}),
+            encoded_document({"kjv_43_3": []}),
+            encoded_document({"kjv_43_3": wrong_translation}),
+            encoded_document({"kjv_43_3": duplicate}),
+            encoded_document({"kjv_43_3": inconsistent_chapter}),
+            encoded_document({"kjv_43_3": zero_verse}),
+            encoded_document({"kjv_43_3": huge_verse}),
+            encoded_document({"kjv_43_3": empty_verses}),
+            encoded_document({"kjv_43_3": verse_not_object}),
+            encoded_document({"kjv_43_3": unsafe_text}),
+            encoded_document({"kjv_43_3": blank_text}),
+            encoded_document({"kjv_43_3": missing_text}),
+            encoded_document({"kjv_43_3": bad_book_number}),
+            encoded_document({"kjv_43_3": bad_book_name}),
+            encoded_document({"kjv_43_3": bad_verse_name}),
+            encoded_document(too_many_chapters),
+        ]
+        for index, body in enumerate(invalid_cases):
+            with self.subTest(index=index):
+                client = GetBibleQueryClient(opener=ScriptedOpener(FakeResponse(body=body)))
+                with self.assertRaises(QueryResponseError) as raised:
+                    client.fetch_scripture("John 3:16")
+                self.assertFalse(raised.exception.retryable)
+
+        # A verse without its own chapter field is still the chapter's verse.
+        no_verse_chapter = chapter_payload(43, "John", 3, [(16, "Loved")])
+        del no_verse_chapter["verses"][0]["chapter"]
+        no_verse_chapter["name"] = 3
+        no_verse_chapter["verses"][0]["name"] = None
+        client = GetBibleQueryClient(
+            opener=ScriptedOpener(FakeResponse({"kjv_43_3": no_verse_chapter}))
+        )
+        document = client.fetch_scripture("John 3:16")
+        self.assertEqual(document["kjv_43_3"]["name"], "John 3")
+        self.assertEqual(document["kjv_43_3"]["verses"][0]["name"], "John 3:16")
+        self.assertEqual(document["kjv_43_3"]["verses"][0]["chapter"], 3)
+
+    def test_problem_documents_populate_the_http_error(self) -> None:
+        cases: list[tuple[int, dict[str, object], dict[str, object]]] = [
+            (
+                404,
+                {"code": "invalid_reference", "detail": "  Unknown book\n name. "},
+                {
+                    "code": "invalid_reference",
+                    "detail": "Unknown book name.",
+                    "invalid_reference": True,
+                    "translation_not_found": False,
+                    "request_limit": False,
+                    "retryable": False,
+                },
+            ),
+            (
+                404,
+                {"code": "translation_not_found"},
+                {
+                    "code": "translation_not_found",
+                    "invalid_reference": False,
+                    "translation_not_found": True,
+                    "request_limit": False,
+                    "retryable": False,
+                },
+            ),
+            (
+                404,
+                {"code": "unknown_version"},
+                {
+                    "invalid_reference": False,
+                    "translation_not_found": False,
+                    "request_limit": False,
+                    "retryable": False,
+                },
+            ),
+            (
+                404,
+                {"code": "not_found"},
+                {"invalid_reference": True, "request_limit": False},
+            ),
+            (
+                400,
+                {"code": "request_limit", "detail": "Too many verses."},
+                {
+                    "code": "request_limit",
+                    "detail": "Too many verses.",
+                    "invalid_reference": False,
+                    "request_limit": True,
+                    "retryable": False,
+                },
+            ),
+            (
+                400,
+                {"code": "parameters_not_accepted"},
+                {"invalid_reference": True, "request_limit": False},
+            ),
+            (
+                429,
+                {"code": "rate_limited", "retry_after": 9},
+                {"retry_after": 9, "retryable": True, "invalid_reference": False},
+            ),
+            (
+                503,
+                {"code": "repository_unavailable"},
+                {"retry_after": None, "retryable": True, "invalid_reference": False},
+            ),
+        ]
+        for status, document, expected in cases:
+            with self.subTest(status=status, code=document.get("code")):
+                client = GetBibleQueryClient(opener=ScriptedOpener(problem(status, document)))
+                with self.assertRaises(QueryHTTPError) as raised:
+                    client.fetch_scripture("John 3:16")
+                error = raised.exception
+                self.assertEqual(error.status_code, status)
+                for attribute, value in expected.items():
+                    self.assertEqual(getattr(error, attribute), value, attribute)
+                self.assertIn(f"HTTP {status} ({document['code']})", str(error))
+                self.assertIn("defer", str(error))
+
+    def test_retry_after_header_takes_precedence_and_is_capped(self) -> None:
+        cases: list[tuple[Mapping[str, str] | None, object, int | None]] = [
+            ({"retry-after": "7"}, 30, 7),
+            ({"Retry-After": "99999"}, None, 3600),
+            ({"Retry-After": "later"}, 12, 12),
+            ({}, 99999, 3600),
+            ({}, -1, None),
+            ({}, True, None),
+            (None, 4, 4),
+        ]
+        for headers, body_retry, expected in cases:
+            with self.subTest(headers=headers, body_retry=body_retry):
+                document: dict[str, object] = {"code": "rate_limited"}
+                if body_retry is not None:
+                    document["retry_after"] = body_retry
+                error = problem(429, document, headers=headers)
+                if headers is None:
+                    error.hdrs = None  # type: ignore[assignment]
+                client = GetBibleQueryClient(opener=ScriptedOpener(error))
+                with self.assertRaises(QueryHTTPError) as raised:
+                    client.fetch_scripture("John 3:16")
+                self.assertEqual(raised.exception.retry_after, expected)
+
+    def test_problem_document_faults_are_ignored(self) -> None:
+        cases: list[HTTPError] = [
+            problem(503, ["not", "an", "object"]),
+            problem(503, None, body=b"{"),
+            problem(503, None, body=b"\xff\xfe"),
+            problem(503, None, body=b"{" + b" " * (16 * 1024) + b"}"),
+            problem(503, None, fp=_FailingBody()),
+            problem(503, {"code": "busy\x1b[31m", "detail": "x\x00y"}),
+            problem(503, {"code": "", "detail": "d" * 513}),
+            problem(503, {"code": 503, "detail": ["busy"]}),
+        ]
+        for index, error in enumerate(cases):
+            with self.subTest(index=index):
+                client = GetBibleQueryClient(opener=ScriptedOpener(error))
+                with self.assertRaises(QueryHTTPError) as raised:
+                    client.fetch_scripture("John 3:16")
+                self.assertEqual(raised.exception.status_code, 503)
+                self.assertEqual(raised.exception.code, "")
+                self.assertEqual(raised.exception.detail, "")
+                self.assertIsNone(raised.exception.retry_after)
+                self.assertTrue(raised.exception.retryable)
+                self.assertEqual(str(raised.exception), (
+                    "The GetBible Query API returned HTTP 503; defer this review."
+                ))
+
+    def test_http_error_properties_do_not_depend_on_a_problem_body(self) -> None:
+        self.assertTrue(QueryHTTPError(400).invalid_reference)
+        self.assertFalse(QueryHTTPError(400).request_limit)
+        self.assertTrue(QueryHTTPError(404).invalid_reference)
+        self.assertFalse(QueryHTTPError(404, code="translation_not_found").invalid_reference)
+        self.assertFalse(QueryHTTPError(404, code="unknown_version").invalid_reference)
+        self.assertFalse(QueryHTTPError(405).invalid_reference)
+        self.assertFalse(QueryHTTPError(429).invalid_reference)
+        self.assertFalse(QueryHTTPError(503).translation_not_found)
+        self.assertIsNone(QueryHTTPError(503).retry_after)
+        self.assertEqual(QueryHTTPError(503).detail, "")
+        for status in (408, 425, 429, 500, 599):
+            self.assertTrue(QueryHTTPError(status).retryable, status)
+        for status in (301, 400, 401, 404, 405, 415):
+            self.assertFalse(QueryHTTPError(status).retryable, status)
 
 
 if __name__ == "__main__":

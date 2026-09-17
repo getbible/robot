@@ -1,8 +1,6 @@
 import unittest
 
-from getbible import RequestLimitError
-
-from modules.errors import ScriptureUnavailable
+from modules.errors import RequestLimitError, ScriptureUnavailable
 from modules.renderer import pack_html_blocks, render_scripture
 
 

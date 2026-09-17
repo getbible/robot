@@ -3,14 +3,13 @@ import json
 import unittest
 from unittest.mock import patch
 
-from getbible import (
+from modules.catalog import BookOption, CatalogClient, ChapterOption
+from modules.errors import (
     CacheIntegrityError,
     RepositoryError,
     RepositoryResponseError,
     RepositoryResponseTooLarge,
 )
-
-from modules.catalog import BookOption, CatalogClient, ChapterOption
 
 
 class _Response:
