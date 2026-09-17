@@ -946,6 +946,38 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             [event_id],
             actor="admin",
         )
+        # Acceptance alone is not publication: the topic is published only
+        # once the robot has observed it in the public Bookmarks API.
+        accepted = await self.api.handle(
+            self.request(
+                "GET",
+                "/getbible/api/v1/contributions/status?details=1",
+                token=token,
+            )
+        )
+        accepted_payload = json.loads(accepted.body)
+        self.assertFalse(
+            next(
+                topic
+                for topic in accepted_payload["topics"]
+                if topic["local_topic_id"] == "private.grace"
+            )["published"]
+        )
+        self.assertEqual(accepted_payload["summary"]["events"]["live"], 0)
+        self.contributions.record_live_catalog(
+            1,
+            "a" * 64,
+            [
+                {
+                    "id": "grace",
+                    "name": "Grace",
+                    "color": "#bbf7d0",
+                    "aliases": [],
+                    "default": False,
+                    "verses": [[43, 3, 16]],
+                }
+            ],
+        )
         reconciled = await self.api.handle(
             self.request(
                 "GET",
@@ -954,6 +986,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             )
         )
         reconciliation = json.loads(reconciled.body)
+        self.assertEqual(reconciliation["summary"]["events"]["live"], 1)
         grace_topic = next(
             topic
             for topic in reconciliation["topics"]
@@ -1010,6 +1043,7 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                         "rejected": 0,
                         "deferred": 0,
                         "applied": 0,
+                        "live": 0,
                     },
                 },
             },
@@ -1389,15 +1423,37 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
             receipts[42],
         )
 
-    async def test_live_catalog_is_authenticated_revisioned_and_revalidates_by_etag(
+    async def test_retired_catalogue_route_is_unknown_and_events_keep_ledger_revision(
         self,
     ) -> None:
+        # The shared topic catalogue is served by the public Bookmarks API; the
+        # robot no longer serves a copy of it, so the old overlay route is
+        # unknown before and after authentication, and no ETag revalidation
+        # header is offered to the browser any more.
         unauthenticated = await self.api.handle(
             self.request("GET", "/getbible/api/v1/bookmarks/catalog")
         )
-        self.assertEqual(unauthenticated.status, 401)
-
+        self.assertEqual(unauthenticated.status, 404)
         token = await self.exchange()
+        authenticated = await self.api.handle(
+            self.request("GET", "/getbible/api/v1/bookmarks/catalog", token=token)
+        )
+        self.assertEqual(authenticated.status, 404)
+        preflight = await self.api.handle(
+            self.request("OPTIONS", "/getbible/api/v1/bookmarks/catalog")
+        )
+        self.assertEqual(preflight.status, 404)
+        allowed = await self.api.handle(
+            self.request("OPTIONS", "/getbible/api/v1/contributions/events")
+        )
+        self.assertEqual(allowed.status, 204)
+        self.assertEqual(
+            allowed.headers["Access-Control-Allow-Headers"],
+            "Authorization, Content-Type, X-Telegram-Init-Data",
+        )
+
+        # The events response still names the accepted ledger revision the
+        # maintainer tooling works from; it is not a catalogue clients load.
         catalog = {
             "schema_version": 1,
             "topics": [
@@ -1415,29 +1471,10 @@ class MiniAppApiTestCase(unittest.IsolatedAsyncioTestCase):
                 "remove": [],
             },
         }
-        published = self.contributions.publish_catalog(catalog, actor="admin")
-        response = await self.api.handle(
-            self.request("GET", "/getbible/api/v1/bookmarks/catalog", token=token)
-        )
-        self.assertEqual(response.status, 200)
-        self.assertEqual(json.loads(response.body)["revision"], 1)
-        self.assertEqual(json.loads(response.body)["checksum"], published.checksum)
-        self.assertEqual(response.headers["ETag"], published.etag)
-        self.assertEqual(
-            response.headers["Cache-Control"],
-            "private, no-cache, max-age=0, must-revalidate",
-        )
-
-        unchanged = await self.api.handle(
-            self.request(
-                "GET",
-                "/getbible/api/v1/bookmarks/catalog",
-                token=token,
-                extra_headers={"If-None-Match": published.etag},
-            )
-        )
-        self.assertEqual(unchanged.status, 304)
-        self.assertEqual(unchanged.body, b"")
+        accepted = self.contributions.publish_catalog(catalog, actor="admin")
+        self.assertEqual(accepted.revision, 1)
+        self.assertEqual(self.contributions.current_catalog().checksum, accepted.checksum)
+        self.assertFalse(hasattr(accepted, "etag"))
 
     async def test_contribution_preflight_and_wrong_methods_use_declared_contract(self) -> None:
         preflight = await self.api.handle(

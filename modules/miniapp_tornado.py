@@ -142,7 +142,7 @@ def _apply_browser_hardening_headers(handler: RequestHandler) -> None:
         "default-src 'none'; script-src 'self' https://telegram.org; "
         "style-src 'self'; img-src 'self' data:; connect-src 'self' "
         "https://api.getbible.net https://query.getbible.net "
-        "https://search.getbible.net; "
+        "https://search.getbible.net https://bookmarks.getbible.net; "
         "font-src 'self'; base-uri 'none'; form-action 'self'; "
         "object-src 'none'; frame-ancestors https://web.telegram.org "
         "https://*.telegram.org; upgrade-insecure-requests",

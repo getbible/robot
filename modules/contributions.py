@@ -1,10 +1,17 @@
-"""Durable moderation queue and live catalogue overlay for trusted contributors.
+"""Durable moderation queue and accepted-contribution ledger for trusted contributors.
 
 The browser never grants contribution authority.  Every write reaches this
 store only after the Mini App API has revalidated Telegram's signed numeric
 user ID and has checked the current application state.  Contributor identity
-stays in the private SQLite audit trail; published catalogue documents are
-strictly privacy-safe and deterministic.
+stays in the private SQLite audit trail; accepted bundles are strictly
+privacy-safe and deterministic.
+
+The shared topic catalogue itself lives in the public Bookmarks API
+(``bookmarks.getbible.net``), published by ``getbible/v1_bookmark_builder``.
+This store never serves a copy of it.  A maintainer's acceptance records a
+ledger revision and marks events ``applied``; the robot then watches the API
+and, once the accepted change is observable there, marks those events live
+and tells their contributors.
 """
 
 from __future__ import annotations
@@ -21,6 +28,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, cast
+
+from .bible_canon import BOOK_CHAPTER_COUNTS
 
 ApplicationState = Literal[
     "pending",
@@ -54,7 +63,20 @@ MAX_PUBLIC_OVERLAY_ASSOCIATIONS = 10_000
 MAX_PUBLIC_OVERLAY_BYTES = 2 * 1024 * 1024
 MAX_ACTIVE_CONTRIBUTOR_CAPABILITIES = 16
 CONTRIBUTOR_CAPABILITY_TTL_SECONDS = 90 * 24 * 60 * 60
-DATABASE_SCHEMA_VERSION = 5
+# The observed Bookmarks API catalogue is bounded by the API's own contract
+# (<= 1000 topics, <= 100000 verse links) and by the bytes this store keeps.
+MAX_LIVE_CATALOG_TOPICS = 1_000
+MAX_LIVE_CATALOG_ASSOCIATIONS = 100_000
+MAX_LIVE_CATALOG_BYTES = 8 * 1024 * 1024
+MAX_LIVE_CATALOG_VERSION = 9_007_199_254_740_991
+MAX_TIMESTAMP_NANOSECONDS = (1 << 63) - 1
+LIVE_NOTIFICATION_KIND = "contributions_live"
+LIVE_NOTIFICATION_MESSAGE = (
+    "Your reviewed bookmark contributions are now part of the shared getBible "
+    "catalogue (catalogue version {version}). Open the Mini App to see them "
+    "marked as global."
+)
+DATABASE_SCHEMA_VERSION = 6
 
 # The browser contribution journal accepts this complete separator-safe
 # alphabet in every position. Personal bookmark IDs are a subset, but imported
@@ -81,79 +103,24 @@ _REQUIRED_TABLES = frozenset(
         "contribution_client_snapshots",
         "contribution_sync_receipts",
         "contributor_capabilities",
+        "contribution_live_catalog",
     }
 )
-# Protestant canon order used by the bundled global bookmark catalogue and its
-# repository CSV. Contributions outside this catalogue are rejected before
+# Contributions outside the 66-book canon shared with the Bookmarks API
+# (``BOOK_CHAPTER_COUNTS`` from ``modules.bible_canon``) are rejected before
 # queueing, even when a selected reader translation exposes additional books.
-BOOK_CHAPTER_COUNTS = (
-    50,
-    40,
-    27,
-    36,
-    34,
-    24,
-    21,
-    4,
-    31,
-    24,
-    22,
-    25,
-    29,
-    36,
-    10,
-    13,
-    10,
-    42,
-    150,
-    31,
-    12,
-    8,
-    66,
-    52,
-    5,
-    48,
-    12,
-    14,
-    3,
-    9,
-    1,
-    4,
-    7,
-    3,
-    3,
-    3,
-    2,
-    14,
-    4,
-    28,
-    16,
-    24,
-    21,
-    28,
-    16,
-    16,
-    13,
-    6,
-    6,
-    4,
-    4,
-    5,
-    3,
-    6,
-    4,
-    3,
-    1,
-    13,
-    5,
-    5,
-    3,
-    5,
-    1,
-    1,
-    1,
-    22,
-)
+# The latest applied topic transition per source topic decides whether a
+# canonical topic that the API publishes still counts as this contributor's.
+_APPLIED_TRANSITIONS_CTE = """
+                WITH applied_transitions AS (
+                    SELECT local_topic_id,
+                           MAX(id) AS latest_transition_id
+                    FROM contribution_events
+                    WHERE contributor_id = ? AND state = 'applied'
+                      AND event_type IN ('topic_upsert', 'topic_delete')
+                    GROUP BY local_topic_id
+                )
+"""
 _APPLICATION_NOTICE = {
     "approved": (
         "You are now enrolled as a GetBible topic contributor. New topics and "
@@ -192,6 +159,7 @@ def _empty_contribution_summary() -> dict[str, dict[str, int]]:
             "rejected": 0,
             "deferred": 0,
             "applied": 0,
+            "live": 0,
         },
     }
 
@@ -209,7 +177,7 @@ class ContributionIdempotencyConflict(ContributionError):
 
 
 class ContributionPublicationConflict(ContributionError):
-    """The live catalogue changed after a moderator built a publication plan."""
+    """The accepted ledger revision changed after a moderator built a plan."""
 
 
 class ContributionRepositoryConflict(ContributionError):
@@ -309,15 +277,13 @@ class ClaimedContributionNotification(ContributionNotification):
 
 @dataclass(frozen=True, slots=True)
 class CatalogRevision:
+    """One accepted ledger revision: the cumulative bundle a maintainer accepted."""
+
     revision: int
     checksum: str
     catalog: dict[str, Any]
     created_at: int
     actor: str
-
-    @property
-    def etag(self) -> str:
-        return f'"gb-catalog-{self.revision}-{self.checksum[:16]}"'
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,6 +291,32 @@ class EventBatchResult:
     accepted: int
     replayed: int
     event_ids: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class LiveCatalog:
+    """The last observed Bookmarks API catalogue, reduced to what liveness needs.
+
+    ``checksum`` is the identity the observer compares between checks (the
+    API index checksum); ``fetched_at`` is a ``time.time_ns()`` timestamp.
+    """
+
+    catalog_version: int
+    checksum: str
+    fetched_at: int
+    topic_ids: frozenset[str]
+    associations: frozenset[tuple[str, int, int, int]]
+
+
+@dataclass(frozen=True, slots=True)
+class LiveCatalogUpdate:
+    """The outcome of one API catalogue observation."""
+
+    catalog_version: int
+    checksum: str
+    changed: bool
+    newly_live_event_ids: tuple[int, ...]
+    notified_contributor_ids: tuple[int, ...]
 
 
 NormalizedEvent: TypeAlias = tuple[
@@ -359,6 +351,10 @@ class ContributionStore:
         self._max_contributors = max_contributors
         self._max_events = max_events
         self._guard = threading.RLock()
+        # The parsed API catalogue is reused across status calls while the
+        # stored row is unchanged; every read still checks the row identity so
+        # another process's observation is picked up immediately.
+        self._live_cache: LiveCatalog | None = None
         self._connection: sqlite3.Connection | None = self._open()
 
     @property
@@ -498,14 +494,17 @@ class ContributionStore:
 
         Local topic IDs are meaningful only inside one contributor's browser.
         They therefore never enter the public catalogue and are returned only
-        from this numeric-ID-scoped query.  A moderator mapping is not itself
-        publication: ``published`` becomes true only after an event has been
-        applied and the latest applied topic transition is not a delete.  The
-        no-transition case supports mappings to an already bundled topic.
+        from this numeric-ID-scoped query.  Neither a moderator mapping nor a
+        maintainer's acceptance is itself publication: ``published`` is true
+        only when the mapped canonical topic is present in the last observed
+        Bookmarks API catalogue and the topic's latest applied transition is
+        not a delete.  A mapping onto a topic the API already publishes counts
+        as published; before any catalogue has been observed nothing does.
         """
         identity = _telegram_user_id(user_id)
         topic_states = {state: 0 for state in sorted(TOPIC_STATES)}
         event_states = {state: 0 for state in sorted(REVIEW_STATES)}
+        live_events = 0
         with self._guard:
             connection = self._connection_required()
             application = connection.execute(
@@ -540,28 +539,38 @@ class ContributionStore:
                 topic_states[str(row[0])] = int(row[1])
             event_count_rows = connection.execute(
                 """
-                SELECT state, COUNT(*)
+                SELECT state, live_at IS NOT NULL, COUNT(*)
                 FROM contribution_events
                 WHERE contributor_id = ?
-                GROUP BY state
+                GROUP BY state, live_at IS NOT NULL
                 """,
                 (identity,),
             ).fetchall()
             for row in event_count_rows:
-                event_states[str(row[0])] = int(row[1])
+                event_states[str(row[0])] += int(row[2])
+                if str(row[0]) == "applied" and row[1]:
+                    live_events += int(row[2])
+            live = self._live_catalog_locked(connection)
+            live_topic_ids = live.topic_ids if live is not None else frozenset()
+            mapped_rows = connection.execute(
+                f"""
+                {_APPLIED_TRANSITIONS_CTE}
+                SELECT source_topics.canonical_topic_id,
+                       transition.event_type AS latest_applied_topic_transition
+                FROM contributor_source_topics AS source_topics
+                LEFT JOIN applied_transitions AS applied
+                  ON applied.local_topic_id = source_topics.local_topic_id
+                LEFT JOIN contribution_events AS transition
+                  ON transition.id = applied.latest_transition_id
+                 AND transition.contributor_id = source_topics.contributor_id
+                WHERE source_topics.contributor_id = ?
+                  AND source_topics.canonical_topic_id IS NOT NULL
+                """,  # nosec B608 -- the CTE is a fixed module constant
+                (identity, identity),
+            ).fetchall()
             rows = connection.execute(
-                """
-                WITH applied_topics AS (
-                    SELECT local_topic_id,
-                           MAX(id) AS latest_applied_event_id,
-                           MAX(CASE
-                               WHEN event_type IN ('topic_upsert', 'topic_delete')
-                               THEN id
-                           END) AS latest_transition_id
-                    FROM contribution_events
-                    WHERE contributor_id = ? AND state = 'applied'
-                    GROUP BY local_topic_id
-                )
+                f"""
+                {_APPLIED_TRANSITIONS_CTE}
                 SELECT source_topics.local_topic_id,
                        source_topics.name,
                        source_topics.color,
@@ -569,22 +578,11 @@ class ContributionStore:
                        source_topics.state,
                        source_topics.canonical_topic_id,
                        canonical.definition_json AS canonical_definition_json,
-                       applied.latest_applied_event_id IS NOT NULL AS has_applied_event,
-                       transition.event_type AS latest_applied_topic_transition,
-                       SUM(CASE
-                           WHEN source_topics.canonical_topic_id IS NOT NULL
-                            AND applied.latest_applied_event_id IS NOT NULL
-                            AND COALESCE(transition.event_type, '') != 'topic_delete'
-                           THEN 1 ELSE 0
-                       END) OVER () AS published_count,
-                       SUM(CASE
-                           WHEN source_topics.canonical_topic_id IS NOT NULL
-                           THEN 1 ELSE 0
-                       END) OVER () AS mapped_count
+                       transition.event_type AS latest_applied_topic_transition
                 FROM contributor_source_topics AS source_topics
                 LEFT JOIN contribution_canonical_topics AS canonical
                   ON canonical.topic_id = source_topics.canonical_topic_id
-                LEFT JOIN applied_topics AS applied
+                LEFT JOIN applied_transitions AS applied
                   ON applied.local_topic_id = source_topics.local_topic_id
                 LEFT JOIN contribution_events AS transition
                   ON transition.id = applied.latest_transition_id
@@ -593,23 +591,23 @@ class ContributionStore:
                 ORDER BY source_topics.updated_at DESC,
                          source_topics.local_topic_id
                 LIMIT ?
-                """,
+                """,  # nosec B608 -- the CTE is a fixed module constant
                 (identity, identity, MAX_CONTRIBUTION_STATUS_TOPICS),
             ).fetchall()
 
         state = str(application[0])
         approved = state == "approved"
-        published_count = int(rows[0][9]) if rows else 0
-        mapped_count = int(rows[0][10]) if rows else 0
+        mapped_count = len(mapped_rows)
+        published_count = sum(
+            1
+            for row in mapped_rows
+            if _topic_is_published(cast(str | None, row[0]), row[1], live_topic_ids)
+        )
         topics: list[dict[str, object]] = []
         for row in rows:
             source_state = str(row[4])
             canonical_id = cast(str | None, row[5])
-            published = bool(
-                canonical_id is not None
-                and row[7]
-                and row[8] != "topic_delete"
-            )
+            published = _topic_is_published(canonical_id, row[7], live_topic_ids)
             topic: dict[str, object] = {
                 "local_topic_id": str(row[0]),
                 "state": source_state,
@@ -647,6 +645,7 @@ class ContributionStore:
                     "rejected": event_states["rejected"],
                     "deferred": event_states["deferred"],
                     "applied": event_states["applied"],
+                    "live": live_events,
                 },
             },
         }
@@ -1623,12 +1622,12 @@ class ContributionStore:
         )
 
     def published_topic_ids(self) -> tuple[str, ...]:
-        """Return every contributed topic that has appeared in a live revision.
+        """Return every contributed topic that has appeared in an accepted revision.
 
-        Catalogue revisions are immutable, so their topic definitions are the
+        Ledger revisions are immutable, so their topic definitions are the
         authoritative provenance for this lifetime rule. Applied event history
-        alone is insufficient: a pre-publication upsert followed by a delete can
-        be terminalized atomically without ever making that topic live.
+        alone is insufficient: a pre-acceptance upsert followed by a delete can
+        be terminalized atomically without ever putting that topic in a bundle.
         """
         with self._guard:
             rows = (
@@ -1663,7 +1662,7 @@ class ContributionStore:
         *,
         actor: str,
     ) -> CatalogRevision:
-        """Atomically make a cumulative, sanitized contribution overlay live."""
+        """Atomically record a cumulative, sanitized accepted bundle as a ledger revision."""
         reviewer = _bounded_text(actor, "actor", MAX_ACTOR_LENGTH)
         normalized = normalize_catalog(catalog)
         encoded = _json(normalized)
@@ -1688,11 +1687,15 @@ class ContributionStore:
         expected_revision: int | None = None,
         expected_checksum: str | None = None,
     ) -> CatalogRevision:
-        """Publish a cumulative overlay and mark its approved events applied together.
+        """Record an accepted bundle and mark its approved events applied together.
 
-        ``catalog`` is the complete cumulative contribution overlay, not merely
-        the latest review batch.  A retry with the same catalogue and already
-        applied event IDs is a no-op and returns the existing live revision.
+        ``catalog`` is the complete cumulative bundle of accepted contributions
+        (the ledger revision a maintainer pushes to the builder repository),
+        not merely the latest review batch and not a document any client is
+        served.  Applied events become live only once the Bookmarks API
+        reflects them (see :meth:`record_live_catalog`).  A retry with the
+        same bundle and already applied event IDs is a no-op and returns the
+        existing ledger revision.
         """
         reviewer = _bounded_text(actor, "actor", MAX_ACTOR_LENGTH)
         if expected_revision is not None and (
@@ -1727,7 +1730,7 @@ class ContributionStore:
                 expected_checksum is not None and str(live[1]) != expected_checksum
             ):
                 raise ContributionPublicationConflict(
-                    "The live contribution catalogue changed; rebuild the publication plan."
+                    "The accepted contribution ledger changed; rebuild the publication plan."
                 )
             if values:
                 placeholders = ",".join("?" for _ in values)
@@ -1777,6 +1780,13 @@ class ContributionStore:
             return revision
 
     def publication_state(self) -> dict[str, object]:
+        """Return the ledger, repository and API observation state as one mapping.
+
+        Besides the accepted ledger revision and the repository lease this
+        carries ``repo_pull_request`` (the pull request opened for the last
+        push, or None), and ``api_catalog_version`` / ``api_checksum`` /
+        ``api_checked_at`` describing the last successful Bookmarks API check.
+        """
         with self._guard:
             row = (
                 self._connection_required()
@@ -1789,6 +1799,307 @@ class ContributionStore:
         result.pop("repo_token", None)
         return result
 
+    def record_live_catalog(
+        self,
+        catalog_version: int,
+        checksum: str,
+        topics: Sequence[Mapping[str, object]],
+        *,
+        fetched_at: int | None = None,
+    ) -> LiveCatalogUpdate:
+        """Store one observed Bookmarks API catalogue and settle liveness from it.
+
+        ``topics`` are the API topics as the client returns them (id, name,
+        colour, aliases, default flag and verse triples); only that reduced
+        form is kept, bounded to :data:`MAX_LIVE_CATALOG_BYTES`.  In one
+        transaction the catalogue row is upserted, every applied event that is
+        not yet live is checked against the catalogue, newly live events get
+        ``live_at`` set, and each affected contributor receives exactly one
+        ``contributions_live`` notification through the ordinary outbox.
+
+        Liveness per event type: ``verse_add`` when the (topic, book, chapter,
+        verse) association is in the catalogue; ``verse_remove`` when it is
+        absent from that topic; ``topic_upsert`` when the canonical topic id
+        exists; ``topic_delete`` when it is absent.
+
+        Observing the checksum that is already stored changes no catalogue
+        content, creates no notification and writes no audit row: it only
+        refreshes the check timestamp and settles events applied since the
+        previous observation, so repeated observations are idempotent.
+        """
+        version = _positive_integer(catalog_version, "catalog_version", MAX_LIVE_CATALOG_VERSION)
+        if not valid_checksum(checksum):
+            raise ContributionError("checksum is invalid.")
+        observed_at = _observation_time(fetched_at)
+        normalized, topic_ids, associations = _normalize_live_topics(topics)
+        encoded = _json(normalized)
+        if len(encoded.encode("utf-8")) > MAX_LIVE_CATALOG_BYTES:
+            raise ContributionError("Live catalogue exceeds the stored byte limit.")
+        now = time.time_ns()
+        with self._guard, self._transaction() as connection:
+            current = connection.execute(
+                """
+                SELECT catalog_version, checksum, fetched_at
+                FROM contribution_live_catalog WHERE singleton = 1
+                """
+            ).fetchone()
+            changed = current is None or str(current[1]) != checksum
+            if changed:
+                connection.execute(
+                    """
+                    INSERT INTO contribution_live_catalog (
+                        singleton, catalog_version, checksum, fetched_at, topics_json
+                    ) VALUES (1, ?, ?, ?, ?)
+                    ON CONFLICT(singleton) DO UPDATE SET
+                        catalog_version = excluded.catalog_version,
+                        checksum = excluded.checksum,
+                        fetched_at = excluded.fetched_at,
+                        topics_json = excluded.topics_json
+                    """,
+                    (version, checksum, observed_at, encoded),
+                )
+                live = LiveCatalog(version, checksum, observed_at, topic_ids, associations)
+                self._live_cache = live
+            else:
+                assert current is not None
+                if int(current[0]) != version:
+                    connection.execute(
+                        """
+                        UPDATE contribution_live_catalog
+                        SET catalog_version = ?, fetched_at = ?
+                        WHERE singleton = 1
+                        """,
+                        (version, observed_at),
+                    )
+                    self._live_cache = None
+                stored = self._live_catalog_locked(connection)
+                assert stored is not None
+                live = stored
+            self._record_api_check_locked(connection, live, checked_at=observed_at, now=now)
+            newly_live, notified = self._settle_liveness_locked(connection, live, now=now)
+            if changed or newly_live:
+                self._audit_locked(
+                    connection,
+                    actor="system",
+                    action="live_catalog_observed",
+                    contributor_id=None,
+                    subject_type="live_catalog",
+                    subject_id=str(live.catalog_version),
+                    detail={
+                        "catalog_version": live.catalog_version,
+                        "checksum": live.checksum,
+                        "changed": changed,
+                        "topics": len(live.topic_ids),
+                        "associations": len(live.associations),
+                        "newly_live": _count_by_type(newly_live),
+                        "notified_contributors": len(notified),
+                    },
+                    now=now,
+                )
+        return LiveCatalogUpdate(
+            catalog_version=live.catalog_version,
+            checksum=live.checksum,
+            changed=changed,
+            newly_live_event_ids=tuple(event_id for event_id, _, _ in newly_live),
+            notified_contributor_ids=notified,
+        )
+
+    def record_live_catalog_check(
+        self,
+        catalog_version: int,
+        checksum: str,
+        *,
+        checked_at: int | None = None,
+    ) -> LiveCatalogUpdate:
+        """Note that the API still publishes the recorded catalogue.
+
+        The cheap path for an unchanged index: it refreshes ``api_checked_at``
+        and settles liveness for events applied since the last observation
+        against the stored catalogue, without any catalogue download.  The
+        identity must match the recorded catalogue; otherwise the caller has
+        to fetch and :meth:`record_live_catalog` the new document.
+        """
+        version = _positive_integer(catalog_version, "catalog_version", MAX_LIVE_CATALOG_VERSION)
+        if not valid_checksum(checksum):
+            raise ContributionError("checksum is invalid.")
+        observed_at = _observation_time(checked_at)
+        now = time.time_ns()
+        with self._guard, self._transaction() as connection:
+            live = self._live_catalog_locked(connection)
+            if live is None or live.checksum != checksum or live.catalog_version != version:
+                raise ContributionError(
+                    "The checked catalogue is not the recorded live catalogue."
+                )
+            self._record_api_check_locked(connection, live, checked_at=observed_at, now=now)
+            newly_live, notified = self._settle_liveness_locked(connection, live, now=now)
+            if newly_live:
+                self._audit_locked(
+                    connection,
+                    actor="system",
+                    action="live_catalog_observed",
+                    contributor_id=None,
+                    subject_type="live_catalog",
+                    subject_id=str(live.catalog_version),
+                    detail={
+                        "catalog_version": live.catalog_version,
+                        "checksum": live.checksum,
+                        "changed": False,
+                        "topics": len(live.topic_ids),
+                        "associations": len(live.associations),
+                        "newly_live": _count_by_type(newly_live),
+                        "notified_contributors": len(notified),
+                    },
+                    now=now,
+                )
+        return LiveCatalogUpdate(
+            catalog_version=live.catalog_version,
+            checksum=live.checksum,
+            changed=False,
+            newly_live_event_ids=tuple(event_id for event_id, _, _ in newly_live),
+            notified_contributor_ids=notified,
+        )
+
+    def live_catalog(self) -> LiveCatalog | None:
+        """Return the last observed API catalogue, or None before any observation."""
+        with self._guard:
+            return self._live_catalog_locked(self._connection_required())
+
+    def live_catalog_state(self) -> dict[str, object]:
+        """Return the observation state for status displays and metrics."""
+        with self._guard:
+            connection = self._connection_required()
+            live = self._live_catalog_locked(connection)
+            checked = connection.execute(
+                "SELECT api_checked_at FROM contribution_publication_state WHERE singleton = 1"
+            ).fetchone()
+        checked_at = (
+            int(checked[0]) if checked is not None and checked[0] is not None else None
+        )
+        if live is None:
+            return {
+                "observed": False,
+                "catalog_version": None,
+                "checksum": None,
+                "fetched_at": None,
+                "checked_at": checked_at,
+                "topics": 0,
+                "associations": 0,
+            }
+        return {
+            "observed": True,
+            "catalog_version": live.catalog_version,
+            "checksum": live.checksum,
+            "fetched_at": live.fetched_at,
+            "checked_at": checked_at,
+            "topics": len(live.topic_ids),
+            "associations": len(live.associations),
+        }
+
+    def _live_catalog_locked(self, connection: sqlite3.Connection) -> LiveCatalog | None:
+        row = connection.execute(
+            """
+            SELECT catalog_version, checksum, fetched_at
+            FROM contribution_live_catalog WHERE singleton = 1
+            """
+        ).fetchone()
+        if row is None:
+            self._live_cache = None
+            return None
+        identity = (int(row[0]), str(row[1]), int(row[2]))
+        cached = self._live_cache
+        if cached is not None and (
+            (cached.catalog_version, cached.checksum, cached.fetched_at) == identity
+        ):
+            return cached
+        document = connection.execute(
+            "SELECT topics_json FROM contribution_live_catalog WHERE singleton = 1"
+        ).fetchone()
+        assert document is not None
+        topic_ids, associations = _live_catalog_content(str(document[0]))
+        live = LiveCatalog(identity[0], identity[1], identity[2], topic_ids, associations)
+        self._live_cache = live
+        return live
+
+    @staticmethod
+    def _record_api_check_locked(
+        connection: sqlite3.Connection,
+        live: LiveCatalog,
+        *,
+        checked_at: int,
+        now: int,
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE contribution_publication_state
+            SET api_catalog_version = ?, api_checksum = ?, api_checked_at = ?,
+                updated_at = ?
+            WHERE singleton = 1
+            """,
+            (live.catalog_version, live.checksum, checked_at, now),
+        )
+
+    @staticmethod
+    def _settle_liveness_locked(
+        connection: sqlite3.Connection,
+        live: LiveCatalog,
+        *,
+        now: int,
+    ) -> tuple[tuple[tuple[int, int, str], ...], tuple[int, ...]]:
+        """Mark applied events the catalogue now reflects and queue one notice each.
+
+        Returns ``((event_id, contributor_id, event_type), ...)`` for the events
+        that became live and the contributor IDs that were notified.
+        """
+        rows = connection.execute(
+            """
+            SELECT id, contributor_id, event_type, canonical_topic_id,
+                   book, chapter, verse
+            FROM contribution_events
+            WHERE state = 'applied' AND live_at IS NULL
+            ORDER BY id
+            """
+        ).fetchall()
+        newly_live: list[tuple[int, int, str]] = []
+        for row in rows:
+            canonical = cast(str | None, row[3])
+            if canonical is None:
+                continue
+            event_type = str(row[2])
+            if _event_is_live(
+                event_type,
+                canonical,
+                cast(int | None, row[4]),
+                cast(int | None, row[5]),
+                cast(int | None, row[6]),
+                live,
+            ):
+                newly_live.append((int(row[0]), int(row[1]), event_type))
+        if not newly_live:
+            return (), ()
+        connection.executemany(
+            """
+            UPDATE contribution_events
+            SET live_at = ?, updated_at = ?
+            WHERE id = ? AND state = 'applied' AND live_at IS NULL
+            """,
+            ((now, now, event_id) for event_id, _, _ in newly_live),
+        )
+        contributors = tuple(sorted({contributor for _, contributor, _ in newly_live}))
+        message = LIVE_NOTIFICATION_MESSAGE.format(version=live.catalog_version)
+        connection.executemany(
+            """
+            INSERT INTO contribution_notifications (
+                contributor_id, kind, message, state, attempts,
+                available_at, created_at, updated_at
+            ) VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+            """,
+            (
+                (contributor, LIVE_NOTIFICATION_KIND, message, now, now, now)
+                for contributor in contributors
+            ),
+        )
+        return tuple(newly_live), contributors
+
     def begin_repo_publication(
         self,
         revision: int,
@@ -1797,7 +2108,7 @@ class ContributionStore:
         actor: str,
         lease_seconds: int = 900,
     ) -> str:
-        """Lease one live revision for repository publication.
+        """Lease one accepted ledger revision for repository publication.
 
         The returned opaque token is required to finish. An abandoned lease
         becomes recoverable after ``lease_seconds``; a successfully pushed
@@ -1821,7 +2132,7 @@ class ContributionStore:
                 or str(row["live_checksum"]) != checksum
             ):
                 raise ContributionRepositoryConflict(
-                    "The requested repository revision is no longer live."
+                    "The requested repository revision is no longer the accepted ledger."
                 )
             if (
                 row["repo_revision"] is not None
@@ -1829,7 +2140,7 @@ class ContributionStore:
                 and str(row["repo_state"]) == "pushed"
             ):
                 raise ContributionRepositoryConflict(
-                    "This live revision was already pushed to the repository."
+                    "This ledger revision was already pushed to the repository."
                 )
             active_lease = (
                 str(row["repo_state"]) == "prepared" and int(row["repo_lease_until"] or 0) > now
@@ -1844,7 +2155,8 @@ class ContributionStore:
                 UPDATE contribution_publication_state
                 SET repo_revision = ?, repo_checksum = ?, repo_state = 'prepared',
                     repo_token = ?, repo_lease_until = ?, repo_branch = NULL,
-                    repo_commit = NULL, repo_error = NULL, updated_at = ?
+                    repo_commit = NULL, repo_pull_request = NULL, repo_error = NULL,
+                    updated_at = ?
                 WHERE singleton = 1
                 """,
                 (checked_revision, checksum, token, lease_until, now),
@@ -1875,8 +2187,14 @@ class ContributionStore:
         branch: str | None = None,
         commit: str | None = None,
         error: str | None = None,
+        pull_request: str | None = None,
     ) -> None:
-        """Complete only the repository lease identified by ``token``."""
+        """Complete only the repository lease identified by ``token``.
+
+        A ``pushed`` completion may carry the URL of the pull request opened
+        on the builder repository, or None when the push succeeded but the
+        pull request still has to be opened by hand.
+        """
         checked_token = _bounded_text(token, "token", 128)
         checked_revision = _positive_integer(revision, "revision", 2_147_483_647, minimum=0)
         checked_state = _bounded_text(state, "state", 32)
@@ -1886,17 +2204,21 @@ class ContributionStore:
         checked_branch = _optional_bounded_text(branch, "branch", 256)
         checked_commit = _optional_bounded_text(commit, "commit", 64)
         checked_error = _optional_bounded_text(error, "error", 1000)
+        checked_pull_request = _optional_pull_request_url(pull_request)
         if checked_state == "pushed" and (checked_branch is None or checked_commit is None):
             raise ContributionError("A pushed publication requires a branch and commit.")
         if checked_state == "failed" and checked_error is None:
             raise ContributionError("A failed publication requires an error.")
+        if checked_state == "failed" and checked_pull_request is not None:
+            raise ContributionError("A failed publication cannot carry a pull request.")
         now = time.time_ns()
         with self._guard, self._transaction() as connection:
             cursor = connection.execute(
                 """
                 UPDATE contribution_publication_state
                 SET repo_state = ?, repo_token = NULL, repo_lease_until = 0,
-                    repo_branch = ?, repo_commit = ?, repo_error = ?, updated_at = ?
+                    repo_branch = ?, repo_commit = ?, repo_pull_request = ?,
+                    repo_error = ?, updated_at = ?
                 WHERE singleton = 1 AND repo_revision = ?
                   AND repo_state = 'prepared' AND repo_token = ?
                 """,
@@ -1904,6 +2226,7 @@ class ContributionStore:
                     checked_state,
                     checked_branch,
                     checked_commit,
+                    checked_pull_request,
                     checked_error,
                     now,
                     checked_revision,
@@ -1921,7 +2244,11 @@ class ContributionStore:
                 contributor_id=None,
                 subject_type="catalog_revision",
                 subject_id=str(checked_revision),
-                detail={"state": checked_state, "branch": checked_branch},
+                detail={
+                    "state": checked_state,
+                    "branch": checked_branch,
+                    "pull_request": checked_pull_request,
+                },
                 now=now,
             )
 
@@ -2107,28 +2434,25 @@ class ContributionStore:
         connection.execute("PRAGMA busy_timeout=5000")
         try:
             user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if user_version > 6:
+            if user_version > DATABASE_SCHEMA_VERSION:
                 raise sqlite3.DatabaseError(
                     "Contribution database was created by a newer application."
                 )
             if user_version == 0:
                 self._create_schema(connection)
-            elif user_version == 1:
-                self._migrate_v1_to_v2(connection)
-                self._migrate_v2_to_v3(connection)
-                self._migrate_v3_to_v4(connection)
-                self._migrate_v4_to_v5(connection)
-            elif user_version == 2:
-                self._migrate_v2_to_v3(connection)
-                self._migrate_v3_to_v4(connection)
-                self._migrate_v4_to_v5(connection)
-            elif user_version == 3:
-                self._migrate_v3_to_v4(connection)
-                self._migrate_v4_to_v5(connection)
-            elif user_version == 4:
-                self._migrate_v4_to_v5(connection)
-            elif user_version == 6:
-                self._downgrade_v6_to_v5(connection)
+            else:
+                if user_version == 1:
+                    self._migrate_v1_to_v2(connection)
+                if user_version <= 2:
+                    self._migrate_v2_to_v3(connection)
+                if user_version <= 3:
+                    self._migrate_v3_to_v4(connection)
+                if user_version <= 4:
+                    self._migrate_v4_to_v5(connection)
+                if user_version <= 5 or not self._v6_layout_complete(connection):
+                    # A store already at 6 may carry the withdrawn push
+                    # transport layout instead of the live catalogue one.
+                    self._migrate_v5_to_v6(connection)
             # A store already at the current version takes no migration branch,
             # so a table lost to an interrupted upgrade, a rollback across the
             # snapshot/push/drip transports, or a manual repair stayed missing
@@ -2262,6 +2586,7 @@ class ContributionStore:
                 submitted_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 decided_at INTEGER,
+                live_at INTEGER,
                 UNIQUE (contributor_id, client_event_id),
                 FOREIGN KEY (contributor_id)
                     REFERENCES contributor_applications(user_id),
@@ -2345,7 +2670,19 @@ class ContributionStore:
                 repo_branch TEXT,
                 repo_commit TEXT,
                 repo_error TEXT,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                repo_pull_request TEXT,
+                api_catalog_version INTEGER,
+                api_checksum TEXT,
+                api_checked_at INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS contribution_live_catalog (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                catalog_version INTEGER NOT NULL,
+                checksum TEXT NOT NULL,
+                fetched_at INTEGER NOT NULL,
+                topics_json TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS contribution_client_snapshots (
@@ -2388,7 +2725,7 @@ class ContributionStore:
             );
             CREATE INDEX IF NOT EXISTS contributor_capabilities_owner
                 ON contributor_capabilities (contributor_id, expires_at, last_used_at);
-            PRAGMA user_version=5;
+            PRAGMA user_version=6;
             COMMIT;
             """
         )
@@ -2400,7 +2737,7 @@ class ContributionStore:
         Version 1 made catalogue checksums unique.  That prevented the valid
         revision sequence A -> B -> A (for example, publishing a topic and
         later accepting its deletion).  Revisions remain monotonic; identical
-        content is only a no-op when it is already the live revision.
+        content is only a no-op when it is already the current revision.
         """
         connection.executescript(
             """
@@ -2536,25 +2873,65 @@ class ContributionStore:
         )
 
     @staticmethod
-    def _downgrade_v6_to_v5(connection: sqlite3.Connection) -> None:
-        """Return a database left at v6 by the withdrawn push transport to v5.
+    def _v6_layout_complete(connection: sqlite3.Connection) -> bool:
+        """Return whether the live catalogue layout is fully present."""
+        return not _v6_layout_missing(connection)
 
-        The v6 schema only added durable staging for chunked Telegram
-        web_app_data push bundles; no surviving feature reads those tables, so
-        dropping them (children before parents, because foreign keys are
-        enforced on this connection) restores the exact v5 layout without
-        touching any contributor, event, or catalogue state.
+    @staticmethod
+    def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
+        """Add the Bookmarks API observation state (idempotent).
+
+        Version 6 records the last observed API catalogue, when each applied
+        event became visible there, the pull request opened for a repository
+        push, and the last successful API check.  A database left at version
+        6 by the withdrawn ``web_app_data`` push transport carried two staging
+        tables instead; no surviving feature reads them, so they are dropped
+        (children before parents, because foreign keys are enforced on this
+        connection) while every contributor, event and ledger row is kept.
         """
-        connection.executescript(
-            """
-            BEGIN IMMEDIATE;
-            DROP TABLE IF EXISTS contribution_push_chunks;
-            DROP INDEX IF EXISTS contribution_push_bundles_expiry;
-            DROP TABLE IF EXISTS contribution_push_bundles;
-            PRAGMA user_version=5;
-            COMMIT;
-            """
-        )
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            tables, event_columns, publication_columns = _v6_layout(connection)
+            if "contribution_push_chunks" in tables:
+                connection.execute("DROP TABLE contribution_push_chunks")
+            if "contribution_push_bundles" in tables:
+                connection.execute("DROP INDEX IF EXISTS contribution_push_bundles_expiry")
+                connection.execute("DROP TABLE contribution_push_bundles")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS contribution_live_catalog (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    catalog_version INTEGER NOT NULL,
+                    checksum TEXT NOT NULL,
+                    fetched_at INTEGER NOT NULL,
+                    topics_json TEXT NOT NULL
+                )
+                """
+            )
+            # A table that is missing altogether is recreated with the full
+            # layout by the IF NOT EXISTS schema script that follows.
+            if event_columns and "live_at" not in event_columns:
+                connection.execute(
+                    "ALTER TABLE contribution_events ADD COLUMN live_at INTEGER"
+                )
+            additions = {
+                "repo_pull_request": "TEXT",
+                "api_catalog_version": "INTEGER",
+                "api_checksum": "TEXT",
+                "api_checked_at": "INTEGER",
+            }
+            for name, declaration in additions.items():
+                if publication_columns and name not in publication_columns:
+                    connection.execute(
+                        f"ALTER TABLE contribution_publication_state "
+                        f"ADD COLUMN {name} {declaration}"
+                    )
+            connection.execute("PRAGMA user_version=6")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+        else:
+            connection.execute("COMMIT")
 
     @staticmethod
     def _ensure_seed_state(connection: sqlite3.Connection) -> None:
@@ -2743,7 +3120,11 @@ class ContributionStore:
 
 
 def normalize_catalog(value: Mapping[str, object]) -> dict[str, Any]:
-    """Validate and deterministically sort the public catalogue overlay schema."""
+    """Validate and deterministically sort an accepted contribution bundle.
+
+    The schema is the builder's ``import-bundle`` input; the ``MAX_PUBLIC_OVERLAY_*``
+    constants bound one accepted bundle.
+    """
     if not isinstance(value, Mapping) or set(value) != {
         "schema_version",
         "topics",
@@ -2937,6 +3318,188 @@ def _normalize_event(raw: Mapping[str, object]) -> NormalizedEvent:
         payload_json,
         digest,
     )
+
+
+def _v6_layout(
+    connection: sqlite3.Connection,
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    tables = frozenset(
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    )
+    event_columns = frozenset(
+        str(row[1]) for row in connection.execute("PRAGMA table_info(contribution_events)")
+    )
+    publication_columns = frozenset(
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(contribution_publication_state)")
+    )
+    return tables, event_columns, publication_columns
+
+
+def _v6_layout_missing(connection: sqlite3.Connection) -> bool:
+    tables, event_columns, publication_columns = _v6_layout(connection)
+    return (
+        "contribution_live_catalog" not in tables
+        or "contribution_push_bundles" in tables
+        or "contribution_push_chunks" in tables
+        or "live_at" not in event_columns
+        or not {
+            "repo_pull_request",
+            "api_catalog_version",
+            "api_checksum",
+            "api_checked_at",
+        }.issubset(publication_columns)
+    )
+
+
+def _topic_is_published(
+    canonical_topic_id: str | None,
+    latest_applied_transition: object,
+    live_topic_ids: frozenset[str],
+) -> bool:
+    return (
+        canonical_topic_id is not None
+        and canonical_topic_id in live_topic_ids
+        and latest_applied_transition != "topic_delete"
+    )
+
+
+def _event_is_live(
+    event_type: str,
+    canonical_topic_id: str,
+    book: int | None,
+    chapter: int | None,
+    verse: int | None,
+    live: LiveCatalog,
+) -> bool:
+    """Decide whether the observed API catalogue reflects one applied event."""
+    if event_type == "topic_upsert":
+        return canonical_topic_id in live.topic_ids
+    if event_type == "topic_delete":
+        return canonical_topic_id not in live.topic_ids
+    if book is None or chapter is None or verse is None:
+        return False
+    present = (canonical_topic_id, book, chapter, verse) in live.associations
+    if event_type == "verse_add":
+        return present
+    if event_type == "verse_remove":
+        return not present
+    return False
+
+
+def _count_by_type(events: Sequence[tuple[int, int, str]]) -> dict[str, int]:
+    counts = {event_type: 0 for event_type in sorted(EVENT_TYPES)}
+    for _, _, event_type in events:
+        counts[event_type] = counts.get(event_type, 0) + 1
+    counts["total"] = len(events)
+    return counts
+
+
+def _observation_time(value: int | None) -> int:
+    if value is None:
+        return time.time_ns()
+    return _positive_integer(value, "fetched_at", MAX_TIMESTAMP_NANOSECONDS, minimum=0)
+
+
+def _optional_pull_request_url(value: object | None) -> str | None:
+    checked = _optional_bounded_text(value, "pull_request", 512)
+    if checked is None:
+        return None
+    if not checked.startswith("https://") or any(character.isspace() for character in checked):
+        raise ContributionError("pull_request must be an https URL.")
+    return checked
+
+
+def _normalize_live_topics(
+    value: object,
+) -> tuple[
+    list[dict[str, object]],
+    frozenset[str],
+    frozenset[tuple[str, int, int, int]],
+]:
+    """Reduce API topics to the bounded form the store keeps for liveness checks."""
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise ContributionError("Live catalogue topics must be an array.")
+    if len(value) > MAX_LIVE_CATALOG_TOPICS:
+        raise ContributionError("Live catalogue contains too many topics.")
+    topics: list[dict[str, object]] = []
+    topic_ids: set[str] = set()
+    associations: set[tuple[str, int, int, int]] = set()
+    links = 0
+    for raw in value:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "id",
+            "name",
+            "color",
+            "aliases",
+            "default",
+            "verses",
+        }:
+            raise ContributionError("Live catalogue topic has unsupported fields.")
+        topic_id = _canonical_topic_id(raw.get("id"))
+        if topic_id in topic_ids:
+            raise ContributionError("Live catalogue topic IDs must be unique.")
+        topic_ids.add(topic_id)
+        name = _bounded_text(raw.get("name"), "name", MAX_TOPIC_NAME)
+        color = _color(raw.get("color"))
+        raw_aliases = raw.get("aliases")
+        if (
+            not isinstance(raw_aliases, (list, tuple))
+            or len(raw_aliases) > MAX_TOPIC_ALIASES
+        ):
+            raise ContributionError("Live catalogue topic aliases must be a bounded array.")
+        aliases = [_bounded_text(alias, "alias", MAX_ALIAS_LENGTH) for alias in raw_aliases]
+        default = raw.get("default")
+        if not isinstance(default, bool):
+            raise ContributionError("Live catalogue topic default flag must be a boolean.")
+        raw_verses = raw.get("verses")
+        if (
+            not isinstance(raw_verses, (list, tuple))
+            or len(raw_verses) > MAX_LIVE_CATALOG_ASSOCIATIONS
+        ):
+            raise ContributionError("Live catalogue topic verses must be a bounded array.")
+        verses: set[tuple[int, int, int]] = set()
+        for triple in raw_verses:
+            if (
+                not isinstance(triple, (list, tuple))
+                or isinstance(triple, (str, bytes))
+                or len(triple) != 3
+            ):
+                raise ContributionError("Live catalogue verse must be a book/chapter/verse triple.")
+            verses.add(_scripture_coordinate(triple[0], triple[1], triple[2]))
+        links += len(verses)
+        if links > MAX_LIVE_CATALOG_ASSOCIATIONS:
+            raise ContributionError("Live catalogue contains too many verse associations.")
+        ordered = sorted(verses)
+        associations.update((topic_id, book, chapter, verse) for book, chapter, verse in ordered)
+        topics.append(
+            {
+                "id": topic_id,
+                "name": name,
+                "color": color,
+                "aliases": aliases,
+                "default": default,
+                "verses": [list(triple) for triple in ordered],
+            }
+        )
+    topics.sort(key=lambda topic: cast(str, topic["id"]))
+    return topics, frozenset(topic_ids), frozenset(associations)
+
+
+def _live_catalog_content(
+    document: str,
+) -> tuple[frozenset[str], frozenset[tuple[str, int, int, int]]]:
+    """Rebuild the liveness sets from a stored catalogue document."""
+    try:
+        payload = json.loads(document)
+    except json.JSONDecodeError as error:
+        raise ContributionError("The stored live catalogue is invalid.") from error
+    try:
+        _, topic_ids, associations = _normalize_live_topics(payload)
+    except ContributionError as error:
+        raise ContributionError("The stored live catalogue is invalid.") from error
+    return topic_ids, associations
 
 
 def _application(row: sqlite3.Row) -> ContributorApplication:
