@@ -366,6 +366,27 @@ class SetupScriptTestCase(unittest.TestCase):
         self.assertIn('"MAX_CONCURRENT_LOOKUPS" "$max_concurrent_lookups"', script)
         self.assertIn('"MAX_CONCURRENT_SEARCHES" "$max_concurrent_searches"', script)
         self.assertIn('"MAX_CONCURRENT_UPDATES" "$max_concurrent_updates"', script)
+        for key in ("GETBIBLE_QUERY_BASE_URL", "GETBIBLE_SEARCH_BASE_URL"):
+            with self.subTest(key=key):
+                self.assertIn(f'"{key}"', script)
+        # The Search API replaced the in-process Librarian; the migration must
+        # not seed settings the runtime no longer reads.
+        for key in (
+            "SEARCH_INDEX_BUILD_SECONDS",
+            "SEARCH_DEADLINE_SECONDS",
+            "SEARCH_CORPUS_LIMIT",
+            "SEARCH_SHARED_CORPUS_LIMIT",
+            "PREWARM_DEFAULT_TRANSLATION",
+            "MINI_APP_MAX_SEARCHES_PER_SESSION",
+            "REFERENCE_CACHE_LIMIT",
+            "BOOKS_CACHE_LIMIT",
+            "CHAPTER_CACHE_LIMIT",
+            "TRANSLATION_CACHE_LIMIT",
+            "CACHE_MAX_BYTES",
+            "CACHE_MAINTENANCE_INTERVAL_SECONDS",
+        ):
+            with self.subTest(removed=key):
+                self.assertNotIn(key, script)
         self.assertIn(
             'mini_app_port=${requested_mini_app_port:-$(next_mini_app_port)}',
             script,

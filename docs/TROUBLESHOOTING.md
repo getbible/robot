@@ -353,15 +353,15 @@ Inspect circuit, repository failure, and timeout metrics. After `CIRCUIT_RECOVER
 
 `RobotBusy` means bounded worker capacity was not acquired within `LOOKUP_QUEUE_TIMEOUT`. A timed-out synchronous worker deliberately retains its permit until the real thread exits, preventing an unbounded executor queue.
 
-Search work and direct references use independent pools and circuits. A large
-first search may download and index a full translation; with
-`PREWARM_DEFAULT_TRANSLATION=true`, this cost occurs once during startup for the
-default translation. Later searches reuse the bounded cache.
+Search work and direct references use independent pools and circuits. A
+Telegram-native search is one HTTPS request to the public Search API bounded
+by `SEARCH_TIMEOUT`; nothing is downloaded or indexed, so a slow search means
+a slow upstream, not local work. Mini App searches never reach the robot.
 
-If logs report `RepositoryResponseTooLarge`, compare the actual corpus size with
-`GETBIBLE_MAX_RESPONSE_BYTES`. The production default is 40 MiB; do not lower it
-to the old 8 MiB value, which cannot hold KJV. Search result construction remains
-separately limited by `SEARCH_MAX_RESPONSE_BYTES`.
+If logs report `RepositoryResponseTooLarge`, compare the response with
+`GETBIBLE_MAX_RESPONSE_BYTES` for catalogue and Query API bodies, or with
+`SEARCH_MAX_RESPONSE_BYTES` for Search API bodies; the two budgets are
+independent.
 
 Measure upstream latency, memory, and the applicable worker pool. Do not raise
 concurrency, timeouts, result sizes, or message budgets until the impact is
@@ -405,51 +405,94 @@ Expected boundaries:
 
 ```text
 GETBIBLE_API_BASE_URL=https://api.getbible.net
+GETBIBLE_QUERY_BASE_URL=https://query.getbible.net
+GETBIBLE_SEARCH_BASE_URL=https://search.getbible.net
 GETBIBLE_WEB_BASE_URL=https://getbible.life
 ```
 
-Data comes from the API host; Telegram links use the website host. Run the renderer, service, catalog, and command tests before deploying any fix.
+Catalogues come from the Main API, references from the Query API, search
+results from the Search API; Telegram links use the website host. Run the renderer, service, catalog, and command tests before deploying any fix.
 
-## Search returns more results than it used to
+## Search answers `429` or `503`
 
-This is expected after moving to Librarian 2 and is not a regression.
-Continuous scripts match under the default filters for the first time and
-diacritics fold by default. Confirm the change coincides with the engine version
+Search is served by the public Search API, from the browser for the Mini App
+and from the robot for the Telegram-native `/search`. Both report its
+`application/problem+json` answers rather than retrying through them:
+
+- `429 rate_limited` — the origin's rate limit was reached; the `Retry-After`
+  header says how long to wait. The Mini App shows the wait and offers a
+  retry; the robot reports the search as temporarily unavailable and counts
+  the answer against its search circuit. Raising `MAX_CONCURRENT_SEARCHES`
+  cannot push through a `429`; it only queues more requests behind it.
+- `503 busy` or `503 search_timeout` — the service is saturated or the query
+  exceeded its own execution budget. Wait the announced `Retry-After`, then
+  retry; narrow a very broad query with a scope or book filter.
+- `503 repository_unavailable` or `readiness_failed` — the service cannot
+  reach its own data. Nothing on the robot host can repair it.
+
+Confirm the origin's state from the host, without the robot:
+
+```bash
+curl -sS -D - -o /dev/null "https://search.getbible.net/v2/kjv?q=grace&limit=1"
+```
+
+A `200` with `Cache-Control` and `ETag` headers means the service is
+answering; a problem document with `Retry-After` means wait. If the robot's
+`/readyz` reports an open search circuit while the origin answers `200`,
+check outbound DNS, TCP 443, and CA trust from the service account, then wait
+`CIRCUIT_RECOVERY_SECONDS` for the half-open probe. `/metrics` publishes
+`getbible_robot_search_circuit_open` for that circuit.
+
+## Search reports an unknown translation
+
+`404 translation_not_found` means the Search API does not serve the requested
+translation code. `/search` uses the reader's saved translation, so the code
+usually comes from an earlier `/bible` choice. Confirm it directly:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' "https://search.getbible.net/v2/<translation>?q=grace&limit=1"
+```
+
+A `301` here means the code is not a catalogue code; both clients treat a
+redirect as an error rather than following it to a guessed translation.
+Choose another translation in `/bible` or `/search`.
+
+## Search returns more or fewer results than it used to
+
+Matching semantics belong to the Search API, and its response carries an
+`engine_version` that moves whenever they change, independent of any
+translation `sha`. Confirm a step in result counts coincides with that value
 rather than with your own deployment:
 
 ```bash
-curl -s http://127.0.0.1:${HEALTH_PORT}/metrics | grep search_engine_version
+curl -sS "https://search.getbible.net/v2/kjv?q=grace&limit=1" | grep -o '"engine_version":[0-9]*'
 ```
 
-`getbible_robot_search_engine_version 4` is the current value. If it has not
-moved, investigate the query, the filters and the translation SHA instead. See
-[Search](SEARCH.md).
+If it has not moved, investigate the query, the filters and the translation
+`sha` instead. The robot no longer publishes an engine version of its own.
+See [Search](SEARCH.md).
 
-## A Mini App search returns "options.diacritics is invalid"
+## A Mini App page open across the upgrade cannot search
 
-A page left open across the Librarian 2 upgrade is still sending the 1.x
-vocabulary. The project speaks only `fold` and `exact`, so the request is
-refused rather than guessed at. Reopening the Mini App loads the current build
-and the error stops. See [Search](SEARCH.md).
+A page loaded before this release still posts to the robot's former
+`/api/v1/search` route, which no longer exists and answers `404`. Reopening
+the Mini App loads the current build from `build/<fingerprint>/`, which
+searches the Search API directly, and the error stops.
 
-## The first search of a translation is slow
+## Search is slow
 
-An index is built once per translation, and the first search of a translation
-waits for that build instead of being abandoned partway through it. A first
-search of a cold translation is therefore slower than every search after it —
-seconds rather than milliseconds — and the ones that follow are served from the
-built index.
+The robot adds no work of its own to a search: no download, no parsing, no
+index. Measure the origin from the host and compare it with what the reader
+sees:
 
-Keep `PREWARM_DEFAULT_TRANSLATION` enabled so the default translation is never
-built inside a request at all.
+```bash
+curl -sS -o /dev/null -w '%{time_total}\n' "https://search.getbible.net/v2/kjv?q=grace&limit=25"
+```
 
-If that first search *fails* rather than merely taking its time, compare
-`SEARCH_TIMEOUT` with `SEARCH_INDEX_BUILD_SECONDS`. Before this was fixed,
-searches were charged `LOOKUP_TIMEOUT` — a budget sized for delivering a
-reference, and shorter than the build the search was waiting on — so the reader
-was told the search timed out while the build they triggered completed without
-them. A `lookup_timed_out` audit event on a `scripture_searches` operation is
-that fault; the loader now refuses a configuration that can reproduce it.
+A Telegram-native search that exceeds `SEARCH_TIMEOUT` is reported as
+temporarily unavailable and logged as `lookup_timed_out` on a search
+operation; the Mini App's own deadline is stall-based, so a response that is
+still arriving is never abandoned.
 
 ## Upgrade fails
 
@@ -471,7 +514,7 @@ Do not manually copy a lock or virtual environment between application trees.
 sudo getbible-robot runtime production
 ```
 
-Likely causes include increased configured bounds, too many worker threads, repeated upstream stalls, a large translation/cache, or repeated Telegram initialization failure. Preserve bounded defaults and reproduce under load before changing `MemoryMax`.
+Likely causes include increased configured bounds, too many worker threads, repeated upstream stalls, or repeated Telegram initialization failure. The robot holds no translation corpus or index, so its resident size does not grow with the translations searched. Preserve bounded defaults and reproduce under load before changing `MemoryMax`.
 
 ## Safe support request
 

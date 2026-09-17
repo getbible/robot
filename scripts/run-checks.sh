@@ -27,16 +27,7 @@ fi
 npm --prefix miniapp run check
 npm --prefix miniapp run test:browser
 
-librarian_path=$(
-  "$PYTHON" - <<'PY'
-from pathlib import Path
-
-import getbible
-
-print(Path(getbible.__file__).resolve().parent)
-PY
-)
-"$VENV/bin/bandit" -q -r bot.py config.py modules container scripts "$librarian_path" -ll
+"$VENV/bin/bandit" -q -r bot.py config.py modules container scripts -ll
 "$PYTHON" scripts/audit_runtime.py
 
 report=$(mktemp)

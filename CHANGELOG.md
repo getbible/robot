@@ -4,6 +4,51 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Search moves to the public Search API
+
+- The Mini App now searches `https://search.getbible.net/v2` directly
+  from the browser, the same way it already reads chapters from
+  `api.getbible.net` and references from `query.getbible.net`. A search
+  is one `GET` carrying the reader's filters; pages advance by offset,
+  the summary shows the API's exact total, and a page whose corpus `sha`
+  differs from the first restarts the search rather than mixing two
+  corpora. Results carry the same direct selection identity as reader
+  verses, so Post accepts them unchanged. Errors arrive as
+  `application/problem+json`; `429` and `503` are shown as retryable
+  with the announced `Retry-After`.
+- `/bible` references and the authoritative text behind Post resolve
+  through `https://query.getbible.net/v2`. The Telegram-native `/search`
+  used when no Mini App is configured is answered by the robot's own
+  thin client to the Search API, on its own executor, semaphore,
+  per-request deadline, response bound, and circuit. Highlighting
+  mirrors the service's script analysis locally in both the browser and
+  the robot.
+- The Librarian (`getbible`) dependency and its `regex` dependency,
+  startup prewarming, the corpus and index caches, the disk-cache
+  janitor, the search engine version gauge, and the robot's
+  `/api/v1/search` routes are gone. The robot downloads no translation,
+  builds no index, and its memory no longer grows with the translations
+  searched; readiness no longer waits for an index build.
+- `SEARCH_CORPUS_LIMIT`, `SEARCH_SHARED_CORPUS_LIMIT`,
+  `SEARCH_DEADLINE_SECONDS`, `SEARCH_INDEX_BUILD_SECONDS`,
+  `PREWARM_DEFAULT_TRANSLATION`, `REFERENCE_CACHE_LIMIT`,
+  `BOOKS_CACHE_LIMIT`, `CHAPTER_CACHE_LIMIT`, `TRANSLATION_CACHE_LIMIT`,
+  `CACHE_MAX_BYTES`, `CACHE_MAINTENANCE_INTERVAL_SECONDS`, and
+  `MINI_APP_MAX_SEARCHES_PER_SESSION` are no longer read; a file that
+  still carries them starts normally and logs one warning per variable.
+  `SEARCH_TIMEOUT` is now the per-request Search API deadline and
+  defaults to 30 seconds in fresh files; `SEARCH_RESULT_LIMIT` is
+  clamped to the API's 100 at request time. The new
+  `GETBIBLE_QUERY_BASE_URL` and `GETBIBLE_SEARCH_BASE_URL` (HTTPS only)
+  direct the robot's own calls. The manager seeds both on upgrade and
+  leaves a legacy `SEARCH_TIMEOUT` untouched so the immediately previous
+  release can still read the file after a rollback.
+- The Mini App Content Security Policy, in the HTML shell and the
+  Tornado header alike, gains `https://search.getbible.net`. Hosts must
+  allow outbound HTTPS to `query.getbible.net` and `search.getbible.net`
+  as well as `api.getbible.net`. Bandit now scans only the repository's
+  own sources.
+
 ### Launches that could never open again
 
 - Fixed the failure, reported on iPhone and Android alike, where even a

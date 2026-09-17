@@ -7,12 +7,12 @@ GetBible keeps immediate Telegram commands native and moves browsing, reading, s
 | `/bible John 3:16` | Native direct-reference post |
 | `/bible John 3:16-18` | Native direct-range post |
 | `/bible` | Open the Mini App reader at the saved location |
-| `/search grace` | Open the Mini App with Librarian search results |
+| `/search grace` | Open the Mini App with Search API results |
 | `/search` | Open the Mini App search form |
 | `/help` | Native command help |
 | Bot menu | Open the Mini App home screen |
 
-`/get` and `/getbible` remain aliases for `/bible`. The Telegram-native picker remains a compatibility fallback when the Mini App is disabled.
+`/get` and `/getbible` remain aliases for `/bible`. The Telegram-native picker remains a compatibility fallback when the Mini App is disabled; the robot then serves `/bible` through the Query API and `/search` through its own thin client to the Search API.
 
 ## Reader workflow
 
@@ -68,25 +68,26 @@ A second click reverses all selected state immediately. The UI derives this stat
 
 ## Search workflow
 
-Search is the sole Mini App Scripture-discovery operation that uses Robot/Librarian.
+Search is a browser-to-Search API operation. It issues no Robot request.
 
 1. Submit a query and optional filters.
-2. Robot/Librarian returns bounded normalized result verses.
-3. The browser registers those verses with the same selection store used by reader chapters.
+2. The browser sends one `GET` to `search.getbible.net/v2/<translation>` with the filters as query parameters and receives matches in authoritative order, chapter-grouped verse text, and the exact total.
+3. The browser normalizes the matches into verse descriptors and registers them with the same selection store used by reader chapters.
 4. Selecting a search result highlights the same coordinate when opened in Reader.
 5. Selecting that coordinate in Reader updates its Search representation.
+6. **Load more** requests the next page by offset; a changed corpus `sha` restarts the search from the first page, and a query that was itself a reference shows its verses with no further page.
 
-Opaque search tokens and deterministic reader IDs are not selection identity. Identity is translation, book number, chapter, and verse.
+Search results and reader verses share one deterministic direct selection identity. Identity is translation, book number, chapter, and verse.
 
-Filters narrow a search; they never tell Librarian how to read a script. The
-words, match, scope, case, diacritics, sort, books, exclusion and proximity
-controls are documented with their values and defaults in [Search](SEARCH.md),
-which also covers why a Chinese or Thai query needs no special handling and why
-the diacritics filter now folds by default.
+Filters narrow a search; they never tell the Search API how to read a script.
+The words, match, scope, case, diacritics, sort, books, exclusion and
+proximity controls are documented with their values, defaults, and bounds in
+[Search](SEARCH.md), which also covers why a Chinese or Thai query needs no
+special handling and why the diacritics filter folds by default.
 
 ## Explicit reference workflow
 
-Mini App explicit references use `query.getbible.net/v2` directly. Query results provide reader coordinates and grouped-reference results without routing through Robot or Librarian.
+Mini App explicit references use `query.getbible.net/v2` directly. Query results provide reader coordinates and grouped-reference results without routing through Robot. The robot's own `/bible <reference>` command uses the same Query API from the host.
 
 A Query API failure affects explicit reference resolution only. It does not invalidate authentication, cached chapters, local selection, or Search state.
 
@@ -198,8 +199,8 @@ Selections from different translations may coexist. Coordinate identity includes
 | --- | --- |
 | Main API unavailable | uncached reader request fails retryably; selection and authentication remain |
 | Query API unavailable | explicit reference resolution fails retryably |
-| Librarian unavailable | Search alone fails |
-| Robot unavailable | protected Search/preferences/Post fail; local selection remains usable |
+| Search API unavailable | Search alone fails, retryably after any announced `Retry-After` |
+| Robot unavailable | protected preferences/Post fail; local selection remains usable and public reads, including search, continue |
 | Telegram Mini App storage unavailable | local bookmarks and last-read remain usable; cross-device sync is marked degraded |
 | Chat restore fails before merge | current bookmarks remain; local JSON export/import remains available |
 | Restore persistence or acknowledgement fails after merge | imported merge remains; chat document remains recoverable for retry |

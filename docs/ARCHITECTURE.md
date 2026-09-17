@@ -5,17 +5,17 @@
 GetBible Robot has two deliberately separate data planes:
 
 1. **Mini App plane** — public, read-only GetBible API V2 data, browser-owned UI state, and compact user state reconciled with Telegram Mini App storage.
-2. **Robot control plane** — Telegram authentication, preference compatibility, Librarian search, bounded bookmark backup transport, and final Telegram delivery.
+2. **Robot control plane** — Telegram authentication, preference compatibility, bounded bookmark backup transport, contribution intake, and final Telegram delivery.
 
-Only full-text search and search pagination use Librarian. Translation discovery, books, chapters, chapter text, hashes, and explicit reference resolution are browser-to-GetBible API operations.
+Every Scripture read is a browser-to-GetBible operation: translation discovery, books, chapters, chapter text, and hashes from the Main API; explicit reference resolution from the Query API; full-text search from the Search API. Robot proxies no Scripture and holds no search state. Its own Scripture requests — `/bible` references, the authoritative text behind Post, and the Telegram-native `/search` used when no Mini App is configured — go to the same public Query and Search APIs from the host.
 
 ```mermaid
 flowchart LR
     T[Telegram WebView]
     A[api.getbible.net/v2]
     Q[query.getbible.net/v2]
+    SR[search.getbible.net/v2]
     R[Robot control plane]
-    L[Librarian]
     S[BrowserSelectionStore]
     H[Scoped local history]
     B[BookmarkStore]
@@ -24,16 +24,17 @@ flowchart LR
 
     T -->|catalogs, chapters, hashes| A
     T -->|explicit/grouped references| Q
+    T -->|full-text search, offset pages| SR
     T -->|signed session, preferences| R
-    T -->|search only| R
-    R -->|search/pagination| L
     A -->|normalized verses| S
-    L -->|normalized verses| S
+    SR -->|normalized verses| S
     T -->|coordinate visits| H
     T -->|personal bookmarks and last-read| B
     B <-->|newest valid record| TS
     S -->|final ordered selection at Post| R
     B -->|explicit bounded JSON backup| R
+    R -->|/bible references, Post text| Q
+    R -->|catalogue| A
     R -->|authoritative bounded output| G
     R -->|private backup document| G
 ```
@@ -46,9 +47,9 @@ No reader navigation, catalog load, chapter load, select, unselect, reorder, cle
 
 | Module | Responsibility |
 | --- | --- |
-| `miniapp/lib/getbible-transport.js` | Fixed-origin, credential-free public HTTP transport with size bounds, stall-based deadlines, and bounded retry |
-| `miniapp/lib/getbible-api.js` | Main API and Query API use cases, hash-aware retrieval, and public response orchestration |
-| `miniapp/lib/getbible-model.js` | GetBible response normalization and deterministic coordinate identities |
+| `miniapp/lib/getbible-transport.js` | Fixed-origin (Main, Query, and Search API), credential-free public HTTP transport with size bounds, stall-based deadlines, bounded retry, and problem-document errors |
+| `miniapp/lib/getbible-api.js` | Main API, Query API, and Search API use cases, hash-aware retrieval, search query building, and public response orchestration |
+| `miniapp/lib/getbible-model.js` | GetBible response normalization, search-result normalization with shared highlight analysis, and deterministic coordinate identities |
 | `miniapp/lib/public-cache.js` | IndexedDB/memory cache, LRU bounds, atomic replacement, and invalidation |
 | `miniapp/lib/selection-store.js` | Browser-owned ordered selection domain |
 | `miniapp/lib/reading-history-store.js` | Bounded, durable, coordinate-only history in an authenticated user-scoped local key |
@@ -61,7 +62,7 @@ No reader navigation, catalog load, chapter load, select, unselect, reorder, cle
 | `miniapp/lib/bible-canon.js` | Shared 66-book and per-book chapter bounds for contribution and live-catalog coordinates |
 | `miniapp/lib/global-bookmark-live-catalog.js` | Strict ETag/revision overlay validation, instance-scoped cache, and bundled fallback |
 | `miniapp/lib/instance-scope.js` | Deterministic non-secret namespace for state bound to one Robot API path |
-| `miniapp/lib/api.js` | Robot session/search/preferences/Post, bookmark backup/restore, contribution status/event-batch, and live-catalog transport facade plus public API composition |
+| `miniapp/lib/api.js` | Robot session/preferences/Post, bookmark backup/restore, contribution status/event-batch, and live-catalog transport facade plus public API composition, including direct search |
 | `miniapp/app.js` | UI orchestration and rendering only |
 
 `BrowserSelectionStore` is the sole owner of temporary selected state. It enforces bounded capacity, coordinate deduplication, source-independent removal, explicit ordering, defensive snapshots, and final coordinate projection.
@@ -74,7 +75,7 @@ No reader navigation, catalog load, chapter load, select, unselect, reorder, cle
 | --- | --- |
 | Configuration and adapters | Validated settings, Telegram, Tornado, persistence, audit, and public ingress |
 | Domain policies | Search options, rendering, rate limiting, preference models, launch/session ownership |
-| Application services | Bounded Librarian search, health, cleanup, posting, and idempotency |
+| Application services | Bounded Scripture service over the public Query and Search APIs, health, cleanup, posting, and idempotency |
 | Delivery adapters | Telegram commands and Mini App HTTP translation |
 | Composition root | `bot.py` constructs and wires all dependencies |
 
@@ -82,7 +83,7 @@ Dependencies point inward. Delivery adapters do not become a second Scripture re
 
 ## Shared verse contract
 
-Reader chapters and Librarian search results normalize to the same browser descriptor:
+Reader chapters and Search API results normalize to the same browser descriptor:
 
 ```text
 selection_id
@@ -103,7 +104,7 @@ The canonical identity is:
 translation + book_number + chapter + verse
 ```
 
-A deterministic reader ID and an opaque Librarian result token may identify the same coordinate. The selection store treats them as one verse. This guarantees that:
+A reader verse and a search result carry the same deterministic direct selection identity, `gbd_<translation>_<book>_<chapter>_<verse>`, and the selection store keys by coordinate. This guarantees that:
 
 - selecting in Search highlights the same verse in Reader;
 - selecting in Reader highlights the same verse in Search;
@@ -126,7 +127,11 @@ Display text and metadata are not posting authority.
 
 ### Query API
 
-`https://query.getbible.net/v2/` resolves explicit and grouped references. It is used for `/bible <reference>` Mini App entry and grouped-reference work that does not require full-text corpus search.
+`https://query.getbible.net/v2/` resolves explicit and grouped references. The browser uses it for `/bible <reference>` Mini App entry and grouped-reference work; the robot uses the same API from the host for the native `/bible` command and for the authoritative text behind Post.
+
+### Search API
+
+`https://search.getbible.net/v2/` answers full-text search: one `GET` per page carrying the reader's filters, answered with matches in authoritative order, chapter-grouped verse text, an exact total, `has_more`, and the corpus `sha`. The browser calls it directly for the Mini App's Search page; the robot calls it only for the Telegram-native `/search`. See [Search](SEARCH.md).
 
 ### Transport security
 
@@ -139,7 +144,7 @@ Public requests:
 - enforce request and response bounds;
 - validate schema and requested coordinates.
 
-The HTML CSP and Tornado response CSP must contain the same two public origins.
+The HTML CSP and Tornado response CSP must contain the same three public origins.
 
 ## Cache integrity
 
@@ -167,13 +172,14 @@ Robot owns:
 - owner-bound launch exchange;
 - bounded opaque sessions with a ninety-day default absolute lifetime;
 - reader preferences;
-- full-text search and pagination through Librarian;
+- Telegram-native `/bible` and `/search` delivery through the public Query
+  and Search APIs when no Mini App is configured;
 - validation and private-chat delivery/retrieval of explicitly requested,
   bounded bookmark backup documents;
 - final Post authorization, idempotency, authoritative resolution, rendering, and Telegram delivery;
 - cleanup, audit, health, and operational limits.
 
-A public API error never invalidates a Telegram session. A Librarian failure affects search only. Browser selection remains usable while Robot is temporarily unavailable.
+A public API error never invalidates a Telegram session. A Search API failure affects search only. Browser selection remains usable while Robot is temporarily unavailable.
 
 ## Selection lifecycle
 
@@ -307,21 +313,11 @@ or expiry.
 
 ## Search
 
-Search is the only Mini App content operation backed by Librarian. It uses a separate bounded executor, semaphore, timeout, and circuit state from reference delivery so expensive corpus work cannot consume every direct-reference permit.
+The Mini App searches `https://search.getbible.net/v2` directly from the browser, over the same fixed-origin transport as chapters and references. Robot serves no search endpoint and keeps no search state; search defaults persist through the ordinary preferences endpoint only.
 
-Search responses are bounded and normalized before reaching the browser. Search tokens are not selection identity and are not trusted for final text.
+The browser supplies a query and narrowing filters; the Search API derives the matching strategy from the text of the translation and of the query. No layer here inspects a query to choose a match mode, and no per-language branch exists in this repository. A page is 25 matches, advanced by `offset + returned` while `has_more` is true; a changed corpus `sha` restarts the search from offset zero rather than combining two corpora; the summary shows the API's exact total. Matches are normalized into the same verse descriptor as reader chapters, with the same direct selection identity, before registration in `BrowserSelectionStore`. Display text from a search is never posting authority.
 
-The robot supplies a query and narrowing filters; Librarian derives the matching
-strategy from the text of the translation and of the query. No layer here
-inspects a query to choose a match mode, and no per-language branch exists in
-this repository. Corpora and their indexes live in a Librarian registry keyed by
-repository, translation and source SHA, shared by every client object in the
-process, so the parse-and-analyse cost is paid once per translation version.
-Index construction is bounded separately from a request deadline because one
-build serves every later search, and a search waits for the build it provokes
-rather than abandoning it: `SEARCH_TIMEOUT` must cover that build, and the Mini
-App waits on the budget the robot declares at session bootstrap rather than
-guessing one. See [Search](SEARCH.md).
+The Telegram-native `/search` used when no Mini App is configured is served by the robot's thin client to the same API on its own executor, semaphore, per-request deadline (`SEARCH_TIMEOUT`), response bound (`SEARCH_MAX_RESPONSE_BYTES`), page size (`SEARCH_RESULT_LIMIT`, clamped to the API's 100), and circuit, so a slow upstream cannot consume a direct-reference permit. The robot downloads no corpus, builds no index, and runs no prewarm. See [Search](SEARCH.md).
 
 ## Posting and trust
 
@@ -355,7 +351,7 @@ session bearer for its sequential bounded event batches on the existing Mini
 App listener, and a `429` paces the drip through the server's `Retry-After`.
 No WebSocket or extra port participates in this control plane.
 
-Browser selection mutations are synchronous and single-threaded. Search pagination uses latest-request coordination so stale responses cannot overwrite current state. Preference writes are serialized per user. Final posting is serialized and idempotent.
+Browser selection mutations are synchronous and single-threaded. Search pagination uses latest-request coordination so stale responses cannot overwrite current state, and restarts from offset zero when the corpus `sha` changes between pages. Preference writes are serialized per user. Final posting is serialized and idempotent.
 
 Bookmark writes are synchronous locally and asynchronously coalesced for
 Telegram storage. Timestamp reconciliation makes startup deterministic when
@@ -363,7 +359,7 @@ local, device, and cloud copies differ. Bookmark chat backup is serialized and
 idempotent per authenticated session; restore references are single-launch and
 explicitly consumed only after a confirmed merge has persisted.
 
-Synchronous Librarian work runs in fixed executors. Timeouts do not release capacity until the underlying future exits, preventing cancellation from turning into an unbounded queue.
+Synchronous upstream work — the robot's own Main, Query, and Search API requests — runs in fixed executors. Timeouts do not release capacity until the underlying future exits, preventing cancellation from turning into an unbounded queue.
 
 ## Failure isolation
 
@@ -371,8 +367,8 @@ Synchronous Librarian work runs in fixed executors. Timeouts do not release capa
 | --- | --- |
 | Main API unavailable | uncached reading only |
 | Query API unavailable | explicit/grouped reference resolution only |
-| Librarian unavailable | search only |
-| Robot temporarily unavailable | authentication/search/preferences/Post only; local selection remains |
+| Search API unavailable | search only |
+| Robot temporarily unavailable | authentication/preferences/Post only; local selection remains and public reads, including search, continue |
 | Telegram Mini App storage unavailable | local bookmark and last-read copies continue; UI reports degraded sync |
 | Browser local storage unavailable | history falls back to memory; Telegram bookmark storage can still persist when supported |
 | Bookmark chat backup unavailable | live bookmarks remain unchanged; local JSON export remains available |
@@ -407,7 +403,7 @@ A release is production-ready only when permanent CI and CodeQL pass on the exac
 - Python 3.10, 3.11, 3.12, 3.13, and 3.14;
 - production container build and smoke test;
 - lint, strict typing, branch coverage, dependency audit, secret scan, and systemd verification;
-- public Main API and Query API routing with no Robot content proxy;
+- public Main API, Query API, and Search API routing with no Robot content proxy;
 - CSP parity and fixed-origin enforcement;
 - hash verification, weekly revalidation, invalidation, bounds, and atomic cache replacement;
 - browser selection add/remove/reorder/clear and defensive snapshots;

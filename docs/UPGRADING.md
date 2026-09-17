@@ -154,45 +154,66 @@ manager-owned. Mini App and webhook ports must be unique and must not match.
 
 Maintainers edit `requirements.in` or `requirements-dev.in`, regenerate both locks with `scripts/refresh-locks.sh`, review the complete generated diff, and run the full Python 3.10–3.14 matrix. Production installs only the exact reviewed `requirements.txt` with hashes.
 
-The Librarian policy is:
+The direct runtime inputs are `python-telegram-bot`, `requests`, `tornado`, and
+`python-dotenv` plus two compatibility pins; there is no Scripture engine among
+them. The generated lock selects the exact tested artifacts. Production does
+not resolve a newer package during service start.
 
-```text
-getbible>=2.0.0,<3
-```
+### Upgrading to the public Search API
 
-The generated lock selects the exact tested artifact. Production does not resolve a newer package during service start.
+This release removes the Librarian (`getbible`) package from the robot. The
+Mini App searches `https://search.getbible.net/v2` directly from the browser,
+`/bible` references and the authoritative text behind Post resolve through
+`https://query.getbible.net/v2`, and the Telegram-native `/search` used when no
+Mini App is configured is answered by the robot's own client to the Search
+API. Nothing needs migrating by hand. Expect the following and see
+[Search](SEARCH.md) for the design.
 
-### Upgrading across Librarian 2
+- **Removed settings are ignored with a warning.** `SEARCH_CORPUS_LIMIT`,
+  `SEARCH_SHARED_CORPUS_LIMIT`, `SEARCH_DEADLINE_SECONDS`,
+  `SEARCH_INDEX_BUILD_SECONDS`, `PREWARM_DEFAULT_TRANSLATION`,
+  `REFERENCE_CACHE_LIMIT`, `BOOKS_CACHE_LIMIT`, `CHAPTER_CACHE_LIMIT`,
+  `TRANSLATION_CACHE_LIMIT`, `CACHE_MAX_BYTES`,
+  `CACHE_MAINTENANCE_INTERVAL_SECONDS`, and
+  `MINI_APP_MAX_SEARCHES_PER_SESSION` are no longer read. An instance file
+  that still contains them starts normally and logs one warning per variable
+  at startup. The manager does not rewrite them, so the immediately previous
+  release can still read the same file after a rollback; remove them with
+  `sudo getbible-robot config <instance>` once rollback is no longer needed.
+- **`SEARCH_TIMEOUT` is now a per-request deadline.** Fresh installs carry
+  `30` seconds. The manager and the versioned Compose files leave a legacy
+  `150` in place, because the previous release refuses any value below its
+  index-build allowance and rollback must stay one step; lower it
+  deliberately after the rollback window. `SEARCH_RESULT_LIMIT` keeps its
+  range and is clamped to the Search API's 100 at request time.
+- **Two new settings.** `GETBIBLE_QUERY_BASE_URL`
+  (`https://query.getbible.net`) and `GETBIBLE_SEARCH_BASE_URL`
+  (`https://search.getbible.net`) direct the robot's own calls and accept
+  HTTPS origins only. The manager adds both on upgrade; the defaults apply
+  where they are absent.
+- **Outbound HTTPS from the host now also reaches `query.getbible.net` and
+  `search.getbible.net`.** Update egress firewalls and proxies before the
+  upgrade; a blocked origin fails `/bible` or the Telegram-native `/search`
+  with a temporary-unavailable reply and opens the matching circuit.
+- **The Mini App's Content Security Policy gains `https://search.getbible.net`**
+  in both the HTML shell and the Tornado header. An external proxy that
+  rewrites the header must include it, or every search is blocked by the
+  browser.
+- **Startup is faster.** There is no prewarm and no index; readiness no
+  longer waits for a translation to be downloaded and built, and the
+  process's memory no longer grows with the translations searched. The
+  instance cache directory is no longer written; its contents can be removed
+  once rollback is no longer needed.
+- **A Mini App page open across the upgrade must reload.** The robot's
+  `/api/v1/search` routes are gone, so a stale page's search answers `404`
+  until it reopens. Sessions live in memory, so the upgrade restart already
+  requires a fresh launch.
+- **No cache to clear.** Neither the robot nor the browser keeps a durable
+  search-result cache; the browser honours the Search API's `Cache-Control`.
 
-Librarian 2 changes search behaviour, so plan this upgrade rather than treating
-it as a routine dependency bump. Nothing needs migrating by hand, but expect the
-following and see [Search](SEARCH.md) for the reasoning.
-
-- **Searches return more.** Continuous scripts — Han, kana, Hangul, Thai, Lao,
-  Khmer, Myanmar, Tibetan — match under the default filters for the first time,
-  and diacritics fold by default. Result-volume dashboards will step up. Confirm
-  the step coincides with `getbible_robot_search_engine_version` moving to `4`
-  before investigating it as a regression.
-- **Saved search filters reset once; reading state does not.** The project uses
-  Librarian's `fold`/`exact` vocabulary and no other, so a profile holding the
-  1.x `insensitive`/`sensitive` falls back to default filters on first read.
-  Because a stored profile degrades field by field, the reader keeps their
-  translation and their place, and the record is rewritten in the current
-  vocabulary the next time they change a preference.
-- **A Mini App page open across the upgrade must reload.** The API accepts only
-  the current vocabulary, so a stale page's search is refused until it reopens.
-  Announce the upgrade if a reload mid-session would be disruptive.
-- **One new setting.** `SEARCH_INDEX_BUILD_SECONDS` (default `120`) bounds index
-  construction. Add it deliberately like any other key.
-- **No cache to clear.** The robot keeps no durable search-result cache.
-
-Rollback is lossy for preferences, so back up the preference database first.
-This release writes `fold` and `exact`, which a pre-upgrade robot cannot read,
-and that older code discards a profile as one record rather than field by field
-— taking the translation and reading position with the filters. Restoring the
-database file alongside the older release is what makes the rollback clean.
-Reverting only the Librarian pin while keeping this release is not a supported
-rollback: Librarian 1.x rejects the current diacritics vocabulary outright.
+Rollback reinstalls the previous release's own lock, Librarian included, and
+reads the same environment file. This release does not change the preference
+vocabulary, so rollback is not lossy for preferences.
 
 ### Contribution store schema
 

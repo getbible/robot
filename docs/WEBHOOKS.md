@@ -161,6 +161,7 @@ during startup.
   certificate validity, DNS, firewall rules, and response latency.
 
 Keep webhook request handling fast. The event loop receives the update and
-offloads synchronous Scripture/search work into bounded executors; search has
-its own smaller concurrency pool so expensive corpus work cannot occupy every
+offloads the robot's own Query API and Search API requests into bounded
+executors; the Telegram-native search has its own smaller concurrency pool
+and circuit so a slow Search API response cannot occupy every
 direct-reference worker.

@@ -12,11 +12,12 @@ A commit is deployable only when every applicable item below is satisfied on the
 
 ## Active Mini App doctrine
 
-- Only full-text search and search pagination use Librarian; Robot's other
-  protected paths are authentication, preference compatibility, final Post,
-  and explicit bookmark chat backup/restore.
+- Every Scripture read goes from the browser to a public GetBible origin;
+  Robot's protected paths are authentication, preference compatibility,
+  final Post, contribution intake, and explicit bookmark chat backup/restore.
 - Translation metadata, books, chapters, chapter text, and hashes use `api.getbible.net/v2` directly from the browser.
 - Explicit and grouped references use `query.getbible.net/v2` directly from the browser.
+- Full-text search uses `search.getbible.net/v2` directly from the browser.
 - Public API requests contain no Telegram or Robot credentials.
 - `BrowserSelectionStore` solely owns select, unselect, reorder, clear, counters, highlighting, and copy state.
 - Reader and search verses share coordinate identity.
@@ -30,7 +31,7 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 
 ## Browser transport and cache
 
-- Main API and Query API origins are fixed HTTPS constants.
+- Main API, Query API, and Search API origins are fixed HTTPS constants.
 - Redirects are rejected; credentials are omitted; `no-referrer` is used.
 - Request timeouts and response-size limits are enforced.
 - The HTML CSP and Tornado response CSP contain identical public-origin allowlists.
@@ -45,7 +46,7 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 
 - Selection capacity is bounded.
 - Snapshots are defensive copies.
-- Reader and Librarian transport IDs deduplicate by translation/book/chapter/verse.
+- Reader and search verses share one deterministic direct selection identity per translation/book/chapter/verse.
 - Selecting updates `aria-pressed`, verse number styling, verse body styling, range boundaries, counters, and navigation badges immediately.
 - A second click removes the selection.
 - Navigating away and back preserves selected styling for the active WebView session.
@@ -116,11 +117,11 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 
 - **Sync now** submits session-authenticated bounded idempotent batches of at
   most 50 contribution events — each request additionally capped at about
-  2 KB, the proven size class of a search request — to the same-origin
-  `POST /api/v1/contributions/events` endpoint, sequentially; the drip obeys
-  the server's `Retry-After` pacing on `429` and halves a batch that dies on
-  the wire, down to single events, so any network path that carries a search
-  carries a synchronization.
+  2 KB — to the same-origin `POST /api/v1/contributions/events` endpoint,
+  sequentially; the drip obeys the server's `Retry-After` pacing on `429`
+  and halves a batch that dies on the wire, down to single events, so any
+  network path that carries an ordinary API request carries a
+  synchronization.
 - Every response returns the complete result set: receipt counts, the full
   detailed contributor status, and the live catalogue revision/checksum, so
   the final batch settles the panel in one round trip. Unavailable catalogue
@@ -173,13 +174,13 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 
 ## Search isolation
 
-- Search and pagination alone use Librarian.
-- Search has independent executor, semaphore, timeout, cache, and circuit behavior.
-- Search failure does not affect reader navigation.
-- Stale responses cannot overwrite current query/filter state.
-- Search output is bounded and normalized before registration in the browser selection store.
-- The requested match mode reaches Librarian unaltered in every writing system.
-- Index construction is bounded separately from a request deadline.
+- The Mini App searches `search.getbible.net/v2` from the browser; Robot serves no search endpoint and holds no search state.
+- Search failure does not affect reader navigation, because the search origin is separate from the Main and Query origins and from Robot.
+- Stale responses cannot overwrite current query/filter state; a changed corpus `sha` restarts pagination from the first page.
+- Search output is bounded and normalized before registration in the browser selection store, with the same direct selection identity as reader verses.
+- The requested filters reach the Search API unaltered in every writing system.
+- The robot's Telegram-native client has its own executor, semaphore, per-request deadline, response bound, and circuit, separate from reference delivery.
+- The robot installs no Scripture engine, downloads no corpus, builds no index, and runs no prewarm.
 
 ## Final Post authority
 
@@ -213,7 +214,7 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - Ruff, strict mypy, and branch coverage pass.
 - Fixed executors and semaphores prevent unbounded queued work.
 - Timeout cancellation does not prematurely release real worker capacity.
-- Session, search, preference, and Post state transitions are serialized at their owning boundary.
+- Session, preference, and Post state transitions are serialized at their owning boundary.
 - Shutdown stops ingress, drains real workers, closes clients, and completes Telegram shutdown.
 
 ## Container and host deployment

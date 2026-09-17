@@ -1070,7 +1070,7 @@ assert_contains "$MINI_APP_VERIFY_LOG" \
 # A same-commit repair is an artifact transaction, not merely a Caddy
 # transaction. Force the candidate restart to fail after every managed file has
 # been refreshed, then require the exact pre-attempt bytes and service state.
-sed -i '/^PREWARM_DEFAULT_TRANSLATION=/d' "$(environment_file_for alpha)"
+sed -i '/^SEARCH_MAX_RESPONSE_BYTES=/d' "$(environment_file_for alpha)"
 printf '# installed manager sentinel\n' >>"$MANAGER_PATH"
 printf '# installed unit sentinel\n' >>"$UNIT_PATH"
 printf '# installed logrotate sentinel\n' >>"$LOGROTATE_PATH"
