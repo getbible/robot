@@ -5,8 +5,8 @@ import { LatestRequestCoordinator } from "../lib/request-coordinator.js";
 
 test("a stale request cannot finalize the current operation", () => {
   const coordinator = new LatestRequestCoordinator();
-  const first = coordinator.begin({ searchId: "FirstSearchToken1" });
-  const second = coordinator.begin({ searchId: "SecondSearchToken" });
+  const first = coordinator.begin({ query: "grace", offset: 25 });
+  const second = coordinator.begin({ query: "grace", offset: 50 });
   let loading = true;
 
   assert.equal(coordinator.isCurrent(first), false);

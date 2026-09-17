@@ -9,17 +9,6 @@ import {
 
 const API_ROOT = "api/v1/";
 const DEFAULT_TIMEOUT_MS = 15_000;
-// A search may have to build a translation's index before it can answer, which
-// the robot budgets in minutes rather than seconds. The page therefore waits on
-// the budget the server announces at session bootstrap, and only falls back to
-// this floor when an older robot announces nothing. Waiting less than the server
-// works is the one thing that cannot be right: it turns a slow answer into a
-// timeout the reader can do nothing about.
-const DEFAULT_SEARCH_TIMEOUT_MS = 150_000;
-const MAX_SEARCH_TIMEOUT_MS = 900_000;
-// Covers the queue wait and the round trip either side of the robot's own
-// deadline, so a server that gives up first can say why.
-const SEARCH_TIMEOUT_GRACE_MS = 10_000;
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
 const CONTRIBUTION_TOKEN_PATTERN = /^gbc_[A-Za-z0-9_-]{43}$/;
 const CONTRIBUTION_EVENTS_MAXIMUM = 50;
@@ -46,7 +35,6 @@ export class MiniAppApi {
   #initData;
   #sessionToken = null;
   #contributionToken = null;
-  #searchTimeoutMs = DEFAULT_SEARCH_TIMEOUT_MS;
   #timeoutMs;
   #cleanupAttempted = false;
   #baseUrl;
@@ -118,7 +106,6 @@ export class MiniAppApi {
       authenticated: false,
     });
     this.#acceptSession(payload);
-    this.#acceptLimits(payload);
     this.#acceptContributionToken(payload?.contributions);
     this.#selections.setMaximum(Number(payload?.basket?.maximum));
     this.#cleanupLaunch();
@@ -138,7 +125,6 @@ export class MiniAppApi {
     this.#sessionToken = sessionToken;
     this.#cleanupAttempted = false;
     const payload = await this.#request("session");
-    this.#acceptLimits(payload);
     this.#acceptContributionToken(payload?.contributions);
     this.#selections.setMaximum(Number(payload?.basket?.maximum));
     this.#cleanupLaunch();
@@ -201,19 +187,16 @@ export class MiniAppApi {
     );
   }
 
-  async search(query, filters) {
-    const payload = await this.#request("search", {
-      method: "POST",
-      body: { query, options: filters },
-      timeoutMs: this.#searchTimeoutMs,
-    });
-    this.#registerPayloadSelections(payload);
-    return payload;
-  }
-
-  async searchPage(searchId, page) {
-    const payload = await this.#request(
-      `search/${encodeURIComponent(searchId)}?${params({ page })}`,
+  /**
+   * One page of full-text search results, read straight from the Search API.
+   *
+   * The results are registered exactly like a chapter's verses so a verse
+   * found by searching can be selected and posted by the same direct
+   * selection id as a verse found by reading.
+   */
+  async search(translation, query, filters, { offset = 0, limit = 25 } = {}) {
+    const payload = await this.#publicRequest(() =>
+      this.#publicApi.search(translation, query, filters, { offset, limit }),
     );
     this.#registerPayloadSelections(payload);
     return payload;
@@ -279,9 +262,9 @@ export class MiniAppApi {
       });
     }
     // Contribution batches ride the exact same session-authenticated,
-    // same-origin request path as search: a small JSON POST with the plain
-    // session bearer plus the contributor token in the body — never a custom
-    // header, never a special body budget.
+    // same-origin request path as every other robot call: a small JSON POST
+    // with the plain session bearer plus the contributor token in the body —
+    // never a custom header, never a special body budget.
     return (async () => {
       const payload = await this.#request("contributions/events", {
         method: "POST",
@@ -385,21 +368,6 @@ export class MiniAppApi {
     }
     this.#sessionToken = payload.session_token;
     this.#cleanupAttempted = false;
-  }
-
-  #acceptLimits(payload) {
-    const seconds = Number(payload?.limits?.search_timeout_seconds);
-    if (!Number.isFinite(seconds) || seconds <= 0) {
-      this.#searchTimeoutMs = DEFAULT_SEARCH_TIMEOUT_MS;
-      return;
-    }
-    this.#searchTimeoutMs = Math.min(
-      MAX_SEARCH_TIMEOUT_MS,
-      Math.max(
-        DEFAULT_TIMEOUT_MS,
-        Math.round(seconds * 1_000) + SEARCH_TIMEOUT_GRACE_MS,
-      ),
-    );
   }
 
   #selectionOperation(operation) {
@@ -590,31 +558,27 @@ function normalizeRetryAfterSeconds(value) {
   return Math.min(3_600, Math.max(0, seconds));
 }
 
+const PUBLIC_ERROR_CODES = Object.freeze({
+  public_api_timeout: "request_timeout",
+  public_api_network_error: "network_error",
+  public_api_not_found: "not_found",
+  public_api_response_too_large: "request_too_large",
+  invalid_public_response: "invalid_response",
+  // The Search API explains its refusals; those codes reach the page as they
+  // are so it can tell a search worth changing from one worth waiting for.
+  search_invalid: "search_invalid",
+  search_rate_limited: "search_rate_limited",
+  search_unavailable: "search_unavailable",
+  translation_not_found: "translation_not_found",
+});
+
 function publicApiError(error) {
-  const code = error.code === "public_api_timeout"
-    ? "request_timeout"
-    : error.code === "public_api_network_error"
-      ? "network_error"
-      : error.code === "public_api_not_found"
-        ? "not_found"
-        : error.code === "public_api_response_too_large"
-          ? "request_too_large"
-          : error.code === "invalid_public_response"
-            ? "invalid_response"
-            : "scripture_temporarily_unavailable";
   return new ApiError(error.message, {
-    code,
+    code: PUBLIC_ERROR_CODES[error.code] ?? "scripture_temporarily_unavailable",
     status: error.status,
     retryable: error.retryable,
+    retryAfter: error.retryAfter ?? null,
   });
-}
-
-function params(values) {
-  const query = new URLSearchParams();
-  for (const [key, value] of Object.entries(values)) {
-    query.set(key, String(value));
-  }
-  return query.toString();
 }
 
 function statusMessage(status) {

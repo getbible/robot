@@ -1,3 +1,5 @@
+import { termHighlights } from "./search-highlight.js";
+
 const TRANSLATION_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const SHA1_PATTERN = /^[0-9a-f]{40}$/;
 const LANGUAGE_TAG_PATTERN = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,7}$/;
@@ -7,6 +9,17 @@ const MAX_BOOKS = 200;
 const MAX_CHAPTERS = 500;
 const MAX_VERSES = 500;
 const MAX_TEXT_LENGTH = 20_000;
+// A full-text page holds at most the API's 100 verses; a reference answer is
+// bounded by the same ceiling the reader applies to a chapter.
+const MAX_SEARCH_ITEMS = 500;
+const MAX_SEARCH_TOTAL = 10_000_000;
+const MAX_SEARCH_OFFSET = 10_000;
+const MAX_SEARCH_LIMIT = 100;
+const MAX_SEARCH_QUERY_LENGTH = 500;
+const MAX_SEARCH_TERMS = 32;
+const MAX_SEARCH_TERM_LENGTH = 100;
+const SEARCH_KINDS = new Set(["search", "reference"]);
+const SEARCH_DIACRITICS = new Set(["fold", "exact"]);
 
 export function normalizeTranslationCode(value) {
   const code = typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -202,6 +215,138 @@ export function normalizeChapterPayload(payload, {
     sha: normalizedSha,
     navigation: { previous: null, next: null },
     items: verses,
+  };
+}
+
+/**
+ * Normalize one Search API v2 envelope into reader-shaped verse descriptors.
+ *
+ * The API answers with `results` grouped by chapter for rendering and a flat
+ * `matches` list that carries the authoritative order, so every match is
+ * resolved back into its chapter by coordinates and emitted in match order.
+ * Each item has exactly the shape a reader verse has, with the same
+ * coordinate-derived selection id, so a search result can be selected, posted,
+ * bookmarked and revisited exactly as a verse read in the chapter can. Any
+ * envelope that does not describe the translation and query that were asked
+ * for is refused outright rather than repaired.
+ */
+export function normalizeSearchPayload(payload, {
+  translation: expectedTranslation,
+  query,
+  diacritics = "fold",
+}) {
+  const translation = normalizeTranslationCode(expectedTranslation);
+  const requestedQuery = boundedText(query, MAX_SEARCH_QUERY_LENGTH);
+  if (requestedQuery === null) {
+    throw new TypeError("Search query is invalid.");
+  }
+  const policy = SEARCH_DIACRITICS.has(diacritics) ? diacritics : "fold";
+  if (
+    !isRecord(payload) ||
+    !isRecord(payload.query) ||
+    !isRecord(payload.results) ||
+    !Array.isArray(payload.matches)
+  ) {
+    throw new TypeError("Search payload is malformed.");
+  }
+  const meta = payload.query;
+  const kind = typeof meta.kind === "string" && SEARCH_KINDS.has(meta.kind)
+    ? meta.kind
+    : null;
+  if (kind === null) {
+    throw new TypeError("Search payload kind is invalid.");
+  }
+  const responseTranslation = isRecord(meta.translation)
+    ? meta.translation.abbreviation
+    : meta.translation;
+  if (
+    typeof responseTranslation !== "string" ||
+    responseTranslation.trim().toLowerCase() !== translation
+  ) {
+    throw new TypeError("Search response translation did not match the request.");
+  }
+  if (payload.matches.length > MAX_SEARCH_ITEMS) {
+    throw new TypeError("Search payload exceeds the supported page size.");
+  }
+  const total = nonNegativeInteger(meta.total, MAX_SEARCH_TOTAL);
+  const returned = nonNegativeInteger(meta.returned, MAX_SEARCH_ITEMS);
+  if (
+    total === null ||
+    returned === null ||
+    returned !== payload.matches.length ||
+    total < returned
+  ) {
+    throw new TypeError("Search payload counts are inconsistent.");
+  }
+
+  let offset = null;
+  let limit = null;
+  let hasMore = false;
+  let sha = null;
+  if (kind === "search") {
+    offset = nonNegativeInteger(meta.offset, MAX_SEARCH_OFFSET);
+    limit = positiveInteger(meta.limit, MAX_SEARCH_LIMIT);
+    if (offset === null || limit === null || typeof meta.has_more !== "boolean") {
+      throw new TypeError("Search payload pagination is invalid.");
+    }
+    hasMore = meta.has_more;
+    const rawSha = typeof meta.sha === "string" ? meta.sha.trim().toLowerCase() : "";
+    sha = SHA1_PATTERN.test(rawSha) ? rawSha : null;
+  }
+
+  const chapters = indexSearchResults(payload.results, translation);
+  const items = [];
+  const seen = new Set();
+  for (const match of payload.matches) {
+    if (!isRecord(match)) {
+      throw new TypeError("Search match is malformed.");
+    }
+    const book = positiveInteger(match.book_nr ?? match.book_number, MAX_BOOKS);
+    const chapter = positiveInteger(match.chapter, 1_000);
+    const verse = positiveInteger(match.verse, 2_000);
+    if (book === null || chapter === null || verse === null) {
+      throw new TypeError("Search match coordinates are invalid.");
+    }
+    const located = chapters.get(`${book}_${chapter}`);
+    const text = located?.verses.get(verse) ?? null;
+    if (!located || text === null) {
+      throw new TypeError("Search match did not resolve to a verse.");
+    }
+    const selectionId = directSelectionId(translation, book, chapter, verse);
+    if (seen.has(selectionId)) {
+      throw new TypeError("Search results contain duplicate verses.");
+    }
+    seen.add(selectionId);
+    const terms = kind === "search" ? normalizeSearchTerms(match.terms) : [];
+    items.push({
+      selection_id: selectionId,
+      translation,
+      reference:
+        boundedText(match.reference, 180) ??
+        `${located.book_name} ${chapter}:${verse}`,
+      book_number: book,
+      book_name: located.book_name,
+      chapter,
+      verse,
+      text,
+      terms,
+      // Reference answers carry no matched terms, so nothing is marked.
+      highlights: terms.length > 0 ? termHighlights(text, terms, policy) : [],
+    });
+  }
+
+  return {
+    kind,
+    translation,
+    query_text: boundedText(meta.text, MAX_SEARCH_QUERY_LENGTH) ?? requestedQuery,
+    total,
+    returned,
+    offset,
+    limit,
+    has_more: hasMore,
+    sha,
+    engine_version: nonNegativeInteger(meta.engine_version, 1_000_000),
+    items,
   };
 }
 
@@ -425,6 +570,90 @@ function visitQueryValue(value, context, results, expectedTranslation, pathKey) 
   }
 }
 
+/**
+ * Index the chapter-grouped `results` object by coordinates.
+ *
+ * Every chapter names its own book and chapter number, so the object key is
+ * only cross-checked, never trusted on its own. A chapter that belongs to a
+ * different translation, or a verse that cannot be read, makes the envelope
+ * unusable rather than being skipped in silence.
+ */
+function indexSearchResults(results, translation) {
+  const chapters = new Map();
+  for (const [key, raw] of Object.entries(results)) {
+    if (!isRecord(raw)) {
+      throw new TypeError("Search results are malformed.");
+    }
+    const abbreviation = raw.abbreviation ?? raw.translation_code;
+    if (
+      typeof abbreviation === "string" &&
+      abbreviation.trim().toLowerCase() !== translation
+    ) {
+      throw new TypeError("Search results belong to another translation.");
+    }
+    const book = positiveInteger(raw.book_nr ?? raw.book_number, MAX_BOOKS);
+    const chapter = positiveInteger(raw.chapter, 1_000);
+    const bookName = boundedText(raw.book_name, 128);
+    if (
+      book === null ||
+      chapter === null ||
+      bookName === null ||
+      !Array.isArray(raw.verses) ||
+      raw.verses.length > MAX_VERSES
+    ) {
+      throw new TypeError("Search results are malformed.");
+    }
+    const keyed = /^([a-z0-9._-]+)_(\d+)_(\d+)$/i.exec(key);
+    if (
+      keyed &&
+      (keyed[1].toLowerCase() !== translation ||
+        Number(keyed[2]) !== book ||
+        Number(keyed[3]) !== chapter)
+    ) {
+      throw new TypeError("Search results are malformed.");
+    }
+    const identity = `${book}_${chapter}`;
+    if (chapters.has(identity)) {
+      throw new TypeError("Search results contain duplicate chapters.");
+    }
+    const verses = new Map();
+    for (const item of raw.verses) {
+      if (!isRecord(item)) {
+        throw new TypeError("Search verse is malformed.");
+      }
+      const verse = positiveInteger(item.verse ?? item.number, 2_000);
+      const text = boundedText(item.text, MAX_TEXT_LENGTH);
+      if (verse === null || text === null || verses.has(verse)) {
+        throw new TypeError("Search verse is malformed.");
+      }
+      verses.set(verse, text);
+    }
+    chapters.set(identity, { book, chapter, book_name: bookName, verses });
+  }
+  return chapters;
+}
+
+function normalizeSearchTerms(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const terms = [];
+  const seen = new Set();
+  for (const item of value) {
+    const term = boundedText(item, MAX_SEARCH_TERM_LENGTH);
+    if (term === null) {
+      continue;
+    }
+    const key = term.toLocaleLowerCase();
+    if (seen.has(key) || terms.length >= MAX_SEARCH_TERMS) {
+      continue;
+    }
+    seen.add(key);
+    terms.push(term);
+  }
+  return terms;
+}
+
 function normalizePossibleTranslation(value, fallback) {
   try {
     return normalizeTranslationCode(value ?? fallback);
@@ -489,6 +718,13 @@ function nearestVerse(available, requested) {
 function positiveInteger(value, maximum) {
   const number = typeof value === "number" ? value : Number(value);
   return Number.isInteger(number) && number >= 1 && number <= maximum
+    ? number
+    : null;
+}
+
+function nonNegativeInteger(value, maximum) {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(number) && number >= 0 && number <= maximum
     ? number
     : null;
 }

@@ -24,6 +24,34 @@ test("keeps executable code and styling outside the document", async () => {
   assert.match(html, /robots" content="noindex, nofollow, noarchive"/);
 });
 
+test("connect-src names exactly the three public GetBible origins", async () => {
+  const html = await readFile(new URL("index.html", root), "utf8");
+  const policy = /http-equiv="Content-Security-Policy"\s+content="([^"]+)"/.exec(html);
+  assert.ok(policy, "CSP meta is present");
+  const directives = new Map(
+    policy[1].split(";").map((directive) => {
+      const [name, ...sources] = directive.trim().split(/\s+/);
+      return [name, sources];
+    }),
+  );
+
+  assert.deepEqual(directives.get("connect-src"), [
+    "'self'",
+    "https://api.getbible.net",
+    "https://query.getbible.net",
+    "https://search.getbible.net",
+  ]);
+  assert.deepEqual(directives.get("default-src"), ["'none'"]);
+  // No other directive may open a second door to any host.
+  for (const [name, sources] of directives) {
+    if (name === "connect-src" || name === "script-src") continue;
+    assert.ok(
+      sources.every((source) => !source.includes("getbible.net")),
+      `${name} must not name a GetBible origin`,
+    );
+  }
+});
+
 test("uses only relative same-origin API paths and no authoritative verse payload", async () => {
   const api = await readFile(new URL("lib/api.js", root), "utf8");
 
@@ -989,10 +1017,11 @@ test("ships parseable OpenAPI JSON at the documented relative root", async () =>
     250,
   );
   assert.equal(contract.components.schemas.Verse.properties.verse.maximum, 2000);
-  assert.equal(contract.components.schemas.Verse.properties.terms.maxItems, 20);
+  // Matched terms belong to the Search API answer, not to Robot's selections.
+  assert.equal(contract.components.schemas.Verse.properties.terms, undefined);
   assert.equal(
-    contract.components.schemas.Verse.properties.terms.items.maxLength,
-    80,
+    contract.components.schemas.Verse.required.includes("terms"),
+    false,
   );
   assert.equal(
     contract.paths["/session"].post.requestBody.content[
@@ -1006,31 +1035,38 @@ test("ships parseable OpenAPI JSON at the documented relative root", async () =>
     ].schema.properties.launch_token.maxLength,
     128,
   );
+  // Search left Robot for the public Search API; nothing about a search
+  // remains in the authenticated contract except the reader's saved defaults.
+  assert.equal(contract.paths["/search"], undefined);
+  assert.equal(contract.paths["/search/{search_id}"], undefined);
+  assert.equal(contract.components.schemas.SearchPage, undefined);
+  assert.equal(contract.components.schemas.SearchFilters, undefined);
+  assert.equal(contract.components.responses.SearchPage, undefined);
+  assert.deepEqual(contract.components.schemas.SearchDefaults.required, [
+    "words",
+    "match",
+    "scope",
+    "case_sensitive",
+    "diacritics",
+    "sort",
+  ]);
   assert.equal(
-    contract.paths["/search/{search_id}"].get.parameters[0].schema.minLength,
-    16,
+    contract.components.schemas.Preferences.properties.search_defaults.$ref,
+    "#/components/schemas/SearchDefaults",
   );
-  assert.equal(
-    contract.paths["/search/{search_id}"].get.parameters[0].schema.maxLength,
-    128,
-  );
+  assert.doesNotMatch(raw, /search_id|search_timeout_seconds/);
   const sessionToken =
     contract.components.schemas.NewSession.allOf[1].properties.session_token;
   assert.equal(sessionToken.minLength, 16);
   assert.equal(sessionToken.maxLength, 128);
   assert.equal(sessionToken.pattern, "^[A-Za-z0-9_-]+$");
 
-  // The page waits on a budget the robot states, rather than guessing one and
-  // reporting a timeout for a search the robot was still running.
-  assert.ok(
-    contract.components.schemas.SessionState.required.includes("limits"),
-  );
+  // The session declares no search budget any more: the browser searches the
+  // public Search API on its own bounded deadlines.
   assert.equal(
-    contract.components.schemas.SessionState.properties.limits.$ref,
-    "#/components/schemas/Limits",
+    contract.components.schemas.SessionState.required.includes("limits"),
+    false,
   );
-  const searchBudget =
-    contract.components.schemas.Limits.properties.search_timeout_seconds;
-  assert.equal(searchBudget.minimum, 1);
-  assert.equal(searchBudget.maximum, 900);
+  assert.equal(contract.components.schemas.SessionState.properties.limits, undefined);
+  assert.equal(contract.components.schemas.Limits, undefined);
 });

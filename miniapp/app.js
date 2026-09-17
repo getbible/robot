@@ -18,8 +18,6 @@ import {
   normalizeContributionStatus,
   normalizeFilters,
   normalizeScripture,
-  normalizeSearch,
-  normalizeSearchPage,
   normalizeSession,
   normalizeReaderLocation,
   planTranslationChange,
@@ -130,6 +128,10 @@ let lastReadRevision = 0;
 let historyExcerptController = null;
 let bookmarkExcerptController = null;
 const searchPageRequests = new LatestRequestCoordinator();
+// The Search API allows up to 100 verses per page and 10 000 skipped matches.
+// A phone renders a quarter page at a time; the offset ceiling is the API's.
+const SEARCH_PAGE_SIZE = 25;
+const SEARCH_MAX_OFFSET = 10_000;
 const MAX_BOOK_CACHE_ENTRIES = 8;
 const MAX_CHAPTER_CACHE_ENTRIES = 24;
 const EXCERPT_HYDRATION_BATCH_SIZE =
@@ -171,18 +173,7 @@ const state = {
   bookRequests: new Map(),
   chapterCache: new Map(),
   chapterRequests: new Map(),
-  search: {
-    query: "",
-    status: "idle",
-    error: null,
-    searchId: null,
-    page: 0,
-    total: 0,
-    hasMore: false,
-    results: [],
-    loadingMore: false,
-    translation: null,
-  },
+  search: idleSearchState(),
   bible: {
     books: [],
     chapters: [],
@@ -235,11 +226,38 @@ const ERROR_MESSAGE_KEYS = Object.freeze({
   request_too_large: "error.request_too_large",
   scripture_request_failed: "common.request_failed",
   scripture_temporarily_unavailable: "error.scripture_unavailable",
-  search_not_found: "error.search_expired",
+  search_invalid: "error.search_invalid",
+  search_rate_limited: "error.rate_limited",
+  search_unavailable: "error.search_unavailable",
   session_not_ready: "error.session_invalid",
+  translation_not_found: "error.translation_not_found",
   translations_unavailable: "gate.translations_unavailable",
   unauthorized: "error.session_invalid",
 });
+
+/**
+ * The search surface with nothing asked. `diacritics` records the folding
+ * policy the query ran under so later pages mark verses the same way, and
+ * `sha` records the translation content the first page came from so a
+ * changed translation restarts the search rather than mixing pages.
+ */
+function idleSearchState() {
+  return {
+    query: "",
+    status: "idle",
+    error: null,
+    translation: null,
+    diacritics: DEFAULT_FILTERS.diacritics,
+    kind: null,
+    total: 0,
+    returned: 0,
+    offset: 0,
+    hasMore: false,
+    sha: null,
+    results: [],
+    loadingMore: false,
+  };
+}
 
 const elements = mapElements({
   boot: "boot-screen",
@@ -3157,10 +3175,12 @@ function resetBibleForTranslationChange(loading) {
 }
 
 function invalidateSearchForTranslationChange() {
-  state.search.searchId = null;
-  state.search.page = 0;
+  state.search.kind = null;
   state.search.total = 0;
+  state.search.returned = 0;
+  state.search.offset = 0;
   state.search.hasMore = false;
+  state.search.sha = null;
   state.search.results = [];
   state.search.loadingMore = false;
   state.search.translation = null;
@@ -3201,28 +3221,21 @@ async function runSearch(rawQuery) {
   );
   bridge.dismissKeyboard();
   state.search = {
+    ...idleSearchState(),
     query,
     status: "loading",
-    error: null,
-    searchId: null,
-    page: 0,
-    total: 0,
-    hasMore: false,
-    results: [],
-    loadingMore: false,
     translation,
+    // Highlighting reads the verse the way the search read it, so later
+    // pages need the same diacritics policy the query ran under.
     diacritics: filters.diacritics,
   };
   elements.searchQuery.value = query;
   renderSearch();
   try {
-    const result = normalizeSearch(
-      await api.search(query, filters),
-      translation,
-      // Highlighting reads the verse the way the search read it, so it needs
-      // the same diacritics policy the query ran under.
-      filters.diacritics,
-    );
+    const result = await api.search(translation, query, filters, {
+      offset: 0,
+      limit: SEARCH_PAGE_SIZE,
+    });
     if (
       requestId !== searchRequestId ||
       state.translation !== translation
@@ -3231,19 +3244,20 @@ async function runSearch(rawQuery) {
     }
     state.search = {
       ...state.search,
-      status: result.results.length === 0 ? "empty" : "ready",
-      searchId: result.search_id,
-      page: result.page,
-      total: result.total,
-      hasMore: result.has_more,
-      results: result.results,
+      status: result.items.length === 0 ? "empty" : "ready",
       translation: result.translation,
+      kind: result.kind,
+      total: result.total,
+      returned: result.returned,
+      offset: result.offset ?? 0,
+      hasMore: canLoadMoreSearchResults(result, result.items.length),
+      sha: result.sha,
+      results: result.items,
     };
     announce(i18n.plural("search.found", result.total));
   } catch (error) {
-    if (handleSessionError(error)) {
-      return;
-    }
+    // A search never carries the robot session, so a refusal here is about
+    // the search, not about access; it is shown, not treated as expiry.
     if (requestId !== searchRequestId) {
       return;
     }
@@ -3253,51 +3267,89 @@ async function runSearch(rawQuery) {
   renderSearch();
 }
 
+/**
+ * Whether another page can follow this one. Only a full-text answer pages,
+ * an empty page cannot advance the offset, and the API stops at 10 000.
+ */
+function canLoadMoreSearchResults(result, loaded) {
+  return (
+    result.kind === "search" &&
+    result.has_more === true &&
+    result.items.length > 0 &&
+    loaded <= SEARCH_MAX_OFFSET
+  );
+}
+
 async function loadNextSearchPage() {
   if (
     state.search.loadingMore ||
     !state.search.hasMore ||
-    !state.search.searchId
+    state.search.kind !== "search" ||
+    state.search.status !== "ready"
   ) {
     return;
   }
-  const searchId = state.search.searchId;
+  const query = state.search.query;
   const translation = state.search.translation;
-  const request = searchPageRequests.begin({ searchId, translation });
+  const sha = state.search.sha;
+  // The next page starts where the verses on screen end, so a page that was
+  // deduplicated on arrival is never counted as ground already covered.
+  const offset = state.search.results.length;
+  if (offset > SEARCH_MAX_OFFSET) {
+    state.search.hasMore = false;
+    renderSearch();
+    return;
+  }
+  const filters = normalizeFilters(
+    { ...state.filters, translation, diacritics: state.search.diacritics },
+    translation,
+  );
+  const request = searchPageRequests.begin({ query, translation, offset });
   state.search.loadingMore = true;
   elements.loadMore.disabled = true;
   elements.loadMore.textContent = i18n.t("common.loading");
   try {
-    const result = normalizeSearchPage(
-      await api.searchPage(searchId, state.search.page + 1),
-      searchId,
-      translation,
-      state.search.diacritics ?? state.filters.diacritics,
-    );
+    const result = await api.search(translation, query, filters, {
+      offset,
+      limit: SEARCH_PAGE_SIZE,
+    });
     if (
       !searchPageRequests.isCurrent(request) ||
-      state.search.searchId !== searchId ||
+      state.search.query !== query ||
       state.translation !== translation
     ) {
       return;
     }
-    state.search.page = result.page;
-    state.search.total = result.total;
-    state.search.hasMore = result.has_more;
-    state.search.results = uniqueVerses(state.search.results, result.results);
-    announce(i18n.plural("search.more_loaded", result.results.length));
-  } catch (error) {
-    if (handleSessionError(error)) {
+    if (
+      result.kind !== "search" ||
+      (sha !== null && result.sha !== sha)
+    ) {
+      // The translation's content changed underneath the result set, so its
+      // pages no longer belong together. Start again from the first page
+      // rather than stitching two editions into one list.
+      toast(i18n.t("search.refreshed"));
+      announce(i18n.t("search.refreshed"));
+      void runSearch(query);
       return;
     }
+    state.search.total = result.total;
+    state.search.returned = result.returned;
+    state.search.offset = result.offset ?? offset;
+    state.search.results = uniqueVerses(state.search.results, result.items);
+    state.search.hasMore = canLoadMoreSearchResults(
+      result,
+      state.search.results.length,
+    );
+    announce(i18n.plural("search.more_loaded", result.items.length));
+  } catch (error) {
     if (!searchPageRequests.isCurrent(request)) {
       return;
     }
-    toast(safeError(error).message);
+    toast(searchErrorMessage(safeError(error)));
   } finally {
     searchPageRequests.complete(request, () => {
       if (
-        state.search.searchId === searchId &&
+        state.search.query === query &&
         state.translation === translation
       ) {
         state.search.loadingMore = false;
@@ -3307,21 +3359,22 @@ async function loadNextSearchPage() {
   }
 }
 
+/**
+ * The reader-facing text for a failed search: the localized reason, plus
+ * the wait the Search API asked for when it named one.
+ */
+function searchErrorMessage(error) {
+  const seconds = Math.ceil(Number(error.retryAfter));
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return error.message;
+  }
+  return `${error.message} ${i18n.t("search.retry_after_hint", { seconds })}`;
+}
+
 function clearSearch() {
   searchRequestId += 1;
   searchPageRequests.invalidate();
-  state.search = {
-    query: "",
-    status: "idle",
-    error: null,
-    searchId: null,
-    page: 0,
-    total: 0,
-    hasMore: false,
-    results: [],
-    loadingMore: false,
-    translation: null,
-  };
+  state.search = idleSearchState();
   elements.searchQuery.value = "";
   renderSearch();
   elements.searchQuery.focus();
@@ -3349,7 +3402,7 @@ function renderSearch() {
     renderState(elements.searchState, {
       icon: "!",
       title: i18n.t("search.failed"),
-      message: search.error.message,
+      message: searchErrorMessage(search.error),
       action: search.error.retryable ? i18n.t("common.try_again") : null,
       onAction: search.error.retryable
         ? () => void runSearch(search.query)
@@ -3359,9 +3412,12 @@ function renderSearch() {
   }
 
   elements.searchSummaryTitle.textContent = `“${search.query}”`;
-  elements.searchSummaryMeta.textContent =
-    `${formatVerseCount(search.total)} · ` +
-    translationName(search.translation ?? state.translation);
+  // The total is the API's exact count of matching verses, not a page size.
+  elements.searchSummaryMeta.textContent = [
+    ...(search.kind === "reference" ? [i18n.t("search.reference_result")] : []),
+    formatVerseCount(search.total),
+    translationName(search.translation ?? state.translation),
+  ].join(" · ");
   if (search.status === "empty") {
     renderState(elements.searchState, {
       icon: "⌕",
@@ -3377,7 +3433,8 @@ function renderSearch() {
   for (const verse of search.results) {
     elements.searchResults.append(createVerseCard(verse, selected));
   }
-  elements.loadMore.hidden = !search.hasMore;
+  // A reference answer is complete as delivered; only full-text pages.
+  elements.loadMore.hidden = search.kind !== "search" || !search.hasMore;
   elements.loadMore.disabled = search.loadingMore;
   elements.loadMore.textContent = search.loadingMore
     ? i18n.t("common.loading")
@@ -7327,11 +7384,13 @@ function safeError(error) {
     return {
       message: localizedErrorMessage(error),
       retryable: error.retryable,
+      retryAfter: error.retryAfter ?? null,
     };
   }
   return {
     message: i18n.t("common.request_failed"),
     retryable: true,
+    retryAfter: null,
   };
 }
 

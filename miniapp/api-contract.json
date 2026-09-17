@@ -375,79 +375,6 @@
         }
       }
     },
-    "/search": {
-      "post": {
-        "summary": "Start a bounded Scripture search",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["query", "options"],
-                "properties": {
-                  "query": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 240
-                  },
-                  "options": {
-                    "$ref": "#/components/schemas/SearchFilters"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/SearchPage"
-          },
-          "422": {
-            "$ref": "#/components/responses/InvalidRequest"
-          },
-          "429": {
-            "$ref": "#/components/responses/RateLimited"
-          }
-        }
-      }
-    },
-    "/search/{search_id}": {
-      "get": {
-        "summary": "Read a page from an authenticated search result set",
-        "parameters": [
-          {
-            "name": "search_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 16,
-              "maxLength": 128,
-              "pattern": "^[A-Za-z0-9_-]+$"
-            }
-          },
-          {
-            "name": "page",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "minimum": 0
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/SearchPage"
-          },
-          "404": {
-            "$ref": "#/components/responses/InvalidRequest"
-          }
-        }
-      }
-    },
     "/basket": {
       "get": {
         "summary": "Read the server-held selection basket",
@@ -940,16 +867,6 @@
           }
         }
       },
-      "SearchPage": {
-        "description": "Bounded search result page",
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/SearchPage"
-            }
-          }
-        }
-      },
       "Unauthorized": {
         "description": "Telegram launch data or bearer session is invalid or expired",
         "content": {
@@ -1158,8 +1075,7 @@
           "book_name",
           "chapter",
           "verse",
-          "text",
-          "terms"
+          "text"
         ],
         "properties": {
           "selection_id": {
@@ -1198,15 +1114,6 @@
             "minLength": 1,
             "maxLength": 4096,
             "description": "Display text is additionally limited to 4096 UTF-8 bytes."
-          },
-          "terms": {
-            "type": "array",
-            "maxItems": 20,
-            "items": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 80
-            }
           }
         }
       },
@@ -1231,77 +1138,6 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 200
-          }
-        }
-      },
-      "SearchFilters": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "translation",
-          "words",
-          "match",
-          "scope",
-          "case_sensitive",
-          "diacritics",
-          "sort",
-          "books",
-          "exclude",
-          "proximity"
-        ],
-        "properties": {
-          "translation": {
-            "$ref": "#/components/schemas/TranslationCode"
-          },
-          "words": {
-            "type": "string",
-            "enum": ["all", "any", "phrase"]
-          },
-          "match": {
-            "type": "string",
-            "enum": ["whole_word", "substring"]
-          },
-          "scope": {
-            "type": "string",
-            "enum": ["bible", "old_testament", "new_testament", "deuterocanon"]
-          },
-          "case_sensitive": {
-            "type": "boolean"
-          },
-          "diacritics": {
-            "type": "string",
-            "enum": ["fold", "exact"],
-            "default": "fold",
-            "description": "Librarian's diacritics policy, passed through unaltered. \"fold\" removes accents, vowel pointing and precomposed letters so unaccented Greek, unpointed Hebrew and unvowelled Arabic reach the text; \"exact\" distinguishes pointed from unpointed."
-          },
-          "sort": {
-            "type": "string",
-            "enum": ["canonical", "relevance"]
-          },
-          "books": {
-            "type": "array",
-            "maxItems": 200,
-            "uniqueItems": true,
-            "items": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 200
-            }
-          },
-          "exclude": {
-            "type": "array",
-            "maxItems": 20,
-            "uniqueItems": true,
-            "items": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 80
-            }
-          },
-          "proximity": {
-            "type": ["integer", "null"],
-            "minimum": 0,
-            "maximum": 100
           }
         }
       },
@@ -2122,7 +1958,6 @@
           "entrypoint",
           "translations",
           "basket",
-          "limits",
           "contributions"
         ],
         "properties": {
@@ -2153,25 +1988,8 @@
           "basket": {
             "$ref": "#/components/schemas/Basket"
           },
-          "limits": {
-            "$ref": "#/components/schemas/Limits"
-          },
           "contributions": {
             "$ref": "#/components/schemas/ContributionStatus"
-          }
-        }
-      },
-      "Limits": {
-        "type": "object",
-        "additionalProperties": false,
-        "description": "Server-declared budgets the page must honour. The browser cannot infer how long the robot will work on a request, and abandoning one early reports a timeout for work that was still in progress.",
-        "required": ["search_timeout_seconds"],
-        "properties": {
-          "search_timeout_seconds": {
-            "type": "number",
-            "description": "Longest the robot will spend on one search, including the one-off index build the first search of a translation triggers.",
-            "minimum": 1,
-            "maximum": 900
           }
         }
       },
@@ -2199,65 +2017,6 @@
             }
           }
         ]
-      },
-      "SearchPage": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "search_id",
-          "query",
-          "translation",
-          "total",
-          "available",
-          "truncated",
-          "page",
-          "page_count",
-          "items"
-        ],
-        "properties": {
-          "search_id": {
-            "type": "string",
-            "minLength": 16,
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9_-]+$"
-          },
-          "page": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "page_count": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "query": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 240
-          },
-          "translation": {
-            "$ref": "#/components/schemas/TranslationCode"
-          },
-          "total": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 1000000
-          },
-          "available": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 1000000
-          },
-          "truncated": {
-            "type": "boolean"
-          },
-          "items": {
-            "type": "array",
-            "maxItems": 30,
-            "items": {
-              "$ref": "#/components/schemas/Verse"
-            }
-          }
-        }
       },
       "ErrorEnvelope": {
         "type": "object",

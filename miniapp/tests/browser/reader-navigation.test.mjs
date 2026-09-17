@@ -13,6 +13,8 @@ const miniappRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const corsHeaders = { "access-control-allow-origin": "*" };
 const mainApiPattern = /^https:\/\/api\.getbible\.net\/v2\/.+/;
 const queryApiPattern = /^https:\/\/query\.getbible\.net\/v2\/.+/;
+const searchApiPattern = /^https:\/\/search\.getbible\.net\/v2\/.+/;
+const searchSha = "5".repeat(40);
 const bookmarkScope = createHash("sha256")
   .update("getbible.miniapp.bookmarks.v1\u000042", "utf8")
   .digest("hex");
@@ -79,6 +81,67 @@ function chapterPayload(translation, book, chapter) {
     verses: Array.from({ length: 40 }, (_, index) => ({
       verse: index + 1,
       text: `${label} ${bookName} ${chapter} text ${index + 1}`,
+    })),
+  };
+}
+
+/**
+ * One Search API v2 page for the word "text", which every stub verse of John 3
+ * contains: 40 matching verses served in the pages the client asks for.
+ */
+function searchPayload(translation, { offset, limit }) {
+  const chapter = chapterPayload(translation, 43, 3);
+  const total = chapter.verses.length;
+  const selected = chapter.verses.slice(offset, offset + limit);
+  return {
+    query: {
+      text: "text",
+      kind: "search",
+      translation: {
+        translation: translation.toUpperCase(),
+        abbreviation: translation,
+        lang: "en",
+        language: "English",
+        direction: "LTR",
+        encoding: "UTF-8",
+      },
+      engine_version: 5,
+      total,
+      returned: selected.length,
+      sha: searchSha,
+      offset,
+      limit,
+      has_more: offset + selected.length < total,
+    },
+    results: {
+      [`${translation}_43_3`]: {
+        translation: translation.toUpperCase(),
+        abbreviation: translation,
+        lang: "en",
+        language: "English",
+        direction: "LTR",
+        encoding: "UTF-8",
+        book_nr: 43,
+        book_name: "John",
+        chapter: 3,
+        name: "John 3",
+        ref: selected.map((verse) => `John 3:${verse.verse}`),
+        verses: selected.map((verse) => ({
+          chapter: 3,
+          verse: verse.verse,
+          name: `John 3:${verse.verse}`,
+          text: verse.text,
+        })),
+      },
+    },
+    matches: selected.map((verse) => ({
+      reference: `John 3:${verse.verse}`,
+      book_nr: 43,
+      chapter: 3,
+      verse: verse.verse,
+      score: 1,
+      occurrences: 1,
+      terms: ["text"],
     })),
   };
 }
@@ -433,6 +496,28 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   await page.route(queryApiPattern, (route) => {
     publicRequests.push(new URL(route.request().url()).pathname);
     return fulfillJson(route, { error: "unexpected query request" }, 400, true);
+  });
+
+  const searchRequests = [];
+  await page.route(searchApiPattern, (route) => {
+    const url = new URL(route.request().url());
+    searchRequests.push(url);
+    const translation = url.pathname.replace(/^\/v2\//, "");
+    assert.equal(route.request().headers().authorization, undefined);
+    if (!/^(?:kjv|aov)$/.test(translation) || url.searchParams.get("q") !== "text") {
+      return fulfillJson(route, {
+        type: "about:blank",
+        title: "Not Found",
+        status: 404,
+        code: "translation_not_found",
+        detail: "unexpected search",
+        instance: url.pathname,
+      }, 404, true);
+    }
+    return fulfillJson(route, searchPayload(translation, {
+      offset: Number(url.searchParams.get("offset")),
+      limit: Number(url.searchParams.get("limit")),
+    }), 200, true);
   });
 
   let preferences = {
@@ -1566,6 +1651,80 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   );
   assert.equal(await page.locator("#clear-reading-history").isHidden(), true);
   assert.equal(await page.locator("#reading-history-empty").isVisible(), true);
+  await page.locator("#empty-history-browse").click();
+  await page.waitForFunction(() => (
+    document.querySelector("#app")?.dataset.activeRoute === "bible" &&
+    document.activeElement?.dataset.route === "bible"
+  ));
+
+  // Full-text search reaches the public Search API directly under the page's
+  // own CSP, pages by offset, and its results select exactly like read verses.
+  await page.locator('[data-route="search"]').click();
+  await page.waitForFunction(() => (
+    document.querySelector("#app")?.dataset.activeRoute === "search"
+  ));
+  await page.locator("#search-query").fill("text");
+  await page.locator("#search-query").press("Enter");
+  await page.waitForFunction(() => (
+    document.querySelectorAll("#search-results .verse-result").length === 25
+  ));
+  assert.equal(searchRequests.length, 1);
+  assert.equal(searchRequests[0].origin, "https://search.getbible.net");
+  assert.equal(searchRequests[0].searchParams.get("q"), "text");
+  assert.equal(searchRequests[0].searchParams.get("limit"), "25");
+  assert.equal(searchRequests[0].searchParams.get("offset"), "0");
+  assert.equal(searchRequests[0].searchParams.get("diacritics"), "exact");
+  const searchedTranslation = searchRequests[0].pathname.replace(/^\/v2\//, "");
+  // The exact total, in whichever interface language the page is running.
+  assert.match(await page.locator("#search-summary-meta").innerText(), /^40 verse/);
+  assert.equal(
+    await page.locator("#search-results .verse-result:first-child mark").innerText(),
+    "text",
+  );
+  assert.equal(await page.locator("#load-more").isVisible(), true);
+  await page.locator("#load-more").click();
+  await page.waitForFunction(() => (
+    document.querySelectorAll("#search-results .verse-result").length === 40
+  ));
+  assert.equal(searchRequests.length, 2);
+  assert.equal(searchRequests[1].searchParams.get("offset"), "25");
+  assert.equal(searchRequests[1].pathname, searchRequests[0].pathname);
+  assert.equal(await page.locator("#load-more").isHidden(), true);
+  const lastSearchCard = page.locator("#search-results .verse-result:last-child .verse-card");
+  assert.equal(
+    await lastSearchCard.getAttribute("data-selection-id"),
+    `gbd_${searchedTranslation}_043_0003_0040`,
+  );
+  const robotRequestsBeforeSelect = robotRequests.length;
+  await lastSearchCard.click();
+  await page.waitForFunction(() => (
+    document.querySelector("#search-results .verse-result:last-child .verse-card")
+      ?.getAttribute("aria-pressed") === "true"
+  ));
+  assert.equal(robotRequests.length, robotRequestsBeforeSelect);
+  await lastSearchCard.click();
+  await page.waitForFunction(() => (
+    document.querySelector("#search-results .verse-result:last-child .verse-card")
+      ?.getAttribute("aria-pressed") === "false"
+  ));
+  await page.locator("#clear-search").click();
+  await page.waitForFunction(() => (
+    document.querySelectorAll("#search-results .verse-result").length === 0 &&
+    document.querySelector("#search-summary")?.hidden === true
+  ));
+  assert.equal(robotRequests.some((path) => path.startsWith("search")), false);
+  // Selecting a search result is a reading-history event like selecting in
+  // the reader, so the history emptied above now holds exactly that verse.
+  await page.locator("#bible-history").click();
+  await page.waitForFunction(() => (
+    document.querySelectorAll(".history-item").length === 1
+  ));
+  assert.match(await page.locator(".history-item").first().innerText(), /John 3:40/);
+  await page.locator("#clear-reading-history").click();
+  await page.waitForFunction(() => (
+    document.querySelectorAll(".history-item").length === 0 &&
+    !document.querySelector("#reading-history-empty")?.hidden
+  ));
   await page.locator("#empty-history-browse").click();
   await page.waitForFunction(() => (
     document.querySelector("#app")?.dataset.activeRoute === "bible" &&

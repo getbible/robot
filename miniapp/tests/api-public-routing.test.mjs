@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { MiniAppApi } from "../lib/api.js";
+import { GetBibleApi } from "../lib/getbible-api.js";
+import { GetBibleTransport } from "../lib/getbible-transport.js";
+import {
+  BrowserPublicCache,
+  MemoryPublicStore,
+} from "../lib/public-cache.js";
 
 const SESSION = {
   session_token: "abcdefghijklmnop",
@@ -172,9 +178,9 @@ test("display-only Scripture previews never become selectable authority", async 
   );
 });
 
-test("reader and Librarian verses use the same local basket contract", async () => {
+test("reader and search verses use the same local basket contract", async () => {
   const searchVerse = {
-    selection_id: "OpaqueSearchSelectionToken123",
+    selection_id: "gbd_kjv_043_0003_0017",
     translation: "kjv",
     reference: "John 3:17",
     book_number: 43,
@@ -183,8 +189,10 @@ test("reader and Librarian verses use the same local basket contract", async () 
     verse: 17,
     text: "For God sent not his Son into the world to condemn the world.",
     terms: ["world"],
+    highlights: [{ start: 34, end: 39 }, { start: 55, end: 60 }],
   };
   const robotRequests = [];
+  const searches = [];
   const api = new MiniAppApi("signed-init-data", {
     baseUrl: "https://robot.example/getbible/",
     publicApi: {
@@ -193,6 +201,22 @@ test("reader and Librarian verses use the same local basket contract", async () 
       },
       async chapter() {
         return { items: [READER_VERSE] };
+      },
+      async search(translation, query, filters, page) {
+        searches.push([translation, query, filters, page]);
+        return {
+          kind: "search",
+          translation,
+          query_text: query,
+          total: 1,
+          returned: 1,
+          offset: 0,
+          limit: 25,
+          has_more: false,
+          sha: null,
+          engine_version: 5,
+          items: [searchVerse],
+        };
       },
     },
     fetchImplementation: async (url, options) => {
@@ -204,26 +228,121 @@ test("reader and Librarian verses use the same local basket contract", async () 
       if (request.url.endsWith("/api/v1/cleanup")) {
         return new Response(null, { status: 204 });
       }
-      if (request.url.endsWith("/api/v1/search")) {
-        return json({ items: [searchVerse], total: 1, page: 0, has_more: false });
-      }
       return json({ error: { code: "unexpected_robot_request" } }, 500);
     },
   });
 
   await api.createSession("LaunchToken123456");
   await api.scripture("kjv", 43, 3, 16);
-  await api.search("world", { translation: "kjv" });
+  const page = await api.search("kjv", "world", { words: "all" }, { offset: 0, limit: 25 });
   await api.addBasketItem(READER_VERSE.selection_id);
   await api.addBasketItem(searchVerse.selection_id);
 
+  assert.deepEqual(searches, [["kjv", "world", { words: "all" }, { offset: 0, limit: 25 }]]);
+  assert.deepEqual(page.items[0].highlights, searchVerse.highlights);
   const basket = await api.basket();
   assert.deepEqual(
     basket.items.map((item) => item.reference),
     ["John 3:16", "John 3:17"],
   );
+  assert.deepEqual(basket.items[1].highlights, searchVerse.highlights);
   assert.equal(
-    robotRequests.some((request) => request.url.endsWith("/api/v1/basket/items")),
+    robotRequests.some((request) => /\/api\/v1\/(?:basket|search)/.test(request.url)),
     false,
   );
+});
+
+test("searches go straight to the search origin and never through Robot", async () => {
+  const robotRequests = [];
+  const publicRequests = [];
+  const envelope = {
+    query: {
+      text: "world",
+      kind: "search",
+      translation: { abbreviation: "kjv" },
+      engine_version: 5,
+      total: 1,
+      returned: 1,
+      offset: 0,
+      limit: 25,
+      has_more: false,
+      sha: null,
+    },
+    results: {
+      kjv_43_3: {
+        abbreviation: "kjv",
+        book_nr: 43,
+        book_name: "John",
+        chapter: 3,
+        name: "John 3",
+        verses: [{ chapter: 3, verse: 16, name: "John 3:16", text: READER_VERSE.text }],
+      },
+    },
+    matches: [{ reference: "John 3:16", book_nr: 43, chapter: 3, verse: 16, terms: ["world"] }],
+  };
+  const transport = new GetBibleTransport({
+    fetchImplementation: async (url, options) => {
+      publicRequests.push({ url: String(url), options });
+      return json(envelope);
+    },
+  });
+  const api = client({
+    onRobotRequest: (request) => {
+      robotRequests.push(request.url);
+      assert.doesNotMatch(request.url, /\/api\/v1\/search/);
+    },
+    publicApi: new GetBibleApi({
+      transport,
+      cache: new BrowserPublicCache({ store: new MemoryPublicStore(), now: () => 1 }),
+      now: () => 1,
+    }),
+  });
+  await api.createSession("LaunchToken123456");
+
+  const page = await api.search("kjv", "world", {});
+
+  assert.equal(publicRequests.length, 1);
+  assert.equal(
+    new URL(publicRequests[0].url).origin,
+    "https://search.getbible.net",
+  );
+  assert.match(publicRequests[0].url, /^https:\/\/search\.getbible\.net\/v2\/kjv\?q=world&/);
+  assert.equal(publicRequests[0].options.headers.Authorization, undefined);
+  assert.equal(publicRequests[0].options.credentials, "omit");
+  assert.equal(page.items[0].selection_id, "gbd_kjv_043_0003_0016");
+  assert.deepEqual(page.items[0].highlights, [{ start: 21, end: 26 }]);
+  assert.ok(robotRequests.every((url) => !/\/search(?:\?|\/|$)/.test(url)));
+  const selected = await api.addBasketItem("gbd_kjv_043_0003_0016");
+  assert.equal(selected.items[0].reference, "John 3:16");
+});
+
+test("only the three public GetBible origins are accepted as fixed roots", () => {
+  const options = { fetchImplementation: async () => json({}) };
+  assert.doesNotThrow(() => new GetBibleTransport({
+    ...options,
+    apiRoot: "https://api.getbible.net/v2/",
+    queryRoot: "https://query.getbible.net/v2/",
+    searchRoot: "https://search.getbible.net/v2/",
+  }));
+  for (const searchRoot of [
+    "http://search.getbible.net/v2/",
+    "https://search.getbible.net/v2",
+    "https://search.getbible.net/v2/?q=x",
+    "https://user:pass@search.getbible.net/v2/",
+    "https://search.getbible.net/v2/#top",
+    "not a url",
+  ]) {
+    assert.throws(
+      () => new GetBibleTransport({ ...options, searchRoot }),
+      TypeError,
+      searchRoot,
+    );
+  }
+  if (process.env.NODE_ENV !== "test") {
+    // The host pin is lifted only for a test runtime that names itself.
+    assert.throws(
+      () => new GetBibleTransport({ ...options, searchRoot: "https://search.example.net/v2/" }),
+      /allowlisted/,
+    );
+  }
 });

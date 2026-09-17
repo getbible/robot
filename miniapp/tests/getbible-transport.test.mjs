@@ -114,6 +114,218 @@ test("query references are encoded on the fixed query origin", async () => {
   );
 });
 
+test("searches are cacheable public GETs on the fixed search origin", async () => {
+  const requests = [];
+  const transport = new GetBibleTransport({
+    fetchImplementation: async (url, options) => {
+      requests.push({ url: String(url), options });
+      return response(JSON.stringify({ query: {}, results: {}, matches: [] }));
+    },
+  });
+
+  const parameters = new URLSearchParams({ q: "faith hope", limit: "25", offset: "0" });
+  const payload = await transport.search("kjv", parameters);
+
+  assert.deepEqual(payload, { query: {}, results: {}, matches: [] });
+  assert.equal(requests.length, 1);
+  assert.equal(
+    requests[0].url,
+    "https://search.getbible.net/v2/kjv?q=faith+hope&limit=25&offset=0",
+  );
+  const { options } = requests[0];
+  assert.equal(options.method, "GET");
+  assert.equal(options.headers.Accept, "application/json");
+  assert.equal(options.headers.Authorization, undefined);
+  assert.equal(options.credentials, "omit");
+  // A search is a public read the API marks cacheable; the browser's cache
+  // may honour that, unlike the checksum-verified catalogue reads above.
+  assert.equal(options.cache, "default");
+  assert.equal(options.redirect, "error");
+  assert.equal(options.referrerPolicy, "no-referrer");
+});
+
+test("search requests refuse anything that is not a clean query string", async () => {
+  const transport = new GetBibleTransport({
+    fetchImplementation: async () => response("{}"),
+  });
+
+  for (const [translation, parameters] of [
+    ["../kjv", new URLSearchParams({ q: "x" })],
+    ["kjv/John 3:16", new URLSearchParams({ q: "x" })],
+    ["KJV", new URLSearchParams({ q: "x" })],
+    ["kjv", ""],
+    ["kjv", new URLSearchParams()],
+    ["kjv", "q=x#fragment"],
+    ["kjv", "q=x?again"],
+    ["kjv", "q=faith hope"],
+    ["kjv", `q=${"x".repeat(9_000)}`],
+    ["kjv", { q: "x" }],
+  ]) {
+    await assert.rejects(
+      transport.search(translation, parameters),
+      TypeError,
+      `${translation} ${String(parameters).slice(0, 40)}`,
+    );
+  }
+});
+
+test("a refused search is explained by its problem document", async () => {
+  const cases = [
+    [400, "missing_search", "search_invalid", false],
+    [400, "request_limit", "search_invalid", false],
+    [401, "unauthorized", "search_unavailable", false],
+    [404, "translation_not_found", "translation_not_found", false],
+    [404, "unknown_version", "search_unavailable", false],
+    [405, "method_not_allowed", "search_unavailable", false],
+    [429, "rate_limited", "search_rate_limited", true],
+    [503, "busy", "search_unavailable", true],
+    [503, "repository_unavailable", "search_unavailable", true],
+    [503, "readiness_failed", "search_unavailable", true],
+    [500, "internal", "search_unavailable", true],
+  ];
+  for (const [status, code, expectedCode, retryable] of cases) {
+    const transport = new GetBibleTransport({
+      attempts: 1,
+      fetchImplementation: async () => response(
+        JSON.stringify({
+          type: "about:blank",
+          title: "Refused",
+          status,
+          code,
+          detail: `because ${code}`,
+          instance: "/v2/kjv",
+        }),
+        { status, contentType: "application/problem+json" },
+      ),
+    });
+    await assert.rejects(
+      transport.search("kjv", new URLSearchParams({ q: "x" })),
+      (error) =>
+        error instanceof PublicApiError &&
+        error.code === expectedCode &&
+        error.status === status &&
+        error.retryable === retryable &&
+        error.retryAfter === null &&
+        error.message === `because ${code}`,
+      `${status} ${code}`,
+    );
+  }
+});
+
+test("a refusal without a readable problem body still maps by status", async () => {
+  const bodies = [
+    () => new Response("<html>nope</html>", { status: 503, headers: { "Content-Type": "text/html" } }),
+    () => new Response("{not json", { status: 503, headers: { "Content-Type": "application/problem+json" } }),
+    () => new Response("[]", { status: 503, headers: { "Content-Type": "application/problem+json" } }),
+    () => new Response(`{"pad":"${"x".repeat(20 * 1024)}"}`, {
+      status: 503,
+      headers: { "Content-Type": "application/problem+json" },
+    }),
+    () => new Response(null, { status: 503 }),
+  ];
+  for (const body of bodies) {
+    const transport = new GetBibleTransport({
+      attempts: 1,
+      fetchImplementation: async () => body(),
+    });
+    await assert.rejects(
+      transport.search("kjv", new URLSearchParams({ q: "x" })),
+      (error) =>
+        error instanceof PublicApiError &&
+        error.code === "search_unavailable" &&
+        error.status === 503 &&
+        error.retryable === true &&
+        error.retryAfter === null,
+    );
+  }
+});
+
+test("Retry-After is read from the body first, then the header, and bounded", async () => {
+  const cases = [
+    [{ retry_after: 12 }, "30", 12],
+    [{}, "45", 45],
+    [{}, "  ", null],
+    [{}, "soon", null],
+    [{ retry_after: -1 }, "7", 7],
+    [{ retry_after: 99_999 }, null, 3_600],
+    [{}, new Date(Date.now() + 90_000).toUTCString(), 89],
+  ];
+  for (const [extra, header, expected] of cases) {
+    const transport = new GetBibleTransport({
+      attempts: 1,
+      fetchImplementation: async () => new Response(
+        JSON.stringify({ status: 429, code: "rate_limited", ...extra }),
+        {
+          status: 429,
+          headers: {
+            "Content-Type": "application/problem+json",
+            ...(header === null ? {} : { "Retry-After": header }),
+          },
+        },
+      ),
+    });
+    await assert.rejects(
+      transport.search("kjv", new URLSearchParams({ q: "x" })),
+      (error) =>
+        error.code === "search_rate_limited" &&
+        (expected === 89
+          ? error.retryAfter >= 88 && error.retryAfter <= 90
+          : error.retryAfter === expected),
+      JSON.stringify([extra, header]),
+    );
+  }
+});
+
+test("a short Retry-After is waited out and a long one ends the retry loop", async () => {
+  const refusal = (retryAfter) => async () => new Response(
+    JSON.stringify({ status: 503, code: "busy", retry_after: retryAfter }),
+    { status: 503, headers: { "Content-Type": "application/problem+json" } },
+  );
+
+  const patientTimers = recordingTimers();
+  let patientAttempts = 0;
+  const patient = new GetBibleTransport({
+    attempts: 2,
+    retryBackoffMs: 0,
+    fetchImplementation: async () => {
+      patientAttempts += 1;
+      return refusal(0.5)();
+    },
+    setTimeoutImplementation: patientTimers.setTimeoutImplementation,
+    clearTimeoutImplementation: patientTimers.clearTimeoutImplementation,
+  });
+  await assert.rejects(
+    patient.search("kjv", new URLSearchParams({ q: "x" })),
+    (error) => error.code === "search_unavailable",
+  );
+  assert.equal(patientAttempts, 2);
+  assert.ok(patientTimers.armed.includes(500), "the server's wait is honoured");
+
+  let impatientAttempts = 0;
+  const impatient = new GetBibleTransport({
+    attempts: 3,
+    retryBackoffMs: 0,
+    fetchImplementation: async () => {
+      impatientAttempts += 1;
+      return refusal(30)();
+    },
+  });
+  await assert.rejects(
+    impatient.search("kjv", new URLSearchParams({ q: "x" })),
+    (error) => error.code === "search_unavailable" && error.retryAfter === 30,
+  );
+  assert.equal(impatientAttempts, 1);
+});
+
+test("public API errors keep their original shape for older callers", () => {
+  const legacy = new PublicApiError("x", { code: "public_api_failed", status: 503, retryable: true });
+  assert.equal(legacy.retryAfter, null);
+  const bounded = new PublicApiError("x", { retryAfter: "7200" });
+  assert.equal(bounded.retryAfter, 3_600);
+  const missing = new PublicApiError("x", { retryAfter: "" });
+  assert.equal(missing.retryAfter, null);
+});
+
 test("announced oversized responses are rejected before reading", async () => {
   const transport = new GetBibleTransport({
     fetchImplementation: async () => new Response("{}", {

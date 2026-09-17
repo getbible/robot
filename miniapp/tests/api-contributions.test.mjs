@@ -15,7 +15,6 @@ const STATUS = {
 // JSON payloads — the session bootstrap and the detailed status.
 const SESSION = {
   session_token: SESSION_TOKEN,
-  limits: { search_timeout_seconds: 30 },
   basket: { maximum: 100, items: [] },
   contributions: { ...STATUS, contribution_token: CONTRIBUTION_TOKEN },
 };

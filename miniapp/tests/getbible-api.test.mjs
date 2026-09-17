@@ -75,6 +75,35 @@ class FakeTransport {
     };
   }
 
+  async search(translation, parameters) {
+    this.calls.push(["search", translation, parameters.toString()]);
+    return {
+      query: {
+        text: parameters.get("q"),
+        kind: "search",
+        translation: { abbreviation: translation },
+        engine_version: 5,
+        total: 1,
+        returned: 1,
+        offset: Number(parameters.get("offset")),
+        limit: Number(parameters.get("limit")),
+        has_more: false,
+        sha: "4".repeat(40),
+      },
+      results: {
+        [`${translation}_43_3`]: {
+          abbreviation: translation,
+          book_nr: 43,
+          book_name: "John",
+          chapter: 3,
+          name: "John 3",
+          verses: [{ chapter: 3, verse: 16, name: "John 3:16", text: "For God so loved the world." }],
+        },
+      },
+      matches: [{ reference: "John 3:16", book_nr: 43, chapter: 3, verse: 16, terms: ["loved"] }],
+    };
+  }
+
   async query(translation, references) {
     this.calls.push(["query", translation, references]);
     return {
@@ -179,6 +208,24 @@ test("display-only chapter reads reuse content without loading navigation maps",
     api.chapter("kjv", 43, 4, 2, { includeNavigation: "no" }),
     /navigation option/,
   );
+});
+
+test("searches use the search origin on every call and persist nothing", async () => {
+  const { api, transport } = createApi();
+
+  const first = await api.search("kjv", "loved", { sort: "relevance" }, { offset: 0, limit: 25 });
+  const second = await api.search("kjv", "loved", { sort: "relevance" }, { offset: 0, limit: 25 });
+
+  assert.equal(first.items[0].selection_id, "gbd_kjv_043_0003_0016");
+  assert.deepEqual(first.items[0].highlights, [{ start: 11, end: 16 }]);
+  assert.equal(first.sha, "4".repeat(40));
+  assert.deepEqual(second, first);
+  // No IndexedDB entry and no in-flight coalescing: both reads reached the
+  // transport, and nothing but search calls were made.
+  assert.deepEqual(transport.calls, [
+    ["search", "kjv", "q=loved&words=all&match=whole_word&case_sensitive=false&scope=bible&diacritics=fold&sort=relevance&limit=25&offset=0"],
+    ["search", "kjv", "q=loved&words=all&match=whole_word&case_sensitive=false&scope=bible&diacritics=fold&sort=relevance&limit=25&offset=0"],
+  ]);
 });
 
 test("reference resolution uses query API without persisting search content", async () => {
