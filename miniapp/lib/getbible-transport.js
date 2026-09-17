@@ -1,6 +1,7 @@
 const DEFAULT_API_ROOT = "https://api.getbible.net/v2/";
 const DEFAULT_QUERY_ROOT = "https://query.getbible.net/v2/";
 const DEFAULT_SEARCH_ROOT = "https://search.getbible.net/v2/";
+const DEFAULT_BOOKMARKS_ROOT = "https://bookmarks.getbible.net/v1/";
 // A chapter is downloaded, not computed, so the only honest question a reader's
 // deadline can ask is whether the response is still arriving. A wall clock
 // answers a different question and answers it wrongly on a slow phone: it
@@ -14,6 +15,10 @@ const DEFAULT_TOTAL_TIMEOUT_MS = 120_000;
 const DEFAULT_ATTEMPTS = 3;
 const DEFAULT_RETRY_BACKOFF_MS = 400;
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+// The complete Bookmarks API collection (every topic, coordinate and locale)
+// is one document. It is larger than any single chapter read, so it carries
+// its own ceiling instead of widening the bound every other read shares.
+const BOOKMARKS_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 // A refusal explains itself in a small problem document; anything larger is
 // not an explanation and is not read.
 const MAX_PROBLEM_BYTES = 16 * 1024;
@@ -23,7 +28,10 @@ const MAX_RETRY_AFTER_WAIT_MS = 5_000;
 const MAX_RETRY_AFTER_SECONDS = 3_600;
 const MAX_SEARCH_PARAMETERS_LENGTH = 8_192;
 const SHA1_PATTERN = /^[0-9a-f]{40}$/;
+const BOOKMARKS_PATH_PATTERN = /^[a-z0-9][a-z0-9_-]*(?:\/[a-z0-9][a-z0-9_-]*)*\.json$/;
 const SEARCH_TRANSLATION_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+export const GETBIBLE_BOOKMARKS_MAX_RESPONSE_BYTES = BOOKMARKS_MAX_RESPONSE_BYTES;
 
 export class PublicApiError extends Error {
   constructor(message, {
@@ -47,6 +55,7 @@ export class PublicApiError extends Error {
 export class GetBibleTransport {
   #apiRoot;
   #attempts;
+  #bookmarksRoot;
   #clearTimeout;
   #fetch;
   #maxResponseBytes;
@@ -62,6 +71,7 @@ export class GetBibleTransport {
     apiRoot = DEFAULT_API_ROOT,
     queryRoot = DEFAULT_QUERY_ROOT,
     searchRoot = DEFAULT_SEARCH_ROOT,
+    bookmarksRoot = DEFAULT_BOOKMARKS_ROOT,
     stallTimeoutMs = DEFAULT_STALL_TIMEOUT_MS,
     totalTimeoutMs = DEFAULT_TOTAL_TIMEOUT_MS,
     attempts = DEFAULT_ATTEMPTS,
@@ -75,6 +85,7 @@ export class GetBibleTransport {
     this.#apiRoot = safeRoot(apiRoot, "api.getbible.net");
     this.#queryRoot = safeRoot(queryRoot, "query.getbible.net");
     this.#searchRoot = safeRoot(searchRoot, "search.getbible.net");
+    this.#bookmarksRoot = safeRoot(bookmarksRoot, "bookmarks.getbible.net");
     if (typeof fetchImplementation !== "function") {
       throw new TypeError("A public API fetch implementation is required.");
     }
@@ -240,6 +251,32 @@ export class GetBibleTransport {
     return decodeJson(bytes);
   }
 
+  /**
+   * One document from the public Bookmarks API v1 origin.
+   *
+   * The exact bytes come back with their SHA-256 so the caller can hold a
+   * document against the checksum the API's index publishes for it. The
+   * browser's HTTP cache is bypassed on purpose: the Mini App keeps its own
+   * verified copy of the catalogue and decides for itself when to revalidate.
+   */
+  async bookmarks(relativePath, {
+    maximumBytes = BOOKMARKS_MAX_RESPONSE_BYTES,
+  } = {}) {
+    if (
+      typeof relativePath !== "string" ||
+      relativePath.length > 128 ||
+      !BOOKMARKS_PATH_PATTERN.test(relativePath)
+    ) {
+      throw new TypeError("Bookmarks API path is invalid.");
+    }
+    const { bytes } = await this.#read(new URL(relativePath, this.#bookmarksRoot), {
+      accept: "application/json",
+      maximumBytes,
+      ceiling: BOOKMARKS_MAX_RESPONSE_BYTES,
+    });
+    return { bytes, sha256: await sha256Hex(this.#subtle, bytes) };
+  }
+
   #apiUrl(relativePath) {
     if (
       typeof relativePath !== "string" ||
@@ -302,13 +339,14 @@ export class GetBibleTransport {
   async #attempt(url, {
     accept,
     maximumBytes,
+    ceiling = this.#maxResponseBytes,
     cache = "no-store",
     problem = false,
   }) {
     if (
       !Number.isInteger(maximumBytes) ||
       maximumBytes < 1 ||
-      maximumBytes > this.#maxResponseBytes
+      maximumBytes > ceiling
     ) {
       throw new RangeError("Public API response bound is invalid.");
     }
@@ -683,7 +721,15 @@ function decodeJson(bytes) {
 }
 
 async function sha1Hex(subtle, bytes) {
-  const digest = new Uint8Array(await subtle.digest("SHA-1", bytes));
+  return digestHex(subtle, "SHA-1", bytes);
+}
+
+async function sha256Hex(subtle, bytes) {
+  return digestHex(subtle, "SHA-256", bytes);
+}
+
+async function digestHex(subtle, algorithm, bytes) {
+  const digest = new Uint8Array(await subtle.digest(algorithm, bytes));
   return [...digest]
     .map((value) => value.toString(16).padStart(2, "0"))
     .join("");

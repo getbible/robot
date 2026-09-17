@@ -1,4 +1,4 @@
-// Protestant canon order used by the bundled catalogue, repository importer,
+// Protestant canon order used by the public Bookmarks API catalogue, the
 // Query API review coordinates, and contributor publication pipeline.
 export const BOOK_CHAPTER_COUNTS = Object.freeze([
   50, 40, 27, 36, 34, 24, 21, 4, 31, 24, 22, 25, 29, 36, 10, 13, 10,

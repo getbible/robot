@@ -290,29 +290,6 @@ export class MiniAppApi {
     }
   }
 
-  bookmarkCatalog(etag = null) {
-    const headers = {};
-    if (etag !== null) {
-      if (
-        typeof etag !== "string" ||
-        etag.length < 1 ||
-        etag.length > 160 ||
-        /[\u0000-\u001f\u007f]/.test(etag)
-      ) {
-        throw new TypeError("The bookmark catalogue ETag is invalid.");
-      }
-      headers["If-None-Match"] = etag;
-    }
-    return this.#request("bookmarks/catalog", {
-      headers,
-      allowNotModified: true,
-      includeEtag: true,
-      // The reviewed overlay improves fresh launches but the bundled catalog
-      // is always usable, so an unreachable publisher must not hold the gate.
-      timeoutMs: 4_000,
-    });
-  }
-
   registerSelections(selections) {
     return this.#selections.registerMany(selections);
   }
@@ -427,8 +404,6 @@ export class MiniAppApi {
     keepalive = false,
     timeoutMs = this.#timeoutMs,
     headers: requestHeaders = {},
-    allowNotModified = false,
-    includeEtag = false,
   } = {}) {
     if (authenticated && !this.#sessionToken) {
       throw new ApiError("Your secure session is not ready.", {
@@ -473,12 +448,6 @@ export class MiniAppApi {
     } finally {
       this.#clearTimeout(timeout);
     }
-    if (allowNotModified && response.status === 304) {
-      return {
-        not_modified: true,
-        etag: response.headers.get("etag"),
-      };
-    }
     if (response.status === 204) return null;
     const contentType = response.headers.get("content-type") || "";
     const payload = contentType.includes("application/json")
@@ -520,9 +489,7 @@ export class MiniAppApi {
         retryable: true,
       });
     }
-    return includeEtag
-      ? { ...payload, etag: response.headers.get("etag") }
-      : payload;
+    return payload;
   }
 }
 

@@ -1,7 +1,4 @@
-import { ENGLISH_BOOKMARK_TOPIC_MESSAGES } from "./bookmark-topic-definitions.js";
-
 export const ENGLISH_MESSAGES = Object.freeze({
-  ...ENGLISH_BOOKMARK_TOPIC_MESSAGES,
   "gate.opening": "Opening getBible.Life…",
   "gate.securing": "Securing your Telegram session…",
   "gate.protected": "Protected Mini App",
@@ -167,6 +164,12 @@ export const ENGLISH_MESSAGES = Object.freeze({
     "The global bookmark library could not be loaded. Please try again.",
   "bookmarks.global_topic_limit":
     "Remove a custom bookmark topic before loading the global topics.",
+  "bookmarks.global_unavailable":
+    "Global topics are unavailable until you are online. Your personal bookmarks and topics still work.",
+  "bookmarks.global_merged_one":
+    "One personal bookmark is now covered by the global catalogue.",
+  "bookmarks.global_merged_other":
+    "{count} personal bookmarks are now covered by the global catalogue.",
   "bookmarks.global_marker": "Global bookmark",
   "bookmarks.topic_global_title": "Global verses for this topic",
   "bookmarks.load_topic_global": "Load global verses",
@@ -294,7 +297,9 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "bookmarks.contribution_outcome_published": "global {count}",
   "bookmarks.contribution_outcome_mapped":
     "accepted, awaiting publication {count}",
-  "bookmarks.contribution_outcome_applied": "applied {count}",
+  "bookmarks.contribution_outcome_live": "live in the shared catalogue {count}",
+  "bookmarks.contribution_outcome_applied":
+    "applied, awaiting publication {count}",
   "bookmarks.contribution_outcome_approved": "accepted {count}",
   "bookmarks.contribution_outcome_pending": "awaiting review {count}",
   "bookmarks.contribution_outcome_deferred": "deferred {count}",

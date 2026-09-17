@@ -154,21 +154,9 @@ export class ContributionSync {
       throw new TypeError("Contribution sync dependencies are invalid.");
     }
 
-    this.#coreTopics = new Map();
-    for (const topic of coreTopics) {
-      const normalized = normalizeContributionTopic(topic);
-      if (this.#coreTopics.has(normalized.id)) {
-        throw new TypeError("A core contribution topic is duplicated.");
-      }
-      this.#coreTopics.set(normalized.id, normalized);
-    }
-    this.#coreTopicIds = new Set(this.#coreTopics.keys());
-    for (const id of coreTopicIds) {
-      if (typeof id !== "string" || !SAFE_ID_PATTERN.test(id)) {
-        throw new TypeError("A core contribution topic ID is invalid.");
-      }
-      this.#coreTopicIds.add(id);
-    }
+    const core = normalizeCoreTopics(coreTopics, coreTopicIds);
+    this.#coreTopics = core.topics;
+    this.#coreTopicIds = core.ids;
 
     this.#api = api;
     this.#idFactory = idFactory;
@@ -251,6 +239,17 @@ export class ContributionSync {
       }
       throw error;
     }
+  }
+
+  /**
+   * Replaces the authoritative global topic metadata after the shared
+   * catalogue changed. Only later snapshots and captures consult it; nothing
+   * already queued is rewritten.
+   */
+  replaceCoreTopics(coreTopics = [], coreTopicIds = []) {
+    const core = normalizeCoreTopics(coreTopics, coreTopicIds);
+    this.#coreTopics = core.topics;
+    this.#coreTopicIds = core.ids;
   }
 
   /** Personal state is reconciled from the next current BookmarkStore snapshot. */
@@ -1240,6 +1239,28 @@ function withBaselineId(event) {
       "baseline:" + event.type + ":" + valueFingerprint(event),
     ...event,
   };
+}
+
+function normalizeCoreTopics(coreTopics, coreTopicIds) {
+  if (!Array.isArray(coreTopics) || !Array.isArray(coreTopicIds)) {
+    throw new TypeError("Contribution sync dependencies are invalid.");
+  }
+  const topics = new Map();
+  for (const topic of coreTopics) {
+    const normalized = normalizeContributionTopic(topic);
+    if (topics.has(normalized.id)) {
+      throw new TypeError("A core contribution topic is duplicated.");
+    }
+    topics.set(normalized.id, normalized);
+  }
+  const ids = new Set(topics.keys());
+  for (const id of coreTopicIds) {
+    if (typeof id !== "string" || !SAFE_ID_PATTERN.test(id)) {
+      throw new TypeError("A core contribution topic ID is invalid.");
+    }
+    ids.add(id);
+  }
+  return { topics, ids };
 }
 
 function normalizeContributionTopic(value) {

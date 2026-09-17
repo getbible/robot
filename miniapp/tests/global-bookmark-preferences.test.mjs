@@ -2,15 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  GLOBAL_BOOKMARK_CATALOG,
-  GLOBAL_BOOKMARK_CATALOG_VERSION,
-  GLOBAL_BOOKMARK_TOPIC_DEFINITIONS,
-} from "../lib/global-bookmark-catalog.js";
-import {
   GLOBAL_BOOKMARK_PREFERENCES_KEY,
   GLOBAL_BOOKMARK_TOPIC_MAPPING_PREFIX,
   GlobalBookmarkPreferences,
 } from "../lib/global-bookmark-preferences.js";
+import { bookmarksApiCatalog } from "./fixtures/bookmarks-api.mjs";
+
+// The catalogue is whatever the public Bookmarks API last published; the
+// preferences only ever see its ids.
+const GLOBAL_BOOKMARK_CATALOG = bookmarksApiCatalog();
+const GLOBAL_BOOKMARK_CATALOG_VERSION = GLOBAL_BOOKMARK_CATALOG.version;
+const GLOBAL_BOOKMARK_TOPIC_DEFINITIONS = GLOBAL_BOOKMARK_CATALOG.topicDefinitions();
 
 class MemoryStorage {
   values = new Map();
@@ -669,12 +671,16 @@ test("stores only catalogue metadata and topic ids, never verse data", () => {
 
   assert.deepEqual(Object.keys(saved).sort(), [
     "catalog_version",
+    "coverage",
     "disabled_topic_ids",
     "enabled_topic_ids",
     "hidden_bookmark_ids",
+    "seeded_catalog_version",
     "version",
   ]);
-  assert.equal(saved.version, 3);
+  assert.equal(saved.version, 4);
+  assert.equal(saved.seeded_catalog_version, null);
+  assert.deepEqual(saved.coverage, {});
   assert.deepEqual(saved.enabled_topic_ids, [...allTopicIds].sort());
   assert.doesNotMatch(
     raw,
@@ -730,7 +736,7 @@ test("caps exclusions at a safe fallback when no catalogue is supplied", () => {
   );
 });
 
-test("prunes fabricated and retired ids against the current bundled catalogue", () => {
+test("prunes fabricated and retired ids against the current API catalogue", () => {
   const storage = new MemoryStorage();
   const [validGrace] = globalBookmarksFor("grace");
   const mappingKey =
@@ -824,7 +830,7 @@ test("removes corrupt preferences without disabling usable browser storage", () 
 test("preserves preferences written by a newer application version", () => {
   const storage = new MemoryStorage();
   const raw = JSON.stringify({
-    version: 4,
+    version: 5,
     catalog_version: 2,
     enabled_topic_ids: ["grace"],
     hidden_bookmark_ids: ["global_grace_43_3_16"],
@@ -870,4 +876,128 @@ test("preserves a newer private mapping envelope and rejects downgrade writes", 
   );
   assert.equal(storage.getItem(mappingKey), raw);
   assert.deepEqual(storage.removed, []);
+});
+
+test("records coverage per coordinate, forgets uncovered ones, and reports stable ones", () => {
+  const storage = new MemoryStorage();
+  const preferences = openPreferences({ storage });
+  const day = 24 * 60 * 60 * 1_000;
+  const start = 1_700_000_000_000;
+
+  assert.equal(preferences.recordCoverage(["43:3:16", "43:1:17"], start), true);
+  assert.equal(preferences.recordCoverage(["43:3:16", "43:1:17"], start + 1), false);
+  assert.deepEqual(preferences.coverage, { "43:1:17": start, "43:3:16": start });
+  assert.deepEqual([...preferences.stableCoverage(start + day - 1, day)], []);
+  assert.deepEqual(
+    [...preferences.stableCoverage(start + day, day)].sort(),
+    ["43:1:17", "43:3:16"],
+  );
+
+  // A coordinate no longer covered is forgotten; covered again later, its
+  // clock starts over.
+  assert.equal(preferences.recordCoverage(new Set(["43:3:16"]), start + day), true);
+  assert.deepEqual(preferences.coverage, { "43:3:16": start });
+  assert.equal(
+    preferences.recordCoverage(["43:3:16", "43:1:17"], start + 2 * day),
+    true,
+  );
+  assert.deepEqual(preferences.coverage, {
+    "43:1:17": start + 2 * day,
+    "43:3:16": start,
+  });
+  assert.deepEqual([...preferences.stableCoverage(start + 2 * day, day)], ["43:3:16"]);
+
+  const reopened = openPreferences({ storage });
+  assert.deepEqual(reopened.coverage, preferences.coverage);
+  assert.equal(reopened.seededCatalogVersion, null);
+
+  assert.throws(() => preferences.recordCoverage("43:3:16"), TypeError);
+  assert.throws(() => preferences.recordCoverage(["43/3/16"]), TypeError);
+  assert.throws(() => preferences.recordCoverage(["67:1:1"]), TypeError);
+  assert.throws(() => preferences.recordCoverage(["1:151:1"]), TypeError);
+  assert.throws(() => preferences.recordCoverage(["1:1:2001"]), TypeError);
+  assert.throws(() => preferences.recordCoverage(["1:1:1"], -1), TypeError);
+  assert.throws(
+    () => preferences.recordCoverage(
+      Array.from({ length: 801 }, (_, index) => `1:1:${index + 1}`),
+    ),
+    RangeError,
+  );
+  assert.throws(() => preferences.stableCoverage(start, -1), TypeError);
+});
+
+test("remembers the seeding catalogue version and upgrades a version three record", () => {
+  const storage = new MemoryStorage();
+  storage.setItem(GLOBAL_BOOKMARK_PREFERENCES_KEY, JSON.stringify({
+    version: 3,
+    catalog_version: 2,
+    enabled_topic_ids: ["grace"],
+    disabled_topic_ids: ["fear-not"],
+    hidden_bookmark_ids: ["global_grace_43_3_16"],
+  }));
+
+  const preferences = openPreferences({
+    allowedBookmarkIds: CATALOG_BOOKMARK_IDS,
+    allowedTopicIds: CATALOG_TOPIC_IDS,
+    storage,
+  });
+  assert.equal(preferences.seededCatalogVersion, null);
+  assert.deepEqual(preferences.coverage, {});
+  assert.deepEqual(preferences.enabledTopicIds, ["grace"]);
+  assert.equal(preferences.hasTopic("fear-not"), false);
+  assert.deepEqual(preferences.hiddenBookmarkIds, ["global_grace_43_3_16"]);
+  // Reading alone never rewrites another WebView's record.
+  assert.equal(JSON.parse(storage.getItem(GLOBAL_BOOKMARK_PREFERENCES_KEY)).version, 3);
+
+  assert.equal(preferences.markSeeded(GLOBAL_BOOKMARK_CATALOG_VERSION), true);
+  assert.equal(preferences.markSeeded(GLOBAL_BOOKMARK_CATALOG_VERSION), false);
+  assert.throws(() => preferences.markSeeded(0), TypeError);
+  const saved = JSON.parse(storage.getItem(GLOBAL_BOOKMARK_PREFERENCES_KEY));
+  assert.equal(saved.version, 4);
+  assert.equal(saved.seeded_catalog_version, GLOBAL_BOOKMARK_CATALOG_VERSION);
+  assert.deepEqual(saved.enabled_topic_ids, ["grace"]);
+  assert.deepEqual(saved.disabled_topic_ids, ["fear-not"]);
+  assert.deepEqual(saved.hidden_bookmark_ids, ["global_grace_43_3_16"]);
+
+  const reopened = openPreferences({ storage });
+  assert.equal(reopened.seededCatalogVersion, GLOBAL_BOOKMARK_CATALOG_VERSION);
+});
+
+test("drops unreadable coverage entries instead of the whole record", () => {
+  const storage = new MemoryStorage();
+  const oldest = 1_700_000_000_000;
+  storage.setItem(GLOBAL_BOOKMARK_PREFERENCES_KEY, JSON.stringify({
+    version: 4,
+    catalog_version: 2,
+    enabled_topic_ids: ["grace"],
+    disabled_topic_ids: [],
+    hidden_bookmark_ids: [],
+    seeded_catalog_version: "3",
+    coverage: {
+      "43:3:16": oldest,
+      "43/3/17": oldest,
+      "67:1:1": oldest,
+      "43:3:18": -1,
+      "43:3:19": "soon",
+      ...Object.fromEntries(
+        Array.from({ length: 900 }, (_, index) => [
+          `1:${(index % 50) + 1}:${Math.floor(index / 50) + 1}`,
+          oldest + 1 + index,
+        ]),
+      ),
+    },
+  }));
+
+  const preferences = openPreferences({ storage });
+
+  assert.equal(preferences.seededCatalogVersion, null);
+  assert.deepEqual(preferences.enabledTopicIds, ["grace"]);
+  const coverage = preferences.coverage;
+  assert.equal(Object.keys(coverage).length, 800);
+  assert.equal(coverage["43:3:16"], oldest);
+  assert.equal(Object.hasOwn(coverage, "43/3/17"), false);
+  assert.equal(Object.hasOwn(coverage, "67:1:1"), false);
+  assert.equal(Object.hasOwn(coverage, "43:3:18"), false);
+  assert.equal(Object.hasOwn(coverage, "43:3:19"), false);
+  assert.equal(Math.max(...Object.values(coverage)), oldest + 799);
 });

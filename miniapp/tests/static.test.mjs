@@ -7,7 +7,6 @@ import {
   BOOKMARK_LOCALE_FALLBACK_POLICIES,
   BOOKMARK_LOCALE_POLICY_SOURCES,
 } from "../lib/bookmark-locales.js";
-import { CORE_BOOKMARK_TOPIC_DEFINITIONS } from "../lib/bookmark-topic-definitions.js";
 import { SCOPED_LOCALE_OVERRIDES } from "../lib/bookmark-locales-scoped-overrides.js";
 import { UI_CATALOGS } from "../lib/i18n.js";
 import { TRANSLATED_MESSAGES } from "../lib/locales.js";
@@ -24,7 +23,7 @@ test("keeps executable code and styling outside the document", async () => {
   assert.match(html, /robots" content="noindex, nofollow, noarchive"/);
 });
 
-test("connect-src names exactly the three public GetBible origins", async () => {
+test("connect-src names exactly the four public GetBible origins", async () => {
   const html = await readFile(new URL("index.html", root), "utf8");
   const policy = /http-equiv="Content-Security-Policy"\s+content="([^"]+)"/.exec(html);
   assert.ok(policy, "CSP meta is present");
@@ -40,6 +39,7 @@ test("connect-src names exactly the three public GetBible origins", async () => 
     "https://api.getbible.net",
     "https://query.getbible.net",
     "https://search.getbible.net",
+    "https://bookmarks.getbible.net",
   ]);
   assert.deepEqual(directives.get("default-src"), ["'none'"]);
   // No other directive may open a second door to any host.
@@ -274,7 +274,11 @@ test("persists only scoped user data and keeps Telegram credentials session-only
   );
   assert.match(
     app,
-    /new GlobalBookmarkPreferences\(\{[\s\S]*?instanceScope,[\s\S]*?storage: globalBookmarkStorage/,
+    /function openGlobalBookmarkPreferences\(scope, storage\)[\s\S]*?new GlobalBookmarkPreferences\(\{[\s\S]*?instanceScope,[\s\S]*?storage,/,
+  );
+  assert.match(
+    app,
+    /openGlobalBookmarkPreferences\(\s*storageScope,\s*globalBookmarkStorage,?\s*\)/,
   );
   assert.doesNotMatch(durableData, /session_token|init_data|bearer_token/i);
   assert.doesNotMatch(source, /setItem\([^,]+,\s*(?:bridge\.)?initData/);
@@ -474,7 +478,7 @@ test("offers one-click contributor sync with lossless personal-to-global present
     /contributionSync\.synchronizeNow\([\s\S]*?bookmarkStore\.snapshot\(\)[\s\S]*?disclosureAcknowledged/,
   );
   assert.equal(manualSync.match(/\.synchronizeNow\(/g)?.length, 1);
-  assert.doesNotMatch(manualSync, /refreshLiveGlobalBookmarkCatalog/);
+  assert.doesNotMatch(manualSync, /refreshGlobalBookmarkCatalog/);
   assert.doesNotMatch(app, /contributionSync\.acknowledgeDisclosure\(/);
   assert.doesNotMatch(app, /ensureContributionDisclosure/);
   assert.match(app, /coreTopics: globalBookmarkCatalog\.topicDefinitions\(\)/);
@@ -482,15 +486,17 @@ test("offers one-click contributor sync with lossless personal-to-global present
   // capability readiness gate may reappear anywhere in the app shell.
   assert.doesNotMatch(app, /contributionTransportReady/);
   assert.doesNotMatch(app, /X-Contribution-Token/i);
-  assert.match(app, /refreshLiveGlobalBookmarkCatalog\(\{ requireNetwork: true \}\)/);
+  assert.match(app, /refreshGlobalBookmarkCatalog\(\{ requireNetwork: true \}\)/);
   assert.match(
     app,
-    /initializeContributionSync\(\)[\s\S]*?stageContributionTopicOutcomes[\s\S]*?refreshLiveGlobalBookmarkCatalog\(\)/,
+    /initializeContributionSync\(\)[\s\S]*?stageContributionTopicOutcomes[\s\S]*?refreshGlobalBookmarkCatalog\(\)/,
   );
-  assert.match(
-    app,
-    /if \(!unchanged && result\.source !== "network"\)[\s\S]*?return \{ changed: false, source: result\.source \}/,
-  );
+  // Every catalogue the source returns was verified against the API's index;
+  // only a pull the network verified just now may merge personal data away.
+  assert.match(app, /adoptGlobalBookmarkCatalog\(result, \{ unchanged \}\)/);
+  assert.match(app, /mergeCoveredPersonalBookmarks\(\{ remove: pull\.verified \}\)/);
+  assert.match(app, /if \(remove && globalBookmarkCatalogAuthoritative\)/);
+  assert.match(app, /verified: result\.source === "network"/);
   assert.match(app, /window\.addEventListener\("focus"[\s\S]*?refreshContributionStatus/);
   assert.match(app, /document\.addEventListener\("visibilitychange"[\s\S]*?refreshContributionStatus/);
   assert.match(
@@ -540,7 +546,7 @@ test("offers one-click contributor sync with lossless personal-to-global present
   );
   assert.match(
     app,
-    /globalBookmarkCatalogRefreshQueue\.then\([\s\S]*?performLiveGlobalBookmarkCatalogRefresh/,
+    /globalBookmarkCatalogRefreshQueue\.then\([\s\S]*?performGlobalBookmarkCatalogRefresh/,
   );
   assert.match(
     app,
@@ -623,19 +629,35 @@ test("offers one-click contributor sync with lossless personal-to-global present
   );
 });
 
-test("derives generated bookmark tags from the canonical topic definitions", async () => {
-  const [generator, sources] = await Promise.all([
-    readFile(new URL("../scripts/generate_global_bookmarks.mjs", root), "utf8"),
-    readFile(
-      new URL("../scripts/lib/global_bookmark_sources.mjs", root),
-      "utf8",
-    ),
+test("ships no bundled global catalogue, generator, or robot overlay client", async () => {
+  for (const retired of [
+    "lib/global-bookmark-data.js",
+    "lib/bookmark-topic-definitions.js",
+    "lib/global-bookmark-live-catalog.js",
+    "../scripts/generate_global_bookmarks.mjs",
+    "../scripts/import_contribution_bundle.mjs",
+    "../scripts/lib/global_bookmark_sources.mjs",
+    "../data/global-bookmarks",
+  ]) {
+    await assert.rejects(access(new URL(retired, root)), undefined, retired);
+  }
+  const [app, api, source, catalog, packageJson] = await Promise.all([
+    readFile(new URL("app.js", root), "utf8"),
+    readFile(new URL("lib/api.js", root), "utf8"),
+    readFile(new URL("lib/global-bookmark-source.js", root), "utf8"),
+    readFile(new URL("lib/global-bookmark-catalog.js", root), "utf8"),
+    readFile(new URL("package.json", root), "utf8"),
   ]);
-
-  assert.match(generator, /parseTopicDocument/);
-  assert.match(generator, /data\/global-bookmarks\/topics\.json/);
-  assert.match(sources, /\[topic\.name, \.\.\.topic\.aliases\]/);
-  assert.doesNotMatch(generator, /const TAG_IDS = new Map\(\[/);
+  assert.doesNotMatch(api, /bookmarks\/catalog|If-None-Match|bookmarkCatalog/);
+  assert.doesNotMatch(app, /bookmarkCatalog\(|global-bookmark-live-catalog|GLOBAL_BOOKMARK_DATA/);
+  assert.match(app, /loadGlobalBookmarkCatalog\(/);
+  assert.match(app, /EMPTY_GLOBAL_BOOKMARK_CATALOG/);
+  assert.match(app, /bookmarks\.global_unavailable/);
+  assert.match(source, /publicCacheKey\("bookmarks", "all"\)/);
+  assert.match(source, /sha256 !== index\.checksum/);
+  assert.doesNotMatch(catalog, /bookmarks_by_topic|globalBookmarkCatalogWithOverlay/);
+  assert.doesNotMatch(packageJson, /generate_global_bookmarks|generate:global-bookmarks/);
+  assert.match(packageJson, /node --check lib\/global-bookmark-source\.js/);
 });
 
 test("references the optimized hero and consistent getBible.Life brand", async () => {
@@ -696,19 +718,9 @@ test("ships complete governed catalogs for every GetBible translation language",
     pluralExtensionKeys.map((key) => key.replace(/_few$/, "_one")),
   );
   const numericOneLocales = new Set(["cu", "ru", "tl", "tsg", "uk"]);
-  const topicKeys = extensionKeys.filter((key) =>
-    key.startsWith("bookmark_topics.")
-  );
-  const canonicalTopicKeys = CORE_BOOKMARK_TOPIC_DEFINITIONS
-    .map((topic) => topic.name_key)
-    .sort();
-  const untranslatedTopicKeys = canonicalTopicKeys.filter(
-    (key) => !extensionKeys.includes(key),
-  );
   const governedEnglishKeys = [...new Set([
     ...baseKeys,
     ...extensionKeys,
-    ...untranslatedTopicKeys,
   ])].sort();
   const scopedOverrideKeys = englishKeys.filter((key) =>
     key.startsWith("history.") ||
@@ -724,19 +736,23 @@ test("ships complete governed catalogs for every GetBible translation language",
     translatedLocales,
   );
   assert.ok(baseKeys.length >= 159);
-  assert.ok(extensionKeys.length >= 178);
+  assert.ok(extensionKeys.length >= 120);
+  // Global topic names are published per locale by the Bookmarks API and
+  // travel with the catalogue; no catalog carries a topic-name message.
   assert.deepEqual(
-    topicKeys,
-    canonicalTopicKeys.filter((key) => extensionKeys.includes(key)),
+    englishKeys.filter((key) => key.startsWith("bookmark_topics.")),
+    [],
   );
   assert.deepEqual(governedEnglishKeys, englishKeys);
-  assert.equal(
-    untranslatedTopicKeys.every((key) =>
-      typeof UI_CATALOGS.en[key] === "string" &&
-      !Object.hasOwn(BOOKMARK_LOCALE_EXTENSION.af, key)
-    ),
-    true,
-  );
+  for (const key of [
+    "bookmarks.global_unavailable",
+    "bookmarks.global_merged_one",
+    "bookmarks.global_merged_other",
+    "bookmarks.contribution_outcome_live",
+  ]) {
+    assert.equal(typeof UI_CATALOGS.en[key], "string", key);
+    assert.equal(BOOKMARK_LOCALE_EXTENSION.af[key], UI_CATALOGS.en[key], key);
+  }
   assert.deepEqual(
     Object.keys(SCOPED_LOCALE_OVERRIDES).sort(),
     ["chr", "cop", "enm", "got", "syr", "tlh"],
@@ -840,7 +856,7 @@ test("ships complete governed catalogs for every GetBible translation language",
     const translatedCount = extensionKeys.filter(
       (key) => BOOKMARK_LOCALE_EXTENSION[locale][key] !== UI_CATALOGS.en[key],
     ).length;
-    assert.ok(translatedCount > 150, `${locale}:target-language coverage`);
+    assert.ok(translatedCount > 100, `${locale}:target-language coverage`);
   }
 
   for (const [locale, overrides] of Object.entries(SCOPED_LOCALE_OVERRIDES)) {
@@ -959,6 +975,14 @@ test("ships parseable OpenAPI JSON at the documented relative root", async () =>
   assert.ok(contract.paths["/bookmarks/restore"].get);
   assert.ok(contract.paths["/bookmarks/restore"].delete);
   assert.ok(contract.paths["/post"]);
+  // The global catalogue is the public Bookmarks API's; the robot serves no copy.
+  assert.equal(contract.paths["/bookmarks/catalog"], undefined);
+  assert.equal(contract.components.schemas.LiveBookmarkCatalog, undefined);
+  assert.equal(contract.components.schemas.LiveBookmarkAssociations, undefined);
+  assert.deepEqual(
+    contract.components.schemas.ContributionSummary.properties.events.required,
+    ["pending", "approved", "rejected", "deferred", "applied", "live"],
+  );
   assert.deepEqual(
     contract.components.schemas.BookmarkBackup.properties.version.enum,
     [1, 2, 3, 4],

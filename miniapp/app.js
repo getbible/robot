@@ -45,13 +45,16 @@ import {
   isEnglishContributionTopicName,
 } from "./lib/contribution-sync.js";
 import { contributionErrorPresentation } from "./lib/contribution-errors.js";
+import { GetBibleTransport } from "./lib/getbible-transport.js";
 import {
-  GLOBAL_BOOKMARK_CATALOG,
+  EMPTY_GLOBAL_BOOKMARK_CATALOG,
   GLOBAL_BOOKMARK_SOURCE,
+  globalBookmarkTopicName,
 } from "./lib/global-bookmark-catalog.js";
 import { GlobalBookmarkDeviceStorage } from "./lib/global-bookmark-device-storage.js";
-import { loadLiveGlobalBookmarkCatalog } from "./lib/global-bookmark-live-catalog.js";
 import { GlobalBookmarkPreferences } from "./lib/global-bookmark-preferences.js";
+import { loadGlobalBookmarkCatalog } from "./lib/global-bookmark-source.js";
+import { BrowserPublicCache } from "./lib/public-cache.js";
 import { miniAppInstanceScope } from "./lib/instance-scope.js";
 import { restoreBookmarkBackup } from "./lib/bookmark-restore.js";
 import { TelegramBookmarkStorage } from "./lib/telegram-bookmark-storage.js";
@@ -77,9 +80,14 @@ let bookmarkStorage = null;
 let bookmarkStorageScopeValue = null;
 let globalBookmarkDeviceStorage = null;
 let globalBookmarkPreferences = null;
-let globalBookmarkCatalog = GLOBAL_BOOKMARK_CATALOG;
+let globalBookmarkCatalog = EMPTY_GLOBAL_BOOKMARK_CATALOG;
 let globalBookmarkCatalogChecksum = null;
+// "unavailable" until a verified API document is in memory, then the source
+// that supplied it: "cache" for the stored copy, "network" once the API's
+// index confirmed it during this session.
+let globalBookmarkCatalogSource = "unavailable";
 let globalBookmarkCatalogAuthoritative = false;
+let globalBookmarkCatalogClient = null;
 let globalBookmarkCatalogRefreshQueue = Promise.resolve();
 let globalBookmarkCatalogRetryTimer = null;
 let globalBookmarkCatalogRetryTimerDueAt = 0;
@@ -106,6 +114,13 @@ const CONTRIBUTION_STATUS_POLL_MS = 60_000;
 const CONTRIBUTION_STATUS_STALE_MS = 15_000;
 const contributionRetryDelays = new WeakMap();
 const globalBookmarkCatalogRetryDelays = new WeakMap();
+// A personal verse link that an enabled global topic also carries is merged
+// away only after the shared row has stood beside it for a day, and only on
+// an explicit pull that the network verified just now.
+const GLOBAL_BOOKMARK_MERGE_STABLE_MS = 24 * 60 * 60 * 1_000;
+// The complete Bookmarks API collection is one cached document and needs
+// more room than a single chapter record.
+const GLOBAL_BOOKMARK_CATALOG_RECORD_BYTES = 8 * 1024 * 1024;
 let api = null;
 let scriptureExcerpts = null;
 let filterDraft = null;
@@ -463,30 +478,23 @@ async function boot() {
     const storageScope = await bookmarkStorageScope(payload?.user?.id);
     bookmarkStorageScopeValue = storageScope;
     readingHistory = new ReadingHistoryStore({ scope: storageScope });
-    const [liveCatalog, globalBookmarkStorage, synchronizedBookmarkStorage] =
+    const [catalogResult, globalBookmarkStorage, synchronizedBookmarkStorage] =
       await openPersonalStorage(storageScope);
-    globalBookmarkCatalog = liveCatalog.catalog;
-    globalBookmarkCatalogChecksum = liveCatalog.checksum;
-    globalBookmarkCatalogAuthoritative = liveCatalog.source === "network";
+    adoptGlobalBookmarkCatalog(catalogResult);
     globalBookmarkDeviceStorage = globalBookmarkStorage;
-    globalBookmarkPreferences = new GlobalBookmarkPreferences({
-      allowedTopicIds: globalBookmarkCatalogAuthoritative
-        ? globalBookmarkCatalog
-          .topicDefinitions()
-          .map((definition) => definition.id)
-        : null,
-      allowedBookmarkIds: globalBookmarkCatalogAuthoritative
-        ? globalBookmarkCatalog.bookmarkIds()
-        : null,
-      scope: storageScope,
-      instanceScope,
-      storage: globalBookmarkStorage,
-    });
+    globalBookmarkPreferences = openGlobalBookmarkPreferences(
+      storageScope,
+      globalBookmarkStorage,
+    );
     bookmarkStorage = synchronizedBookmarkStorage;
     bookmarkStore = new BookmarkStore({
       scope: storageScope,
       storage: bookmarkStorage,
     });
+    seedDefaultGlobalBookmarkTopics();
+    if (catalogResult.source === "network") {
+      mergeCoveredPersonalBookmarks({ remove: false });
+    }
     contributionStatus = session.contributions;
     if (contributionStatus?.can_contribute) {
       try {
@@ -612,7 +620,7 @@ async function initializeContributionSync() {
       );
       // Publication is a separate read model. Refresh it opportunistically,
       // but never couple its availability to contribution transport state.
-      void refreshLiveGlobalBookmarkCatalog().catch((error) => {
+      void refreshGlobalBookmarkCatalog().catch((error) => {
         if (
           generation === sessionGeneration &&
           contributionFailureIsRetryable(error)
@@ -696,12 +704,8 @@ async function openPersonalStorage(storageScope) {
   };
   return Promise.all([
     bootStep("global catalogue", [
-      () => loadLiveGlobalBookmarkCatalog({
-        api,
-        scope: storageScope,
-        instanceScope,
-      }),
-      () => bundledGlobalBookmarkCatalog(),
+      () => loadGlobalBookmarkCatalog(globalBookmarkCatalogSourceClient()),
+      () => unavailableGlobalBookmarkCatalog(),
     ]),
     bootStep("global bookmark storage", [
       () => GlobalBookmarkDeviceStorage.open({
@@ -764,14 +768,196 @@ async function bootStep(label, attempts) {
   throw failure;
 }
 
-function bundledGlobalBookmarkCatalog() {
+/**
+ * The state the Mini App holds when no verified catalogue exists yet: no
+ * topics, no global rows, and a Bookmarks surface that says global topics
+ * wait for a connection. Nothing is bundled to stand in for the API.
+ */
+function unavailableGlobalBookmarkCatalog() {
   return Object.freeze({
-    catalog: GLOBAL_BOOKMARK_CATALOG,
-    revision: 0,
+    catalog: EMPTY_GLOBAL_BOOKMARK_CATALOG,
+    catalogVersion: 0,
     checksum: null,
-    etag: null,
-    source: "bundled",
+    checkedAt: 0,
+    source: "unavailable",
   });
+}
+
+/**
+ * The public Bookmarks API is session-independent: one transport and one
+ * cache serve every launch of this page, and the verified document survives
+ * in the shared public cache between launches.
+ */
+function globalBookmarkCatalogSourceClient() {
+  if (!globalBookmarkCatalogClient) {
+    globalBookmarkCatalogClient = Object.freeze({
+      transport: new GetBibleTransport(),
+      cache: new BrowserPublicCache({
+        maxRecordBytes: GLOBAL_BOOKMARK_CATALOG_RECORD_BYTES,
+      }),
+    });
+  }
+  return globalBookmarkCatalogClient;
+}
+
+function adoptGlobalBookmarkCatalog(result, { unchanged = false } = {}) {
+  globalBookmarkCatalog = result.catalog;
+  globalBookmarkCatalogChecksum = result.checksum;
+  globalBookmarkCatalogSource = result.source;
+  // "Authoritative" means the catalogue in memory was proved current by the
+  // network during this session. A cached copy that merely repeats it keeps
+  // that standing; a different one has to earn it again.
+  globalBookmarkCatalogAuthoritative = result.source === "network" ||
+    (unchanged && globalBookmarkCatalogAuthoritative);
+}
+
+function openGlobalBookmarkPreferences(scope, storage) {
+  return new GlobalBookmarkPreferences({
+    allowedTopicIds: globalBookmarkCatalogAuthoritative
+      ? globalBookmarkCatalog
+        .topicDefinitions()
+        .map((definition) => definition.id)
+      : null,
+    allowedBookmarkIds: globalBookmarkCatalogAuthoritative
+      ? globalBookmarkCatalog.bookmarkIds()
+      : null,
+    scope,
+    instanceScope,
+    storage,
+  });
+}
+
+/**
+ * Offers the catalogue's default topics once per scope.
+ *
+ * Nothing about the shared topics is bundled any more, so a first-time reader
+ * receives them as personal topics when a verified catalogue first loads. The
+ * offer is recorded in the preference record whether or not it added
+ * anything: a store that already holds topics is the reader's own choice.
+ */
+function seedDefaultGlobalBookmarkTopics() {
+  if (
+    !bookmarkStore ||
+    !globalBookmarkPreferences ||
+    globalBookmarkCatalogSource === "unavailable" ||
+    globalBookmarkCatalog.version < 1 ||
+    globalBookmarkPreferences.seededCatalogVersion !== null
+  ) {
+    return false;
+  }
+  let seeded = false;
+  try {
+    seeded = bookmarkStore.seedDefaultTopics(
+      globalBookmarkCatalog.topicDefinitions({ defaultsOnly: true }),
+    ).topics_added > 0;
+  } catch {
+    // A store already at its topic limit is not a first-time reader's. The
+    // offer still counts as made.
+  }
+  try {
+    globalBookmarkPreferences.markSeeded(globalBookmarkCatalog.version);
+  } catch {
+    // Without a durable record the offer repeats on the next launch, which
+    // adds nothing to a store that now holds the topics.
+  }
+  void globalBookmarkPreferences.flush().catch(() => undefined);
+  if (seeded && bookmarkStorage) {
+    void bookmarkStorage.flush().catch(() => undefined);
+  }
+  return seeded;
+}
+
+/**
+ * Personal verse links that an enabled global topic also carries.
+ *
+ * Their coordinates are recorded in the preference record so the shared row
+ * and the personal one can stand side by side for a day before the personal
+ * copy is merged away. With `remove`, assignments whose coverage has held
+ * that long are removed from personal storage and the global row is what
+ * remains; `topicIds` narrows the removal to those local topics. Removal is
+ * only ever asked for after a network-verified pull.
+ */
+function mergeCoveredPersonalBookmarks({ remove = false, topicIds = null } = {}) {
+  if (!bookmarkStore || !globalBookmarkPreferences) {
+    return { covered: 0, merged: 0 };
+  }
+  const now = Date.now();
+  let covered = coveredPersonalBookmarkAssignments();
+  let changed = recordGlobalBookmarkCoverage(covered.keys, now);
+  let merged = 0;
+  if (remove && globalBookmarkCatalogAuthoritative) {
+    const stable = globalBookmarkPreferences.stableCoverage(
+      now,
+      GLOBAL_BOOKMARK_MERGE_STABLE_MS,
+    );
+    const due = covered.assignments.filter(({ topicId, key }) =>
+      stable.has(key) && (!topicIds || topicIds.has(topicId))
+    );
+    if (due.length > 0) {
+      mutatePersonalBookmarks(() => {
+        for (const { bookmark, topicId } of due) {
+          if (bookmarkStore.removeBookmarkTopic(bookmark.id, topicId)) {
+            merged += 1;
+          }
+        }
+      });
+      covered = coveredPersonalBookmarkAssignments();
+      if (recordGlobalBookmarkCoverage(covered.keys, now)) {
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    void globalBookmarkPreferences.flush().catch(() => undefined);
+  }
+  return { covered: covered.keys.size, merged };
+}
+
+function coveredPersonalBookmarkAssignments() {
+  const snapshot = bookmarkStore.snapshot();
+  const classified = globallyClassifiedTopics(snapshot.topics);
+  const keys = new Set();
+  const assignments = [];
+  for (const bookmark of snapshot.bookmarks) {
+    const coordinateKey = bookmarkCoordinateKey(bookmark);
+    const key = `${bookmark.book}:${bookmark.chapter}:${bookmark.verse}`;
+    for (const topicId of bookmarkTopicIds(bookmark)) {
+      const topic = classified.get(topicId);
+      if (!topic?.enabled || !topic.coordinates.has(coordinateKey)) {
+        continue;
+      }
+      keys.add(key);
+      assignments.push({ bookmark, topicId, key });
+    }
+  }
+  return { keys, assignments };
+}
+
+function recordGlobalBookmarkCoverage(keys, now) {
+  try {
+    return globalBookmarkPreferences.recordCoverage(keys, now);
+  } catch {
+    // A record that cannot take these keys keeps its last observation; the
+    // merge simply waits for one it can.
+    return false;
+  }
+}
+
+/**
+ * An explicit pull asks the network to verify the catalogue. Offline, the
+ * verified copy already in memory still lets topics be enabled; only the
+ * merge, which removes personal data, waits for a network-verified pull.
+ */
+async function pullGlobalBookmarkCatalog() {
+  try {
+    const result = await refreshGlobalBookmarkCatalog({ requireNetwork: true });
+    return { ...result, verified: result.source === "network" };
+  } catch (error) {
+    if (globalBookmarkCatalogSource === "unavailable") {
+      throw error;
+    }
+    return { changed: false, source: globalBookmarkCatalogSource, verified: false };
+  }
 }
 
 function withDeadline(operation, timeoutMs, label) {
@@ -973,8 +1159,17 @@ function contributionOutcomeDetails(summary) {
     ),
     contributionOutcomeGroup(
       "bookmarks.contribution_event_outcomes",
-      summary.events,
-      ["applied", "approved", "pending", "deferred", "rejected"],
+      {
+        ...summary.events,
+        // "live" is the part of "applied" the public catalogue already
+        // carries; the remainder is still waiting for a publication.
+        applied: Math.max(
+          0,
+          (Number(summary.events?.applied) || 0) -
+            (Number(summary.events?.live) || 0),
+        ),
+      },
+      ["live", "applied", "approved", "pending", "deferred", "rejected"],
     ),
   ].filter(Boolean);
 }
@@ -1122,7 +1317,7 @@ async function refreshContributionStatus({
         stageContributionTopicOutcomes(status.topics, {
           detailsAvailable: reviewDetailsAvailable,
         });
-        void refreshLiveGlobalBookmarkCatalog().catch((error) => {
+        void refreshGlobalBookmarkCatalog().catch((error) => {
           if (
             generation === sessionGeneration &&
             contributionFailureIsRetryable(error)
@@ -1158,7 +1353,7 @@ async function refreshContributionStatus({
       stageContributionTopicOutcomes(status.topics, {
         detailsAvailable: reviewDetailsAvailable,
       });
-      void refreshLiveGlobalBookmarkCatalog().catch((error) => {
+      void refreshGlobalBookmarkCatalog().catch((error) => {
         if (
           generation === sessionGeneration &&
           contributionFailureIsRetryable(error)
@@ -1781,7 +1976,7 @@ function scheduleGlobalBookmarkCatalogRetry(error) {
     if (generation !== sessionGeneration) {
       return;
     }
-    void refreshLiveGlobalBookmarkCatalog({ requireNetwork: true })
+    void refreshGlobalBookmarkCatalog({ requireNetwork: true })
       .then(() => {
         if (
           generation === sessionGeneration &&
@@ -1865,7 +2060,7 @@ function globalBookmarkCatalogRetryDelay(error) {
   return delay;
 }
 
-function refreshLiveGlobalBookmarkCatalog({ requireNetwork = false } = {}) {
+function refreshGlobalBookmarkCatalog({ requireNetwork = false } = {}) {
   const retryRemaining = globalBookmarkCatalogRetryRemaining();
   if (retryRemaining > 0) {
     if (!requireNetwork) {
@@ -1883,14 +2078,12 @@ function refreshLiveGlobalBookmarkCatalog({ requireNetwork = false } = {}) {
   }
   const generation = sessionGeneration;
   const scope = bookmarkStorageScopeValue;
-  const requestApi = api;
   const deviceStorage = globalBookmarkDeviceStorage;
   const task = globalBookmarkCatalogRefreshQueue.then(() =>
-    performLiveGlobalBookmarkCatalogRefresh({
+    performGlobalBookmarkCatalogRefresh({
       requireNetwork,
       generation,
       scope,
-      requestApi,
       deviceStorage,
     })
   );
@@ -1901,77 +2094,62 @@ function refreshLiveGlobalBookmarkCatalog({ requireNetwork = false } = {}) {
   return task;
 }
 
-async function performLiveGlobalBookmarkCatalogRefresh({
+async function performGlobalBookmarkCatalogRefresh({
   requireNetwork,
   generation,
   scope,
-  requestApi,
   deviceStorage,
 }) {
   if (
     generation !== sessionGeneration ||
-    !requestApi ||
     !scope ||
     !bookmarkStore ||
     !globalBookmarkPreferences ||
     !deviceStorage ||
-    requestApi !== api ||
     scope !== bookmarkStorageScopeValue ||
     deviceStorage !== globalBookmarkDeviceStorage
   ) {
     return { changed: false, source: "unavailable" };
   }
   const stagedOutcomes = pendingContributionOutcomeRefresh;
-  const result = await loadLiveGlobalBookmarkCatalog({
-    api: requestApi,
-    scope,
-    instanceScope,
+  const result = await loadGlobalBookmarkCatalog({
+    ...globalBookmarkCatalogSourceClient(),
     requireNetwork,
   });
   if (
     generation !== sessionGeneration ||
-    requestApi !== api ||
     scope !== bookmarkStorageScopeValue ||
     deviceStorage !== globalBookmarkDeviceStorage
   ) {
     return { changed: false, source: "stale" };
   }
-  const unchanged = (
-    result.checksum === globalBookmarkCatalogChecksum ||
-    (result.checksum === null && globalBookmarkCatalogChecksum === null)
-  );
-  if (!unchanged && result.source !== "network") {
-    // A refresh fallback may be older than the already validated in-memory
-    // catalogue. Keep serving the newer effective view until a live response
-    // proves a replacement, instead of rolling the contributor back to P.
-    return { changed: false, source: result.source };
-  }
+  const unchanged = result.checksum === globalBookmarkCatalogChecksum;
+  // Every copy the source returns was verified against the API's index when
+  // it was stored, so a cached document that differs from the one in memory
+  // is a newer network pass (another WebView's, perhaps) and is followed.
   const shouldRebuildPreferences = !unchanged || (
     result.source === "network" &&
     !globalBookmarkCatalogAuthoritative
   );
-  if (!unchanged) {
-    globalBookmarkCatalog = result.catalog;
-    globalBookmarkCatalogChecksum = result.checksum;
-  }
+  adoptGlobalBookmarkCatalog(result, { unchanged });
   if (shouldRebuildPreferences) {
-    globalBookmarkCatalogAuthoritative = result.source === "network";
-    globalBookmarkPreferences = new GlobalBookmarkPreferences({
-      allowedTopicIds: globalBookmarkCatalog
-        .topicDefinitions()
-        .map((definition) => definition.id),
-      allowedBookmarkIds: globalBookmarkCatalog.bookmarkIds(),
-      scope,
-      instanceScope,
-      storage: deviceStorage,
-    });
+    globalBookmarkPreferences = openGlobalBookmarkPreferences(scope, deviceStorage);
   }
+  if (!unchanged && contributionSync) {
+    contributionSync.replaceCoreTopics(
+      globalBookmarkCatalog.topicDefinitions(),
+      globalBookmarkCatalog.topicDefinitions().map((definition) => definition.id),
+    );
+  }
+  seedDefaultGlobalBookmarkTopics();
   let reconciliation = null;
   if (
-    result.source === "network" &&
     stagedOutcomes &&
     pendingContributionOutcomeRefresh?.version === stagedOutcomes.version
   ) {
+    // Publication is decided by the server against the API; the catalogue in
+    // memory only needs to carry the canonical topic. A copy that does not
+    // yet is revalidated on the strict retry below.
     reconciliation = await reconcilePublishedContributionTopics(
       stagedOutcomes.outcomes,
       generation,
@@ -1991,20 +2169,24 @@ async function performLiveGlobalBookmarkCatalogRefresh({
     renderContributionMarkers();
   }
   if (result.source === "network") {
-    if (!pendingContributionOutcomeRefresh) {
-      cancelGlobalBookmarkCatalogRetry();
-    } else {
-      const retryError = new ApiError(
-        i18n.t("bookmarks.contribution_sync_catalog_error"),
-        {
-          code: "global_bookmark_unavailable",
-          retryable: true,
-        },
-      );
-      scheduleGlobalBookmarkCatalogRetry(retryError);
-      if (requireNetwork) {
-        throw retryError;
-      }
+    // Coverage is observed on every network-verified catalogue so a later
+    // explicit pull knows how long a shared row has stood beside a personal
+    // one.
+    mergeCoveredPersonalBookmarks({ remove: false });
+  }
+  if (!pendingContributionOutcomeRefresh) {
+    cancelGlobalBookmarkCatalogRetry();
+  } else {
+    const retryError = new ApiError(
+      i18n.t("bookmarks.contribution_sync_catalog_error"),
+      {
+        code: "global_bookmark_unavailable",
+        retryable: true,
+      },
+    );
+    scheduleGlobalBookmarkCatalogRetry(retryError);
+    if (requireNetwork) {
+      throw retryError;
     }
   }
   return {
@@ -2018,7 +2200,7 @@ function attachListeners() {
   elements.accessRetry.addEventListener("click", () => accessAction());
   window.addEventListener("online", () => {
     updateConnectionState();
-    void refreshLiveGlobalBookmarkCatalog();
+    void refreshGlobalBookmarkCatalog().catch(() => undefined);
     void refreshContributionStatus({
       force: true,
     }).catch(() => undefined);
@@ -4887,15 +5069,15 @@ function coreBookmarkTopicDefinition(topicId) {
 
 function bookmarkTopicPresentation(topic) {
   const definition = coreBookmarkTopicDefinition(topic?.id);
-  const translated = definition ? i18n.t(definition.name_key) : null;
   return {
     core: Boolean(definition),
     definition,
-    // The catalog owns a global topic's identity and translated name, while
+    // The catalogue owns a global topic's identity and its published names
+    // (the interface locale, then its base language, then English), while
     // its locally stored color remains a user preference on every topic.
     color: topic?.color ?? definition?.color ?? BOOKMARK_TOPIC_COLORS[0],
     name: definition
-      ? translated === definition.name_key ? definition.name : translated
+      ? globalBookmarkTopicName(definition, i18n.locale)
       : topic?.name ?? "",
   };
 }
@@ -5185,12 +5367,18 @@ function renderBookmarks() {
   elements.clearBookmarks.disabled = !bookmarkStore;
   setBookmarkBackupBusy(Boolean(bookmarkBackupTask));
   setGlobalBookmarkBusy(Boolean(globalBookmarkTask));
-  if (globalBookmarkPreferences?.enabled && !globalBookmarkTask) {
+  if (globalBookmarkTask) {
+    // The running pull owns the status line until it reports.
+  } else if (globalBookmarkCatalogSource === "unavailable") {
+    elements.globalBookmarkStatus.textContent = i18n.t(
+      "bookmarks.global_unavailable",
+    );
+  } else if (globalBookmarkPreferences?.enabled) {
     elements.globalBookmarkStatus.textContent = i18n.t(
       "bookmarks.global_current",
       globalStats,
     );
-  } else if (!globalBookmarkTask) {
+  } else {
     elements.globalBookmarkStatus.textContent = "";
   }
   updateBookmarkStorageWarning();
@@ -6150,21 +6338,21 @@ async function loadGlobalBookmarks() {
       "bookmarks.global_loading",
     );
     try {
-      await refreshLiveGlobalBookmarkCatalog();
+      const pull = await pullGlobalBookmarkCatalog();
       const hiddenBookmarkIds = globalBookmarkPreferences.hiddenBookmarkIds;
       const definitions = globalBookmarkCatalog.topicDefinitions();
-      const result = bookmarkStore.ensureTopics(
-        definitions,
-        globalBookmarkTopicMappings(),
-      );
+      const result = definitions.length > 0
+        ? bookmarkStore.ensureTopics(definitions, globalBookmarkTopicMappings())
+        : { topics_added: 0, topics_updated: 0, topic_ids: {} };
       const mappingChanged = await globalBookmarkPreferences.setTopicMappings(
         result.topic_ids,
         bookmarkStore.snapshot().topics,
       );
-      const preferencesChanged = globalBookmarkPreferences.enableTopics(
-        definitions.map((definition) => definition.id),
-        globalBookmarkCatalog.version,
-      );
+      const preferencesChanged = definitions.length > 0 &&
+        globalBookmarkPreferences.enableTopics(
+          definitions.map((definition) => definition.id),
+          globalBookmarkCatalog.version,
+        );
       await globalBookmarkPreferences.flush();
       const restoredSnapshot = bookmarkStore.snapshot();
       const restoredBookmarks = hiddenBookmarkIds
@@ -6178,6 +6366,10 @@ async function loadGlobalBookmarks() {
           !globalBookmarkPreferences.isBookmarkHidden(bookmark.id)
         );
       captureGlobalBookmarkAdditions(restoredBookmarks);
+      // With every topic enabled, a personal link the catalogue also carries
+      // is now shadowed by its global row; once that has held for a day on a
+      // network-verified pull the personal copy is merged away.
+      const merge = mergeCoveredPersonalBookmarks({ remove: pull.verified });
       clearBookmarkNavigation();
       renderBookmarks();
       if (state.bible.status === "ready") {
@@ -6197,20 +6389,27 @@ async function loadGlobalBookmarks() {
         mappingChanged ||
         result.topics_added > 0 ||
         result.topics_updated > 0;
-      const message = i18n.t(
-        changed ? "bookmarks.global_loaded" : "bookmarks.global_current",
-        {
-          bookmarks,
-          topics: globalBookmarkCatalog.topicDefinitions().length,
-        },
-      );
+      const message = [
+        i18n.t(
+          changed ? "bookmarks.global_loaded" : "bookmarks.global_current",
+          {
+            bookmarks,
+            topics: definitions.length,
+          },
+        ),
+        ...(merge.merged > 0
+          ? [i18n.plural("bookmarks.global_merged", merge.merged)]
+          : []),
+      ].join(" ");
       elements.globalBookmarkStatus.textContent = message;
       bridge.notifySuccess();
       announce(message);
     } catch (error) {
       const message = error instanceof RangeError
         ? i18n.t("bookmarks.global_topic_limit")
-        : i18n.t("bookmarks.global_failed");
+        : globalBookmarkCatalogSource === "unavailable"
+          ? i18n.t("bookmarks.global_unavailable")
+          : i18n.t("bookmarks.global_failed");
       elements.globalBookmarkStatus.textContent = message;
       bridge.notifyError();
       announce(message);
@@ -6276,9 +6475,9 @@ async function loadTopicGlobalBookmarks() {
     await Promise.resolve();
     setGlobalBookmarkBusy(true);
     try {
-      // Revalidate the reviewed overlay on an explicit pull so an already-open
-      // Mini App can use an operator publication without a reload.
-      await refreshLiveGlobalBookmarkCatalog();
+      // Revalidate against the API on an explicit pull so an already-open
+      // Mini App can use a new publication without a reload.
+      const pull = await pullGlobalBookmarkCatalog();
       const snapshot = bookmarkStore.snapshot();
       const hiddenBookmarkIds = globalBookmarkPreferences.hiddenBookmarkIds;
       const canonicalTopicId = globalBookmarkCatalog.canonicalTopicId(
@@ -6305,18 +6504,29 @@ async function loadTopicGlobalBookmarks() {
           !globalBookmarkPreferences.isBookmarkHidden(bookmark.id)
         );
       captureGlobalBookmarkAdditions(restoredBookmarks);
+      const merge = mergeCoveredPersonalBookmarks({
+        remove: pull.verified,
+        topicIds: new Set([topicId]),
+      });
       renderBookmarks();
       const bookmarks = globalBookmarkCatalog.bookmarksForTopic(
         topicId,
         snapshot.topics,
         globalBookmarkTopicMappings(),
       ).length;
-      const message = i18n.t("bookmarks.topic_global_loaded", { bookmarks });
+      const message = [
+        i18n.t("bookmarks.topic_global_loaded", { bookmarks }),
+        ...(merge.merged > 0
+          ? [i18n.plural("bookmarks.global_merged", merge.merged)]
+          : []),
+      ].join(" ");
       elements.bookmarkTopicGlobalStatus.textContent = message;
       bridge.notifySuccess();
       announce(message);
     } catch {
-      const message = i18n.t("bookmarks.global_failed");
+      const message = globalBookmarkCatalogSource === "unavailable"
+        ? i18n.t("bookmarks.global_unavailable")
+        : i18n.t("bookmarks.global_failed");
       elements.bookmarkTopicGlobalStatus.textContent = message;
       bridge.notifyError();
       announce(message);
@@ -7346,8 +7556,9 @@ function invalidateClientSessionState() {
   bookmarkStorageScopeValue = null;
   globalBookmarkDeviceStorage = null;
   globalBookmarkPreferences = null;
-  globalBookmarkCatalog = GLOBAL_BOOKMARK_CATALOG;
+  globalBookmarkCatalog = EMPTY_GLOBAL_BOOKMARK_CATALOG;
   globalBookmarkCatalogChecksum = null;
+  globalBookmarkCatalogSource = "unavailable";
   globalBookmarkCatalogAuthoritative = false;
   readingHistory = null;
   cancelHistoryExcerptHydration();

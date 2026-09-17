@@ -90,6 +90,7 @@ test("normalizes the backend session bootstrap without retaining identity", () =
           rejected: 0,
           deferred: 0,
           applied: 3,
+          live: 1,
         },
       },
     },
@@ -133,6 +134,7 @@ test("normalizes the backend session bootstrap without retaining identity", () =
     "grace",
   );
   assert.equal(session.contributions.summary.events.pending, 2);
+  assert.equal(session.contributions.summary.events.live, 1);
   assert.equal(
     contributionReviewDetailsAvailable(session.contributions),
     true,
@@ -167,6 +169,7 @@ test("normalizes legacy and current contributor status envelopes", () => {
         rejected: 0,
         deferred: 0,
         applied: 0,
+        live: 0,
       },
     },
   });
@@ -244,6 +247,17 @@ test("rejects unsafe contributor review outcomes", () => {
       summary: {
         ...summary,
         events: { ...summary.events, pending: -1 },
+      },
+    },
+    {
+      enabled: true,
+      state: "approved",
+      can_contribute: true,
+      disclosure_required: false,
+      topics: [],
+      summary: {
+        ...summary,
+        events: { ...summary.events, live: 1, retired: 0 },
       },
     },
     "approved",
