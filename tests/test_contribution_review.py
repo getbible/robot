@@ -1,16 +1,28 @@
+import contextlib
+import inspect
 import io
 import json
+import os
 import sqlite3
+import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 from modules.contributions import ContributionError, ContributionStore
+from modules.getbible_bookmarks import BookmarksTransportError, parse_catalog_document
 from modules.getbible_query import VerseReference
 from scripts.contribution_review import (
+    BUILDER_TOKEN_ENVIRONMENT_VARIABLE,
+    EXPECTED_GITHUB_REPOSITORY,
+    GITHUB_API_PULLS_URL,
+    MAX_EFFECTIVE_TOPICS,
+    AcceptanceCancelled,
     Association,
     CanonicalTopic,
     ContributionBundle,
@@ -18,12 +30,17 @@ from scripts.contribution_review import (
     ReviewError,
     _all_events,
     _load_base_associations,
+    _load_canonical_topics,
     _load_store,
+    accept_contributions,
     atomic_write,
     build_publication_plan,
+    compare_url_for,
     export_current_catalog,
+    fetch_catalog,
+    main,
     parse_porcelain_paths,
-    publish_live,
+    print_status,
     review_applications,
     review_topics,
     review_verses,
@@ -33,8 +50,62 @@ from scripts.contribution_review import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-TOPICS = ROOT / "data" / "global-bookmarks" / "topics.json"
-ASSOCIATIONS = ROOT / "data" / "global-bookmarks" / "tag-verse.csv"
+
+# A small catalogue in the exact shape the public Bookmarks API publishes as
+# catalog.json.  It stands in for the saved document that ``fetch-catalog``
+# writes and every review command reads through ``--catalog-file``.
+CATALOG_TOPICS: list[dict[str, object]] = [
+    {
+        "id": "faith",
+        "name": "Faith",
+        "color": "#fde68a",
+        "aliases": ["Trust in God"],
+        "default": True,
+        "verses": [[40, 17, 20], [58, 11, 1], [58, 11, 6]],
+    },
+    {
+        "id": "grace",
+        "name": "Grace",
+        "color": "#bbf7d0",
+        "aliases": [],
+        "default": True,
+        "verses": [[43, 1, 17], [43, 3, 16], [45, 3, 24], [45, 5, 20], [49, 2, 8], [56, 3, 5]],
+    },
+    {
+        "id": "prayer",
+        "name": "Prayer",
+        "color": "#93c5fd",
+        "aliases": [],
+        "default": True,
+        "verses": [[40, 6, 9], [52, 5, 17]],
+    },
+    {
+        "id": "wisdom-cause",
+        "name": "Wisdom Cause",
+        "color": "#fef08a",
+        "aliases": [],
+        "default": False,
+        "verses": [[20, 1, 7], [20, 9, 10], [59, 1, 5]],
+    },
+]
+_FIXTURES = tempfile.TemporaryDirectory()
+CATALOG = Path(_FIXTURES.name) / "bookmarks-catalog.json"
+
+
+def catalog_document(topics: list[dict[str, object]] | None = None) -> bytes:
+    payload = {
+        "schema_version": 1,
+        "topics": list(CATALOG_TOPICS if topics is None else topics),
+    }
+    return (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def setUpModule() -> None:
+    CATALOG.write_bytes(catalog_document())
+
+
+def tearDownModule() -> None:
+    _FIXTURES.cleanup()
 
 
 def _topic_event(
@@ -239,11 +310,10 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         )
         self._map_new(local_id=local)
         self._approve_pending()
-        publish_live(
+        accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -345,7 +415,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         review_topics(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(answers),
             output=io.StringIO(),
         )
@@ -373,7 +443,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         review_topics(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(answers),
             output=io.StringIO(),
         )
@@ -402,11 +472,10 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         )
         self._map_new(local_id=published_local)
         self._approve_pending()
-        publish_live(
+        accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -428,7 +497,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             review_topics(
                 self.store,
                 actor="test-admin",
-                topics_file=TOPICS,
+                catalog_file=CATALOG,
                 input_fn=lambda _prompt: next(answers),
                 output=io.StringIO(),
             )
@@ -460,7 +529,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             review_topics(
                 self.store,
                 actor="test-admin",
-                topics_file=TOPICS,
+                catalog_file=CATALOG,
                 input_fn=lambda _prompt: next(answers),
                 output=io.StringIO(),
             )
@@ -494,8 +563,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
                 self.store,
                 actor="test-admin",
                 translation="kjv",
-                topics_file=TOPICS,
-                associations_file=ASSOCIATIONS,
+                catalog_file=CATALOG,
                 verse_client=FailingClient(),
             )
 
@@ -521,8 +589,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             verse_client=FailingClient(),
             output=output,
         )
@@ -552,8 +619,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             verse_client=FailingClient(),
             output=io.StringIO(),
         )
@@ -566,8 +632,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         with self.assertRaisesRegex(ReviewError, "without an accepted canonical topic"):
             build_publication_plan(
                 self.store,
-                topics_file=TOPICS,
-                associations_file=ASSOCIATIONS,
+                catalog_file=CATALOG,
             )
 
     def test_rejected_later_metadata_edit_does_not_revoke_accepted_establishment(self) -> None:
@@ -619,8 +684,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "a",
             output=io.StringIO(),
             verse_client=VerseClient(),
@@ -629,8 +693,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         self.assertEqual(verse.state, "approved")
         plan = build_publication_plan(
             self.store,
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
         )
         self.assertEqual({topic.id for topic in plan.bundle.topics}, {"review-topic-1"})
         self.assertIn(first_upsert.id, plan.event_ids)
@@ -644,7 +707,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         review_topics(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -674,7 +737,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         review_topics(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=output,
         )
@@ -698,7 +761,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         review_topics(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(answers),
             output=io.StringIO(),
         )
@@ -726,7 +789,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         review_topics(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(answers),
             output=io.StringIO(),
         )
@@ -765,8 +828,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(answers),
             output=output,
             verse_client=VerseClient(),
@@ -816,8 +878,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(answers),
             output=output,
             verse_client=VerseClient(),
@@ -836,7 +897,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         self.assertEqual(states["verse.boundary.add.1"], "deferred")
         self.assertEqual(states["verse.boundary.remove.1"], "pending")
 
-    def test_live_publication_is_cumulative_durable_and_idempotent(self) -> None:
+    def test_acceptance_is_cumulative_durable_and_idempotent(self) -> None:
         local = "local.topic.1"
         first = self.store.record_events(
             42,
@@ -847,11 +908,10 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         )
         self._map_new(local_id=local)
         self._approve_pending()
-        first_revision = publish_live(
+        first_revision = accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -864,21 +924,13 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             set(first.event_ids.values()), {event.id for event in self.store.list_events()}
         )
         export_path = Path(self.directory.name) / "reviewed.json"
-        export_current_catalog(self.store, export_path, output=io.StringIO())
-        checked = subprocess.run(
-            [
-                "node",
-                str(ROOT / "scripts" / "import_contribution_bundle.mjs"),
-                "--check",
-                str(export_path),
-            ],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        self.assertEqual(checked.returncode, 0, msg=checked.stderr or checked.stdout)
+        exported = export_current_catalog(self.store, export_path, output=io.StringIO())
+        # The export is the unchanged schema-1 bundle the builder's
+        # ``import-bundle`` command consumes: only these members, no identities.
+        document = json.loads(export_path.read_text(encoding="utf-8"))
+        self.assertEqual(set(document), {"schema_version", "topics", "associations"})
+        self.assertEqual(ContributionBundle.read(export_path), exported.bundle)
+        self.assertEqual({topic.id for topic in exported.bundle.topics}, {"review-topic-1"})
 
         self.store.close()
         self.store = ContributionStore(path=str(self.database))
@@ -907,17 +959,15 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "a",
             output=io.StringIO(),
             verse_client=VerseClient(),
         )
-        second_revision = publish_live(
+        second_revision = accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -939,17 +989,15 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "a",
             output=io.StringIO(),
             verse_client=VerseClient(),
         )
-        third_revision = publish_live(
+        third_revision = accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -957,11 +1005,10 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         current = ContributionBundle.validated(self.store.current_catalog().catalog)
         self.assertEqual({item.verse for item in current.additions}, {2})
 
-        no_change = publish_live(
+        no_change = accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -991,7 +1038,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         self.assertEqual(exported.checksum, snapshot.checksum)
         self.assertEqual(destination.read_bytes(), exported.bundle.json_bytes())
 
-    def test_live_publication_refuses_stale_plan_without_losing_newer_catalog(self) -> None:
+    def test_acceptance_refuses_stale_plan_without_losing_newer_revision(self) -> None:
         local = "local.topic.1"
         self.store.record_events(
             42,
@@ -1015,11 +1062,10 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
 
         try:
             with self.assertRaisesRegex(ValueError, "changed"):
-                publish_live(
+                accept_contributions(
                     self.store,
                     actor="test-admin",
-                    topics_file=TOPICS,
-                    associations_file=ASSOCIATIONS,
+                    catalog_file=CATALOG,
                     input_fn=publish_competing_revision,
                     output=io.StringIO(),
                 )
@@ -1043,11 +1089,10 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         )
         self._map_new(local_id=local)
         self._approve_pending()
-        publish_live(
+        accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -1064,7 +1109,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             review_topics(
                 self.store,
                 actor="test-admin",
-                topics_file=TOPICS,
+                catalog_file=CATALOG,
                 input_fn=lambda _prompt: next(rename_answers),
                 output=io.StringIO(),
             )
@@ -1076,7 +1121,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         review_topics(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(keep_answers),
             output=io.StringIO(),
         )
@@ -1095,17 +1140,15 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "a",
             output=io.StringIO(),
             verse_client=VerseClient(),
         )
-        publish_live(
+        accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -1115,7 +1158,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         self.assertEqual({item.topic_id for item in current.additions}, {"review-topic-1"})
         self.assertEqual({item.verse for item in current.additions}, {1, 2})
 
-    def test_live_overlay_compacts_after_repository_catalog_catches_up(self) -> None:
+    def test_accepted_ledger_compacts_after_the_api_catalogue_catches_up(self) -> None:
         local = "local.topic.1"
         self.store.record_events(
             42,
@@ -1126,45 +1169,30 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         )
         self._map_new(local_id=local)
         self._approve_pending()
-        publish_live(
+        accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
 
-        root = Path(self.directory.name) / "updated-base"
-        root.mkdir()
-        updated_topics = root / "topics.json"
-        updated_associations = root / "tag-verse.csv"
-        topic_payload = json.loads(TOPICS.read_text(encoding="utf-8"))
-        topic_payload["topics"].append(
-            {
-                **_definition(),
-                "default": False,
-            }
+        # Upstream merged the pull request and the API now publishes the topic.
+        updated_catalog = Path(self.directory.name) / "updated-catalog.json"
+        updated_catalog.write_bytes(
+            catalog_document(
+                [
+                    *CATALOG_TOPICS,
+                    {**_definition(), "default": False, "verses": [[1, 1, 1]]},
+                ]
+            )
         )
-        updated_topics.write_text(
-            json.dumps(topic_payload),
-            encoding="utf-8",
-        )
-        updated_associations.write_text(
-            ASSOCIATIONS.read_text(encoding="utf-8") + "1 1:1,Review Topic 1\n",
-            encoding="utf-8",
-        )
-        plan = build_publication_plan(
-            self.store,
-            topics_file=updated_topics,
-            associations_file=updated_associations,
-        )
+        plan = build_publication_plan(self.store, catalog_file=updated_catalog)
         self.assertEqual(plan.bundle, ContributionBundle.empty())
-        compacted = publish_live(
+        compacted = accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=updated_topics,
-            associations_file=updated_associations,
+            catalog_file=updated_catalog,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -1183,11 +1211,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         )
         self._map_new(2)
         self._approve_pending()
-        after = build_publication_plan(
-            self.store,
-            topics_file=updated_topics,
-            associations_file=updated_associations,
-        )
+        after = build_publication_plan(self.store, catalog_file=updated_catalog)
         self.assertEqual({topic.id for topic in after.bundle.topics}, {"review-topic-2"})
 
     def test_zero_association_topic_is_not_published_or_applied(self) -> None:
@@ -1199,8 +1223,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         self._approve_pending()
         plan = build_publication_plan(
             self.store,
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
         )
         self.assertEqual(plan.bundle.topics, ())
         self.assertEqual(plan.event_ids, ())
@@ -1219,16 +1242,15 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         review_topics(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(answers),
             output=io.StringIO(),
         )
         self._approve_pending()
-        publish_live(
+        accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -1263,7 +1285,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         review_topics(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(answers),
             output=io.StringIO(),
         )
@@ -1305,7 +1327,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             review_topics(
                 self.store,
                 actor="test-admin",
-                topics_file=TOPICS,
+                catalog_file=CATALOG,
                 input_fn=lambda _prompt: next(answers),
                 output=io.StringIO(),
             )
@@ -1332,11 +1354,10 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         )
         self._map_new(local_id=local)
         self._approve_pending()
-        publish_live(
+        accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -1368,7 +1389,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             review_topics(
                 self.store,
                 actor="test-admin",
-                topics_file=TOPICS,
+                catalog_file=CATALOG,
                 input_fn=lambda _prompt: next(answers),
                 output=io.StringIO(),
             )
@@ -1377,7 +1398,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             review_topics(
                 self.store,
                 actor="test-admin",
-                topics_file=TOPICS,
+                catalog_file=CATALOG,
                 input_fn=lambda _prompt: next(alias_answers),
                 output=io.StringIO(),
             )
@@ -1385,7 +1406,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         review_topics(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(reject_answers),
             output=io.StringIO(),
         )
@@ -1404,8 +1425,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "a",
             output=io.StringIO(),
             verse_client=VerseClient(),
@@ -1415,11 +1435,10 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         definition = self.store.list_canonical_topics()[0]
         self.assertEqual(definition.color, "#123456")
         self.assertEqual(definition.aliases, ())
-        publish_live(
+        accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -1447,26 +1466,24 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         review_topics(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(delete_answers),
             output=delete_output,
         )
-        self.assertIn("permanent after their first live publication", delete_output.getvalue())
+        self.assertIn("permanent once accepted for the shared catalogue", delete_output.getvalue())
         review_verses(
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "a",
             output=io.StringIO(),
             verse_client=VerseClient(),
         )
-        publish_live(
+        accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -1510,16 +1527,14 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
 
         plan = build_publication_plan(
             self.store,
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
         )
         self.assertEqual(plan.bundle, ContributionBundle.empty())
         self.assertEqual(plan.event_ids, (1, 2))
-        publish_live(
+        accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
@@ -1544,8 +1559,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
 
         uncovered = build_publication_plan(
             self.store,
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
         )
         self.assertEqual(uncovered.bundle, ContributionBundle.empty())
         self.assertEqual(uncovered.event_ids, ())
@@ -1554,22 +1568,20 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         self._approve_pending()
         covered = build_publication_plan(
             self.store,
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
         )
         self.assertEqual({topic.id for topic in covered.bundle.topics}, {"review-topic-1"})
         self.assertEqual(covered.event_ids, (1, 2, 3))
-        publish_live(
+        accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
         self.assertEqual({event.state for event in self.store.list_events()}, {"applied"})
 
-    def test_planner_rejects_delete_after_live_and_pushed_history(self) -> None:
+    def test_planner_rejects_delete_after_acceptance_and_pushed_history(self) -> None:
         local = "local.topic.1"
         self.store.record_events(
             42,
@@ -1580,29 +1592,28 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         )
         self._map_new(local_id=local)
         self._approve_pending()
-        live = publish_live(
+        accepted = accept_contributions(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "yes",
             output=io.StringIO(),
         )
         lease = self.store.begin_repo_publication(
-            live.revision,
-            live.checksum,
+            accepted.revision,
+            accepted.checksum,
             actor="test-publisher",
         )
         self.store.finish_repo_publication(
             lease,
-            live.revision,
+            accepted.revision,
             state="pushed",
             actor="test-publisher",
             branch="contributions/test",
             commit="a" * 40,
         )
-        # Even if the current overlay is later compacted/restored, immutable
-        # catalogue history records that this ID may already exist in Git.
+        # Even if the ledger is later compacted/restored, immutable revision
+        # history records that this ID may already exist upstream.
         self.store.publish_catalog(ContributionBundle.empty().as_dict(), actor="test-admin")
         self.assertEqual(self.store.published_topic_ids(), ("review-topic-1",))
 
@@ -1636,8 +1647,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         with self.assertRaisesRegex(ReviewError, "delete permanent topic review-topic-1"):
             build_publication_plan(
                 self.store,
-                topics_file=TOPICS,
-                associations_file=ASSOCIATIONS,
+                catalog_file=CATALOG,
             )
 
     def test_core_delete_rejection_does_not_suppress_meaningful_removal(self) -> None:
@@ -1679,7 +1689,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         review_topics(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(answers),
             output=io.StringIO(),
         )
@@ -1698,8 +1708,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "a",
             output=io.StringIO(),
             verse_client=VerseClient(),
@@ -1756,7 +1765,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         review_topics(
             self.store,
             actor="test-admin",
-            topics_file=TOPICS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(delete_answers),
             output=io.StringIO(),
         )
@@ -1777,8 +1786,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(review_answers),
             output=review_output,
             verse_client=VerseClient(),
@@ -1792,45 +1800,37 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         self.assertEqual(other_events["verse.other.add"].state, "rejected")
         self.assertIn("approved deletion", review_output.getvalue())
 
-    def test_effective_topic_limit_allows_39_new_and_refuses_40th(self) -> None:
+    def test_effective_topic_limit_counts_the_api_catalogue_and_refuses_the_next(self) -> None:
+        allowed = MAX_EFFECTIVE_TOPICS - len(CATALOG_TOPICS)
         topic_events = []
         verse_events = []
-        for index in range(1, 41):
+        for index in range(1, allowed + 2):
             local = f"local.topic.{index}"
             topic_events.append(_topic_event(f"topic.{index}", local, f"Review Topic {index}"))
-            chapter = 1 if index <= 31 else 2
-            verse = index if index <= 31 else index - 31
             verse_events.append(
                 _verse_event(
                     f"verse.{index}",
                     local,
-                    chapter=chapter,
-                    verse=verse,
+                    chapter=(index - 1) // 31 + 1,
+                    verse=(index - 1) % 31 + 1,
                 )
             )
-        self.store.record_events(42, topic_events[:25] + verse_events[:25])
-        self.store.record_events(42, topic_events[25:] + verse_events[25:])
-        for index in range(1, 41):
+        events = topic_events + verse_events
+        for start in range(0, len(events), 50):
+            self.store.record_events(42, events[start : start + 50])
+        for index in range(1, allowed + 2):
             self._map_new(index)
-        events = self.store.list_events()
-        for event in events:
-            if event.canonical_topic_id != "review-topic-40":
+        last_topic = f"review-topic-{allowed + 1}"
+        for event in self.store.list_events():
+            if event.canonical_topic_id != last_topic:
                 self.store.decide_event(event.id, "approved", actor="test-admin")
-        plan = build_publication_plan(
-            self.store,
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
-        )
-        self.assertEqual(len(plan.bundle.topics), 39)
+        plan = build_publication_plan(self.store, catalog_file=CATALOG)
+        self.assertEqual(len(plan.bundle.topics), allowed)
 
         for event in self.store.list_events(states={"pending"}):
             self.store.decide_event(event.id, "approved", actor="test-admin")
-        with self.assertRaisesRegex(ReviewError, "100"):
-            build_publication_plan(
-                self.store,
-                topics_file=TOPICS,
-                associations_file=ASSOCIATIONS,
-            )
+        with self.assertRaisesRegex(ReviewError, str(MAX_EFFECTIVE_TOPICS)):
+            build_publication_plan(self.store, catalog_file=CATALOG)
 
     def test_topic_aliases_cannot_collide_with_core_or_contributed_names(self) -> None:
         self.store.record_events(
@@ -1857,8 +1857,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         with self.assertRaisesRegex(ReviewError, "reuse an English name or alias"):
             build_publication_plan(
                 self.store,
-                topics_file=TOPICS,
-                associations_file=ASSOCIATIONS,
+                catalog_file=CATALOG,
             )
 
         other_store = ContributionStore(
@@ -1897,8 +1896,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             with self.assertRaisesRegex(ReviewError, "reuse an English name or alias"):
                 build_publication_plan(
                     other_store,
-                    topics_file=TOPICS,
-                    associations_file=ASSOCIATIONS,
+                    catalog_file=CATALOG,
                 )
         finally:
             other_store.close()
@@ -1931,8 +1929,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: self.fail("The unsafe removal must be deferred"),
             output=output,
             verse_client=VerseClient(),
@@ -1943,8 +1940,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         self.assertIn("final verse association", output.getvalue())
         plan = build_publication_plan(
             self.store,
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
         )
         self.assertEqual(plan.event_ids, ())
 
@@ -1976,8 +1972,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: "a",
             output=io.StringIO(),
             verse_client=VerseClient(),
@@ -1986,8 +1981,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         self.assertEqual(removal.state, "approved")
         plan = build_publication_plan(
             self.store,
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
         )
         self.assertEqual(
             {item.verse for item in plan.bundle.additions if item.topic_id == "review-topic-1"},
@@ -2030,8 +2024,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             self.store,
             actor="test-admin",
             translation="kjv",
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
             input_fn=lambda _prompt: next(answers),
             output=output,
             verse_client=VerseClient(),
@@ -2047,8 +2040,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         self.assertIn("final verse association", output.getvalue())
         plan = build_publication_plan(
             self.store,
-            topics_file=TOPICS,
-            associations_file=ASSOCIATIONS,
+            catalog_file=CATALOG,
         )
         self.assertEqual(
             {item.verse for item in plan.bundle.additions if item.topic_id == "review-topic-1"},
@@ -2059,7 +2051,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         core_associations = sorted(
             (
                 item
-                for item in _load_base_associations(TOPICS, ASSOCIATIONS)
+                for item in _load_base_associations(CATALOG)
                 if item.topic_id == "wisdom-cause"
             ),
             key=lambda item: (item.book, item.chapter, item.verse),
@@ -2081,7 +2073,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         )
         definition = next(
             topic
-            for topic in json.loads(TOPICS.read_text(encoding="utf-8"))["topics"]
+            for topic in json.loads(CATALOG.read_text(encoding="utf-8"))["topics"]
             if topic["id"] == "wisdom-cause"
         )
         self.store.set_topic_mapping(
@@ -2098,8 +2090,7 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
         with self.assertRaisesRegex(ReviewError, "without verse associations"):
             build_publication_plan(
                 self.store,
-                topics_file=TOPICS,
-                associations_file=ASSOCIATIONS,
+                catalog_file=CATALOG,
             )
 
         contributed_store = ContributionStore(
@@ -2129,11 +2120,10 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             )
             for event in contributed_store.list_events():
                 contributed_store.decide_event(event.id, "approved", actor="test-admin")
-            publish_live(
+            accept_contributions(
                 contributed_store,
                 actor="test-admin",
-                topics_file=TOPICS,
-                associations_file=ASSOCIATIONS,
+                catalog_file=CATALOG,
                 input_fn=lambda _prompt: "yes",
                 output=io.StringIO(),
             )
@@ -2155,34 +2145,45 @@ class ContributionReviewIntegrationTestCase(unittest.TestCase):
             with self.assertRaisesRegex(ReviewError, "without verse associations"):
                 build_publication_plan(
                     contributed_store,
-                    topics_file=TOPICS,
-                    associations_file=ASSOCIATIONS,
+                    catalog_file=CATALOG,
                 )
         finally:
             contributed_store.close()
 
 
 class FakeProcessRunner:
+    """Answer the publisher's git and builder invocations without a checkout."""
+
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
+        self.environments: list[dict[str, str]] = []
         self.remote_collision = True
-        self.fetch_url = "git@github.com:getbible/robot.git"
-        self.push_url = "git@github.com:getbible/robot.git"
-        self.index_flags = "H bot.py\0"
+        self.fetch_url = "git@github.com:getbible/v1_bookmark_builder.git"
+        self.push_url = "git@github.com:getbible/v1_bookmark_builder.git"
+        self.index_flags = "H src/builder.py\0"
         self.sparse_checkout: str | None = None
         self.fetch_head = "a" * 40
         self.committed_tree = "c" * 40
         self.local_name: str | None = "GetBible Contribution Publisher"
         self.local_email: str | None = "publisher@getbible.net"
+        self.python_version = "Python 3.12.4\n"
+        self.git_version = "git version 2.43.0\n"
+        self.changed_paths = ["data/links/review-topic.json", "data/topics.json"]
 
-    def __call__(self, arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def __call__(self, arguments: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.calls.append(arguments)
-        if arguments[:2] == ["node", "--version"]:
-            return subprocess.CompletedProcess(arguments, 0, "v22.17.1\n", "")
-        if arguments[:2] == ["npm", "--version"]:
-            return subprocess.CompletedProcess(arguments, 0, "10.9.2\n", "")
-        if arguments[0] == "node" or arguments[0] == "npm":
-            return subprocess.CompletedProcess(arguments, 0, "", "")
+        environment = kwargs.get("env")
+        if isinstance(environment, dict):
+            self.environments.append(environment)
+        if arguments[0] != "git":
+            # The builder interpreter: a version probe or src/builder.py.
+            if arguments[1:] == ["--version"]:
+                return subprocess.CompletedProcess(arguments, 0, self.python_version, "")
+            return subprocess.CompletedProcess(
+                arguments, 0, "OK: 5 topics, 15 verse links, 0 locales.\n", ""
+            )
+        if arguments[1:] == ["--version"]:
+            return subprocess.CompletedProcess(arguments, 0, self.git_version, "")
         git_arguments = arguments[3:]
         while git_arguments[:1] == ["-c"]:
             git_arguments = git_arguments[2:]
@@ -2215,13 +2216,11 @@ class FakeProcessRunner:
         if git_arguments == ["ls-files", "-v", "-z"]:
             return subprocess.CompletedProcess(arguments, 0, self.index_flags, "")
         if git_arguments[:2] == ["status", "--porcelain=v1"]:
-            output = " M data/global-bookmarks/topics.json\0" if "-z" in git_arguments else ""
+            output = ""
+            if "-z" in git_arguments:
+                output = " M data/topics.json\0?? data/links/review-topic.json\0"
             return subprocess.CompletedProcess(arguments, 0, output, "")
-        if git_arguments == [
-            "rev-parse",
-            "--verify",
-            "refs/remotes/origin/master^{commit}",
-        ]:
+        if git_arguments == ["rev-parse", "--verify", "refs/remotes/origin/main^{commit}"]:
             return subprocess.CompletedProcess(arguments, 0, "a" * 40 + "\n", "")
         if git_arguments == ["rev-parse", "--verify", "FETCH_HEAD^{commit}"]:
             return subprocess.CompletedProcess(arguments, 0, self.fetch_head + "\n", "")
@@ -2236,7 +2235,7 @@ class FakeProcessRunner:
             return subprocess.CompletedProcess(arguments, 0, "c" * 40 + "\n", "")
         if git_arguments[:3] == ["hash-object", "--no-filters", "--"]:
             return subprocess.CompletedProcess(arguments, 0, "d" * 40 + "\n", "")
-        if git_arguments[:3] == ["rev-parse", "--verify", ":data/global-bookmarks/topics.json"]:
+        if git_arguments[:2] == ["rev-parse", "--verify"] and git_arguments[2].startswith(":"):
             return subprocess.CompletedProcess(arguments, 0, "d" * 40 + "\n", "")
         if git_arguments == ["rev-parse", "--verify", "HEAD^{commit}"]:
             return subprocess.CompletedProcess(arguments, 0, "b" * 40 + "\n", "")
@@ -2244,46 +2243,70 @@ class FakeProcessRunner:
             return subprocess.CompletedProcess(arguments, 0, self.committed_tree + "\n", "")
         if git_arguments == ["rev-list", "--parents", "--max-count=1", "HEAD"]:
             return subprocess.CompletedProcess(arguments, 0, f"{'b' * 40} {'a' * 40}\n", "")
-        if git_arguments[:5] == [
-            "diff-tree",
-            "--no-commit-id",
-            "--name-only",
-            "-r",
-            "-z",
-        ]:
+        if git_arguments[:5] == ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z"]:
             return subprocess.CompletedProcess(
                 arguments,
                 0,
-                "data/global-bookmarks/topics.json\0",
+                "".join(f"{path}\0" for path in self.changed_paths),
                 "",
             )
         return subprocess.CompletedProcess(arguments, 0, "", "")
+
+
+class FakeGitHubResponse:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self.body = body
+        self.headers: dict[str, str] = {}
+
+    def getcode(self) -> int:
+        return self.status
+
+    def read(self, amount: int = -1) -> bytes:
+        return self.body
+
+    def __enter__(self) -> "FakeGitHubResponse":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+
+class FakeUrlopen:
+    def __init__(
+        self,
+        response: FakeGitHubResponse | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.response = response
+        self.error = error
+        self.requests: list[tuple[object, object]] = []
+
+    def __call__(self, request: object, timeout: object = None) -> FakeGitHubResponse:
+        self.requests.append((request, timeout))
+        if self.error is not None:
+            raise self.error
+        assert self.response is not None
+        return self.response
+
+
+PULL_REQUEST_URL = f"https://github.com/{EXPECTED_GITHUB_REPOSITORY}/pull/12"
+TOKEN = "github_pat_example_secret_value"
 
 
 class GitPublisherTestCase(unittest.TestCase):
     @staticmethod
     def _publisher_checkout(root: Path) -> Path:
         checkout = root / "checkout"
-        for relative in (
-            ".git",
-            "scripts",
-            "data/global-bookmarks",
-            "miniapp/lib",
-        ):
+        for relative in (".git", "src", "data/links", "data/locales"):
             (checkout / relative).mkdir(parents=True, exist_ok=True)
         for relative in (
             ".git/HEAD",
             ".git/config",
             ".git/index",
-            "bot.py",
-            "setup.sh",
-            "scripts/import_contribution_bundle.mjs",
-            "data/global-bookmarks/tag-verse.csv",
-            "data/global-bookmarks/topics.json",
-            "miniapp/package.json",
-            "miniapp/lib/bookmark-topic-definitions.js",
-            "miniapp/lib/global-bookmark-data.js",
-            "miniapp/lib/messages.en.js",
+            "src/builder.py",
+            "data/topics.json",
+            "data/links/review-topic.json",
         ):
             (checkout / relative).write_text("", encoding="utf-8")
         return checkout
@@ -2299,58 +2322,155 @@ class GitPublisherTestCase(unittest.TestCase):
         bundle_path.write_bytes(bundle.json_bytes())
         return bundle_path, bundle
 
+    def _publish(
+        self,
+        root: Path,
+        runner: FakeProcessRunner,
+        **options: object,
+    ) -> tuple[object, io.StringIO, ContributionBundle]:
+        checkout = self._publisher_checkout(root)
+        bundle_path, bundle = self._bundle_file(root)
+        output = io.StringIO()
+        publisher = GitPublisher(
+            checkout=checkout,
+            expected_user="publisher",
+            runner=runner,
+            stdout=output,
+            **options,  # type: ignore[arg-type]
+        )
+        with patch.object(publisher, "_validate_identity"):
+            result = publisher.publish(bundle_path)
+        return result, output, bundle
+
     def test_porcelain_parser_preserves_status_and_unusual_paths(self) -> None:
         self.assertEqual(
             parse_porcelain_paths(
-                " M data/global-bookmarks/topics.json\0"
-                "M  miniapp/lib/global-bookmark-data.js\0"
-                "?? data/global-bookmarks/name with spaces\nline\0"
+                " M data/topics.json\0"
+                "?? data/links/review-topic.json\0"
+                "?? data/links/name with spaces\nline\0"
             ),
             [
-                "data/global-bookmarks/name with spaces\nline",
-                "data/global-bookmarks/topics.json",
-                "miniapp/lib/global-bookmark-data.js",
+                "data/links/name with spaces\nline",
+                "data/links/review-topic.json",
+                "data/topics.json",
             ],
         )
         for malformed in ("M missing-index-space\0", "R  renamed\0", "C  copied\0"):
             with self.subTest(malformed=malformed), self.assertRaises(ReviewError):
                 parse_porcelain_paths(malformed)
 
-    def test_publisher_checks_identity_tooling_remote_collision_and_pushes(self) -> None:
+    def test_publisher_imports_validates_commits_and_pushes_a_builder_branch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            checkout = self._publisher_checkout(root)
-            bundle_path, bundle = self._bundle_file(root)
             runner = FakeProcessRunner()
-            output = io.StringIO()
-            publisher = GitPublisher(
-                checkout=checkout,
-                expected_user="publisher",
-                runner=runner,
-                stdout=output,
-            )
-            with patch.object(publisher, "_validate_identity"):
-                result = publisher.publish(bundle_path)
-            self.assertTrue(result.branch.endswith("-2"))
+            result, output, bundle = self._publish(root, runner, environment={})
+            self.assertTrue(result.branch.startswith("contributions/"))
+            self.assertTrue(result.branch.endswith(f"-{bundle.checksum[:10]}-2"))
             self.assertEqual(result.commit, "b" * 40)
+            self.assertIsNone(result.pull_request)
             self.assertIn("Pushed contributions/", output.getvalue())
-            self.assertTrue(
-                any("push" in call and "--set-upstream" in call for call in runner.calls)
+            self.assertIn(compare_url_for(result.branch), output.getvalue())
+
+            bundle_argument = str((root / "bundle.json").resolve())
+            builder_calls = [call for call in runner.calls if call[0] != "git"]
+            self.assertEqual(
+                builder_calls,
+                [
+                    ["python3", "--version"],
+                    ["python3", "src/builder.py", "import-bundle", bundle_argument],
+                    ["python3", "src/builder.py", "validate"],
+                ],
             )
+            self.assertIn(["git", "--version"], runner.calls)
+            self.assertFalse(any(call[0] in {"node", "npm"} for call in runner.calls))
+
+            def position(*fragment: str) -> int:
+                return next(
+                    index
+                    for index, call in enumerate(runner.calls)
+                    if all(part in call for part in fragment)
+                )
+
+            self.assertLess(position("import-bundle"), position("validate"))
+            self.assertLess(position("validate"), position("add", "--"))
+            self.assertLess(position("commit", "--message"), position("push", "--set-upstream"))
             self.assertTrue(
                 any(
-                    "+refs/heads/master:refs/remotes/origin/master" in call for call in runner.calls
+                    call[-4:] == ["push", "--set-upstream", "origin", result.branch]
+                    for call in runner.calls
                 )
             )
             self.assertTrue(
-                all("core.hooksPath=/dev/null" in call for call in runner.calls if call[0] == "git")
+                any("+refs/heads/main:refs/remotes/origin/main" in call for call in runner.calls)
+            )
+            self.assertFalse(
+                any("master" in argument for call in runner.calls for argument in call)
+            )
+            self.assertTrue(
+                all(
+                    "core.hooksPath=/dev/null" in call
+                    for call in runner.calls
+                    if call[:2] == ["git", "-C"]
+                )
+            )
+            commit_call = next(call for call in runner.calls if "commit" in call)
+            self.assertEqual(
+                commit_call[-1],
+                "Add reviewed getBible robot bookmark contributions\n\n"
+                "Topics: 1\n"
+                "Verse associations: 1\n"
+                f"Bundle SHA-256: {bundle.checksum}\n",
+            )
+            add_call = next(call for call in runner.calls if "add" in call)
+            self.assertEqual(
+                add_call[-2:], ["data/links/review-topic.json", "data/topics.json"]
             )
             for key in ("user.name", "user.email"):
                 self.assertTrue(
+                    any(call[-4:] == ["config", "--local", "--get", key] for call in runner.calls)
+                )
+
+    def test_publisher_uses_the_configured_interpreter_and_requires_python_3_12(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = FakeProcessRunner()
+            result, _output, _bundle = self._publish(
+                root, runner, environment={}, builder_python="/opt/python3.12/bin/python3"
+            )
+            self.assertEqual(result.commit, "b" * 40)
+            builder_calls = [call for call in runner.calls if call[0] != "git"]
+            self.assertTrue(builder_calls)
+            self.assertTrue(all(call[0] == "/opt/python3.12/bin/python3" for call in builder_calls))
+
+        for version in ("Python 3.11.9\n", "Python 2.7.18\n", "nonsense\n", ""):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                runner = FakeProcessRunner()
+                runner.python_version = version
+                with self.assertRaisesRegex(ReviewError, "Python 3.12 or newer"):
+                    self._publish(root, runner, environment={})
+                self.assertFalse(
                     any(
-                        call[-4:] == ["config", "--local", "--get", key]
+                        argument in {"fetch", "switch", "import-bundle", "push"}
                         for call in runner.calls
+                        for argument in call
                     )
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            runner = FakeProcessRunner()
+            runner.git_version = "not git\n"
+            with self.assertRaisesRegex(ReviewError, "usable git"):
+                self._publish(Path(directory), runner, environment={})
+
+        for invalid in ("", "python3 -u", "../python", "py;rm", "relative/python"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ReviewError, "command name or an absolute path"
+            ):
+                GitPublisher(
+                    checkout=Path("/unused"),
+                    expected_user="publisher",
+                    builder_python=invalid,
                 )
 
     def test_publisher_requires_checkout_local_git_identity_before_mutation(self) -> None:
@@ -2360,23 +2480,11 @@ class GitPublisherTestCase(unittest.TestCase):
         ):
             with self.subTest(attribute=attribute), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                checkout = self._publisher_checkout(root)
-                bundle_path, _bundle = self._bundle_file(root)
                 runner = FakeProcessRunner()
                 setattr(runner, attribute, None)
-                publisher = GitPublisher(
-                    checkout=checkout,
-                    expected_user="publisher",
-                    runner=runner,
-                )
-                with (
-                    patch.object(publisher, "_validate_identity"),
-                    self.assertRaisesRegex(ReviewError, message),
-                ):
-                    publisher.publish(bundle_path)
-                self.assertFalse(
-                    any(call[0] in {"node", "npm"} for call in runner.calls),
-                )
+                with self.assertRaisesRegex(ReviewError, message):
+                    self._publish(root, runner, environment={})
+                self.assertFalse(any(call[0] != "git" for call in runner.calls))
                 self.assertFalse(
                     any(
                         argument in {"fetch", "switch", "add", "commit", "push"}
@@ -2404,78 +2512,106 @@ class GitPublisherTestCase(unittest.TestCase):
                 with self.assertRaisesRegex(ReviewError, message):
                     publisher._validate_git_identity()
 
-    def test_publisher_rejects_noncanonical_push_url_and_unsafe_index_modes(self) -> None:
+    def test_publisher_accepts_every_canonical_builder_origin_form_only(self) -> None:
         runner = FakeProcessRunner()
-        runner.push_url = "git@github.com:attacker/fork.git"
         publisher = GitPublisher(
             checkout=Path("/unused").resolve(),
             expected_user="publisher",
             runner=runner,
         )
+        for url in (
+            "https://github.com/getbible/v1_bookmark_builder.git",
+            "https://github.com/getbible/v1_bookmark_builder",
+            "https://github.com/getbible/v1_bookmark_builder/",
+            "HTTPS://GITHUB.COM/GetBible/V1_Bookmark_Builder.git",
+            "ssh://git@github.com/getbible/v1_bookmark_builder.git",
+            "ssh://git@github.com/getbible/v1_bookmark_builder",
+            "git@github.com:getbible/v1_bookmark_builder.git",
+            "git@github.com:getbible/v1_bookmark_builder",
+        ):
+            with self.subTest(url=url):
+                runner.fetch_url = url
+                runner.push_url = url
+                publisher._validate_origin()
+
+        canonical = "git@github.com:getbible/v1_bookmark_builder.git"
+        for url, label in (
+            ("git@github.com:getbible/robot.git", "fetch URL"),
+            ("https://github.com/attacker/v1_bookmark_builder.git", "fetch URL"),
+            ("https://gitlab.com/getbible/v1_bookmark_builder.git", "fetch URL"),
+            ("https://github.com/getbible/v1_bookmark_builder.git/extra", "fetch URL"),
+            ("", "fetch URL"),
+        ):
+            with self.subTest(url=url):
+                runner.fetch_url = url
+                runner.push_url = canonical
+                with self.assertRaisesRegex(ReviewError, label):
+                    publisher._validate_origin()
+        runner.fetch_url = canonical
+        runner.push_url = "git@github.com:attacker/fork.git"
         with self.assertRaisesRegex(ReviewError, "push URL"):
             publisher._validate_origin()
 
-        runner.push_url = "git@github.com:getbible/robot.git"
-        runner.index_flags = "h scripts/import_contribution_bundle.mjs\0"
+        runner.push_url = canonical
+        runner.index_flags = "h src/builder.py\0"
         with self.assertRaisesRegex(ReviewError, "assume-unchanged"):
             publisher._validate_index_mode()
 
-        runner.index_flags = "H bot.py\0"
+        runner.index_flags = "H src/builder.py\0"
         runner.sparse_checkout = "true"
         with self.assertRaisesRegex(ReviewError, "sparse checkout"):
             publisher._validate_index_mode()
 
-    def test_publisher_rejects_symlink_and_writable_critical_paths(self) -> None:
+    def test_publisher_requires_the_builder_layout_and_safe_critical_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             checkout = self._publisher_checkout(Path(directory))
-            package = checkout / "miniapp" / "package.json"
-            package.unlink()
-            package.symlink_to(checkout / "bot.py")
+            topics = checkout / "data" / "topics.json"
+            topics.unlink()
+            topics.symlink_to(checkout / "src" / "builder.py")
             publisher = GitPublisher(checkout=checkout, expected_user="publisher")
             with self.assertRaisesRegex(ReviewError, "regular file"):
                 publisher._validate_checkout_filesystem()
 
         with tempfile.TemporaryDirectory() as directory:
             checkout = self._publisher_checkout(Path(directory))
-            importer = checkout / "scripts" / "import_contribution_bundle.mjs"
-            importer.chmod(0o666)
+            (checkout / "src" / "builder.py").chmod(0o666)
             publisher = GitPublisher(checkout=checkout, expected_user="publisher")
             with self.assertRaisesRegex(ReviewError, "group- or other-writable"):
                 publisher._validate_checkout_filesystem()
 
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = self._publisher_checkout(Path(directory))
+            (checkout / "data" / "locales").rmdir()
+            publisher = GitPublisher(checkout=checkout, expected_user="publisher")
+            with self.assertRaisesRegex(ReviewError, "unavailable"):
+                publisher._validate_checkout_filesystem()
+
+        with tempfile.TemporaryDirectory() as directory:
+            # A getbible/robot checkout is not a builder checkout.
+            checkout = Path(directory) / "robot"
+            for relative in (".git", "scripts", "miniapp"):
+                (checkout / relative).mkdir(parents=True)
+            for relative in (".git/HEAD", ".git/config", ".git/index", "bot.py", "setup.sh"):
+                (checkout / relative).write_text("", encoding="utf-8")
+            publisher = GitPublisher(checkout=checkout, expected_user="publisher")
+            with self.assertRaisesRegex(ReviewError, "unavailable"):
+                publisher._validate_checkout_filesystem()
+
     def test_publisher_verifies_fetch_head_and_final_commit_tree(self) -> None:
         for attribute, value, message in (
-            ("fetch_head", "e" * 40, "fetched origin/master"),
+            ("fetch_head", "e" * 40, "fetched origin/main"),
             ("committed_tree", "e" * 40, "commit tree changed"),
         ):
             with self.subTest(attribute=attribute), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                checkout = self._publisher_checkout(root)
-                bundle_path, _bundle = self._bundle_file(root)
                 runner = FakeProcessRunner()
                 setattr(runner, attribute, value)
-                publisher = GitPublisher(
-                    checkout=checkout,
-                    expected_user="publisher",
-                    runner=runner,
-                )
-                with (
-                    patch.object(publisher, "_validate_identity"),
-                    self.assertRaisesRegex(ReviewError, message),
-                ):
-                    publisher.publish(bundle_path)
+                with self.assertRaisesRegex(ReviewError, message):
+                    self._publish(Path(directory), runner, environment={})
 
     def test_publisher_refuses_bundle_swapped_after_revision_lease(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            bundle_path = root / "bundle.json"
-            bundle_path.write_bytes(
-                ContributionBundle(
-                    (CanonicalTopic("review-topic", "Review Topic", "#123456"),),
-                    (Association("review-topic", 1, 1, 1),),
-                    (),
-                ).json_bytes()
-            )
+            bundle_path, _bundle = self._bundle_file(root)
             runner = FakeProcessRunner()
             with self.assertRaisesRegex(ReviewError, "publication lease"):
                 GitPublisher(
@@ -2494,9 +2630,717 @@ class GitPublisherTestCase(unittest.TestCase):
                 self.assertRaisesRegex(ReviewError, "non-root"),
             ):
                 publisher._validate_identity()
-        with self.assertRaisesRegex(ReviewError, "unexpected paths"):
-            GitPublisher._validate_changed_paths(["private/telegram-users.json"])
+        GitPublisher._validate_changed_paths(
+            ["data/links/review-topic.json", "data/links/gods-judgment.json", "data/topics.json"]
+        )
+        for unexpected in (
+            ["private/telegram-users.json"],
+            ["data/locales/fr.json"],
+            ["src/builder.py"],
+            ["data/links/Bad_Slug.json"],
+            ["data/links/nested/topic.json"],
+            ["data/links/-leading.json"],
+            ["data/topics.json", "README.md"],
+        ):
+            with self.subTest(paths=unexpected), self.assertRaisesRegex(
+                ReviewError, "unexpected paths"
+            ):
+                GitPublisher._validate_changed_paths(unexpected)
+
+        with tempfile.TemporaryDirectory() as directory:
+            runner = FakeProcessRunner()
+            runner.changed_paths = ["data/locales/fr.json", "data/topics.json"]
+            with self.assertRaisesRegex(ReviewError, "unexpected paths"):
+                self._publish(Path(directory), runner, environment={})
+            self.assertFalse(any("push" in call for call in runner.calls))
+
+    def test_pull_request_is_opened_with_the_builder_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runner = FakeProcessRunner()
+            urlopen = FakeUrlopen(
+                FakeGitHubResponse(201, json.dumps({"html_url": PULL_REQUEST_URL}).encode())
+            )
+            result, output, bundle = self._publish(
+                Path(directory),
+                runner,
+                environment={BUILDER_TOKEN_ENVIRONMENT_VARIABLE: TOKEN},
+                urlopen=urlopen,
+                instance_name="alpha",
+            )
+            self.assertEqual(result.pull_request, PULL_REQUEST_URL)
+            self.assertEqual(result.commit, "b" * 40)
+            self.assertIn(f"Opened pull request {PULL_REQUEST_URL}", output.getvalue())
+            self.assertNotIn(TOKEN, output.getvalue())
+
+            self.assertEqual(len(urlopen.requests), 1)
+            request, timeout = urlopen.requests[0]
+            self.assertEqual(request.full_url, GITHUB_API_PULLS_URL)
+            self.assertEqual(request.get_method(), "POST")
+            self.assertEqual(timeout, 30.0)
+            self.assertEqual(request.get_header("Authorization"), f"Bearer {TOKEN}")
+            self.assertEqual(request.get_header("Accept"), "application/vnd.github+json")
+            self.assertEqual(request.get_header("X-github-api-version"), "2022-11-28")
+            payload = json.loads(request.data.decode("utf-8"))
+            self.assertEqual(payload["head"], result.branch)
+            self.assertEqual(payload["base"], "main")
+            self.assertTrue(payload["title"].startswith("Reviewed bookmark contributions "))
+            self.assertTrue(payload["title"].endswith(f"({bundle.checksum[:10]})"))
+            self.assertIn("- Topics: 1", payload["body"])
+            self.assertIn("- Verse associations added: 1", payload["body"])
+            self.assertIn(f"- Bundle SHA-256: {bundle.checksum}", payload["body"])
+            self.assertIn("- Robot instance: alpha", payload["body"])
+            self.assertNotIn("contributor", payload["body"].casefold())
+
+            # The push happened before the pull request, and no child process
+            # ever saw the token.
+            push_index = next(
+                index for index, call in enumerate(runner.calls) if "push" in call
+            )
+            self.assertEqual(push_index, len(runner.calls) - 1)
+            self.assertTrue(runner.environments)
+            self.assertFalse(
+                any(BUILDER_TOKEN_ENVIRONMENT_VARIABLE in env for env in runner.environments)
+            )
+
+    def test_pull_request_is_skipped_without_a_token_and_the_compare_url_is_printed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            urlopen = FakeUrlopen()
+            result, output, _bundle = self._publish(
+                Path(directory),
+                FakeProcessRunner(),
+                environment={"HOME": "/srv/publisher"},
+                urlopen=urlopen,
+            )
+            self.assertIsNone(result.pull_request)
+            self.assertEqual(urlopen.requests, [])
+            self.assertIn(
+                f"https://github.com/{EXPECTED_GITHUB_REPOSITORY}/compare/main..."
+                f"{result.branch}?expand=1",
+                output.getvalue(),
+            )
+            self.assertIn(BUILDER_TOKEN_ENVIRONMENT_VARIABLE, output.getvalue())
+
+        with tempfile.TemporaryDirectory() as directory:
+            urlopen = FakeUrlopen()
+            result, output, _bundle = self._publish(
+                Path(directory),
+                FakeProcessRunner(),
+                environment={BUILDER_TOKEN_ENVIRONMENT_VARIABLE: "bad token\nvalue"},
+                urlopen=urlopen,
+            )
+            self.assertIsNone(result.pull_request)
+            self.assertEqual(urlopen.requests, [])
+            self.assertIn("malformed", output.getvalue())
+            self.assertNotIn("bad token", output.getvalue())
+
+    def test_pull_request_api_failure_keeps_the_push_result(self) -> None:
+        cases = (
+            (
+                FakeUrlopen(error=HTTPError(GITHUB_API_PULLS_URL, 422, "Unprocessable", {}, None)),
+                "HTTP 422",
+            ),
+            (FakeUrlopen(error=URLError("connection refused")), "could not be reached"),
+            (FakeUrlopen(error=TimeoutError()), "could not be reached"),
+            (
+                FakeUrlopen(FakeGitHubResponse(201, b"<html>not json</html>")),
+                "unexpected response",
+            ),
+            (
+                FakeUrlopen(
+                    FakeGitHubResponse(
+                        201,
+                        json.dumps({"html_url": "https://github.com/attacker/x/pull/1"}).encode(),
+                    )
+                ),
+                "unexpected response",
+            ),
+            (FakeUrlopen(FakeGitHubResponse(204, b"")), "HTTP 204"),
+        )
+        for urlopen, detail in cases:
+            with self.subTest(detail=detail), tempfile.TemporaryDirectory() as directory:
+                result, output, _bundle = self._publish(
+                    Path(directory),
+                    FakeProcessRunner(),
+                    environment={BUILDER_TOKEN_ENVIRONMENT_VARIABLE: TOKEN},
+                    urlopen=urlopen,
+                )
+                self.assertTrue(result.branch.startswith("contributions/"))
+                self.assertEqual(result.commit, "b" * 40)
+                self.assertIsNone(result.pull_request)
+                self.assertEqual(len(urlopen.requests), 1)
+                self.assertIn(detail, output.getvalue())
+                self.assertIn(compare_url_for(result.branch), output.getvalue())
+                self.assertNotIn(TOKEN, output.getvalue())
+
+    def test_publish_repository_command_prints_branch_commit_and_pull_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = self._publisher_checkout(root)
+            bundle_path, bundle = self._bundle_file(root)
+            runner = FakeProcessRunner()
+            urlopen = FakeUrlopen(
+                FakeGitHubResponse(201, json.dumps({"html_url": PULL_REQUEST_URL}).encode())
+            )
+            stdout = io.StringIO()
+            with (
+                patch("scripts.contribution_review.GitPublisher._validate_identity"),
+                patch("scripts.contribution_review.subprocess.run", runner),
+                patch("scripts.contribution_review._PULL_REQUEST_OPENER") as opener,
+                patch.dict(os.environ, {BUILDER_TOKEN_ENVIRONMENT_VARIABLE: TOKEN}),
+                contextlib.redirect_stdout(stdout),
+            ):
+                opener.open = urlopen
+                code = main(
+                    [
+                        "publish-repository",
+                        "--bundle",
+                        str(bundle_path),
+                        "--checkout",
+                        str(checkout),
+                        "--expected-user",
+                        "publisher",
+                        "--expected-bundle-checksum",
+                        bundle.checksum,
+                        "--builder-python",
+                        "python3.12",
+                        "--instance-name",
+                        "alpha",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            result = json.loads(stdout.getvalue().splitlines()[-1])
+            self.assertEqual(set(result), {"branch", "commit", "pull_request"})
+            self.assertEqual(result["commit"], "b" * 40)
+            self.assertEqual(result["pull_request"], PULL_REQUEST_URL)
+            self.assertNotIn(TOKEN, stdout.getvalue())
+            self.assertTrue(
+                any(call[:2] == ["python3.12", "src/builder.py"] for call in runner.calls)
+            )
 
 
-if __name__ == "__main__":
-    unittest.main()
+class CatalogLoaderTestCase(unittest.TestCase):
+    def test_loaders_read_the_saved_api_catalogue(self) -> None:
+        topics = _load_canonical_topics(CATALOG)
+        self.assertEqual(set(topics), {topic["id"] for topic in CATALOG_TOPICS})
+        self.assertEqual(topics["grace"], CanonicalTopic("grace", "Grace", "#bbf7d0"))
+        self.assertEqual(topics["faith"].aliases, ("Trust in God",))
+
+        associations = _load_base_associations(CATALOG)
+        self.assertIn(Association("grace", 43, 3, 16), associations)
+        self.assertIn(Association("wisdom-cause", 59, 1, 5), associations)
+        self.assertEqual(
+            len(associations),
+            sum(len(topic["verses"]) for topic in CATALOG_TOPICS),  # type: ignore[arg-type]
+        )
+
+    def test_loaders_do_not_require_api_ids_to_be_derived_slugs(self) -> None:
+        # Upstream may rename a topic while keeping its id stable; the API is
+        # authoritative, so the loader must not reject that.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "catalog.json"
+            path.write_bytes(
+                catalog_document(
+                    [
+                        {
+                            "id": "gods-judgment",
+                            "name": "Judgment of God",
+                            "color": "#fb7185",
+                            "aliases": ["God's Judgment"],
+                            "default": True,
+                            "verses": [[45, 2, 5]],
+                        }
+                    ]
+                )
+            )
+            topics = _load_canonical_topics(path)
+            self.assertEqual(topics["gods-judgment"].name, "Judgment of God")
+            self.assertEqual(topics["gods-judgment"].aliases, ("God's Judgment",))
+
+    def test_loaders_reject_missing_stale_and_malformed_catalogues(self) -> None:
+        with self.assertRaisesRegex(ReviewError, "fetch-catalog"):
+            _load_canonical_topics(None)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ReviewError, "missing"):
+                _load_base_associations(root / "absent.json")
+
+            stale = root / "stale.json"
+            stale.write_bytes(catalog_document())
+            two_days_ago = time.time() - 2 * 24 * 3600
+            os.utime(stale, (two_days_ago, two_days_ago))
+            with self.assertRaisesRegex(ReviewError, "older than one day"):
+                _load_canonical_topics(stale)
+
+            linked = root / "linked.json"
+            linked.symlink_to(CATALOG)
+            with self.assertRaisesRegex(ReviewError, "regular file"):
+                _load_canonical_topics(linked)
+
+            malformed = root / "malformed.json"
+            for payload in (
+                b"not json",
+                catalog_document() + b"}",
+                json.dumps({"schema_version": 1, "topics": [], "extra": True}).encode(),
+                json.dumps({"schema_version": 2, "topics": []}).encode(),
+                catalog_document(
+                    [{**CATALOG_TOPICS[1], "verses": [[67, 1, 1]]}]  # type: ignore[dict-item]
+                ),
+                catalog_document(
+                    [{**CATALOG_TOPICS[1], "verses": [[1, 51, 1]]}]  # type: ignore[dict-item]
+                ),
+                catalog_document(
+                    [{**CATALOG_TOPICS[1], "verses": [[1, 1, 2], [1, 1, 1]]}]  # type: ignore[dict-item]
+                ),
+                catalog_document([{**CATALOG_TOPICS[1], "color": "#BBF7D0"}]),  # type: ignore[dict-item]
+                catalog_document([{**CATALOG_TOPICS[1], "id": "Grace"}]),  # type: ignore[dict-item]
+                catalog_document([CATALOG_TOPICS[1], CATALOG_TOPICS[1]]),
+                catalog_document(
+                    [CATALOG_TOPICS[1], {**CATALOG_TOPICS[0], "aliases": ["grace"]}]  # type: ignore[dict-item]
+                ),
+            ):
+                with self.subTest(payload=payload[:60]):
+                    malformed.write_bytes(payload)
+                    with self.assertRaisesRegex(ReviewError, "not a valid Bookmarks API catalogue"):
+                        _load_base_associations(malformed)
+
+
+class FakeBookmarksClient:
+    def __init__(self, document: bytes, *, version: int = 7) -> None:
+        self.document = document
+        self.version = version
+        self.calls: list[str] = []
+
+    def index(self) -> SimpleNamespace:
+        self.calls.append("index")
+        return SimpleNamespace(
+            catalog_version=self.version,
+            checksum="f" * 64,
+            topics=len(json.loads(self.document)["topics"]),
+            verses=0,
+            locales=(),
+        )
+
+    def catalog(self) -> object:
+        self.calls.append("catalog")
+        return parse_catalog_document(self.document)
+
+
+class FetchCatalogTestCase(unittest.TestCase):
+    def test_fetch_catalog_writes_the_verified_document_privately(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "exports" / "bookmarks-catalog.json"
+            client = FakeBookmarksClient(catalog_document(), version=9)
+            output = io.StringIO()
+            result = fetch_catalog(destination, client=client, output_stream=output)
+            self.assertEqual(client.calls, ["index", "catalog"])
+            self.assertEqual(destination.read_bytes(), catalog_document())
+            self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(destination.parent.stat().st_mode), 0o700)
+            expected_checksum = parse_catalog_document(catalog_document()).checksum
+            self.assertEqual(
+                result,
+                {
+                    "catalog_version": 9,
+                    "checksum": expected_checksum,
+                    "topics": len(CATALOG_TOPICS),
+                    "path": str(destination.resolve()),
+                },
+            )
+            self.assertIn("catalogue version 9", output.getvalue())
+            self.assertEqual(list(destination.parent.glob(".*.tmp")), [])
+
+            # The saved copy is what the review commands then load.
+            self.assertEqual(
+                set(_load_canonical_topics(destination)),
+                set(_load_canonical_topics(CATALOG)),
+            )
+
+    def test_fetch_catalog_keeps_the_previous_copy_when_the_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "bookmarks-catalog.json"
+            destination.write_bytes(b"previous")
+            client = FakeBookmarksClient(catalog_document())
+            with (
+                patch("scripts.contribution_review.os.replace", side_effect=OSError("fail")),
+                self.assertRaises(OSError),
+            ):
+                fetch_catalog(destination, client=client, output_stream=io.StringIO())
+            self.assertEqual(destination.read_bytes(), b"previous")
+            self.assertEqual(list(destination.parent.glob(".*.tmp")), [])
+
+    def test_fetch_catalog_reports_api_failures_and_rejects_unsafe_outputs(self) -> None:
+        class FailingClient:
+            def index(self) -> object:
+                raise BookmarksTransportError()
+
+            def catalog(self) -> object:  # pragma: no cover - never reached
+                raise AssertionError("index() failed first")
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "bookmarks-catalog.json"
+            with self.assertRaisesRegex(ReviewError, "could not be fetched"):
+                fetch_catalog(destination, client=FailingClient(), output_stream=io.StringIO())
+            self.assertFalse(destination.exists())
+            with self.assertRaisesRegex(ReviewError, "absolute"):
+                fetch_catalog(Path("relative.json"), client=FailingClient())
+            linked = Path(directory) / "linked.json"
+            linked.symlink_to(destination)
+            with self.assertRaisesRegex(ReviewError, "symbolic link"):
+                fetch_catalog(linked, client=FailingClient())
+
+    def test_fetch_catalog_command_uses_the_client_and_prints_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "bookmarks-catalog.json"
+            client = FakeBookmarksClient(catalog_document(), version=3)
+            stdout = io.StringIO()
+            with (
+                patch(
+                    "modules.getbible_bookmarks.GetBibleBookmarksClient",
+                    return_value=client,
+                ) as factory,
+                contextlib.redirect_stdout(stdout),
+            ):
+                code = main(
+                    [
+                        "fetch-catalog",
+                        "--output",
+                        str(destination),
+                        "--base-url",
+                        "https://bookmarks.example.test/v1",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            factory.assert_called_once_with(base_url="https://bookmarks.example.test/v1")
+            result = json.loads(stdout.getvalue().splitlines()[-1])
+            self.assertEqual(set(result), {"catalog_version", "checksum", "topics", "path"})
+            self.assertEqual(result["catalog_version"], 3)
+            self.assertEqual(destination.read_bytes(), catalog_document())
+
+            with (
+                patch(
+                    "modules.getbible_bookmarks.GetBibleBookmarksClient",
+                    return_value=client,
+                ) as factory,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                main(["fetch-catalog", "--output", str(destination)])
+            factory.assert_called_once_with(base_url="https://bookmarks.getbible.net/v1")
+
+
+class FakeCompletionStore:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def finish_repo_publication(
+        self,
+        token: str,
+        revision: int,
+        *,
+        state: str,
+        actor: str,
+        branch: str | None = None,
+        commit: str | None = None,
+        error: str | None = None,
+        pull_request: str | None = None,
+    ) -> None:
+        self.calls.append(
+            {
+                "token": token,
+                "revision": revision,
+                "state": state,
+                "actor": actor,
+                "branch": branch,
+                "commit": commit,
+                "error": error,
+                "pull_request": pull_request,
+            }
+        )
+
+
+class FakeStatusStore:
+    def __init__(self, publication: dict[str, object]) -> None:
+        self.publication = publication
+
+    def list_applications(self, *, states: object = None, limit: int = 100) -> list[object]:
+        return []
+
+    def list_source_topics(self, *, states: object = None, limit: int = 500) -> list[object]:
+        return []
+
+    def list_events(self, **_kwargs: object) -> list[object]:
+        return []
+
+    def current_catalog(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            revision=0,
+            checksum="0" * 64,
+            catalog=ContributionBundle.empty().as_dict(),
+        )
+
+    def publication_state(self) -> dict[str, object]:
+        return dict(self.publication)
+
+
+class PublicationRecordingTestCase(unittest.TestCase):
+    def _finish(self, store: FakeCompletionStore, *extra: str) -> int:
+        with patch("scripts.contribution_review._load_store", return_value=store):
+            return main(
+                [
+                    "finish-repository-publication",
+                    "--store",
+                    "/var/lib/getbible-robot/alpha/contributions.sqlite3",
+                    "--actor",
+                    "setup:test",
+                    "--lease-token",
+                    "1" * 48,
+                    "--revision",
+                    "4",
+                    "--state",
+                    "pushed",
+                    "--branch",
+                    "contributions/20260917-101010-0123456789",
+                    "--commit",
+                    "b" * 40,
+                    *extra,
+                ]
+            )
+
+    def test_finish_passes_the_pull_request_url_to_the_store(self) -> None:
+        store = FakeCompletionStore()
+        self.assertEqual(self._finish(store, "--pull-request", PULL_REQUEST_URL), 0)
+        self.assertEqual(len(store.calls), 1)
+        self.assertEqual(store.calls[0]["pull_request"], PULL_REQUEST_URL)
+        self.assertEqual(store.calls[0]["state"], "pushed")
+        self.assertEqual(store.calls[0]["revision"], 4)
+
+        store = FakeCompletionStore()
+        self.assertEqual(self._finish(store), 0)
+        self.assertIsNone(store.calls[0]["pull_request"])
+
+        store = FakeCompletionStore()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            self._finish(store, "--pull-request", "https://github.com/attacker/x/pull/1")
+        self.assertEqual(store.calls, [])
+        self.assertIn("pull request URL", stderr.getvalue())
+
+    def test_real_store_records_the_pull_request_when_the_contract_is_present(self) -> None:
+        signature = inspect.signature(ContributionStore.finish_repo_publication)
+        if "pull_request" not in signature.parameters:
+            self.skipTest("ContributionStore.finish_repo_publication(pull_request=) not landed")
+        with tempfile.TemporaryDirectory() as directory:
+            store = ContributionStore(path=str(Path(directory) / "contributions.sqlite3"))
+            try:
+                _approve(store)
+                store.record_events(
+                    42,
+                    [
+                        _topic_event("topic.pr", "local.topic.1", "Review Topic 1"),
+                        _verse_event("verse.pr", "local.topic.1"),
+                    ],
+                )
+                store.set_topic_mapping(
+                    42,
+                    "local.topic.1",
+                    "review-topic-1",
+                    state="mapped",
+                    actor="test-admin",
+                    canonical_definition=_definition(),
+                )
+                for event in store.list_events():
+                    store.decide_event(event.id, "approved", actor="test-admin")
+                accepted = accept_contributions(
+                    store,
+                    actor="test-admin",
+                    catalog_file=CATALOG,
+                    input_fn=lambda _prompt: "y",
+                    output=io.StringIO(),
+                )
+                lease = store.begin_repo_publication(
+                    accepted.revision, accepted.checksum, actor="setup:test"
+                )
+                with patch("scripts.contribution_review._load_store", return_value=store):
+                    code = main(
+                        [
+                            "finish-repository-publication",
+                            "--store",
+                            "/unused/contributions.sqlite3",
+                            "--actor",
+                            "setup:test",
+                            "--lease-token",
+                            lease,
+                            "--revision",
+                            str(accepted.revision),
+                            "--state",
+                            "pushed",
+                            "--branch",
+                            "contributions/20260917-101010-0123456789",
+                            "--commit",
+                            "b" * 40,
+                            "--pull-request",
+                            PULL_REQUEST_URL,
+                        ]
+                    )
+                self.assertEqual(code, 0)
+                state = store.publication_state()
+                self.assertEqual(state["repo_state"], "pushed")
+                self.assertEqual(state["repo_pull_request"], PULL_REQUEST_URL)
+                output = io.StringIO()
+                print_status(store, output=output)
+                self.assertIn(f"Last pull request: {PULL_REQUEST_URL}", output.getvalue())
+            finally:
+                store.close()
+
+    def test_status_shows_api_catalogue_and_pull_request_when_the_store_provides_them(self) -> None:
+        checked_at = time.time_ns()
+        store = FakeStatusStore(
+            {
+                "repo_state": "pushed",
+                "repo_revision": 3,
+                "repo_branch": "contributions/20260917-101010-0123456789",
+                "repo_pull_request": PULL_REQUEST_URL,
+                "api_catalog_version": 12,
+                "api_checksum": "ab" * 32,
+                "api_checked_at": checked_at,
+            }
+        )
+        output = io.StringIO()
+        print_status(store, output=output)  # type: ignore[arg-type]
+        text = output.getvalue()
+        self.assertIn("Accepted ledger revision: none", text)
+        self.assertIn("Approved changes awaiting acceptance: 0", text)
+        self.assertIn("Upstream publication: pushed (ledger revision 3)", text)
+        self.assertIn("Upstream branch: contributions/20260917-101010-0123456789", text)
+        self.assertIn(f"Last pull request: {PULL_REQUEST_URL}", text)
+        self.assertIn("Shared API catalogue version: 12", text)
+        self.assertIn(f"Shared API catalogue checksum: {'ab' * 32}", text)
+        self.assertIn("Shared API catalogue checked: 20", text)
+        self.assertNotIn("live", text.casefold())
+
+        older = FakeStatusStore({"repo_state": "not started", "repo_revision": 0})
+        output = io.StringIO()
+        print_status(older, output=output)  # type: ignore[arg-type]
+        self.assertIn("Shared API catalogue version: not observed yet", output.getvalue())
+        self.assertNotIn("Last pull request", output.getvalue())
+
+
+class AcceptanceTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.store = ContributionStore(
+            path=str(Path(self.directory.name) / "contributions.sqlite3")
+        )
+        _approve(self.store)
+        self.store.record_events(
+            42,
+            [
+                _topic_event("topic.accept", "local.topic.1", "Review Topic 1"),
+                _verse_event("verse.accept", "local.topic.1"),
+            ],
+        )
+        self.store.set_topic_mapping(
+            42,
+            "local.topic.1",
+            "review-topic-1",
+            state="mapped",
+            actor="test-admin",
+            canonical_definition=_definition(),
+        )
+        for event in self.store.list_events():
+            self.store.decide_event(event.id, "approved", actor="test-admin")
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.directory.cleanup()
+
+    def test_accept_prompts_with_ledger_wording_and_records_the_revision(self) -> None:
+        output = io.StringIO()
+        with self.assertRaises(AcceptanceCancelled):
+            accept_contributions(
+                self.store,
+                actor="test-admin",
+                catalog_file=CATALOG,
+                input_fn=lambda _prompt: "",
+                output=output,
+            )
+        self.assertIn(
+            "Accept 1 topics, 1 additions and 0 removals into the submission ledger?",
+            output.getvalue(),
+        )
+        self.assertIn("Acceptance cancelled.", output.getvalue())
+        self.assertEqual({event.state for event in self.store.list_events()}, {"approved"})
+        self.assertEqual(self.store.current_catalog().revision, 0)
+
+        prompts: list[str] = []
+
+        def answer(prompt: str) -> str:
+            prompts.append(prompt)
+            return "y"
+
+        output = io.StringIO()
+        revision = accept_contributions(
+            self.store,
+            actor="test-admin",
+            catalog_file=CATALOG,
+            input_fn=answer,
+            output=output,
+        )
+        self.assertEqual(prompts, ["Accept now? [y/N]: "])
+        self.assertEqual(revision.revision, 1)
+        self.assertIn("Recorded accepted ledger revision 1", output.getvalue())
+        self.assertNotIn("live", output.getvalue().casefold())
+        self.assertEqual({event.state for event in self.store.list_events()}, {"applied"})
+
+        output = io.StringIO()
+        self.assertIsNone(
+            accept_contributions(
+                self.store,
+                actor="test-admin",
+                catalog_file=CATALOG,
+                input_fn=lambda _prompt: "y",
+                output=output,
+            )
+        )
+        self.assertIn("no approved contribution changes to accept", output.getvalue())
+
+    def test_accept_command_requires_the_catalogue_and_signals_cancellation(self) -> None:
+        arguments = [
+            "accept",
+            "--store",
+            "/unused/contributions.sqlite3",
+            "--actor",
+            "setup:test",
+            "--catalog-file",
+            str(CATALOG),
+        ]
+        with (
+            patch("scripts.contribution_review._load_store", return_value=self.store),
+            patch("sys.stdin", io.StringIO("n\n")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(main(arguments), 3)
+        self.assertEqual(self.store.current_catalog().revision, 0)
+
+        with (
+            patch("scripts.contribution_review._load_store", return_value=self.store),
+            patch("sys.stdin", io.StringIO("y\n")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(main(arguments), 0)
+        self.assertEqual(self.store.current_catalog().revision, 1)
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            main(arguments[:-2])
+        self.assertIn("--catalog-file", stderr.getvalue())
+        for retired in (
+            ["publish-live", *arguments[1:]],
+            ["topics", *arguments[1:-2], "--topics-file", "x"],
+            ["verses", *arguments[1:], "--associations-file", "x"],
+        ):
+            with (
+                self.subTest(retired=retired[0]),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                main(retired)

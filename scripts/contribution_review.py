@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
-"""Review trusted bookmark contributions and publish approved catalogue changes.
+"""Review trusted bookmark contributions and submit them upstream.
+
+The public Bookmarks API (``bookmarks.getbible.net``) is the single source of
+truth for the shared topic catalogue.  This tool never serves or overlays a
+copy of it: ``fetch-catalog`` saves a verified ``catalog.json`` for the review
+commands, reviewed changes are *accepted* into the instance's submission
+ledger, and ``publish-repository`` applies the accepted bundle to a checkout
+of ``getbible/v1_bookmark_builder``, pushes a branch and opens a pull request.
+Once upstream merges and publishes, the robot observes the new catalogue
+version and only then tells contributors their changes are live.
 
 The interactive review commands run as the isolated instance service account.
 Repository publication is intentionally separate and must run as a dedicated,
 non-root Git publisher account.  Telegram identities never enter an export,
-commit, or Git command argument.
+commit, pull request, or Git command argument.
 """
 
 from __future__ import annotations
@@ -25,8 +34,11 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any, NoReturn, Protocol, TextIO, cast
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 SCHEMA_VERSION = 1
 DEFAULT_TRANSLATION = "kjv"
@@ -42,7 +54,18 @@ MAX_EVENTS_PER_SCAN = 250_000
 MAX_EFFECTIVE_TOPICS = 100
 MAX_EFFECTIVE_ASSOCIATIONS = 10_000
 MAX_OVERLAY_BYTES = 2 * 1024 * 1024
-EXPECTED_GITHUB_REPOSITORY = "getbible/robot"
+EXPECTED_GITHUB_REPOSITORY = "getbible/v1_bookmark_builder"
+BASE_BRANCH = "main"
+GITHUB_API_PULLS_URL = f"https://api.github.com/repos/{EXPECTED_GITHUB_REPOSITORY}/pulls"
+GITHUB_PULL_REQUEST_PREFIX = f"https://github.com/{EXPECTED_GITHUB_REPOSITORY}/pull/"
+BUILDER_TOKEN_ENVIRONMENT_VARIABLE = "GETBIBLE_BUILDER_TOKEN"
+DEFAULT_BUILDER_PYTHON = "python3"
+MINIMUM_BUILDER_PYTHON = (3, 12)
+MAX_BUILDER_TOKEN_LENGTH = 512
+MAX_CATALOG_FILE_BYTES = 8 * 1024 * 1024
+MAX_CATALOG_FILE_AGE_SECONDS = 24 * 60 * 60
+MAX_PULL_REQUEST_RESPONSE_BYTES = 1024 * 1024
+PULL_REQUEST_TIMEOUT_SECONDS = 30.0
 GIT_PUBLICATION_TIMEOUT_SECONDS = 2_400
 MAX_BRANCH_COLLISION_ATTEMPTS = 20
 MAX_GIT_IDENTITY_NAME_LENGTH = 160
@@ -132,10 +155,38 @@ _CANONICAL_ENGLISH_TOPIC_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]\Z"
 )
 _GIT_BRANCH_COMPONENT_RE = re.compile(r"[^a-z0-9-]+")
+_TOPIC_LINK_PATH_RE = re.compile(r"data/links/[a-z0-9]+(?:-[a-z0-9]+)*\.json\Z")
+_BUILDER_PYTHON_RE = re.compile(r"(?:(?:/[A-Za-z0-9._+-]+)+|[A-Za-z0-9][A-Za-z0-9._+-]*)\Z")
+_PYTHON_VERSION_RE = re.compile(r"Python (\d+)\.(\d+)(?:\.\d+)?\S*")
+_GIT_VERSION_RE = re.compile(r"git version \d+\.\d+.*")
+_INSTANCE_NAME_RE = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
+_PULL_REQUEST_URL_RE = re.compile(re.escape(GITHUB_PULL_REQUEST_PREFIX) + r"[1-9]\d{0,9}\Z")
+
+
+class _RejectRedirectHandler(HTTPRedirectHandler):
+    """Surface a GitHub API redirect as an error instead of following it."""
+
+    def redirect_request(
+        self,
+        request: Request,
+        file_pointer: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> None:
+        return None
+
+
+_PULL_REQUEST_OPENER = build_opener(_RejectRedirectHandler())
 
 
 class ReviewError(RuntimeError):
     """A safe, operator-facing contribution review failure."""
+
+
+class AcceptanceCancelled(RuntimeError):
+    """The operator declined to accept the planned changes; nothing changed."""
 
 
 class StoreProtocol(Protocol):
@@ -235,6 +286,7 @@ class StoreProtocol(Protocol):
         branch: str | None = None,
         commit: str | None = None,
         error: str | None = None,
+        pull_request: str | None = None,
     ) -> None: ...
 
 
@@ -404,6 +456,7 @@ class ContributionBundle:
 class GitPublication:
     branch: str
     commit: str
+    pull_request: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,20 +476,41 @@ class CatalogExport:
 
 
 class GitPublisher:
-    """Import one reviewed bundle and push a branch from ``origin/master``."""
+    """Apply one accepted bundle to a builder checkout and push it upstream.
+
+    The checkout is a clone of ``getbible/v1_bookmark_builder``.  The bundle is
+    applied with the builder's own importer, checked with its ``validate``
+    command, committed on a fresh ``contributions/...`` branch based directly
+    on ``origin/main`` and pushed.  When ``GETBIBLE_BUILDER_TOKEN`` is present
+    in the environment a pull request against ``main`` is opened afterwards;
+    otherwise the compare URL is printed so a maintainer can open it by hand.
+    The token is read once, never logged, and never handed to child processes.
+    """
 
     def __init__(
         self,
         *,
         checkout: Path,
         expected_user: str,
-        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        builder_python: str = DEFAULT_BUILDER_PYTHON,
+        instance_name: str | None = None,
+        runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+        urlopen: Callable[..., Any] | None = None,
+        environment: Mapping[str, str] | None = None,
         stdout: TextIO = sys.stdout,
     ) -> None:
         self._configured_checkout = checkout
         self.checkout = checkout.resolve()
         self.expected_user = expected_user
-        self._run_process = runner
+        self.builder_python = validate_builder_python(builder_python)
+        self.instance_name = validate_instance_name(instance_name) if instance_name else None
+        self._run_process: Callable[..., subprocess.CompletedProcess[str]] = (
+            runner if runner is not None else subprocess.run
+        )
+        self._urlopen: Callable[..., Any] = (
+            urlopen if urlopen is not None else _PULL_REQUEST_OPENER.open
+        )
+        self._environment = environment
         self.stdout = stdout
         self._deadline: float | None = None
 
@@ -462,20 +536,21 @@ class GitPublisher:
             "--no-tags",
             "--prune",
             "origin",
-            "+refs/heads/master:refs/remotes/origin/master",
+            f"+refs/heads/{BASE_BRANCH}:refs/remotes/origin/{BASE_BRANCH}",
         )
         self._require_clean()
-        base = self._git_output("rev-parse", "--verify", "refs/remotes/origin/master^{commit}")
+        base = self._git_output(
+            "rev-parse", "--verify", f"refs/remotes/origin/{BASE_BRANCH}^{{commit}}"
+        )
         fetched = self._git_output("rev-parse", "--verify", "FETCH_HEAD^{commit}")
         if _GIT_OBJECT_RE.fullmatch(base) is None or not hmac.compare_digest(base, fetched):
-            raise ReviewError("The fetched origin/master result could not be verified.")
+            raise ReviewError(f"The fetched origin/{BASE_BRANCH} result could not be verified.")
         branch = self._unique_branch(bundle.checksum)
         self._git("switch", "--create", branch, base)
         try:
             self._require_clean()
-            importer = self.checkout / "scripts" / "import_contribution_bundle.mjs"
-            self._command("node", str(importer), str(bundle_path.resolve()))
-            self._command("npm", "--prefix", "miniapp", "run", "check")
+            self._builder("import-bundle", str(bundle_path.resolve()))
+            self._builder("validate")
             changed = self._changed_paths()
             if not changed:
                 raise ReviewError("The reviewed bundle makes no repository changes.")
@@ -495,7 +570,9 @@ class GitPublisher:
             if not hmac.compare_digest(committed_tree, expected_tree):
                 raise ReviewError("The publication commit tree changed after validation.")
             if len(parents) != 2 or parents[0] != commit or parents[1] != base:
-                raise ReviewError("The publication commit is not based directly on origin/master.")
+                raise ReviewError(
+                    f"The publication commit is not based directly on origin/{BASE_BRANCH}."
+                )
             self._validate_changed_paths(self._committed_paths())
             self._require_clean()
             self._validate_checkout_filesystem()
@@ -506,7 +583,8 @@ class GitPublisher:
             # diagnosis.  Never reset or discard reviewed catalogue work.
             raise
         self.stdout.write(f"Pushed {branch} at {commit}.\n")
-        return GitPublication(branch, commit)
+        pull_request = self._open_pull_request(branch, bundle)
+        return GitPublication(branch, commit, pull_request)
 
     def _validate_identity(self) -> None:
         if not self.expected_user or self.expected_user == "root":
@@ -607,28 +685,22 @@ class GitPublisher:
         if self._configured_checkout.resolve() != self.checkout:
             raise ReviewError("The configured Git checkout path changed during validation.")
 
+        # The builder repository layout: sources under data/, the stdlib-only
+        # importer and validator under src/.
         directories = (
             self.checkout,
             self.checkout / ".git",
-            self.checkout / "scripts",
+            self.checkout / "src",
             self.checkout / "data",
-            self.checkout / "data" / "global-bookmarks",
-            self.checkout / "miniapp",
-            self.checkout / "miniapp" / "lib",
+            self.checkout / "data" / "links",
+            self.checkout / "data" / "locales",
         )
         files = (
             self.checkout / ".git" / "HEAD",
             self.checkout / ".git" / "config",
             self.checkout / ".git" / "index",
-            self.checkout / "bot.py",
-            self.checkout / "setup.sh",
-            self.checkout / "scripts" / "import_contribution_bundle.mjs",
-            self.checkout / "data" / "global-bookmarks" / "tag-verse.csv",
-            self.checkout / "data" / "global-bookmarks" / "topics.json",
-            self.checkout / "miniapp" / "package.json",
-            self.checkout / "miniapp" / "lib" / "bookmark-topic-definitions.js",
-            self.checkout / "miniapp" / "lib" / "global-bookmark-data.js",
-            self.checkout / "miniapp" / "lib" / "messages.en.js",
+            self.checkout / "src" / "builder.py",
+            self.checkout / "data" / "topics.json",
         )
         for path in directories:
             metadata = self._secure_metadata(path, directory=True)
@@ -642,7 +714,9 @@ class GitPublisher:
         try:
             metadata = path.lstat()
         except OSError as error:
-            raise ReviewError("A required publisher checkout path is unavailable.") from error
+            raise ReviewError(
+                f"A required publisher checkout path is unavailable: {path}."
+            ) from error
         expected_type = stat.S_ISDIR if directory else stat.S_ISREG
         if not expected_type(metadata.st_mode):
             label = "directory" if directory else "regular file"
@@ -671,7 +745,7 @@ class GitPublisher:
             ):
                 raise ReviewError(
                     f"The configured origin {label} URL is not the canonical "
-                    "getbible/robot repository."
+                    f"{EXPECTED_GITHUB_REPOSITORY} repository."
                 )
 
     def _require_clean(self) -> None:
@@ -708,15 +782,26 @@ class GitPublisher:
             )
 
     def _validate_tooling(self) -> None:
-        node_version = self._command("node", "--version").stdout.strip()
-        match = re.fullmatch(r"v(\d+)\.\d+\.\d+", node_version)
-        if match is None or int(match.group(1)) < 22:
+        """Require the builder's interpreter (Python >= 3.12) and a usable git."""
+
+        probe = self._command(self.builder_python, "--version")
+        version = (probe.stdout or probe.stderr or "").strip()
+        match = _PYTHON_VERSION_RE.fullmatch(version)
+        if match is None or (int(match.group(1)), int(match.group(2))) < MINIMUM_BUILDER_PYTHON:
+            required = ".".join(str(part) for part in MINIMUM_BUILDER_PYTHON)
+            found = sanitize_terminal(version or "no version", maximum=40)
             raise ReviewError(
-                "Repository publication requires Node.js 22 or newer (matching project CI)."
+                f"Repository publication requires Python {required} or newer for the "
+                f"bookmark builder ({self.builder_python} reports {found})."
             )
-        npm_version = self._command("npm", "--version").stdout.strip()
-        if re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", npm_version) is None:
-            raise ReviewError("Repository publication requires a usable npm installation.")
+        git_version = self._command("git", "--version").stdout.strip()
+        if _GIT_VERSION_RE.fullmatch(git_version) is None:
+            raise ReviewError("Repository publication requires a usable git installation.")
+
+    def _builder(self, *arguments: str) -> None:
+        """Run ``src/builder.py`` from the checkout root so ``./data`` resolves."""
+
+        self._command(self.builder_python, "src/builder.py", *arguments)
 
     def _unique_branch(self, checksum: str) -> str:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -782,14 +867,19 @@ class GitPublisher:
 
     @staticmethod
     def _validate_changed_paths(paths: Sequence[str]) -> None:
-        allowed_exact = {
-            "data/global-bookmarks/tag-verse.csv",
-            "data/global-bookmarks/topics.json",
-            "miniapp/lib/bookmark-topic-definitions.js",
-            "miniapp/lib/global-bookmark-data.js",
-            "miniapp/lib/messages.en.js",
-        }
-        unexpected = [path for path in paths if path not in allowed_exact]
+        """Allow only the builder sources a bundle may touch.
+
+        A bundle creates topics and adds or removes verse links, so the only
+        legitimate changes are ``data/topics.json`` and one links file per
+        topic slug.  Locale files, the builder itself and anything else mean
+        the importer or the checkout is not what this tool expects.
+        """
+
+        unexpected = [
+            path
+            for path in paths
+            if path != "data/topics.json" and _TOPIC_LINK_PATH_RE.fullmatch(path) is None
+        ]
         if unexpected:
             labels = ", ".join(sanitize_terminal(path, maximum=160) for path in unexpected)
             raise ReviewError(f"The importer changed unexpected paths: {labels}.")
@@ -798,11 +888,124 @@ class GitPublisher:
     def _commit_message(bundle: ContributionBundle) -> str:
         association_count = len(bundle.additions) + len(bundle.removals)
         return (
-            "Update reviewed global bookmark contributions\n\n"
+            "Add reviewed getBible robot bookmark contributions\n\n"
             f"Topics: {len(bundle.topics)}\n"
             f"Verse associations: {association_count}\n"
             f"Bundle SHA-256: {bundle.checksum}\n"
         )
+
+    def _open_pull_request(self, branch: str, bundle: ContributionBundle) -> str | None:
+        """Open the upstream pull request; on any failure report the compare URL.
+
+        The push already succeeded, so nothing here may fail the publication.
+        The token is never echoed and no response body is reproduced.
+        """
+
+        compare_url = compare_url_for(branch)
+        token = self._builder_token()
+        if token is None:
+            self.stdout.write(
+                f"No {BUILDER_TOKEN_ENVIRONMENT_VARIABLE} is available; open the pull "
+                f"request manually: {compare_url}\n"
+            )
+            return None
+        payload = json.dumps(
+            {
+                "title": self._pull_request_title(bundle),
+                "head": branch,
+                "base": BASE_BRANCH,
+                "body": self._pull_request_body(bundle),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+        request = Request(
+            GITHUB_API_PULLS_URL,
+            data=payload,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "Content-Type": "application/json",
+                "User-Agent": "getbible-robot-contribution-publisher",
+            },
+        )
+        detail = "the GitHub API could not be reached"
+        try:
+            with self._urlopen(request, timeout=PULL_REQUEST_TIMEOUT_SECONDS) as response:
+                status = response.getcode()
+                body = response.read(MAX_PULL_REQUEST_RESPONSE_BYTES + 1)
+        except HTTPError as error:
+            detail = f"GitHub answered HTTP {error.code}"
+            with suppress(Exception):
+                error.close()
+        except (URLError, OSError, HTTPException, ValueError):
+            pass
+        else:
+            if status not in {200, 201}:
+                detail = f"GitHub answered HTTP {sanitize_terminal(status, maximum=12)}"
+            elif not isinstance(body, bytes) or len(body) > MAX_PULL_REQUEST_RESPONSE_BYTES:
+                detail = "GitHub returned an oversized response"
+            else:
+                url = _pull_request_url(body)
+                if url is not None:
+                    self.stdout.write(f"Opened pull request {url}.\n")
+                    return url
+                detail = "GitHub returned an unexpected response"
+        self.stdout.write(
+            f"The pull request could not be opened ({detail}); the branch is pushed, "
+            f"open it manually: {compare_url}\n"
+        )
+        return None
+
+    def _builder_token(self) -> str | None:
+        environment = self._environment if self._environment is not None else os.environ
+        raw = environment.get(BUILDER_TOKEN_ENVIRONMENT_VARIABLE)
+        if raw is None:
+            return None
+        token = raw.strip()
+        if not token:
+            return None
+        if (
+            len(token) > MAX_BUILDER_TOKEN_LENGTH
+            or not token.isascii()
+            or any(
+                character.isspace() or unicodedata.category(character).startswith("C")
+                for character in token
+            )
+        ):
+            self.stdout.write(
+                f"The {BUILDER_TOKEN_ENVIRONMENT_VARIABLE} value is malformed and was ignored.\n"
+            )
+            return None
+        return token
+
+    @staticmethod
+    def _pull_request_title(bundle: ContributionBundle) -> str:
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return f"Reviewed bookmark contributions {stamp} ({bundle.checksum[:10]})"
+
+    def _pull_request_body(self, bundle: ContributionBundle) -> str:
+        lines = [
+            "Reviewed bookmark contributions submitted by the getBible robot's "
+            "maintainer review pipeline.",
+            "",
+            f"- Topics: {len(bundle.topics)}",
+            f"- Verse associations added: {len(bundle.additions)}",
+            f"- Verse associations removed: {len(bundle.removals)}",
+            f"- Bundle SHA-256: {bundle.checksum}",
+        ]
+        if self.instance_name is not None:
+            lines.append(f"- Robot instance: {self.instance_name}")
+        lines.extend(
+            (
+                "",
+                "The bundle was applied with `src/builder.py import-bundle` and passed "
+                "`src/builder.py validate` before the branch was pushed.",
+            )
+        )
+        return "\n".join(lines) + "\n"
 
     def _git(self, *arguments: str) -> None:
         self._command("git", "-C", str(self.checkout), *_GIT_SAFE_CONFIG, *arguments)
@@ -854,11 +1057,15 @@ class GitPublisher:
 
     @staticmethod
     def _command_environment() -> dict[str, str]:
-        return {
+        # Git and the builder never need the GitHub token; keep it out of
+        # every child process so hooks-free git and the importer cannot see it.
+        environment = {
             **os.environ,
             "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_TERMINAL_PROMPT": "0",
         }
+        environment.pop(BUILDER_TOKEN_ENVIRONMENT_VARIABLE, None)
+        return environment
 
     def _remaining_timeout(self, maximum: int) -> float:
         if self._deadline is None:
@@ -867,6 +1074,57 @@ class GitPublisher:
         if remaining <= 0:
             raise ReviewError("Repository publication exceeded its total time limit.")
         return min(float(maximum), remaining)
+
+
+def compare_url_for(branch: str) -> str:
+    """Return the GitHub compare page that opens a pull request for ``branch``."""
+
+    return (
+        f"https://github.com/{EXPECTED_GITHUB_REPOSITORY}/compare/"
+        f"{BASE_BRANCH}...{branch}?expand=1"
+    )
+
+
+def validate_builder_python(value: object) -> str:
+    """Accept a bare command name or an absolute path for the builder interpreter."""
+
+    candidate = str(value or "").strip()
+    if not candidate or len(candidate) > 256 or _BUILDER_PYTHON_RE.fullmatch(candidate) is None:
+        raise ReviewError(
+            "The builder Python interpreter must be a command name or an absolute path."
+        )
+    return candidate
+
+
+def validate_instance_name(value: object) -> str:
+    candidate = str(value or "").strip()
+    if _INSTANCE_NAME_RE.fullmatch(candidate) is None:
+        raise ReviewError("The robot instance name is invalid.")
+    return candidate
+
+
+def validate_pull_request_url(value: object) -> str:
+    """Accept only a pull request URL on the canonical builder repository."""
+
+    candidate = str(value or "").strip()
+    if _PULL_REQUEST_URL_RE.fullmatch(candidate) is None:
+        raise ReviewError(
+            f"The pull request URL must point at a {EXPECTED_GITHUB_REPOSITORY} pull request."
+        )
+    return candidate
+
+
+def _pull_request_url(body: bytes) -> str | None:
+    try:
+        document = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    url = document.get("html_url")
+    if not isinstance(url, str) or _PULL_REQUEST_URL_RE.fullmatch(url) is None:
+        return None
+    return url
 
 
 def parse_porcelain_paths(output: str) -> list[str]:
@@ -986,7 +1244,7 @@ def _canonical_topic_label(value: str) -> str:
 
 
 def _validate_topic_name_uniqueness(topics: Sequence[CanonicalTopic]) -> None:
-    """Match the repository importer's base+overlay name/alias invariant."""
+    """Match the builder's catalogue-wide English name/alias uniqueness rule."""
 
     owners: dict[str, str] = {}
     for topic in topics:
@@ -1077,13 +1335,31 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for name in ("applications", "topics", "verses", "status", "publish-live"):
+    for name in ("applications", "status"):
         command = subparsers.add_parser(name)
         command.add_argument("--store", type=Path, required=True)
         command.add_argument("--actor", required=True)
-        command.add_argument("--topics-file", type=Path)
-        command.add_argument("--associations-file", type=Path)
-        command.add_argument("--translation", default=DEFAULT_TRANSLATION)
+
+    for name in ("topics", "verses", "accept"):
+        command = subparsers.add_parser(name)
+        command.add_argument("--store", type=Path, required=True)
+        command.add_argument("--actor", required=True)
+        command.add_argument(
+            "--catalog-file",
+            type=Path,
+            required=True,
+            help="a catalog.json saved by fetch-catalog from the public Bookmarks API",
+        )
+        if name == "verses":
+            command.add_argument("--translation", default=DEFAULT_TRANSLATION)
+
+    fetch = subparsers.add_parser("fetch-catalog")
+    fetch.add_argument("--output", type=Path, required=True)
+    fetch.add_argument(
+        "--base-url",
+        default=None,
+        help="the Bookmarks API root including /v1 (default: the public API)",
+    )
 
     export = subparsers.add_parser("export")
     export.add_argument("--store", type=Path, required=True)
@@ -1106,12 +1382,15 @@ def _parser() -> argparse.ArgumentParser:
     finished.add_argument("--branch")
     finished.add_argument("--commit")
     finished.add_argument("--error")
+    finished.add_argument("--pull-request")
 
     repository = subparsers.add_parser("publish-repository")
     repository.add_argument("--bundle", type=Path, required=True)
     repository.add_argument("--checkout", type=Path, required=True)
     repository.add_argument("--expected-user", required=True)
     repository.add_argument("--expected-bundle-checksum", required=True)
+    repository.add_argument("--builder-python", default=DEFAULT_BUILDER_PYTHON)
+    repository.add_argument("--instance-name", default=None)
     return parser
 
 
@@ -1150,33 +1429,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             publication = GitPublisher(
                 checkout=arguments.checkout,
                 expected_user=arguments.expected_user,
+                builder_python=arguments.builder_python,
+                instance_name=arguments.instance_name,
             ).publish(
                 arguments.bundle,
                 expected_bundle_checksum=arguments.expected_bundle_checksum,
             )
             print(json.dumps(asdict(publication), sort_keys=True, separators=(",", ":")))
             return 0
+        if arguments.command == "fetch-catalog":
+            fetched = fetch_catalog(arguments.output, base_url=arguments.base_url)
+            print(json.dumps(fetched, sort_keys=True, separators=(",", ":")))
+            return 0
         store = _load_store(arguments.store)
         if arguments.command == "applications":
             review_applications(store, actor=arguments.actor)
         elif arguments.command == "topics":
-            review_topics(store, actor=arguments.actor, topics_file=arguments.topics_file)
+            review_topics(store, actor=arguments.actor, catalog_file=arguments.catalog_file)
         elif arguments.command == "verses":
             review_verses(
                 store,
                 actor=arguments.actor,
                 translation=arguments.translation,
-                topics_file=arguments.topics_file,
-                associations_file=arguments.associations_file,
+                catalog_file=arguments.catalog_file,
             )
         elif arguments.command == "status":
             print_status(store)
-        elif arguments.command == "publish-live":
-            publish_live(
+        elif arguments.command == "accept":
+            accept_contributions(
                 store,
                 actor=arguments.actor,
-                topics_file=arguments.topics_file,
-                associations_file=arguments.associations_file,
+                catalog_file=arguments.catalog_file,
             )
         elif arguments.command == "export":
             exported = export_current_catalog(store, arguments.output)
@@ -1201,6 +1484,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps({"token": token}, sort_keys=True, separators=(",", ":")))
         elif arguments.command == "finish-repository-publication":
+            completion: dict[str, str] = {}
+            if arguments.pull_request is not None:
+                completion["pull_request"] = validate_pull_request_url(arguments.pull_request)
             store.finish_repo_publication(
                 arguments.lease_token,
                 arguments.revision,
@@ -1209,12 +1495,65 @@ def main(argv: Sequence[str] | None = None) -> int:
                 commit=arguments.commit,
                 error=arguments.error,
                 actor=arguments.actor,
+                **completion,
             )
         else:  # pragma: no cover - argparse prevents this path
             raise ReviewError("Unknown contribution-review command.")
+    except AcceptanceCancelled:
+        return 3
     except (ReviewError, OSError, sqlite3.Error, ValueError) as error:
         _fatal(error)
     return 0
+
+
+def fetch_catalog(
+    output: Path,
+    *,
+    base_url: str | None = None,
+    client: object | None = None,
+    output_stream: TextIO = sys.stdout,
+) -> dict[str, object]:
+    """Save a verified ``catalog.json`` from the Bookmarks API for the review commands.
+
+    The document is written atomically with mode 0600 exactly as the API served
+    it, after its SHA-256 matched ``checksums.json``.  The result names the
+    catalogue version from ``index.json`` so operators can see what they review
+    against.
+    """
+
+    if not output.is_absolute():
+        raise ReviewError("The catalogue output path must be absolute.")
+    if output.is_symlink():
+        raise ReviewError("The catalogue output path cannot be a symbolic link.")
+    try:
+        from modules.getbible_bookmarks import (
+            BOOKMARKS_API_BASE_URL,
+            GetBibleBookmarksClient,
+            GetBibleBookmarksError,
+        )
+    except ImportError as error:
+        raise ReviewError("The deployed application lacks the Bookmarks API client.") from error
+    try:
+        if client is None:
+            client = GetBibleBookmarksClient(base_url=base_url or BOOKMARKS_API_BASE_URL)
+        index = cast(Any, client).index()
+        catalog = cast(Any, client).catalog()
+    except GetBibleBookmarksError as error:
+        raise ReviewError(
+            "The shared bookmark catalogue could not be fetched from the Bookmarks API: "
+            f"{error}"
+        ) from error
+    atomic_write(output, catalog.document)
+    output_stream.write(
+        f"Saved Bookmarks API catalogue version {index.catalog_version} "
+        f"({len(catalog.topics)} topics) to {output}.\n"
+    )
+    return {
+        "catalog_version": index.catalog_version,
+        "checksum": catalog.checksum,
+        "topics": len(catalog.topics),
+        "path": str(output.resolve()),
+    }
 
 
 # Interactive review operations are defined below.  Keeping them outside
@@ -1328,16 +1667,16 @@ def review_topics(
     store: StoreProtocol,
     *,
     actor: str,
-    topics_file: Path | None,
+    catalog_file: Path | None,
     input_fn: Callable[[str], str] = input,
     output: TextIO = sys.stdout,
 ) -> None:
-    canonical = _load_canonical_topics(topics_file)
+    canonical = _load_canonical_topics(catalog_file)
     locked_topic_ids = _published_topic_ids(store)
     pending = list(store.list_source_topics(states={"pending", "deferred"}, limit=1000))
     if not pending:
         output.write("No unresolved contributor topics.\n")
-    bundled_topic_ids = set(canonical)
+    catalogue_topic_ids = set(canonical)
     for stored in store.list_canonical_topics():
         definition = CanonicalTopic.validated(stored)
         canonical[definition.id] = definition
@@ -1368,13 +1707,19 @@ def review_topics(
             )
         suggested = canonical.get(local_topic_id)
         if suggested is not None:
-            output.write(f"  This local id exactly matches bundled topic {suggested.name}.\n")
+            output.write(
+                f"  This local id exactly matches shared catalogue topic {suggested.name}.\n"
+            )
             if payload.get("name") or payload.get("color") or payload.get("aliases"):
                 output.write(
-                    "  Proposed metadata will be ignored; the bundled English definition "
-                    "and color remain authoritative.\n"
+                    "  Proposed metadata will be ignored; the shared catalogue's English "
+                    "definition and color remain authoritative.\n"
                 )
-            if _yes_no("Map to that authoritative bundled topic? [Y/n]: ", input_fn, default=True):
+            if _yes_no(
+                "Map to that authoritative shared catalogue topic? [Y/n]: ",
+                input_fn,
+                default=True,
+            ):
                 store.set_topic_mapping(
                     contributor_id,
                     local_topic_id,
@@ -1396,7 +1741,7 @@ def review_topics(
             return
         if previous_canonical in locked_topic_ids and action in {"m", "n", "r", "d"}:
             raise ReviewError(
-                "A published source mapping cannot be replaced, rejected, or deferred. "
+                "An accepted source mapping cannot be replaced, rejected, or deferred. "
                 "Map it to the existing canonical topic, then review the proposed topic event."
             )
         if action in {"r", "d"}:
@@ -1468,7 +1813,7 @@ def review_topics(
                 actor=_actor(actor),
                 canonical_topic_id=chosen,
                 canonical_definition=(
-                    None if chosen in bundled_topic_ids else definition.as_dict()
+                    None if chosen in catalogue_topic_ids else definition.as_dict()
                 ),
                 name=definition.name,
                 color=definition.color,
@@ -1484,7 +1829,7 @@ def review_topics(
             name=definition.name,
             color=definition.color,
             aliases=definition.aliases,
-            canonical_definition=(None if chosen in bundled_topic_ids else definition.as_dict()),
+            canonical_definition=(None if chosen in catalogue_topic_ids else definition.as_dict()),
         )
         canonical[chosen] = definition
         if merged_source is not None:
@@ -1493,7 +1838,7 @@ def review_topics(
     _review_topic_events(
         store,
         actor=actor,
-        bundled_topics=bundled_topic_ids,
+        catalogue_topics=catalogue_topic_ids,
         canonical_topics=canonical,
         locked_topic_ids=locked_topic_ids,
         input_fn=input_fn,
@@ -1506,8 +1851,7 @@ def review_verses(
     *,
     actor: str,
     translation: str,
-    topics_file: Path | None = None,
-    associations_file: Path | None = None,
+    catalog_file: Path | None = None,
     input_fn: Callable[[str], str] = input,
     output: TextIO = sys.stdout,
     verse_client: VerseClientProtocol | None = None,
@@ -1524,15 +1868,10 @@ def review_verses(
     if not events:
         output.write("No pending or deferred verse changes.\n")
         return
-    if topics_file is None or associations_file is None:
-        raise ReviewError(
-            "Bundled topic and association sources are required for duplicate checks."
-        )
-    base_topics = _load_canonical_topics(topics_file)
-    base_associations = _load_base_associations(topics_file, associations_file)
+    base_topics, base_associations = _load_catalog_sources(catalog_file)
     current = ContributionBundle.validated(_catalog_payload(store.current_catalog()))
     permanent_topic_ids = set(base_topics) | _published_topic_ids(store)
-    known_live_topics = set(base_topics) | {topic.id for topic in current.topics}
+    known_catalogue_topics = set(base_topics) | {topic.id for topic in current.topics}
     topic_dependencies: dict[tuple[int, str], list[Mapping[str, object]]] = {}
     canonical_topic_dependencies: dict[str, list[Mapping[str, object]]] = {}
     for dependency in _all_events(store, types={"topic_upsert", "topic_delete"}):
@@ -1598,7 +1937,7 @@ def review_verses(
             latest_accepted_canonical
             and str(latest_accepted_canonical.get("event_type")) == "topic_delete"
             and str(latest_accepted_canonical.get("state")) == "applied"
-            and canonical_id not in known_live_topics
+            and canonical_id not in known_catalogue_topics
         )
         if deleted_and_absent:
             store.decide_event(
@@ -1627,7 +1966,11 @@ def review_verses(
             continue
         if approved_delete and str(payload.get("event_type")) == "verse_add":
             approved_delete_additions.add(_event_id(payload))
-        if canonical_id not in known_live_topics and not accepted_upsert and not approved_delete:
+        if (
+            canonical_id not in known_catalogue_topics
+            and not accepted_upsert
+            and not approved_delete
+        ):
             rejected_upsert = any(
                 str(item.get("event_type")) == "topic_upsert"
                 and str(item.get("state")) == "rejected"
@@ -1877,54 +2220,74 @@ def print_status(store: StoreProtocol, *, output: TextIO = sys.stdout) -> None:
     output.write(f"  Applications awaiting action: {len(applications)}\n")
     output.write(f"  Topics awaiting resolution: {len(topics)}\n")
     output.write(f"  Verse changes awaiting action: {len(events) - approved}\n")
-    output.write(f"  Approved changes awaiting live publication: {approved}\n")
-    output.write(f"  Live catalogue revision: {revision or 'none'}\n")
+    output.write(f"  Approved changes awaiting acceptance: {approved}\n")
+    output.write(f"  Accepted ledger revision: {revision or 'none'}\n")
     if current is not None:
         bundle = ContributionBundle.validated(current)
-        output.write(f"  Live catalogue checksum: {_catalog_checksum(current_record, bundle)}\n")
+        output.write(f"  Accepted ledger checksum: {_catalog_checksum(current_record, bundle)}\n")
     repository = _record_mapping(store.publication_state())
     repo_state = sanitize_terminal(repository.get("repo_state") or "not started")
     repo_revision = repository.get("repo_revision")
-    output.write(f"  Repository publication: {repo_state}")
+    output.write(f"  Upstream publication: {repo_state}")
     if isinstance(repo_revision, int) and repo_revision >= 0:
-        output.write(f" (live revision {repo_revision})")
+        output.write(f" (ledger revision {repo_revision})")
     output.write("\n")
     branch = repository.get("repo_branch")
     if branch:
-        output.write(f"  Repository branch: {sanitize_terminal(branch, maximum=256)}\n")
+        output.write(f"  Upstream branch: {sanitize_terminal(branch, maximum=256)}\n")
+    pull_request = repository.get("repo_pull_request")
+    if pull_request:
+        output.write(f"  Last pull request: {sanitize_terminal(pull_request, maximum=256)}\n")
+    # The store learns these from the public Bookmarks API watcher; an older
+    # store or one that has not observed the API yet simply omits them.
+    api_version = repository.get("api_catalog_version")
+    if isinstance(api_version, int) and not isinstance(api_version, bool) and api_version > 0:
+        output.write(f"  Shared API catalogue version: {api_version}\n")
+        api_checksum = repository.get("api_checksum")
+        if isinstance(api_checksum, str) and re.fullmatch(r"[0-9a-f]{64}", api_checksum):
+            output.write(f"  Shared API catalogue checksum: {api_checksum}\n")
+        api_checked_at = repository.get("api_checked_at")
+        if api_checked_at:
+            output.write(f"  Shared API catalogue checked: {_format_timestamp(api_checked_at)}\n")
+    else:
+        output.write("  Shared API catalogue version: not observed yet\n")
 
 
-def publish_live(
+def accept_contributions(
     store: StoreProtocol,
     *,
     actor: str,
-    topics_file: Path | None = None,
-    associations_file: Path | None = None,
+    catalog_file: Path | None = None,
     input_fn: Callable[[str], str] = input,
     output: TextIO = sys.stdout,
-) -> object:
+) -> object | None:
+    """Record the approved changes as the next accepted submission-ledger revision.
+
+    Acceptance does not publish anything: the revision is what
+    ``publish-repository`` later exports, applies to the builder checkout and
+    submits upstream as a pull request.  Returns the new revision record, or
+    ``None`` when nothing is waiting.  Raises :class:`AcceptanceCancelled`
+    when the operator declines.
+    """
+
     if store.list_source_topics(states={"pending", "deferred"}, limit=1):
-        raise ReviewError("Resolve all pending contributor topics before live publication.")
-    plan = build_publication_plan(
-        store,
-        topics_file=topics_file,
-        associations_file=associations_file,
-    )
+        raise ReviewError("Resolve all pending contributor topics before accepting changes.")
+    plan = build_publication_plan(store, catalog_file=catalog_file)
     bundle = plan.bundle
     if not plan.event_ids and bundle == plan.base_bundle:
-        output.write("There are no approved contribution changes to publish.\n")
+        output.write("There are no approved contribution changes to accept.\n")
         return None
     output.write(
-        f"Publish {len(bundle.topics)} topics, {len(bundle.additions)} additions, "
-        f"and {len(bundle.removals)} removals to this instance?\n"
+        f"Accept {len(bundle.topics)} topics, {len(bundle.additions)} additions and "
+        f"{len(bundle.removals)} removals into the submission ledger?\n"
     )
-    if not _yes_no("Publish live now? [y/N]: ", input_fn):
-        output.write("Live publication cancelled.\n")
-        return None
+    if not _yes_no("Accept now? [y/N]: ", input_fn):
+        output.write("Acceptance cancelled.\n")
+        raise AcceptanceCancelled("Acceptance cancelled.")
     publish_atomically = getattr(store, "publish_approved_events_atomically", None)
     if not callable(publish_atomically):
         raise ReviewError(
-            "The contribution store lacks transactional event publication; update the instance."
+            "The contribution store lacks transactional event acceptance; update the instance."
         )
     revision = publish_atomically(
         bundle.as_dict(),
@@ -1933,10 +2296,10 @@ def publish_live(
         expected_revision=plan.base_revision,
         expected_checksum=plan.base_checksum,
     )
-    live_checksum = _catalog_checksum(revision, bundle)
+    ledger_checksum = _catalog_checksum(revision, bundle)
     output.write(
-        f"Published live catalogue revision {_catalog_revision(revision) or 'unknown'} "
-        f"({live_checksum}).\n"
+        f"Recorded accepted ledger revision {_catalog_revision(revision) or 'unknown'} "
+        f"({ledger_checksum}). Publish it upstream to open the pull request.\n"
     )
     return revision
 
@@ -1944,25 +2307,20 @@ def publish_live(
 def build_publication_plan(
     store: StoreProtocol,
     *,
-    topics_file: Path | None = None,
-    associations_file: Path | None = None,
+    catalog_file: Path | None = None,
 ) -> PublicationPlan:
-    if topics_file is None or associations_file is None:
-        raise ReviewError(
-            "Bundled topic and association sources are required for safe live publication."
-        )
     current_record = store.current_catalog()
     current = ContributionBundle.validated(_catalog_payload(current_record))
     base_revision = _catalog_revision_number(current_record)
     base_checksum = _catalog_checksum(current_record, current)
-    base_topics = _load_canonical_topics(topics_file)
-    base_associations = _load_base_associations(topics_file, associations_file)
+    base_topics, base_associations = _load_catalog_sources(catalog_file)
     permanent_topic_ids = set(base_topics) | _published_topic_ids(store)
-    # Rebase the live overlay onto the deployed repository catalogue.  Once a
-    # reviewed branch is merged, its definitions and additions are redundant;
-    # removals remain necessary only while the target still exists in base.
+    # Rebase the accepted ledger onto the published API catalogue.  Once an
+    # upstream pull request is merged and published, its definitions and
+    # additions are redundant; removals remain necessary only while the target
+    # still exists in the API catalogue.
     topics = {topic.id: topic for topic in current.topics if topic.id not in base_topics}
-    established_overlay_topic_ids = set(topics)
+    established_ledger_topic_ids = set(topics)
     additions = {item for item in current.additions if item not in base_associations}
     removals = {item for item in current.removals if item in base_associations}
     mapped: dict[tuple[int, str], CanonicalTopic] = {}
@@ -2071,7 +2429,7 @@ def build_publication_plan(
         if topic_id in deleted_topic_ids:
             continue
         if topic_id not in effective_topic_ids:
-            if topic_id not in established_overlay_topic_ids:
+            if topic_id not in established_ledger_topic_ids:
                 topics.pop(topic_id, None)
             continue
         if topic_id in topics and topic_id not in approved_upsert_topic_ids:
@@ -2121,7 +2479,7 @@ def build_publication_plan(
         tuple(removals),
     ).normalized()
     if len(bundle.json_bytes()) > MAX_OVERLAY_BYTES:
-        raise ReviewError("The cumulative contribution overlay would exceed 2 MiB.")
+        raise ReviewError("The cumulative accepted contribution bundle would exceed 2 MiB.")
     return PublicationPlan(
         bundle,
         tuple(sorted(set(event_ids))),
@@ -2140,10 +2498,10 @@ def export_current_catalog(
     record = store.current_catalog()
     payload = _catalog_payload(record)
     if payload is None:
-        raise ReviewError("No live contribution catalogue has been published yet.")
+        raise ReviewError("No accepted contribution ledger revision exists yet.")
     bundle = ContributionBundle.validated(payload)
     if len(bundle.json_bytes()) > MAX_OVERLAY_BYTES:
-        raise ReviewError("The live contribution catalogue exceeds 2 MiB.")
+        raise ReviewError("The accepted contribution ledger exceeds 2 MiB.")
     revision = _catalog_revision_number(record)
     checksum = _catalog_checksum(record, bundle)
     atomic_write(path, bundle.json_bytes())
@@ -2186,7 +2544,7 @@ def _review_topic_events(
     store: StoreProtocol,
     *,
     actor: str,
-    bundled_topics: set[str],
+    catalogue_topics: set[str],
     canonical_topics: Mapping[str, CanonicalTopic],
     locked_topic_ids: set[str],
     input_fn: Callable[[str], str],
@@ -2261,15 +2619,15 @@ def _review_topic_events(
         output.write(f"  Proposed color: {sanitize_terminal(payload.get('topic_color') or '')}\n")
         output.write(f"  Submitted: {_format_timestamp(payload.get('submitted_at'))}\n")
         if event_type == "topic_delete":
-            if canonical_id in bundled_topics or canonical_id in locked_topic_ids:
+            if canonical_id in catalogue_topics or canonical_id in locked_topic_ids:
                 output.write(
-                    "  Topics are permanent after their first live publication and "
+                    "  Topics are permanent once accepted for the shared catalogue and "
                     "cannot be deleted by a contribution.\n"
                 )
                 action = _choice("Reject, defer, or stop? [r/d/s]: ", {"r", "d", "s"}, input_fn)
             else:
                 output.write(
-                    "  This cancels the never-published topic and its pending overlay links.\n"
+                    "  This cancels the never-accepted topic and its pending verse links.\n"
                 )
                 action = _choice(
                     "Approve deletion, reject, defer, or stop? [a/r/d/s]: ",
@@ -2289,9 +2647,9 @@ def _review_topic_events(
             current_definition = source.get("canonical_definition")
             if current_definition:
                 proposed = CanonicalTopic.validated(current_definition)
-            elif canonical_id in bundled_topics:
+            elif canonical_id in catalogue_topics:
                 output.write(
-                    "Bundled topic definitions stay authoritative; map to a new topic "
+                    "Shared catalogue definitions stay authoritative; map to a new topic "
                     "to propose distinct metadata.\n"
                 )
                 continue
@@ -2345,51 +2703,86 @@ def _review_topic_events(
         output.write(f"Topic change {state}.\n")
 
 
-def _load_base_associations(
-    topics_file: Path | None,
-    associations_file: Path | None,
-) -> set[Association]:
-    if topics_file is None or associations_file is None:
-        return set()
-    topics = _load_canonical_topics(topics_file)
-    names: dict[str, str] = {}
-    for topic in topics.values():
-        for name in (topic.name, *topic.aliases):
-            folded = name.casefold()
-            if folded in names and names[folded] != topic.id:
-                raise ReviewError("Bundled topic names and aliases are not unique.")
-            names[folded] = topic.id
-    try:
-        if associations_file.stat().st_size > 8 * 1024 * 1024:
-            raise ReviewError("The bundled association source exceeds 8 MiB.")
-        rows = associations_file.read_text(encoding="utf-8").splitlines()
-    except ReviewError:
-        raise
-    except (OSError, UnicodeError) as error:
-        raise ReviewError(f"Bundled associations could not be read: {error}") from error
-    associations: set[Association] = set()
-    for index, row in enumerate(rows, 1):
-        if not row:
-            continue
-        columns = row.split(",")
-        if len(columns) != 2:
-            raise ReviewError(f"Bundled association row {index} is malformed.")
-        match = re.fullmatch(r"([1-9]\d*) ([1-9]\d*):([1-9]\d*)", columns[0].strip())
-        topic_id = names.get(columns[1].strip().casefold())
-        if match is None or topic_id is None:
-            raise ReviewError(f"Bundled association row {index} is invalid.")
-        association = Association.validated(
-            {
-                "topic_id": topic_id,
-                "book": int(match.group(1)),
-                "chapter": int(match.group(2)),
-                "verse": int(match.group(3)),
-            }
+def _load_base_associations(catalog_file: Path | None) -> set[Association]:
+    """Return every (topic, book, chapter, verse) link the shared catalogue publishes."""
+
+    return _catalog_associations(_read_catalog_document(catalog_file))
+
+
+def _load_catalog_sources(
+    catalog_file: Path | None,
+) -> tuple[dict[str, CanonicalTopic], set[Association]]:
+    catalog = _read_catalog_document(catalog_file)
+    topics = _catalog_topics(catalog)
+    return {topic.id: topic for topic in topics}, _catalog_associations(catalog)
+
+
+def _read_catalog_document(path: Path | None) -> Any:
+    """Load a saved ``catalog.json`` with the same rules the API client applies.
+
+    The file is written by ``fetch-catalog`` after its checksum was verified
+    against the API, so a missing, stale or malformed file is an operator
+    error: re-run ``fetch-catalog`` rather than review against guesses.
+    """
+
+    if path is None:
+        raise ReviewError(
+            "A saved copy of the shared bookmark catalogue is required; run "
+            "fetch-catalog and pass --catalog-file."
         )
-        if association in associations:
-            raise ReviewError(f"Bundled association row {index} is duplicated.")
-        associations.add(association)
-    return associations
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise ReviewError(
+            f"The saved catalogue file is missing: {path}. Run fetch-catalog first."
+        ) from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ReviewError("The saved catalogue file must be a regular file.")
+    if metadata.st_size > MAX_CATALOG_FILE_BYTES:
+        raise ReviewError("The saved catalogue file exceeds 8 MiB.")
+    if time.time() - metadata.st_mtime > MAX_CATALOG_FILE_AGE_SECONDS:
+        raise ReviewError(
+            "The saved catalogue file is older than one day; run fetch-catalog again "
+            "before reviewing."
+        )
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise ReviewError(f"The saved catalogue file could not be read: {error}") from error
+    try:
+        from modules.getbible_bookmarks import GetBibleBookmarksError, parse_catalog_document
+    except ImportError as error:
+        raise ReviewError("The deployed application lacks the Bookmarks API client.") from error
+    try:
+        return parse_catalog_document(payload)
+    except GetBibleBookmarksError as error:
+        raise ReviewError(
+            f"The saved catalogue file is not a valid Bookmarks API catalogue: {error}"
+        ) from error
+
+
+def _catalog_topics(catalog: Any) -> list[CanonicalTopic]:
+    # API ids are stable across upstream renames, so the derived-slug rule that
+    # governs *new* contributed topics is deliberately not applied here.
+    topics = [
+        CanonicalTopic(
+            validate_topic_slug(topic.id),
+            validate_english_topic_name(topic.name),
+            validate_topic_color(topic.color),
+            validate_aliases(topic.aliases, name=topic.name),
+        )
+        for topic in catalog.topics
+    ]
+    _validate_topic_name_uniqueness(topics)
+    return topics
+
+
+def _catalog_associations(catalog: Any) -> set[Association]:
+    return {
+        Association(topic.id, book, chapter, verse)
+        for topic in catalog.topics
+        for book, chapter, verse in topic.verses
+    }
 
 
 def _all_events(
@@ -2430,12 +2823,13 @@ def _all_events(
 def _published_topic_ids(store: StoreProtocol) -> set[str]:
     """Return canonical IDs whose definitions and existence must remain stable.
 
-    Once a topic has appeared in a live revision, a repository branch may
-    already contain it. Schema version 1 has no topic tombstone, so locking the
-    historical live IDs prevents a later branch merge from resurrecting a
-    locally deleted topic. The store derives this set from immutable catalogue
-    revisions rather than applied events, since a pre-publication upsert/delete
-    chain may be terminalized without ever making the topic live.
+    Once a topic has appeared in an accepted ledger revision, an upstream
+    branch or pull request may already contain it. Schema version 1 has no
+    topic tombstone, so locking the historical accepted IDs prevents a later
+    merge from resurrecting a locally deleted topic. The store derives this set
+    from immutable ledger revisions rather than applied events, since a
+    pre-acceptance upsert/delete chain may be terminalized without the topic
+    ever being accepted.
     """
 
     return {validate_topic_slug(topic_id) for topic_id in store.published_topic_ids()}
@@ -2454,23 +2848,15 @@ def _assert_stable_published_topic(
     current = canonical_topics.get(previous_canonical)
     if chosen != previous_canonical or current is None or definition != current:
         raise ReviewError(
-            "A published canonical topic definition cannot be changed. Keep its "
-            "English name, topic ID, color, and aliases exactly as published."
+            "An accepted canonical topic definition cannot be changed. Keep its "
+            "English name, topic ID, color, and aliases exactly as accepted."
         )
 
 
-def _load_canonical_topics(path: Path | None) -> dict[str, CanonicalTopic]:
-    if path is None or not path.is_file():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ReviewError(f"Canonical topic definitions could not be read: {error}") from error
-    raw = payload.get("topics", payload) if isinstance(payload, dict) else payload
-    if not isinstance(raw, list):
-        raise ReviewError("Canonical topic definitions must be an array.")
-    topics = [CanonicalTopic.validated(item) for item in raw]
-    return {topic.id: topic for topic in topics}
+def _load_canonical_topics(catalog_file: Path | None) -> dict[str, CanonicalTopic]:
+    """Return the shared catalogue's topics keyed by id."""
+
+    return {topic.id: topic for topic in _catalog_topics(_read_catalog_document(catalog_file))}
 
 
 def _select_topic(
@@ -2721,7 +3107,7 @@ def _catalog_revision_number(value: object | None) -> int:
     payload = _record_mapping(value)
     revision = payload.get("revision")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
-        raise ReviewError("The live catalogue revision is invalid.")
+        raise ReviewError("The accepted ledger revision is invalid.")
     return revision
 
 

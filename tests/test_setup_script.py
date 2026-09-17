@@ -129,8 +129,15 @@ class SetupScriptTestCase(unittest.TestCase):
             '"CONTRIBUTION_STORE_FILE"',
             '"CONTRIBUTION_GIT_CHECKOUT"',
             '"CONTRIBUTION_GIT_USER"',
-            '--topics-file "$topics_file"',
-            '--associations-file "$associations_file"',
+            '"CONTRIBUTION_GITHUB_TOKEN"',
+            '"CONTRIBUTION_BUILDER_PYTHON"',
+            'fetch-catalog \\\n        --output "$CONTRIBUTION_CATALOG_FILE"',
+            '--catalog-file "$CONTRIBUTION_CATALOG_FILE"',
+            '--builder-python "$builder_python"',
+            '--instance-name "$ACTIVE_INSTANCE"',
+            '/bin/bash -c "$CONTRIBUTION_PUBLISHER_ENTRY"',
+            '<<<"$github_token"',
+            '--pull-request "$pull_request"',
             "begin-repository-publication",
             "finish-repository-publication",
             '--lease-token "$lease_token"',
@@ -168,6 +175,97 @@ class SetupScriptTestCase(unittest.TestCase):
             text=True,
         )
         self.assertIn("getbible-robot setup manager", version_result.stdout)
+
+    def test_contribution_menu_submits_to_the_builder_repository(self) -> None:
+        script = SETUP.read_text(encoding="utf-8")
+        # The robot no longer ships or generates a catalogue copy; acceptance
+        # ends in a pull request on getbible/v1_bookmark_builder.
+        for retired in (
+            "global-bookmarks",
+            "import_contribution_bundle",
+            "generate_global_bookmarks",
+            "publish-live",
+            "--topics-file",
+            "--associations-file",
+            "api/v1/bookmarks/catalog",
+            "npm --prefix",
+            "live instance",
+            "Live catalogue",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, script)
+        for fragment in (
+            'ensure_env_value "$python_bin" "$env_file" "CONTRIBUTION_GITHUB_TOKEN" ""',
+            'ensure_env_value "$python_bin" "$env_file" "CONTRIBUTION_BUILDER_PYTHON" "python3"',
+            'replace_env_value "$python_bin" "$env_file" "CONTRIBUTION_GITHUB_TOKEN" ""',
+            'replace_env_value "$python_bin" "$env_file" "CONTRIBUTION_BUILDER_PYTHON" "python3"',
+            "  1) Show review status",
+            "  2) Review contributor applications / revoke access",
+            "  3) Resolve and merge contributor topics",
+            "  4) Review verse additions and removals",
+            "  5) Accept approved changes and open a builder pull request",
+            "  0) Return",
+            "bookmarks.getbible.net",
+            "getbible/v1_bookmark_builder",
+            "record_operation contribution-accept",
+            'CONTRIBUTION_CATALOG_FILE="${STATE_ROOT}/${ACTIVE_INSTANCE}/'
+            'contribution-exports/bookmarks-catalog.json"',
+            "json_optional_result_field",
+            "Pull request opened: %s",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, script)
+
+        # The catalogue is fetched, as the service account, before every
+        # command that compares against it; a failed fetch skips the command.
+        menu_start = script.index("cmd_contributions() {")
+        menu = script[menu_start : script.index("\ncmd_menu() {", menu_start)]
+        self.assertNotIn("  6) ", menu)
+        self.assertEqual(menu.count("fetch_contribution_catalog || continue"), 3)
+        for command in ("topics", "verses", "accept"):
+            with self.subTest(command=command):
+                run_at = menu.index(f"run_contribution_cli {command}")
+                self.assertIn(
+                    "fetch_contribution_catalog || continue",
+                    menu[menu.rfind("\n            ", 0, run_at) - 120 : run_at],
+                )
+        self.assertLess(
+            menu.index("run_contribution_cli accept"),
+            menu.index("publish_contributions_to_repository"),
+        )
+        fetch_start = script.index("fetch_contribution_catalog() {")
+        fetch = script[fetch_start : script.index("\njson_result_field() {", fetch_start)]
+        self.assertIn('runuser --user "$ACTIVE_USER"', fetch)
+        self.assertIn("return 1", fetch)
+
+        # The builder token is optional, reaches the publisher only through
+        # its sanitised stdin, and is never placed on a command line.
+        publish_start = script.index("publish_contributions_to_repository() (")
+        publish = script[publish_start : script.index("\ncmd_contributions() {", publish_start)]
+        self.assertIn('"CONTRIBUTION_GITHUB_TOKEN"', publish)
+        self.assertNotIn('GETBIBLE_BUILDER_TOKEN="$github_token"', script)
+        self.assertNotIn("GETBIBLE_BUILDER_TOKEN=$github_token", script)
+        self.assertNotIn('echo "$github_token"', script)
+        self.assertNotIn('printf.*"$github_token"', script)
+        self.assertLess(publish.index("env -i HOME="), publish.index('<<<"$github_token"'))
+        self.assertIn("IFS= read -r GETBIBLE_BUILDER_TOKEN", script)
+        self.assertIn('exec "$0" "$@"', script)
+        self.assertIn('builder_python=${builder_python:-python3}', publish)
+        self.assertIn("Python 3.12+", publish)
+
+        checkout_start = script.index("validate_publisher_checkout() {")
+        checkout = script[checkout_start : script.index("\n}\n", checkout_start)]
+        self.assertIn('"src/builder.py"', checkout)
+        self.assertIn('"data/topics.json"', checkout)
+        self.assertIn("getbible/v1_bookmark_builder", checkout)
+
+        container = (ROOT / "container" / "setup.sh").read_text(encoding="utf-8")
+        for retired in ("global-bookmarks", "--topics-file", "--associations-file", "publish-live"):
+            with self.subTest(container=retired):
+                self.assertNotIn(retired, container)
+        self.assertIn("fetch-catalog", container)
+        self.assertIn('--catalog-file "$CONTRIBUTION_CATALOG"', container)
+        self.assertIn("5) Accept approved changes into the submission ledger", container)
 
     def test_container_setup_entrypoint_is_executable_and_valid(self) -> None:
         container_setup = ROOT / "container" / "setup.sh"
@@ -837,7 +935,9 @@ cat "$dropin_root/alpha.conf"
         surface_start = script.index("probe_mini_app_surface() {")
         surface_end = script.index("\nwait_for_mini_app_surface() {", surface_start)
         surface = script[surface_start:surface_end]
-        self.assertIn('"${base_url}/api/v1/bookmarks/catalog" GET', surface)
+        # The shared catalogue lives on bookmarks.getbible.net; the instance
+        # serves no copy, so the postflight never probes for one.
+        self.assertNotIn("bookmarks/catalog", surface)
         self.assertIn('"${base_url}/api/v1/contributions/status" GET', surface)
         self.assertIn('"${base_url}/api/v1/contributions/events" POST', surface)
         self.assertNotIn("/api/v1/contributions/sync", surface)

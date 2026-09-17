@@ -23,7 +23,6 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
         self.config = root / "config"
         (self.app / "scripts").mkdir(parents=True)
         (self.app / "modules").mkdir()
-        (self.app / "data" / "global-bookmarks").mkdir(parents=True)
         self.config.mkdir()
         state = self.data / "production" / "state"
         state.mkdir(parents=True, mode=0o700)
@@ -31,15 +30,18 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
             ROOT / "scripts" / "contribution_review.py",
             self.app / "scripts" / "contribution_review.py",
         )
-        for name in ("contributions.py", "getbible_query.py"):
+        # The review CLI needs the store, the canon shared with the Bookmarks
+        # API client, that client, and the Query client; no catalogue sources
+        # ship with the application any more.
+        for name in (
+            "contributions.py",
+            "bible_canon.py",
+            "getbible_bookmarks.py",
+            "getbible_query.py",
+        ):
             shutil.copy2(
                 ROOT / "modules" / name,
                 self.app / "modules" / name,
-            )
-        for name in ("topics.json", "tag-verse.csv"):
-            shutil.copy2(
-                ROOT / "data" / "global-bookmarks" / name,
-                self.app / "data" / "global-bookmarks" / name,
             )
         self.store_path = state / "contributions.sqlite3"
         store = ContributionStore(path=str(self.store_path))
@@ -75,8 +77,11 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Contribution review status", result.stdout)
-        self.assertIn("Live catalogue revision", result.stdout)
+        self.assertIn("Accepted ledger revision: none", result.stdout)
+        self.assertIn("Shared API catalogue version", result.stdout)
+        self.assertNotIn("live", result.stdout.casefold())
         self.assertNotIn(str(self.store_path), result.stdout)
+        self.assertFalse((self.store_path.parent / "contribution-exports").exists())
 
     def test_export_is_private_deterministic_and_identity_free(self) -> None:
         result = self.run_setup("contributions", "production", "export")
@@ -94,8 +99,13 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(exports[0].stat().st_mode), 0o600)
         self.assertIn("Privacy-safe repository export:", result.stdout)
         self.assertIn(
-            "Automated Git branch publication from a container export is not supported",
+            "Automated pull-request publication to getbible/v1_bookmark_builder from a "
+            "container export is not supported",
             result.stdout,
+        )
+        self.assertIn("src/builder.py import-bundle", result.stdout)
+        self.assertFalse(
+            (self.store_path.parent / "contribution-exports" / "bookmarks-catalog.json").exists()
         )
 
     def test_concurrent_exports_reserve_distinct_private_files(self) -> None:
@@ -138,10 +148,17 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(export.stat().st_mode), 0o600)
 
     def test_review_mutations_require_a_terminal(self) -> None:
-        result = self.run_setup("contributions", "production", "applications")
+        for action in ("applications", "topics", "verses", "accept"):
+            with self.subTest(action=action):
+                result = self.run_setup("contributions", "production", action)
 
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("requires an interactive terminal", result.stderr)
+        # No catalogue download is attempted before the terminal check.
+        self.assertFalse((self.store_path.parent / "contribution-exports").exists())
+        result = self.run_setup("contributions", "production", "publish-live")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("requires an interactive terminal", result.stderr)
+        self.assertIn("Unknown contribution action", result.stderr)
 
     def test_container_menu_never_claims_repository_push_support(self) -> None:
         script = CONTAINER_SETUP.read_text(encoding="utf-8")
@@ -149,10 +166,34 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
         self.assertNotIn("git push", script.casefold())
         self.assertNotIn("publish-repository", script.casefold())
         self.assertIn(
-            "Automated repository branch publication is unavailable for container instances",
+            "Automated pull-request publication to getbible/v1_bookmark_builder is "
+            "unavailable for container instances",
             script,
         )
         self.assertIn("Use a native deployment", script)
+        for retired in (
+            "global-bookmarks",
+            "--topics-file",
+            "--associations-file",
+            "publish-live",
+            "live instance",
+            "Git branch",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, script)
+        self.assertIn("fetch-catalog", script)
+        self.assertIn("bookmarks.getbible.net", script)
+        self.assertIn("5) Accept approved changes into the submission ledger", script)
+        # Every catalogue-dependent action fetches first and fails closed.
+        for command in ("topics", "accept"):
+            self.assertIn(f"run_catalogue_review {command}", script)
+        self.assertIn("run_catalogue_review verses", script)
+        review_start = script.index("run_catalogue_review() {")
+        review = script[review_start : script.index("\n}\n", review_start)]
+        self.assertLess(
+            review.index("fetch_contribution_catalog || return 1"),
+            review.index('--catalog-file "$CONTRIBUTION_CATALOG"'),
+        )
 
     def test_symlinked_private_store_is_rejected(self) -> None:
         self.store_path.unlink()

@@ -59,6 +59,18 @@ CONTRIBUTION_ENV_FILE=""
 CONTRIBUTION_STORE_FILE=""
 CONTRIBUTION_SCRIPT=""
 CONTRIBUTION_ACTOR=""
+CONTRIBUTION_CATALOG_FILE=""
+# Entry point executed inside the publisher's sanitised `env -i` environment.
+# The builder token arrives on standard input, so it is never part of a command
+# line, a log line, or the manager's own environment; the verified helper then
+# replaces the shell.
+CONTRIBUTION_PUBLISHER_ENTRY='IFS= read -r GETBIBLE_BUILDER_TOKEN || true
+if [[ -n "${GETBIBLE_BUILDER_TOKEN}" ]]; then
+    export GETBIBLE_BUILDER_TOKEN
+else
+    unset GETBIBLE_BUILDER_TOKEN
+fi
+exec "$0" "$@"'
 
 DEFAULT_SYSTEMD_MEMORY_HIGH_MB=1536
 DEFAULT_SYSTEMD_MEMORY_MAX_MB=2048
@@ -151,7 +163,8 @@ Commands:
   miniapp     Configure the authenticated Telegram Mini App HTTPS route
   content     Edit the welcome or detailed help text
   contributions
-              Review trusted topic/verse contributions and publish them
+              Review trusted topic/verse contributions and submit them
+              upstream as a getbible/v1_bookmark_builder pull request
   update      Deploy the current reviewed checkout (alias for upgrade)
   upgrade     Deploy the exact commit from a reviewed source checkout
   rollback    Return to the immediately previous deployed application
@@ -885,6 +898,8 @@ migrate_instance_configuration() {
         "CONTRIBUTION_STORE_FILE" "${STATE_ROOT}/${instance}/contributions.sqlite3"
     ensure_env_value "$python_bin" "$env_file" "CONTRIBUTION_GIT_CHECKOUT" ""
     ensure_env_value "$python_bin" "$env_file" "CONTRIBUTION_GIT_USER" ""
+    ensure_env_value "$python_bin" "$env_file" "CONTRIBUTION_GITHUB_TOKEN" ""
+    ensure_env_value "$python_bin" "$env_file" "CONTRIBUTION_BUILDER_PYTHON" "python3"
     migrate_env_default \
         "$python_bin" "$env_file" "USER_PREFERENCE_LIMIT" "100000" "10000"
     ensure_env_value "$python_bin" "$env_file" "TELEGRAM_DELIVERY_MODE" "polling"
@@ -1849,10 +1864,9 @@ probe_mini_app_surface() {
     local app_dir=$1
     local base_url=${2%/}
     local public_origin=$3
+    # The shared bookmark catalogue is served by bookmarks.getbible.net, not by
+    # the instance, so only the contribution routes are probed here.
     probe_mini_app_url "${base_url}/" &&
-        probe_mini_app_api_url \
-            "$app_dir/venv/bin/python" \
-            "${base_url}/api/v1/bookmarks/catalog" GET "$public_origin" &&
         probe_mini_app_api_url \
             "$app_dir/venv/bin/python" \
             "${base_url}/api/v1/contributions/status" GET "$public_origin" &&
@@ -2741,6 +2755,8 @@ cmd_install() {
         "CONTRIBUTION_STORE_FILE" "${state_dir}/contributions.sqlite3"
     replace_env_value "$python_bin" "$env_file" "CONTRIBUTION_GIT_CHECKOUT" ""
     replace_env_value "$python_bin" "$env_file" "CONTRIBUTION_GIT_USER" ""
+    replace_env_value "$python_bin" "$env_file" "CONTRIBUTION_GITHUB_TOKEN" ""
+    replace_env_value "$python_bin" "$env_file" "CONTRIBUTION_BUILDER_PYTHON" "python3"
     replace_env_value "$python_bin" "$env_file" "USER_PREFERENCE_LIMIT" "10000"
     replace_env_value "$python_bin" "$env_file" "WELCOME_MESSAGE_FILE" "$welcome_file"
     replace_env_value "$python_bin" "$env_file" "HELP_MESSAGE_FILE" "$help_file"
@@ -4468,6 +4484,7 @@ load_contribution_context() {
     CONTRIBUTION_ENV_FILE=$env_file
     CONTRIBUTION_STORE_FILE=$store_file
     CONTRIBUTION_ACTOR="setup:${SUDO_USER:-root}"
+    CONTRIBUTION_CATALOG_FILE="${STATE_ROOT}/${ACTIVE_INSTANCE}/contribution-exports/bookmarks-catalog.json"
 }
 
 run_contribution_cli() {
@@ -4481,6 +4498,38 @@ run_contribution_cli() {
         --actor "$CONTRIBUTION_ACTOR" "$@"
 }
 
+ensure_contribution_export_dir() {
+    local export_dir="${STATE_ROOT}/${ACTIVE_INSTANCE}/contribution-exports"
+    runuser --user "$ACTIVE_USER" -- mkdir -p -- "$export_dir" || return 1
+    runuser --user "$ACTIVE_USER" -- chmod 0700 "$export_dir" || return 1
+    printf '%s\n' "$export_dir"
+}
+
+fetch_contribution_catalog() {
+    # The public Bookmarks API is the only source of the shared catalogue.
+    # Every review step that compares against it fails closed when the
+    # verified download is unavailable rather than reviewing against a guess.
+    local base_url
+    local -a fetch_arguments=()
+    ensure_contribution_export_dir >/dev/null || {
+        warn "The private contribution export directory could not be prepared."
+        return 1
+    }
+    base_url=$(dotenv_value \
+        "$CONTRIBUTION_APP_DIR" "$CONTRIBUTION_ENV_FILE" "GETBIBLE_BOOKMARKS_BASE_URL")
+    if [[ "$base_url" == https://* ]]; then
+        fetch_arguments+=(--base-url "${base_url%/}/v1")
+    fi
+    if ! runuser --user "$ACTIVE_USER" -- \
+        env PYTHONPATH="$CONTRIBUTION_APP_DIR" \
+        "$CONTRIBUTION_APP_DIR/venv/bin/python" \
+        "$CONTRIBUTION_SCRIPT" fetch-catalog \
+        --output "$CONTRIBUTION_CATALOG_FILE" "${fetch_arguments[@]}"; then
+        warn "The shared bookmark catalogue could not be fetched from bookmarks.getbible.net; topic, verse, and acceptance review need it and were not started."
+        return 1
+    fi
+}
+
 json_result_field() {
     local python_bin=$1
     local payload=$2
@@ -4492,6 +4541,23 @@ value = json.loads(sys.argv[1]).get(sys.argv[2])
 if value is None or isinstance(value, (dict, list, bool)):
     raise SystemExit("missing or invalid publication result")
 print(value)
+' "$payload" "$field"
+}
+
+json_optional_result_field() {
+    local python_bin=$1
+    local payload=$2
+    local field=$3
+    "$python_bin" -c '
+import json
+import sys
+value = json.loads(sys.argv[1]).get(sys.argv[2])
+if value is None:
+    print("")
+elif isinstance(value, (dict, list, bool)):
+    raise SystemExit("invalid publication result")
+else:
+    print(value)
 ' "$payload" "$field"
 }
 
@@ -4525,6 +4591,20 @@ if not stat.S_ISDIR(metadata.st_mode):
     raise SystemExit("Publisher checkout is not a directory.")
 if metadata.st_uid != expected_uid:
     raise SystemExit("Publisher checkout is not owned by its dedicated publisher user.")
+# The checkout must be a clone of getbible/v1_bookmark_builder: the stdlib
+# builder plus the catalogue sources it validates and publishes.
+for relative in ("src/builder.py", "data/topics.json"):
+    candidate = path / relative
+    try:
+        candidate_metadata = os.lstat(candidate)
+    except OSError:
+        raise SystemExit(
+            f"Publisher checkout is not a getbible/v1_bookmark_builder clone: {relative} is missing."
+        ) from None
+    if not stat.S_ISREG(candidate_metadata.st_mode):
+        raise SystemExit(f"Publisher checkout entry is not a regular file: {relative}")
+    if candidate_metadata.st_uid != expected_uid:
+        raise SystemExit(f"Publisher checkout entry is not owned by the publisher user: {relative}")
 PY
 }
 
@@ -4623,6 +4703,9 @@ publish_contributions_to_repository() (
     local publisher_result
     local branch
     local commit
+    local pull_request
+    local github_token
+    local builder_python
     local stamp
     local service_uid
     local publisher_uid
@@ -4640,7 +4723,22 @@ publish_contributions_to_repository() (
         "$CONTRIBUTION_APP_DIR" "$CONTRIBUTION_ENV_FILE" \
         "CONTRIBUTION_GIT_USER")
     [[ -n "$checkout" && -n "$git_user" ]] || {
-        warn "Set CONTRIBUTION_GIT_CHECKOUT and CONTRIBUTION_GIT_USER in this instance configuration first."
+        warn "Set CONTRIBUTION_GIT_CHECKOUT (a getbible/v1_bookmark_builder checkout) and CONTRIBUTION_GIT_USER in this instance configuration first."
+        return 1
+    }
+    # Optional: with a fine-grained token scoped to getbible/v1_bookmark_builder
+    # the publisher opens the pull request itself; without one it prints the
+    # compare URL.  The value is handed to the publisher on standard input and
+    # is never echoed, logged, or placed on a command line.
+    github_token=$(dotenv_value \
+        "$CONTRIBUTION_APP_DIR" "$CONTRIBUTION_ENV_FILE" \
+        "CONTRIBUTION_GITHUB_TOKEN")
+    builder_python=$(dotenv_value \
+        "$CONTRIBUTION_APP_DIR" "$CONTRIBUTION_ENV_FILE" \
+        "CONTRIBUTION_BUILDER_PYTHON")
+    builder_python=${builder_python:-python3}
+    [[ "$builder_python" =~ ^([A-Za-z0-9][A-Za-z0-9._+-]*|(/[A-Za-z0-9._+-]+)+)$ ]] || {
+        warn "CONTRIBUTION_BUILDER_PYTHON must be a command name or an absolute path to a Python 3.12+ interpreter."
         return 1
     }
     [[ "$git_user" != "root" && "$git_user" != "$ACTIVE_USER" ]] || {
@@ -4653,7 +4751,7 @@ publish_contributions_to_repository() (
     }
     python_bin=$(select_python)
     validate_publisher_checkout "$python_bin" "$checkout" "$git_user" || {
-        warn "The configured publisher checkout failed its ownership or symlink check."
+        warn "The configured publisher checkout failed its ownership, symlink, or builder-layout check."
         return 1
     }
     checkout_lock_key=$("$python_bin" -c '
@@ -4687,19 +4785,20 @@ print(hashlib.sha256(str(Path(sys.argv[1]).resolve()).encode()).hexdigest()[:24]
     fi
 
     stamp=$(date --utc +'%Y%m%d-%H%M%S')
-    export_dir="${STATE_ROOT}/${ACTIVE_INSTANCE}/contribution-exports"
-    runuser --user "$ACTIVE_USER" -- mkdir -p -- "$export_dir"
-    runuser --user "$ACTIVE_USER" -- chmod 0700 "$export_dir"
+    export_dir=$(ensure_contribution_export_dir) || {
+        warn "The private contribution export directory could not be prepared."
+        return 1
+    }
     export_file=$(runuser --user "$ACTIVE_USER" -- \
         mktemp --tmpdir="$export_dir" "reviewed-catalog-${stamp}.XXXXXXXX.json")
     if ! export_output=$(run_contribution_cli export --output "$export_file"); then
-        warn "The live catalogue export failed; no Git operation was attempted."
+        warn "The accepted ledger export failed; no Git operation was attempted."
         return 1
     fi
     printf '%s\n' "$export_output"
     export_result=${export_output##*$'\n'}
     revision=$(json_result_field "$python_bin" "$export_result" revision) || {
-        warn "The catalogue export did not report a valid live revision."
+        warn "The catalogue export did not report a valid ledger revision."
         return 1
     }
     [[ "$revision" =~ ^[1-9][0-9]*$ ]] || {
@@ -4707,7 +4806,7 @@ print(hashlib.sha256(str(Path(sys.argv[1]).resolve()).encode()).hexdigest()[:24]
         return 1
     }
     checksum=$(json_result_field "$python_bin" "$export_result" checksum) || {
-        warn "The catalogue export did not report a valid live checksum."
+        warn "The catalogue export did not report a valid ledger checksum."
         return 1
     }
     [[ "$checksum" =~ ^[0-9a-f]{64}$ ]] || {
@@ -4724,7 +4823,7 @@ print(hashlib.sha256(str(Path(sys.argv[1]).resolve()).encode()).hexdigest()[:24]
     }
     if ! lease_output=$(run_contribution_cli begin-repository-publication \
         --revision "$revision" --checksum "$checksum" --lease-seconds 3600); then
-        warn "This live revision is already publishing, already pushed, or no longer current."
+        warn "This accepted revision is already publishing, already pushed, or no longer current."
         return 1
     fi
     lease_result=${lease_output##*$'\n'}
@@ -4772,15 +4871,18 @@ print(hashlib.sha256(str(Path(sys.argv[1]).resolve()).encode()).hexdigest()[:24]
     if ! publisher_output=$(runuser --user "$git_user" -- \
         env -i HOME="$publisher_home" LANG=C.UTF-8 \
         PATH=/usr/local/bin:/usr/bin:/bin GIT_TERMINAL_PROMPT=0 \
+        /bin/bash -c "$CONTRIBUTION_PUBLISHER_ENTRY" \
         "$python_bin" "$CONTRIBUTION_TEMP_DIR/contribution_review.py" \
         publish-repository \
         --bundle "$CONTRIBUTION_TEMP_DIR/catalogue.json" \
         --checkout "$checkout" --expected-user "$git_user" \
-        --expected-bundle-checksum "$bundle_checksum"); then
+        --expected-bundle-checksum "$bundle_checksum" \
+        --builder-python "$builder_python" \
+        --instance-name "$ACTIVE_INSTANCE" <<<"$github_token"); then
         run_contribution_cli finish-repository-publication \
             --lease-token "$lease_token" --revision "$revision" --state failed \
             --error "Git publisher command failed; reviewed export retained." || true
-        warn "Git publication failed. The reviewed export remains at ${export_file}."
+        warn "Upstream publication failed. The reviewed export remains at ${export_file}."
         clear_contribution_temp
         return 1
     fi
@@ -4802,16 +4904,29 @@ print(hashlib.sha256(str(Path(sys.argv[1]).resolve()).encode()).hexdigest()[:24]
         clear_contribution_temp
         return 1
     }
+    # The pull request is best effort: the branch is already upstream, so an
+    # unusable pull-request result is recorded as pushed without a URL.
+    pull_request=$(json_optional_result_field \
+        "$python_bin" "$publisher_result" pull_request) || pull_request=""
+    [[ "$pull_request" =~ ^https://github\.com/getbible/v1_bookmark_builder/pull/[0-9]+$ ]] ||
+        pull_request=""
+    local -a finish_arguments=(--branch "$branch" --commit "$commit")
+    [[ -z "$pull_request" ]] || finish_arguments+=(--pull-request "$pull_request")
     if ! run_contribution_cli finish-repository-publication \
         --lease-token "$lease_token" --revision "$revision" --state pushed \
-        --branch "$branch" --commit "$commit"; then
+        "${finish_arguments[@]}"; then
         warn "The branch was pushed, but recording its publication failed. Branch: ${branch}"
         clear_contribution_temp
         return 1
     fi
     clear_contribution_temp
     record_operation contribution-repository-publish "$ACTIVE_INSTANCE" ok
-    printf 'Repository branch published: %s (%s)\n' "$branch" "$commit"
+    printf 'Builder branch pushed to getbible/v1_bookmark_builder: %s (%s)\n' "$branch" "$commit"
+    if [[ -n "$pull_request" ]]; then
+        printf 'Pull request opened: %s\n' "$pull_request"
+    else
+        printf 'No pull request was opened automatically; open one for the pushed branch using the compare URL above.\n'
+    fi
     printf 'The privacy-safe source export remains at: %s\n' "$export_file"
 )
 
@@ -4821,8 +4936,6 @@ cmd_contributions() {
     select_instance "${1:-}"
     load_contribution_context
     local selection
-    local topics_file="${CONTRIBUTION_APP_DIR}/data/global-bookmarks/topics.json"
-    local associations_file="${CONTRIBUTION_APP_DIR}/data/global-bookmarks/tag-verse.csv"
     local translation
     translation=$(dotenv_value \
         "$CONTRIBUTION_APP_DIR" "$CONTRIBUTION_ENV_FILE" "TRANSLATION")
@@ -4835,42 +4948,34 @@ Contribution review
   2) Review contributor applications / revoke access
   3) Resolve and merge contributor topics
   4) Review verse additions and removals
-  5) Publish approved changes to this live instance
-  6) Export live changes and push a repository branch
+  5) Accept approved changes and open a builder pull request
   0) Return
+
+Topic, verse, and acceptance review compare against the shared catalogue,
+which is fetched fresh from bookmarks.getbible.net before each of them.
 EOF
         read -r -p "Selection: " selection
         case "$selection" in
             1) run_contribution_cli status || true ;;
             2) run_contribution_cli applications || true ;;
             3)
-                if [[ -f "$topics_file" && ! -L "$topics_file" ]]; then
-                    run_contribution_cli topics --topics-file "$topics_file" || true
-                else
-                    warn "Canonical topic definitions are unavailable; update this instance first."
-                fi
+                fetch_contribution_catalog || continue
+                run_contribution_cli topics \
+                    --catalog-file "$CONTRIBUTION_CATALOG_FILE" || true
                 ;;
             4)
-                if [[ -f "$topics_file" && ! -L "$topics_file" &&
-                    -f "$associations_file" && ! -L "$associations_file" ]]; then
-                    run_contribution_cli verses --translation "$translation" \
-                        --topics-file "$topics_file" \
-                        --associations-file "$associations_file" || true
-                else
-                    warn "Bundled catalogue sources are unavailable or unsafe; update this instance first."
-                fi
+                fetch_contribution_catalog || continue
+                run_contribution_cli verses --translation "$translation" \
+                    --catalog-file "$CONTRIBUTION_CATALOG_FILE" || true
                 ;;
             5)
-                if [[ ! -f "$topics_file" || -L "$topics_file" ||
-                    ! -f "$associations_file" || -L "$associations_file" ]]; then
-                    warn "Bundled catalogue sources are unavailable or unsafe; update this instance first."
-                elif run_contribution_cli publish-live \
-                    --topics-file "$topics_file" \
-                    --associations-file "$associations_file"; then
-                    record_operation contribution-live-publish "$ACTIVE_INSTANCE" ok
+                fetch_contribution_catalog || continue
+                if run_contribution_cli accept \
+                    --catalog-file "$CONTRIBUTION_CATALOG_FILE"; then
+                    record_operation contribution-accept "$ACTIVE_INSTANCE" ok
+                    publish_contributions_to_repository || true
                 fi
                 ;;
-            6) publish_contributions_to_repository || true ;;
             0) return ;;
             *) warn "Unknown selection." ;;
         esac
