@@ -17,7 +17,6 @@ import {
   normalizeFilters,
   normalizeReaderLocation,
   normalizeScripture,
-  normalizeSearch,
   normalizeSession,
   normalizeTranslations,
   normalizeVerses,
@@ -389,39 +388,25 @@ test("derives compact book labels from API-provided localized names", () => {
   );
 });
 
-test("normalizes zero-based search pages and derives pagination", () => {
-  const result = normalizeSearch({
-    search_id: "SearchTokenValue1",
-    query: "God",
-    translation: "kjv",
-    total: 40,
-    available: 25,
-    truncated: true,
-    page: 0,
-    page_count: 3,
-    items: [verse],
-  });
+test("derives basket highlights from the terms a row still carries", () => {
+  // A verse selected from a search keeps its matched terms; the shared
+  // highlighter marks them again wherever the row is rendered next.
+  const [row] = normalizeVerses([verse]);
 
-  assert.equal(result.page, 0);
-  assert.equal(result.has_more, true);
-  assert.equal(result.results.length, 1);
-  assert.deepEqual(result.results[0].highlights, [
+  assert.deepEqual(row.highlights, [
     { start: 4, end: 7 },
     { start: 21, end: 26 },
   ]);
+  assert.deepEqual(normalizeVerses([verse], "exact")[0].highlights, row.highlights);
+  assert.deepEqual(
+    normalizeVerses([{ ...verse, highlights: [{ start: 0, end: 3 }] }])[0].highlights,
+    [{ start: 0, end: 3 }],
+  );
+  // A verse carrying no text is not a verse; the model drops it outright.
+  assert.deepEqual(normalizeVerses([{ ...verse, text: "" }]), []);
 });
 
-test("rejects search and Scripture responses from a stale translation", () => {
-  assert.throws(
-    () => normalizeSearch({
-      search_id: "SearchTokenValue1",
-      query: "God",
-      translation: "kjv",
-      total: 1,
-      items: [verse],
-    }, "aov"),
-    /translation did not match/,
-  );
+test("rejects Scripture responses from a stale translation", () => {
   assert.throws(
     () => normalizeScripture({
       translation: "kjv",
@@ -691,95 +676,4 @@ test("resolves interface locales by exact locale, base language, then English", 
   assert.equal(resolveLocale("pt-AO", available), "pt");
   assert.equal(resolveLocale("zu-ZA", available), "en");
   assert.equal(resolveLocale("not a locale", available), "en");
-});
-
-// --- search-term highlighting ------------------------------------------------
-// Librarian returns the terms it matched in its own analysed form — folded and
-// casefolded — while the verse arrives as written. Matching those terms
-// literally against the raw verse finds nothing the moment folding does any
-// work, which is every accented, pointed or unvowelled script.
-
-function marked(text, terms, diacritics = "fold") {
-  const payload = {
-    selection_id: "AbCdEfGhIjKlMnOp",
-    translation: "kjv",
-    reference: "John 1:1",
-    book_number: 43,
-    chapter: 1,
-    verse: 1,
-    text,
-    terms,
-  };
-  const [normalized] = normalizeVerses([payload], diacritics);
-  return normalized.highlights.map((span) => text.slice(span.start, span.end));
-}
-
-test("highlights folded matches in every writing system Librarian reaches", () => {
-  const cases = [
-    ["λόγος ἦν πρὸς τὸν θεόν", ["λογος"], ["λόγος"], "Greek, unaccented query"],
-    ["Ðức Chúa Trời yêu", ["duc", "troi"], ["Ðức", "Trời"], "precomposed Latin"],
-    ["בְּרֵאשִׁית בָּרָא", ["בראשית"], ["בְּרֵאשִׁית"], "Hebrew, unpointed query"],
-    ["فِي الْبَدْءِ كَانَ", ["بدء"], ["بَدْءِ"], "Arabic stem behind a particle"],
-    ["神爱世人，甚至将他的独生子", ["神爱"], ["神爱"], "Han"],
-    ["하나님이 세상을 이처럼 사랑하사", ["사랑"], ["사랑"], "Hangul"],
-    ["พระเจ้าทรงรักโลก", ["พระเจ้า"], ["พระเจ้า"], "Thai"],
-    ["यीशु ने कहा", ["यीशु"], ["यीशु"], "Devanagari, marks kept"],
-    ["God so loved the world", ["loved"], ["loved"], "Latin control"],
-  ];
-  for (const [text, terms, expected, label] of cases) {
-    assert.deepEqual(marked(text, terms), expected, label);
-  }
-});
-
-test("ends a highlighted word at a trailing apostrophe", () => {
-  // Librarian carries a word through an apostrophe only when a letter follows,
-  // so it indexes `priests'` as the unit `priests` and returns the verse.
-  assert.deepEqual(
-    marked("minister in the priests' office", ["priests"]),
-    ["priests"],
-  );
-  assert.deepEqual(marked("the sons of d'Israel", ["israel"]), []);
-});
-
-test("keeps a folded trailing mark inside the span it belongs to", () => {
-  // The kasra after the hamza is part of the matched stem; closing the span
-  // before it would split a letter from its own vowel.
-  const [span] = marked("فِي الْبَدْءِ كَانَ", ["بدء"]);
-  assert.equal(span, "بَدْءِ");
-});
-
-test("does not fold when the reader asked for exact diacritics", () => {
-  // Under `exact` the engine distinguishes pointed from unpointed, so an
-  // unaccented term is not a match to mark.
-  assert.deepEqual(marked("λόγος ἦν", ["λογος"], "exact"), []);
-  assert.deepEqual(marked("λόγος ἦν", ["λόγος"], "exact"), ["λόγος"]);
-});
-
-test("marks whole words only, and never overlapping spans", () => {
-  assert.deepEqual(marked("grace and greatness", ["great"]), []);
-  assert.deepEqual(
-    marked("grace upon grace", ["grace"]),
-    ["grace", "grace"],
-  );
-});
-
-test("survives terms that normalize away or are absent", () => {
-  assert.deepEqual(marked("God so loved", ["", "  "]), []);
-  assert.deepEqual(marked("God so loved", ["absent"]), []);
-  assert.deepEqual(marked("God so loved", []), []);
-  // A verse carrying no text is not a verse; the model drops it outright.
-  assert.deepEqual(normalizeVerses([{ ...verse, text: "" }]), []);
-});
-
-test("marks only the abjad stems Librarian actually derives", () => {
-  // `ולאמר` analyses to ['ולאמר','אמר'] because `ול` is a closed-class
-  // particle; `ויאמר` analyses to ['ויאמר','יאמר'] and never yields `אמר`.
-  assert.deepEqual(
-    marked("ויאמר אלהים ולאמר הנביא אמר יהוה", ["אמר"]),
-    ["אמר", "אמר"],
-  );
-  assert.deepEqual(marked("יהי אור והאור טוב", ["אור"]), ["אור", "אור"]);
-  // Three letters is the floor below which no stem is derived, so `ובן` keeps
-  // its particle and only the bare word matches.
-  assert.deepEqual(marked("ובן האיש בן", ["בן"]), ["בן"]);
 });

@@ -229,7 +229,7 @@ test("explicit revocation calls DELETE session and clears Robot auth", async () 
     ),
   );
   await assert.rejects(
-    api.search("grace", { translation: "kjv" }),
+    api.search("kjv", "grace", {}),
     (error) => error?.code === "session_not_ready",
   );
 });
@@ -255,7 +255,7 @@ test("failed explicit revocation still clears Robot auth", async () => {
     (error) => error?.code === "network_error",
   );
   await assert.rejects(
-    api.search("grace", { translation: "kjv" }),
+    api.search("kjv", "grace", {}),
     (error) => error?.code === "session_not_ready",
   );
 });

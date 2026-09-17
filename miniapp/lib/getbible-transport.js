@@ -1,5 +1,6 @@
 const DEFAULT_API_ROOT = "https://api.getbible.net/v2/";
 const DEFAULT_QUERY_ROOT = "https://query.getbible.net/v2/";
+const DEFAULT_SEARCH_ROOT = "https://search.getbible.net/v2/";
 // A chapter is downloaded, not computed, so the only honest question a reader's
 // deadline can ask is whether the response is still arriving. A wall clock
 // answers a different question and answers it wrongly on a slow phone: it
@@ -13,19 +14,30 @@ const DEFAULT_TOTAL_TIMEOUT_MS = 120_000;
 const DEFAULT_ATTEMPTS = 3;
 const DEFAULT_RETRY_BACKOFF_MS = 400;
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+// A refusal explains itself in a small problem document; anything larger is
+// not an explanation and is not read.
+const MAX_PROBLEM_BYTES = 16 * 1024;
+// A Retry-After the page will honour by waiting inside the retry loop. Longer
+// waits are surfaced to the reader instead of being sat out silently.
+const MAX_RETRY_AFTER_WAIT_MS = 5_000;
+const MAX_RETRY_AFTER_SECONDS = 3_600;
+const MAX_SEARCH_PARAMETERS_LENGTH = 8_192;
 const SHA1_PATTERN = /^[0-9a-f]{40}$/;
+const SEARCH_TRANSLATION_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 export class PublicApiError extends Error {
   constructor(message, {
     code = "public_api_failed",
     status = 0,
     retryable = false,
+    retryAfter = null,
   } = {}) {
     super(message);
     this.name = "PublicApiError";
     this.code = code;
     this.status = status;
     this.retryable = retryable;
+    this.retryAfter = normalizeRetryAfter(retryAfter);
   }
 }
 
@@ -40,6 +52,7 @@ export class GetBibleTransport {
   #maxResponseBytes;
   #queryRoot;
   #retryBackoffMs;
+  #searchRoot;
   #setTimeout;
   #stallTimeoutMs;
   #subtle;
@@ -48,6 +61,7 @@ export class GetBibleTransport {
   constructor({
     apiRoot = DEFAULT_API_ROOT,
     queryRoot = DEFAULT_QUERY_ROOT,
+    searchRoot = DEFAULT_SEARCH_ROOT,
     stallTimeoutMs = DEFAULT_STALL_TIMEOUT_MS,
     totalTimeoutMs = DEFAULT_TOTAL_TIMEOUT_MS,
     attempts = DEFAULT_ATTEMPTS,
@@ -60,6 +74,7 @@ export class GetBibleTransport {
   } = {}) {
     this.#apiRoot = safeRoot(apiRoot, "api.getbible.net");
     this.#queryRoot = safeRoot(queryRoot, "query.getbible.net");
+    this.#searchRoot = safeRoot(searchRoot, "search.getbible.net");
     if (typeof fetchImplementation !== "function") {
       throw new TypeError("A public API fetch implementation is required.");
     }
@@ -196,6 +211,35 @@ export class GetBibleTransport {
     return decodeJson(bytes);
   }
 
+  /**
+   * One full-text search on the fixed Search API origin.
+   *
+   * A search is a public, cacheable GET like any other Scripture read, so the
+   * browser's HTTP cache is allowed to honour the API's Cache-Control rather
+   * than every repeated query paying a fresh round trip. A refusal arrives as
+   * a problem document, which is read (bounded) so the reader can be told
+   * whether to change the search, wait, or try again.
+   */
+  async search(translation, parameters, {
+    maximumBytes = this.#maxResponseBytes,
+  } = {}) {
+    if (
+      typeof translation !== "string" ||
+      !SEARCH_TRANSLATION_PATTERN.test(translation)
+    ) {
+      throw new TypeError("Search translation is invalid.");
+    }
+    const query = encodeSearchParameters(parameters);
+    const url = new URL(`${translation}?${query}`, this.#searchRoot);
+    const { bytes } = await this.#read(url, {
+      accept: "application/json",
+      maximumBytes,
+      cache: "default",
+      problem: true,
+    });
+    return decodeJson(bytes);
+  }
+
   #apiUrl(relativePath) {
     if (
       typeof relativePath !== "string" ||
@@ -229,7 +273,19 @@ export class GetBibleTransport {
         ) {
           throw error;
         }
-        await this.#pause(this.#retryBackoffMs * 2 ** (attempt - 1));
+        // A server that names its own wait is not asking to be retried on
+        // this loop's schedule: a short wait is honoured here, a long one is
+        // handed to the reader as advice rather than sat out in silence.
+        const requestedWaitMs = error.retryAfter === null
+          ? 0
+          : Math.round(error.retryAfter * 1_000);
+        if (requestedWaitMs > MAX_RETRY_AFTER_WAIT_MS) {
+          throw error;
+        }
+        await this.#pause(Math.max(
+          this.#retryBackoffMs * 2 ** (attempt - 1),
+          requestedWaitMs,
+        ));
       }
     }
   }
@@ -243,7 +299,12 @@ export class GetBibleTransport {
     });
   }
 
-  async #attempt(url, { accept, maximumBytes }) {
+  async #attempt(url, {
+    accept,
+    maximumBytes,
+    cache = "no-store",
+    problem = false,
+  }) {
     if (
       !Number.isInteger(maximumBytes) ||
       maximumBytes < 1 ||
@@ -279,7 +340,7 @@ export class GetBibleTransport {
         method: "GET",
         headers: { Accept: accept },
         credentials: "omit",
-        cache: "no-store",
+        cache,
         redirect: "error",
         referrerPolicy: "no-referrer",
         signal: controller.signal,
@@ -302,6 +363,7 @@ export class GetBibleTransport {
     try {
       return await this.#body(response, url, {
         maximumBytes,
+        problem,
         onProgress: armStall,
         onIndefinite: clearStall,
         signal: controller.signal,
@@ -326,7 +388,16 @@ export class GetBibleTransport {
     }
   }
 
-  async #body(response, url, { maximumBytes, onProgress, onIndefinite, signal }) {
+  async #body(response, url, {
+    maximumBytes,
+    problem = false,
+    onProgress,
+    onIndefinite,
+    signal,
+  }) {
+    if (!response.ok && problem) {
+      throw await problemError(response, { onProgress, onIndefinite, signal });
+    }
     if (!response.ok) {
       throw new PublicApiError(
         response.status === 404
@@ -382,6 +453,119 @@ function safeRoot(value, expectedHost) {
 
 function isTestRuntime() {
   return typeof process === "object" && process?.env?.NODE_ENV === "test";
+}
+
+function encodeSearchParameters(parameters) {
+  const encoded = parameters instanceof URLSearchParams
+    ? parameters.toString()
+    : typeof parameters === "string"
+      ? parameters
+      : "";
+  if (
+    encoded.length === 0 ||
+    encoded.length > MAX_SEARCH_PARAMETERS_LENGTH ||
+    /[#?\s]/.test(encoded)
+  ) {
+    throw new TypeError("Search parameters are invalid.");
+  }
+  return encoded;
+}
+
+/**
+ * Turn a refused search into the error the reader can act on.
+ *
+ * The problem document is advisory: the HTTP status decides whether the
+ * request itself was wrong (400, never retried unchanged), the translation is
+ * unknown (404), the public budget is spent (429, wait) or the service is
+ * temporarily unable to answer (503 and other 5xx, retry). The body's `code`
+ * only refines the 404 case, and a body that cannot be read leaves the status
+ * mapping intact rather than hiding the refusal behind a parse failure.
+ */
+async function problemError(response, { onProgress, onIndefinite, signal }) {
+  const status = response.status;
+  let problem = null;
+  try {
+    const contentType = response.headers.get("content-type") || "";
+    if (/application\/(?:problem\+)?json/i.test(contentType)) {
+      const bytes = await readBoundedBody(response, MAX_PROBLEM_BYTES, {
+        onProgress,
+        onIndefinite,
+        signal,
+      });
+      const decoded = decodeJson(bytes);
+      problem = decoded && typeof decoded === "object" && !Array.isArray(decoded)
+        ? decoded
+        : null;
+    }
+  } catch {
+    problem = null;
+  }
+  const problemCode = typeof problem?.code === "string" ? problem.code : "";
+  const retryAfter = retryAfterSeconds(
+    response.headers.get("retry-after"),
+    problem?.retry_after,
+  );
+  const detail = typeof problem?.detail === "string"
+    ? problem.detail.trim().slice(0, 300)
+    : "";
+  if (status === 400) {
+    return new PublicApiError(
+      detail || "The search request was not accepted.",
+      { code: "search_invalid", status, retryable: false, retryAfter },
+    );
+  }
+  if (status === 404 && problemCode === "translation_not_found") {
+    return new PublicApiError(
+      detail || "The requested translation cannot be searched.",
+      { code: "translation_not_found", status, retryable: false, retryAfter },
+    );
+  }
+  if (status === 429) {
+    return new PublicApiError(
+      detail || "The search service asked the browser to slow down.",
+      { code: "search_rate_limited", status, retryable: true, retryAfter },
+    );
+  }
+  return new PublicApiError(
+    detail || "The search service is temporarily unavailable.",
+    {
+      code: "search_unavailable",
+      status,
+      retryable: status >= 500,
+      retryAfter,
+    },
+  );
+}
+
+function retryAfterSeconds(header, bodyValue) {
+  const fromBody = normalizeRetryAfter(bodyValue);
+  if (fromBody !== null) {
+    return fromBody;
+  }
+  if (typeof header !== "string" || header.trim() === "") {
+    return null;
+  }
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) {
+    return normalizeRetryAfter(seconds);
+  }
+  const timestamp = Date.parse(header);
+  return Number.isFinite(timestamp)
+    ? normalizeRetryAfter((timestamp - Date.now()) / 1_000)
+    : null;
+}
+
+function normalizeRetryAfter(value) {
+  // Number(null) and Number("") are 0, which would forge a server-issued
+  // "wait zero seconds" out of a refusal that carried no Retry-After at all.
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return null;
+  }
+  return Math.min(MAX_RETRY_AFTER_SECONDS, seconds);
 }
 
 async function readBoundedBody(response, maximumBytes, {

@@ -66,6 +66,10 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "search.no_results_hint":
     "Try fewer words, a broader scope, or different filters.",
   "search.change_filters": "Change filters",
+  "search.reference_result": "Scripture reference",
+  "search.refreshed":
+    "This translation changed while you were reading. The search started again.",
+  "search.retry_after_hint": "Try again in about {seconds} seconds.",
   "bible.eyebrow": "Read Scripture",
   "bible.title": "Choose a passage",
   "bible.body": "Open a chapter to read, then tap any verse you want to include.",
@@ -410,8 +414,12 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "error.request_too_large": "That request is too large.",
   "error.scripture_unavailable":
     "Scripture is temporarily unavailable. Please try again.",
-  "error.search_expired":
-    "These search results are unavailable or expired. Search again.",
+  "error.search_invalid":
+    "That search could not be understood. Try different words or filters.",
+  "error.search_unavailable":
+    "Search is temporarily unavailable. Please try again.",
+  "error.translation_not_found":
+    "This translation cannot be searched right now.",
   "error.post_locked":
     "This selection already has an incomplete posting attempt. Review the target chat before creating a new selection.",
 });
