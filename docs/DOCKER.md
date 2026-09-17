@@ -166,7 +166,8 @@ The supervisor owns both SQLite paths and will not accept shared overrides:
 
 The second file contains contributor applications, Telegram profile metadata,
 immutable events, review decisions, notification state, private audit history,
-and live catalogue revisions. It is therefore more sensitive than recoverable
+the accepted-contribution ledger, and the last observed public catalogue. It is
+therefore more sensitive than recoverable
 cache data. Keep the `robot-data` volume private, include it in encrypted
 backups when contributions are enabled, and never mount it into another bot
 instance. `CONTRIBUTION_CONTRIBUTOR_LIMIT` and `CONTRIBUTION_EVENT_LIMIT` pass
@@ -269,18 +270,21 @@ The shell runs as the image's unprivileged UID/GID 10001. The root filesystem
 remains read-only; only the instance data volume and bounded `/tmp` tmpfs are
 writable.
 
-The contribution submenu reviews applications, resolves topics, reviews verses
-with authoritative text, publishes a live instance revision, and writes a
-privacy-safe repository export. `status` and `export` also work
-non-interactively. Exports are mode `0600` below:
+The contribution submenu shows status and writes a privacy-safe bundle
+export; topic and verse review, acceptance, and publication are native-only
+because they need the public catalogue download and the publisher account.
+`status` and `export` also work non-interactively. Exports are mode `0600`
+below:
 
 ```text
 /data/<instance>/state/contribution-exports/reviewed-catalog-<UTC>.json
 ```
 
-The image does not contain Node, Git, or a repository credential. Automated
-branch publication from a container export is not supported in this release;
-retain the JSON only for a separately reviewed manual repository import.
+The image does not contain Git or a repository credential. Automated
+publication from a container export is not supported in this release; apply
+the bundle by hand in a checkout of `getbible/v1_bookmark_builder` with
+`python3 src/builder.py import-bundle <bundle.json>` and `validate`, and open
+the pull request yourself.
 
 Do not add a Git credential or publisher checkout to the application
 container. The guarded one-command repository publication workflow is

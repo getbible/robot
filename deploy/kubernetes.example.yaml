@@ -75,13 +75,19 @@ spec:
             - name: CONTAINER_INSTANCE_MEMORY_LIMIT_MB
               value: "1792"
             # Public GetBible origins the robot calls. The Mini App reaches the
-            # same three services directly from the browser.
+            # same four services directly from the browser.
             - name: GETBIBLE_API_BASE_URL
               value: https://api.getbible.net
             - name: GETBIBLE_QUERY_BASE_URL
               value: https://query.getbible.net
             - name: GETBIBLE_SEARCH_BASE_URL
               value: https://search.getbible.net
+            - name: GETBIBLE_BOOKMARKS_BASE_URL
+              value: https://bookmarks.getbible.net
+            # How often the robot reads the Bookmarks API index to learn that
+            # accepted contributions are live.
+            - name: BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS
+              value: "21600"
             - name: MAX_CONCURRENT_LOOKUPS
               value: "8"
             - name: MAX_CONCURRENT_SEARCHES

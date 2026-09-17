@@ -1,6 +1,6 @@
 # Telegram Mini App
 
-The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, temporary verse selection, and device-local history belong in the browser. Compact personal bookmarks and last-read coordinates additionally use Telegram Mini App storage when available. Global-topic preferences use scoped browser storage plus Telegram DeviceStorage, but deliberately remain outside CloudStorage and personal backup. Full-text search, like every other Scripture read, goes from the browser to a public GetBible origin. Robot remains the authenticated Telegram control plane, the bounded relay for an explicit private-chat bookmark backup or restore, and the review boundary for approved contributor events and live global-catalogue revisions.
+The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, temporary verse selection, and device-local history belong in the browser. Compact personal bookmarks and last-read coordinates additionally use Telegram Mini App storage when available. Global-topic preferences use scoped browser storage plus Telegram DeviceStorage, but deliberately remain outside CloudStorage and personal backup. Full-text search and the shared bookmark topic catalogue, like every other Scripture read, go from the browser to a public GetBible origin. Robot remains the authenticated Telegram control plane, the bounded relay for an explicit private-chat bookmark backup or restore, and the review boundary for approved contributor events, whose accepted changes reach the public Bookmarks API through a pull request on the builder repository.
 
 ## Active doctrine
 
@@ -23,7 +23,8 @@ contributions.
 | Personal bookmark aggregate v3, topics, recent topics, and active topic | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage` |
 | Global topic visibility, exclusions, and legacy mapping | Scoped `localStorage` + Telegram `DeviceStorage` only |
 | Approved-contributor journal of explicit global add/remove intents | Per-instance, authenticated-user-scoped browser IndexedDB |
-| Contributor status, events, and live global-catalogue revision | Robot → private per-instance SQLite |
+| Global topic catalogue | Browser → `bookmarks.getbible.net/v1`, verified by SHA-256 and cached in IndexedDB |
+| Contributor status, events, the accepted-contribution ledger, and the last observed public catalogue | Robot → private per-instance SQLite |
 | Compact last-read coordinate | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage`, with Robot preference compatibility |
 | Bookmark JSON download/import | Browser |
 | Private-chat bookmark backup/restore | Browser confirmation + Robot/Telegram transport |
@@ -45,11 +46,12 @@ Telegram WebView
   ├─ catalogs / chapters / hashes                    → api.getbible.net/v2
   ├─ explicit or grouped references                  → query.getbible.net/v2
   ├─ full-text search, page by page                  → search.getbible.net/v2
+  ├─ shared topic catalogue, verified and cached     → bookmarks.getbible.net/v1
   ├─ temporary ordered selection                     → BrowserSelectionStore
   ├─ unique coordinate history                       → scoped local ReadingHistoryStore
   ├─ personal bookmarks / topics / last-read         → local + Telegram storage adapter
   ├─ global topic visibility / exclusions            → scoped localStorage + DeviceStorage
-  └─ approved contribution outbox / live overlay     → authenticated Robot API
+  └─ approved contribution outbox and status         → authenticated Robot API
 ```
 
 Reader and search results are normalized into one verse descriptor. Coordinate identity is:
@@ -83,8 +85,9 @@ The browser transport accepts only these fixed HTTPS origins:
 - `https://api.getbible.net/v2/`
 - `https://query.getbible.net/v2/`
 - `https://search.getbible.net/v2/`
+- `https://bookmarks.getbible.net/v1/`
 
-Requests omit cookies and credentials, never include Telegram data, reject redirects, use `no-referrer`, enforce time and response-size bounds, and validate response coordinates and schemas before use. Search responses are ordinary cacheable `GET`s whose freshness the API declares; a failed search is `application/problem+json` and `429`/`503` carry the wait in `Retry-After`.
+Requests omit cookies and credentials, never include Telegram data, reject redirects, use `no-referrer`, enforce time and response-size bounds, and validate response coordinates and schemas before use. Search responses are ordinary cacheable `GET`s whose freshness the API declares; a failed search is `application/problem+json` and `429`/`503` carry the wait in `Retry-After`. The topic catalogue's `all.json` is accepted only when its SHA-256 equals the checksum in `index.json`.
 
 Both CSP enforcement layers must contain the same allowlist:
 
@@ -148,25 +151,34 @@ Compact **Add all** and **Remove all** controls appear before search with a
 disclosure explaining that global topics are curated verse sets. One global
 link may be hidden, or all global links may be removed for one topic. Loading
 that topic or the full catalog resets its exclusions without duplication. The
-built-in catalogue contains the repository's reviewed topic-to-verse links.
+catalogue is the public Bookmarks API: cached in IndexedDB, revalidated
+against `index.json` at most once a day, replaced only by an `all.json` whose
+SHA-256 matches, and always network-verified on an explicit **Add all** or
+per-topic load. Until a catalogue has loaded the surface reports global topics
+as unavailable until online.
 Scoped visibility, exclusions, and the legacy numeric-topic mapping reconcile
 through localStorage
 and Telegram `DeviceStorage`, surviving a discarded Desktop WebView store.
 They never consume personal records, enter `CloudStorage`, or enter backups.
 
 Personal records are bounded to 800 canonical verses, and each may belong to
-multiple topics without consuming another verse slot. Global topic definitions
-are reviewed server-owned metadata: their localized names cannot be edited,
+multiple topics without consuming another verse slot. A first-time reader
+starts with the catalogue's default topics, seeded once when the catalogue
+first loads. A personal bookmark whose verse an enabled global topic also
+links is merged into the global row after a day of network-verified coverage,
+and the status line reports how many were merged; a cache-only or unavailable
+catalogue never removes anything. Global topic definitions
+are reviewed catalogue metadata: their names, shown in the reader's locale
+with English fallback, cannot be edited,
 but their user-facing colors can be changed from topic detail. Custom topic
 detail supports the same color control and inline name editing with explicit
 confirm and cancel actions. Removing any topic warns that its linked verse
 assignments will also be removed. Removing a global topic changes only that
 user's catalogue state; **Add all** recreates it from the reviewed definition.
 The new-topic plus-card is therefore the only topic-creation area, and the UI
-does not duplicate global restoration there. The global catalogue provider
-merges a validated, reviewed per-instance overlay over the bundled catalogue.
-The bundled source remains available when the overlay request, validation, or
-local cache fails.
+does not duplicate global restoration there. Robot serves no catalogue and
+publishes no overlay; the last verified catalogue in IndexedDB stands in when
+the Bookmarks API is unreachable.
 
 Immediately below the Global topics controls, an approved contributor sees a
 collapsible **Manage Contribution** panel containing synchronization state,
@@ -259,10 +271,11 @@ nor is starved by public traffic; a batch beyond the budget waits behind
 `429` and `Retry-After`, it never fails permanently.
 
 Every response returns the complete result set: `accepted`, `replayed`, and
-`event_ids` receipts, the full detailed contributor status, and the live
-catalogue revision/checksum — `{revision: null, checksum: null,
-available: false}` when enrichment is temporarily unavailable, which never
-turns a committed batch into an error. The final batch's response therefore
+`event_ids` receipts, the full detailed contributor status, and the
+accepted-ledger revision/checksum in `catalog` — `{revision: null,
+checksum: null, available: false}` when enrichment is temporarily
+unavailable, which never turns a committed batch into an error. The final
+batch's response therefore
 settles the panel in one round trip: what happened, where the contributor
 stands, and how much they have contributed. A redelivered event replays
 idempotently per contributor and `client_event_id` under constant-time
@@ -276,30 +289,33 @@ deduplicates. A transport failure cannot roll back a bookmark mutation.
 Revocation or rejection stops future submission without deleting personal
 topics or markings. Personal topics and bookmarks are never altered by any
 synchronization outcome: a failed or pending synchronization leaves the
-personal topic and its bookmarks untouched, only a topic verifiably
-published in the live core catalogue is ever marked **G**, and nothing is
-removed. The transport is ordinary same-origin HTTPS on the Mini
+personal topic and its bookmarks untouched, only a topic the host has seen
+in the public Bookmarks API catalogue is ever marked **G**, and nothing is
+removed by synchronization. The transport is ordinary same-origin HTTPS on
+the Mini
 App domain and port already in use; it needs no custom header, WebSocket,
 long-lived connection, extra listener, or Telegram `sendData` bridge. Status
 polls between synchronizations use
-`GET /api/v1/contributions/status?details=1`, and the reviewed catalogue pull
-remains `GET /api/v1/bookmarks/catalog` with ETag revalidation.
+`GET /api/v1/contributions/status?details=1`. Robot serves no catalogue
+route; the global catalogue is read from `bookmarks.getbible.net/v1`.
 
 Contribution source topic names must be English. The UI explains that rule,
 the browser omits invalid topic-name proposals, the server validates them
-again, and the operator can still reject or correct a proposal. Accepted
-repository topics receive the stable key `bookmark_topics.<english-slug>` plus
-their canonical English source. A locale with no new translation resolves to
-that English name; no foreign-language catalogue is synthesized in this flow.
+again, and the operator can still reject or correct a proposal. An accepted
+topic keeps its canonical English source name and id; translations live in
+the builder repository's locale files and reach readers through the
+catalogue's per-locale names. A locale without a translation resolves to the
+English name; no foreign-language catalogue is synthesized in this flow.
 
-The reviewed catalogue endpoint returns only canonical topic metadata,
-coordinate additions/removals, a server revision, checksum, and ETag. It
-contains no contributor identity. A bounded per-instance,
-authenticated-scope cache may retain that envelope. An authenticated valid
-`200` replaces it even after a database restore, `304` retains it unchanged,
-and failed or malformed loading uses the bundled catalogue. Publishing a
-live revision changes the current instance immediately and survives restart,
-while repository branch publication remains a separate operator step.
+Acceptance does not publish. **Publish** in the maintainer workflow records
+the approved changes in the store's submission ledger and opens a pull request
+on `getbible/v1_bookmark_builder`; the upstream merge publishes the Bookmarks
+API. Robot then reads `index.json` on its check interval, records the live
+catalogue, marks the applied events it contains as live, and queues one
+private "contributions live" notice per contributor. The detailed status
+reports a topic as published only once it has been seen in that catalogue, so
+the panel's **P** marker becomes **G** on the next status refresh after the
+upstream publication, never on acceptance.
 
 ## Cache integrity
 
@@ -427,7 +443,7 @@ Deploy HTML, JavaScript modules, server code, and documentation from one validat
 
 The shell also loads a dependency-free classic `boot.js` before the module graph. If `boot()` has not been entered by `DOMContentLoaded`, a module failed to download or threw while evaluating, and the watchdog shows the ordinary gate with **Try again** instead of leaving the opening spinner up forever.
 
-Opening personal storage during boot is bounded and fault-isolated. Telegram `CloudStorage` and `DeviceStorage` reads, IndexedDB opens, the live catalogue, and the contributor journal each have their own bound, and the whole personal-storage step has a ten-second deadline; a store that does not answer degrades that launch to the scoped browser copy, or to memory, and the reader opens with the bookmark storage warning visible. The public translation catalogue is preferred at boot but the robot's own list from the session response stands in when the public origin fails or stalls.
+Opening personal storage during boot is bounded and fault-isolated. Telegram `CloudStorage` and `DeviceStorage` reads, IndexedDB opens, the public topic catalogue, and the contributor journal each have their own bound, and the whole personal-storage step has a ten-second deadline; a store that does not answer degrades that launch to the scoped browser copy, or to memory, and the reader opens with the bookmark storage warning visible. A topic catalogue that cannot be loaded leaves the Bookmarks surface reporting global topics as unavailable until online. The public translation catalogue is preferred at boot but the robot's own list from the session response stands in when the public origin fails or stalls.
 
 After deployment, verify:
 
@@ -463,11 +479,12 @@ After deployment, verify:
     redelivered events replay without duplication, whose final response
     settles the panel's status, and which keep every local mutation on server
     failure;
-20. a newly published live topic appears on the same instance, uses its English
-    source when the active locale lacks a translation, and falls back to the
-    bundled catalogue when overlay validation fails;
+20. the global topics come from `bookmarks.getbible.net/v1`, a topic's name
+    follows the reader's locale with English fallback, a contributed topic is
+    marked **G** only after the host has seen it in the public catalogue, and
+    the last verified cached catalogue stands in when the API is unreachable;
 21. Post failure preserves selection and successful Post clears it.
 
 ## Verification gate
 
-A release is not ready unless permanent CI proves Python 3.10–3.14, the production container, lint, strict typing, branch coverage, dependency and secret scans, CodeQL, public API routing, CSP parity, hash verification, bounded caches, bounded selections, durable local history, bookmark-domain and hybrid-storage invariants, private-chat backup/restore ownership and bounds, contributor authorization/idempotency/privacy, live-catalogue fallback, English topic fallback, real Chromium navigation, graphical select/unselect, cross-source identity, no pre-Post Robot mutation, and authoritative idempotent posting.
+A release is not ready unless permanent CI proves Python 3.10–3.14, the production container, lint, strict typing, branch coverage, dependency and secret scans, CodeQL, public API routing, CSP parity, hash verification, bounded caches, bounded selections, durable local history, bookmark-domain and hybrid-storage invariants, private-chat backup/restore ownership and bounds, contributor authorization/idempotency/privacy, Bookmarks API checksum verification and cache-first fallback, English topic-name fallback, real Chromium navigation, graphical select/unselect, cross-source identity, no pre-Post Robot mutation, and authoritative idempotent posting.

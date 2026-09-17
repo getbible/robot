@@ -7,7 +7,7 @@ GetBible Robot has two deliberately separate data planes:
 1. **Mini App plane** — public, read-only GetBible API V2 data, browser-owned UI state, and compact user state reconciled with Telegram Mini App storage.
 2. **Robot control plane** — Telegram authentication, preference compatibility, bounded bookmark backup transport, contribution intake, and final Telegram delivery.
 
-Every Scripture read is a browser-to-GetBible operation: translation discovery, books, chapters, chapter text, and hashes from the Main API; explicit reference resolution from the Query API; full-text search from the Search API. Robot proxies no Scripture and holds no search state. Its own Scripture requests — `/bible` references, the authoritative text behind Post, and the Telegram-native `/search` used when no Mini App is configured — go to the same public Query and Search APIs from the host.
+Every Scripture read is a browser-to-GetBible operation: translation discovery, books, chapters, chapter text, and hashes from the Main API; explicit reference resolution from the Query API; full-text search from the Search API. The shared bookmark topic catalogue is read the same way, from the Bookmarks API. Robot proxies no Scripture, holds no search state, and ships no copy of the catalogue. Its own requests — `/bible` references, the authoritative text behind Post, the Telegram-native `/search` used when no Mini App is configured, and the periodic check of the Bookmarks API index that tells contributors their accepted changes are live — go to the same public APIs from the host.
 
 ```mermaid
 flowchart LR
@@ -15,6 +15,7 @@ flowchart LR
     A[api.getbible.net/v2]
     Q[query.getbible.net/v2]
     SR[search.getbible.net/v2]
+    BK[bookmarks.getbible.net/v1]
     R[Robot control plane]
     S[BrowserSelectionStore]
     H[Scoped local history]
@@ -25,6 +26,7 @@ flowchart LR
     T -->|catalogs, chapters, hashes| A
     T -->|explicit/grouped references| Q
     T -->|full-text search, offset pages| SR
+    T -->|topic catalogue: index.json, verified all.json| BK
     T -->|signed session, preferences| R
     A -->|normalized verses| S
     SR -->|normalized verses| S
@@ -35,6 +37,7 @@ flowchart LR
     B -->|explicit bounded JSON backup| R
     R -->|/bible references, Post text| Q
     R -->|catalogue| A
+    R -->|index.json every check interval| BK
     R -->|authoritative bounded output| G
     R -->|private backup document| G
 ```
@@ -47,22 +50,22 @@ No reader navigation, catalog load, chapter load, select, unselect, reorder, cle
 
 | Module | Responsibility |
 | --- | --- |
-| `miniapp/lib/getbible-transport.js` | Fixed-origin (Main, Query, and Search API), credential-free public HTTP transport with size bounds, stall-based deadlines, bounded retry, and problem-document errors |
+| `miniapp/lib/getbible-transport.js` | Fixed-origin (Main, Query, Search, and Bookmarks API), credential-free public HTTP transport with size bounds, stall-based deadlines, bounded retry, problem-document errors, and SHA-256 of fetched bytes |
 | `miniapp/lib/getbible-api.js` | Main API, Query API, and Search API use cases, hash-aware retrieval, search query building, and public response orchestration |
 | `miniapp/lib/getbible-model.js` | GetBible response normalization, search-result normalization with shared highlight analysis, and deterministic coordinate identities |
 | `miniapp/lib/public-cache.js` | IndexedDB/memory cache, LRU bounds, atomic replacement, and invalidation |
 | `miniapp/lib/selection-store.js` | Browser-owned ordered selection domain |
 | `miniapp/lib/reading-history-store.js` | Bounded, durable, coordinate-only history in an authenticated user-scoped local key |
 | `miniapp/lib/bookmark-store.js` | Canonical personal verse records, multi-topic assignment, colored topic management, and portable JSON import/export |
-| `miniapp/lib/global-bookmark-catalog.js` | Built-in global topic/verse provider, default-topic definitions, and local-topic remapping |
-| `miniapp/lib/global-bookmark-preferences.js` | Device-local global-topic visibility, per-link exclusions, and canonical-to-local mapping |
+| `miniapp/lib/global-bookmark-source.js` | Cache-first loading of the Bookmarks API catalogue: daily `index.json` revalidation, `all.json` accepted only when its SHA-256 equals the index checksum, IndexedDB record with the checksum as validator, and network-required refresh for explicit pulls |
+| `miniapp/lib/global-bookmark-catalog.js` | Global topic/verse catalogue built from the API document, default-topic and per-locale name definitions, and local-topic remapping |
+| `miniapp/lib/global-bookmark-preferences.js` | Device-local global-topic visibility, per-link exclusions, canonical-to-local mapping, one-time default-topic seeding, and the coverage record behind the personal-to-global merge |
 | `miniapp/lib/global-bookmark-device-storage.js` | Scoped timestamp reconciliation for global-topic preferences across localStorage and Telegram DeviceStorage, explicitly excluding CloudStorage |
 | `miniapp/lib/telegram-bookmark-storage.js` | Aggregate-v3 timestamp reconciliation across localStorage, Telegram DeviceStorage, and Telegram CloudStorage, with compact cloud topic and recent-topic indexes |
 | `miniapp/lib/bookmark-topic-sort.js` | Presentation-only alphabetical topic ordering without rewriting canonical storage order |
-| `miniapp/lib/bible-canon.js` | Shared 66-book and per-book chapter bounds for contribution and live-catalog coordinates |
-| `miniapp/lib/global-bookmark-live-catalog.js` | Strict ETag/revision overlay validation, instance-scoped cache, and bundled fallback |
+| `miniapp/lib/bible-canon.js` | Shared 66-book and per-book chapter bounds for contribution and catalogue coordinates |
 | `miniapp/lib/instance-scope.js` | Deterministic non-secret namespace for state bound to one Robot API path |
-| `miniapp/lib/api.js` | Robot session/preferences/Post, bookmark backup/restore, contribution status/event-batch, and live-catalog transport facade plus public API composition, including direct search |
+| `miniapp/lib/api.js` | Robot session/preferences/Post, bookmark backup/restore, and contribution status/event-batch transport facade plus public API composition, including direct search |
 | `miniapp/app.js` | UI orchestration and rendering only |
 
 `BrowserSelectionStore` is the sole owner of temporary selected state. It enforces bounded capacity, coordinate deduplication, source-independent removal, explicit ordering, defensive snapshots, and final coordinate projection.
@@ -144,7 +147,7 @@ Public requests:
 - enforce request and response bounds;
 - validate schema and requested coordinates.
 
-The HTML CSP and Tornado response CSP must contain the same three public origins.
+The HTML CSP and Tornado response CSP must contain the same four public origins.
 
 ## Cache integrity
 
@@ -228,10 +231,12 @@ canonical book/chapter/verse across translations. A record may belong to
 multiple colored topics without consuming another verse slot. Reassigning the
 same coordinate updates that record; assigning an existing topic is a no-op.
 The domain permits topic add/rename/recolor/removal and warns before topic
-removal also removes its personal verse assignments. Built-in topic identity
-and English migration names remain stable storage metadata, while display names
-come from localized constants and are read-only; built-in colors remain
-editable. Custom topic names remain editable. The UI creates topics from the
+removal also removes its personal verse assignments. Global topic identity
+and English names remain stable storage metadata, while display names come
+from the catalogue's per-locale names with English fallback and are read-only;
+global colors remain editable. New stores start with no topics; the
+catalogue's default topics are seeded once per scope when the catalogue first
+loads. Custom topic names remain editable. The UI creates topics from the
 plus-card after the alphabetical list and edits names/colors in topic detail;
 it has no second topic editor. Removing a global topic is a user-local catalogue
 choice, and **Add all** restores its reviewed definition while preserving
@@ -255,8 +260,16 @@ Existing Robot reader preferences remain a compatibility and availability
 fallback. No history entry, selection, chapter body, global catalog, global
 exclusion, or public-cache record is sent through the personal adapter.
 
-The browser-bundled global provider contains the repository's reviewed
-topic-to-verse links. Personal and global rows share one topic list, with global
+The global catalogue is the public Bookmarks API at
+`https://bookmarks.getbible.net/v1`. `global-bookmark-source.js` loads it
+cache-first: a cached document younger than a day is used as is; otherwise
+`index.json` is read and, when its checksum matches the cached validator, the
+cache is marked checked; when it differs, `all.json` is downloaded, accepted
+only if its SHA-256 equals the index checksum, normalised, and stored in the
+IndexedDB public cache with that checksum as validator. An explicit **Add all**
+or per-topic load requires the network. When nothing can be loaded the surface
+reports global topics as unavailable until online; no bundled list exists.
+Personal and global rows share one topic list, with global
 rows marked
 **G**. Global rows hydrate display-only verse text for the active translation
 through the bounded public chapter data plane. Compact all-catalog add/remove
@@ -268,13 +281,12 @@ when its WebView storage is discarded. `CloudStorage` is deliberately excluded,
 so this state remains device-local. Loading one topic or the complete catalog
 also resets the relevant exclusions without creating duplicates. Global links
 never become personal records and never enter CloudStorage or backup documents.
-The authenticated live provider fetches a reviewed, revisioned per-instance
-overlay and merges it over the bundled catalogue. It accepts only strict
-English canonical topic metadata and bounded 66-book coordinate deltas, caches
-by instance plus authenticated scope, and falls back to the bundled provider on
-offline, malformed, or oversized data. A validated authenticated `200` replaces
-the cache after database recovery even when its revision moves backward or
-diverges; `304` retains the cached envelope. Approved contributors synchronize
+A personal bookmark whose coordinate an enabled global topic also links is
+recorded as covered on every successful network refresh; once that coverage
+has been stable for a day, the next network-verified load removes the personal
+row, the global row stands in for it, and the status line reports how many
+were merged. A cache-only or unavailable catalogue never removes anything.
+Approved contributors synchronize
 through an explicit **Sync now**: the browser converts the current personal
 topic/assignment state into bounded idempotent contribution events with
 deterministic content-derived IDs, appends its queued explicit global
@@ -289,10 +301,26 @@ separate from the public search limits. Contributor authority and
 disclosure are rechecked in the durable SQLite store on every batch. A
 redelivered event replays idempotently per contributor and `client_event_id`;
 a reused ID with different content fails closed. Every response returns the
-batch receipt with the complete contributor status and catalogue
+batch receipt with the complete contributor status and the accepted-ledger
 revision/checksum, so the final batch settles the panel in one round trip.
 Contributor state never enters Telegram storage, and a failed request never
 rolls back the personal bookmark mutation.
+
+Acceptance runs outside the browser. A maintainer reviews applications,
+topics, and verses on the host; **publish** accepts the approved events into
+the store's submission ledger, exports the bundle, pushes a
+`contributions/<stamp>-<checksum>` branch to a local checkout of
+`getbible/v1_bookmark_builder` after `python3 src/builder.py import-bundle`
+and `validate`, and opens a pull request through the GitHub API when a token
+is configured. Nothing is published by the robot: the upstream merge runs the
+builder's workflow, which publishes the Bookmarks API. Robot's
+`watch-bookmark-catalog` task reads `index.json` every
+`BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS`, fetches and verifies the catalogue
+when the version or checksum moved, records it, marks the applied events it
+now contains as live, and queues one private "contributions live" notice per
+contributor. A contributed topic is reported as published only once it has
+been seen in that catalogue, so the Mini App's **P** marker becomes **G** on
+the next status refresh, never on acceptance alone.
 
 The user may download or import the same bounded personal JSON locally. New
 backup documents are version 4 and carry each record's topic assignments as
@@ -368,7 +396,8 @@ Synchronous upstream work — the robot's own Main, Query, and Search API reques
 | Main API unavailable | uncached reading only |
 | Query API unavailable | explicit/grouped reference resolution only |
 | Search API unavailable | search only |
-| Robot temporarily unavailable | authentication/preferences/Post only; local selection remains and public reads, including search, continue |
+| Bookmarks API unavailable | global topics come from the IndexedDB copy; with nothing cached the surface reports them unavailable until online; no personal bookmark is merged; the robot's watcher logs a warning and retries next interval |
+| Robot temporarily unavailable | authentication/preferences/Post only; local selection remains and public reads, including search and the topic catalogue, continue |
 | Telegram Mini App storage unavailable | local bookmark and last-read copies continue; UI reports degraded sync |
 | Browser local storage unavailable | history falls back to memory; Telegram bookmark storage can still persist when supported |
 | Bookmark chat backup unavailable | live bookmarks remain unchanged; local JSON export remains available |
@@ -403,7 +432,7 @@ A release is production-ready only when permanent CI and CodeQL pass on the exac
 - Python 3.10, 3.11, 3.12, 3.13, and 3.14;
 - production container build and smoke test;
 - lint, strict typing, branch coverage, dependency audit, secret scan, and systemd verification;
-- public Main API, Query API, and Search API routing with no Robot content proxy;
+- public Main API, Query API, Search API, and Bookmarks API routing with no Robot content proxy;
 - CSP parity and fixed-origin enforcement;
 - hash verification, weekly revalidation, invalidation, bounds, and atomic cache replacement;
 - browser selection add/remove/reorder/clear and defensive snapshots;
@@ -420,8 +449,13 @@ A release is production-ready only when permanent CI and CodeQL pass on the exac
   and per-link/per-topic/all-catalog reset without CloudStorage or personal sync;
 - approved-contributor disclosure and per-batch authority rechecks, bounded
   idempotent event batches, per-event replay without duplication, rate-limit
-  pacing, global-removal capture, and strict live-catalog revision/fallback
-  behavior;
+  pacing, and global-removal capture;
+- the Bookmarks API catalogue: cache-first loading, daily `index.json`
+  revalidation, rejection of an `all.json` whose SHA-256 differs from the
+  index, network-required explicit pulls, one-time default-topic seeding, and
+  personal-to-global merge only after a day of network-verified coverage;
+- publication through a pull request on `getbible/v1_bookmark_builder`, the
+  catalogue watcher, and one "contributions live" notice per contributor;
 - bounded JSON download/import plus owner-bound private-chat backup, fresh
   one-time restore launch, compact v4 `colorIndexes` plus v1/v2/v3 import,
   persistence-before-acknowledgement, and absence of global links or backup

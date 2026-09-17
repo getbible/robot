@@ -9,6 +9,7 @@ Telegram Mini App
   ├─ translations / books / chapters / hashes → https://api.getbible.net/v2
   ├─ explicit and grouped references          → https://query.getbible.net/v2
   ├─ full-text search, page by page           → https://search.getbible.net/v2
+  ├─ shared bookmark topic catalogue          → https://bookmarks.getbible.net/v1
   ├─ temporary ordered selection              → browser memory
   ├─ coordinate-only reading history          → scoped browser localStorage
   ├─ public Scripture cache                   → browser IndexedDB
@@ -18,10 +19,11 @@ Telegram Mini App
 
 Robot
   ├─ /bible references and authoritative Post text → https://query.getbible.net/v2
-  └─ Telegram-native /search (no Mini App)         → https://search.getbible.net/v2
+  ├─ Telegram-native /search (no Mini App)         → https://search.getbible.net/v2
+  └─ accepted-contribution liveness check          → https://bookmarks.getbible.net/v1
 ```
 
-Robot proxies no Scripture: catalogues, chapters, references, and search are all browser-to-GetBible requests. The robot installs no Scripture engine, downloads no corpus, and builds no index.
+Robot proxies no Scripture: catalogues, chapters, references, search, and the shared bookmark topic catalogue are all browser-to-GetBible requests. The robot installs no Scripture engine, downloads no corpus, builds no index, and ships no copy of the topic catalogue.
 
 A normal reader action does not pass through Robot. Selecting, unselecting, reordering, clearing, highlighting, counters, and copying are browser-owned and issue no Robot request. Final Post is the only selection synchronization boundary; Robot validates authoritative Scripture before Telegram delivery.
 
@@ -80,9 +82,19 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   while each topic retains its own add/remove controls. Global links carry a
   **G** marker and may also be hidden individually. Adding a topic or the
   complete catalog restores its hidden links without duplicating them. The
-  built-in catalogue contains the repository's reviewed topic-to-verse links.
-  Its scoped visibility, exclusions, and legacy numeric-topic mapping are
-  mirrored through Telegram
+  global catalogue is the public Bookmarks API at
+  `https://bookmarks.getbible.net/v1`: the browser reads `index.json` at most
+  once a day, downloads `all.json` only when the index checksum changed,
+  verifies its SHA-256 against that checksum, and keeps the verified document
+  in IndexedDB. An explicit **Add all** or per-topic load always revalidates
+  against the network. A first-time reader's default topics are seeded once
+  from the catalogue's default topics; when the API is unreachable and
+  nothing is cached, the surface says that global topics are unavailable
+  until online. A personal bookmark whose verse a loaded global topic also
+  links is removed from personal storage only after a network-verified
+  catalogue has covered it for a day, and the status line says how many were
+  merged. Scoped visibility, exclusions, and the legacy numeric-topic mapping
+  are mirrored through Telegram
   `DeviceStorage` when supported, so a Telegram Desktop WebView can restore
   them after its browser storage is discarded. They never enter CloudStorage,
   personal synchronization, or backups. Global rows resolve their verse text
@@ -90,8 +102,9 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   personal storage.
 - A plus-card after the topic list creates personal topics. Topic detail keeps
   editing in context: every topic color is user-editable, custom names support
-  inline confirm/cancel editing, and global names remain read-only server-owned
-  metadata. Removing a topic warns that its linked verse assignments will also
+  inline confirm/cancel editing, and global names remain read-only catalogue
+  metadata shown in the reader's locale when the catalogue carries a
+  translation. Removing a topic warns that its linked verse assignments will also
   be removed; removing a global topic is user-local and **Add all** restores
   it. Approved contributors alone see the collapsible **Manage Contribution**
   panel immediately below Global topics.
@@ -100,14 +113,23 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   path the rest of the Mini App API uses. Snapshot-derived events carry deterministic
   content-derived IDs, so a redelivered event replays safely, and every
   response returns the complete result set: receipt counts, the full
-  contributor status, and the live catalogue revision/checksum. The final
+  contributor status, and the revision/checksum of the accepted-contribution
+  ledger. The final
   batch settles the panel in one round trip. Alongside the session bearer,
   every batch body carries the short-lived `contribution_token` that only
   approved contributors receive inside JSON payloads — never a custom
   header — and the drip runs on its own contribution rate budget
   (`CONTRIBUTION_RATE_CAPACITY`, `CONTRIBUTION_RATE_REFILL_PER_SECOND`)
   separate from the public request limits. It requires no WebSocket,
-  additional port, or repeated raw Telegram `initData` header.
+  additional port, or repeated raw Telegram `initData` header. A maintainer
+  reviews the queue with `sudo getbible-robot contributions <instance>`
+  (status, applications, topics, verses, publish); publishing accepts the
+  approved changes into the ledger and opens a pull request on
+  [getbible/v1_bookmark_builder](https://github.com/getbible/v1_bookmark_builder).
+  Once that pull request merges and the Bookmarks API republishes, the robot
+  notices on its next catalogue check, marks the contributions live, and
+  sends each contributor one private notice; the Mini App's **P** marker
+  becomes **G** on the next status refresh.
 - Personal bookmark aggregate version 3, topics, the clearable recently-used
   topic order, the active topic, and the compact last-read coordinate reconcile
   by timestamp across scoped
@@ -150,7 +172,7 @@ The bot token remains server-side. It is never placed in HTML, JavaScript, URLs,
 
 Public API transport:
 
-- uses only `https://api.getbible.net/v2/`, `https://query.getbible.net/v2/`, and `https://search.getbible.net/v2/`;
+- uses only `https://api.getbible.net/v2/`, `https://query.getbible.net/v2/`, `https://search.getbible.net/v2/`, and `https://bookmarks.getbible.net/v1/`;
 - omits credentials and cookies;
 - sends no Telegram data;
 - rejects redirects;
@@ -271,10 +293,13 @@ venv/bin/python -m unittest discover -s tests -v
 (cd miniapp && npm run test:browser)
 ```
 
-After reviewing updated global topic metadata or verse associations, regenerate
-the deterministic browser catalogue with
-`(cd miniapp && npm run generate:global-bookmarks)`. Accepted moderation exports
-use the documented importer in `data/global-bookmarks/README.md`.
+The global topic catalogue is not part of this repository. The Mini App reads
+it from `https://bookmarks.getbible.net/v1`, and accepted contributions reach
+it through a pull request on
+[getbible/v1_bookmark_builder](https://github.com/getbible/v1_bookmark_builder)
+opened by `sudo getbible-robot contributions <instance>`; see
+[Operations](docs/OPERATIONS.md#contributor-enrolment-and-moderation). There is
+nothing to regenerate after a review.
 
 The permanent release gate requires:
 

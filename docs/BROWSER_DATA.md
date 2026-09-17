@@ -16,6 +16,9 @@ The reading and persistence split is:
 - `search.getbible.net/v2` answers full-text search with offset pagination and
   exact totals; results stay in page memory and the browser HTTP cache, never
   IndexedDB;
+- `bookmarks.getbible.net/v1` supplies the shared global topic catalogue,
+  accepted only when the SHA-256 of `all.json` equals the checksum in
+  `index.json`, and kept in IndexedDB with that checksum as validator;
 - IndexedDB stores validated public content;
 - browser memory owns the current ordered selection;
 - scoped browser `localStorage` owns bounded, coordinate-only reading history;
@@ -28,8 +31,9 @@ The reading and persistence split is:
   topic mapping; `CloudStorage` is excluded;
 - per-instance, authenticated-user-scoped IndexedDB journals the approved
   contributor's explicit global add/remove intents until an explicit Sync;
-- Robot authorizes contributors, accepts bounded idempotent review events, and
-  publishes the reviewed live global-catalogue overlay;
+- Robot authorizes contributors, accepts bounded idempotent review events,
+  keeps the accepted-contribution ledger, and reports when accepted changes
+  have appeared in the public catalogue;
 - Robot authenticates Telegram, retains compatible reader preferences, accepts
   the final ordered post request, validates it, and sends authoritative
   Scripture or an explicitly requested bookmark backup document to Telegram.
@@ -52,7 +56,7 @@ The reading and persistence split is:
 | Bookmark and last-read device/cloud sync | Telegram Mini App storage | No |
 | Global catalog visibility and exclusions | Scoped localStorage + Telegram DeviceStorage | No |
 | Contributor journal of explicit global intents | Per-instance scoped IndexedDB | Authenticated event intake/review |
-| Reviewed live global catalogue | Strict instance-scoped browser cache + bundled fallback | Revisioned publication |
+| Global topic catalogue | Yes, Bookmarks API, verified and cached in IndexedDB | No; the host watches the same API to report liveness |
 | Private-chat bookmark backup/restore transport | Confirm/merge in browser | Yes |
 | Telegram authentication | No | Yes |
 | Reader preference compatibility | Compact Mini App storage copy | Yes |
@@ -67,6 +71,7 @@ flowchart LR
     T -->|translations / books / chapters / chapter text / hashes| A[api.getbible.net/v2]
     T -->|explicit and grouped references| Q[query.getbible.net/v2]
     T -->|full-text search, offset pages| SR[search.getbible.net/v2]
+    T -->|topic catalogue: index.json, verified all.json| BK[bookmarks.getbible.net/v1]
     A --> V[VerseSelection]
     SR --> V
     V --> B[BrowserSelectionStore]
@@ -81,7 +86,7 @@ flowchart LR
     P -->|validated Scripture or private backup document| G[Telegram]
 ```
 
-No select, unselect, reorder, clear, reader navigation, catalog, chapter, explicit-reference, or search operation may call Robot.
+No select, unselect, reorder, clear, reader navigation, catalog, chapter, explicit-reference, search, or global-catalogue operation may call Robot.
 
 ## Reading history
 
@@ -150,10 +155,11 @@ is a user-local catalogue removal, not deletion of the reviewed definition;
 **Add all** restores it. Selections remain independent and ephemeral, and the
 public cache remains identity-free.
 
-### Global catalog overlay
+### Global catalogue
 
-The browser bundle provides the repository's reviewed global topic-to-verse
-links. They appear in the same topic list as personal records and carry a **G**
+The global topic-to-verse links come from the public Bookmarks API at
+`https://bookmarks.getbible.net/v1`; the robot ships no copy. They appear in
+the same topic list as personal records and carry a **G**
 marker.
 Their cards hydrate verse text for the currently selected translation from the
 bounded public chapter data plane; that text is not persisted as a bookmark.
@@ -167,15 +173,29 @@ WebView discards its browser storage while keeping the state device-local:
 restores its hidden links without duplication. Global links and these
 preferences never enter the personal aggregate or backup documents.
 
-The provider also merges a reviewed, revisioned per-instance overlay from Robot.
-The browser validates canonical English topic IDs/names/aliases, exact fields,
-66-book chapter bounds, topic and assignment caps, checksum, revision, and ETag
-before use. The cache is namespaced by both Robot API path and authenticated
-scope and never contains contributor identity. A validated authenticated `200`
-is authoritative, including a lower or divergent revision after a database
-restore; an unchanged `304` retains the cached bytes. Explicit **Add all** and
-per-topic loads revalidate the overlay, while every malformed or unavailable
-response keeps the last valid cached or bundled catalogue usable.
+Loading is cache-first. A cached catalogue younger than a day is used as is.
+Otherwise the browser reads `index.json` (schema version, catalogue version,
+the SHA-256 of `all.json`, and counts); when the checksum equals the cached
+validator the cache is marked checked, and when it differs `all.json` is
+downloaded, accepted only if its SHA-256 equals that checksum, validated
+against the catalogue rules (topic ids, names, colours, aliases, 66-book
+coordinate bounds, sorted unique verses), normalised, and stored in the
+identity-free public cache with the checksum as validator. Explicit **Add all**
+and per-topic loads require the network and revalidate; a malformed, oversized,
+or unavailable response keeps the last verified cached catalogue, and when
+nothing is cached the surface reports global topics as unavailable until
+online. Topic names are shown in the reader's locale from the catalogue's
+per-locale names, falling back to the base language and then to English.
+
+A first-time reader starts with no topics; the catalogue's default topics are
+seeded into personal storage once per scope, recorded by catalogue version in
+the preference record, so a later catalogue never reseeds them. A personal
+bookmark whose coordinate an enabled global topic also links is recorded as
+covered on every successful network refresh; once that coverage has been
+stable for a day, the next network-verified **Add all** or per-topic load
+removes the personal row, the global row stands in for it, and the status line
+reports how many bookmarks were merged. A cache-only or unavailable catalogue
+never removes anything.
 
 ### Trusted contribution mirror
 
@@ -193,8 +213,10 @@ global intents need the journal, because snapshot-derived events are
 re-created on every run and deduplicated server-side by their stable IDs. A
 redelivered event replays idempotently, and a reused ID with different
 content is rejected. Every response returns the receipt counts with the
-complete contributor status and catalogue revision/checksum, so the final
-batch settles the panel. Transport failure does not modify personal bookmarks
+complete contributor status and the accepted-ledger revision/checksum, so the
+final batch settles the panel. A contributed topic is marked **P** until the
+host has seen it in the public Bookmarks API catalogue, then **G**; acceptance
+alone never changes the marker. Transport failure does not modify personal bookmarks
 and leaves the same idempotent events available for the next Sync; no
 capability token, WebSocket, or extra port participates.
 
@@ -246,13 +268,14 @@ Browser text, names, and references are display data only and never posting auth
 
 ## Public API origins
 
-The browser transport has three fixed HTTPS origins:
+The browser transport has four fixed HTTPS origins:
 
 - `https://api.getbible.net/v2/` for mappings, Scripture, and matching `.sha` resources;
 - `https://query.getbible.net/v2/` for explicit and grouped Bible-reference resolution;
-- `https://search.getbible.net/v2/` for full-text search.
+- `https://search.getbible.net/v2/` for full-text search;
+- `https://bookmarks.getbible.net/v1/` for the shared topic catalogue (`index.json` and `all.json`).
 
-The Content Security Policy allows only these three external connection origins in addition to the Mini App origin. Requests omit credentials, disable redirects, send no Telegram data, and use `no-referrer`. Catalogue and chapter requests do not rely on HTTP cache state; search responses are ordinary cacheable `GET`s whose freshness the API declares, and they are never written to IndexedDB. A failed search is `application/problem+json`; `429` and `503` are retried after the announced `Retry-After`, while `400` and `404` are raised at once.
+The Content Security Policy allows only these four external connection origins in addition to the Mini App origin. Requests omit credentials, disable redirects, send no Telegram data, and use `no-referrer`. Catalogue, chapter, and topic-catalogue requests do not rely on HTTP cache state; search responses are ordinary cacheable `GET`s whose freshness the API declares, and they are never written to IndexedDB. A failed search is `application/problem+json`; `429` and `503` are retried after the announced `Retry-After`, while `400` and `404` are raised at once.
 
 ### Waiting for a chapter
 
@@ -264,7 +287,7 @@ Reads that fail for a reason that may not repeat — a stalled transfer, a dropp
 
 ## Persistent cache
 
-Public GetBible content is stored in IndexedDB under the versioned `public:v2:` namespace. An in-memory implementation is used only when IndexedDB is unavailable.
+Public GetBible content is stored in IndexedDB under the versioned `public:v2:` namespace. The verified Bookmarks API catalogue is one record in the same namespace, keyed `bookmarks:all`, with the index checksum as its validator and the time of the last successful check. An in-memory implementation is used only when IndexedDB is unavailable.
 
 The cache is bounded by record count, total estimated payload size, per-record
 size, least-recently-used eviction, and in-flight request coalescing. Only
@@ -294,9 +317,11 @@ A failed validation never replaces a previously accepted record.
   bookmark mutation; a `429` paces the drip, redelivered events replay
   idempotently on the next Sync, and an unavailable journal is disclosed as
   memory-only.
-- A malformed, oversized, or unavailable live catalogue never replaces a valid
-  cached or bundled catalogue; a validated authenticated `200` remains
-  authoritative after database recovery.
+- A malformed, oversized, or unavailable Bookmarks API response never replaces
+  a verified cached catalogue; an `all.json` whose SHA-256 differs from the
+  index checksum is rejected; without any cached catalogue the surface reports
+  global topics as unavailable until online, and no personal bookmark is
+  merged.
 - A chat restore transport, validation, or confirmation failure before merge
   leaves current bookmarks unchanged. If persistence or acknowledgement fails
   after merge, the imported merge remains available and the chat document can
@@ -312,7 +337,8 @@ No documentation or test may present legacy routes as the active design.
 
 The release gate must prove:
 
-- catalog, chapter, explicit/grouped reference, and full-text search traffic goes directly to the GetBible APIs;
+- catalog, chapter, explicit/grouped reference, full-text search, and topic-catalogue traffic goes directly to the GetBible APIs;
+- the topic catalogue is accepted only when the SHA-256 of `all.json` equals the checksum in `index.json`, revalidates at most daily unless explicitly pulled, and a personal bookmark is merged into a global link only after a day of network-verified coverage;
 - no Robot endpoint serves search, and the removed search routes answer `404`;
 - select, unselect, reorder, and clear issue no Robot request;
 - reader and search records share coordinate identity;
@@ -340,8 +366,12 @@ The release gate must prove:
 - approved contribution disclosure, session-authenticated bounded event
   batches, idempotent per-event replay, rate-limit pacing, and explicit global
   removals remain local-first;
-- strict live-catalog validation, authoritative instance-scoped revalidation,
-  explicit load refresh, English fallback, and bundled offline fallback hold;
+- the Bookmarks API catalogue is verified by SHA-256 against its index,
+  revalidated at most daily unless explicitly pulled, kept in the identity-free
+  public cache, never replaced by a malformed or mismatched document, and
+  reported as unavailable rather than substituted when nothing is cached;
+  topic names fall back to English; a personal bookmark is merged into a
+  global link only after a day of network-verified coverage;
 - private-chat backup is owner-bound and bounded, restore uses a fresh
   one-time launch, the confirmed merge persists before acknowledgement, and no
   backup body enters Robot database/session/log storage.

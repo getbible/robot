@@ -156,15 +156,16 @@ bodies, Telegram `initData`, or launch/session credentials.
 | `GETBIBLE_API_BASE_URL` | `https://api.getbible.net` | HTTPS base URL; no credentials, path, query, or fragment; loopback HTTP is allowed for tests | Main API: translation catalogues, books, chapters |
 | `GETBIBLE_QUERY_BASE_URL` | `https://query.getbible.net` | HTTPS base URL; no credentials, path, query, or fragment | Query API: `/bible` references and the authoritative text behind Post |
 | `GETBIBLE_SEARCH_BASE_URL` | `https://search.getbible.net` | HTTPS base URL; no credentials, path, query, or fragment | Search API: the Telegram-native `/search` when no Mini App is configured |
+| `GETBIBLE_BOOKMARKS_BASE_URL` | `https://bookmarks.getbible.net` | HTTPS base URL; no credentials, path, query, or fragment | Bookmarks API: the shared topic catalogue the robot reads to learn that accepted contributions are live, and the source the maintainer workflow reviews against |
 | `GETBIBLE_WEB_BASE_URL` | `https://getbible.life` | Same URL rules | Base for every clickable link shown in Telegram |
 | `WELCOME_MESSAGE` | built-in text | Non-empty; at most 4096 characters | `/start` response |
 | `HELP_MESSAGE` | built-in text | Non-empty; at most 4096 characters | `/help` response |
 | `WELCOME_MESSAGE_FILE` | empty | Empty or readable absolute UTF-8 path; takes precedence over `WELCOME_MESSAGE` | Editable multi-line `/start` content |
 | `HELP_MESSAGE_FILE` | empty | Empty or readable absolute UTF-8 path; takes precedence over `HELP_MESSAGE` | Editable multi-line `/help` content |
 
-The three API variables and the website variable are intentionally different.
+The four API variables and the website variable are intentionally different.
 The API values are used only for the robot's own data access; the Mini App
-reaches the same three public services directly from the browser at their
+reaches the same four public services directly from the browser at their
 fixed addresses, which these settings do not change. The website value is
 used only for user-facing links. `TRANSLATION` is the application fallback. Choosing another translation
 in `/bible` or `/search` saves it for that Telegram user; later explicit
@@ -180,13 +181,16 @@ their manager-owned paths in the environment file.
 
 | Variable | Default | Validation | Purpose |
 |---|---:|---|---|
-| `CONTRIBUTION_STORE_FILE` | empty | Empty or an absolute path | Private SQLite application, event, decision, notification, audit, and live-catalogue store; an empty value disables contribution enrolment and synchronization |
+| `CONTRIBUTION_STORE_FILE` | empty | Empty or an absolute path | Private SQLite application, event, decision, notification, audit, accepted-ledger, and observed-catalogue store; an empty value disables contribution enrolment, synchronization, and the catalogue watcher |
 | `CONTRIBUTION_CONTRIBUTOR_LIMIT` | `10000` | `100`–`1000000` | Maximum contributor application records accepted by one instance |
 | `CONTRIBUTION_EVENT_LIMIT` | `250000` | `1000`–`5000000` | Maximum immutable contribution events retained by one instance |
 | `CONTRIBUTION_RATE_CAPACITY` | `60` | `1`–`100000` | Token-bucket capacity of the dedicated contributor synchronization budget for `POST /api/v1/contributions/events`, separate from the public Mini App and user limits |
 | `CONTRIBUTION_RATE_REFILL_PER_SECOND` | `5.0` | `0.01`–`1000.0` | Refill rate of that contribution budget; requests beyond it wait behind `429` and `Retry-After` pacing instead of failing permanently |
-| `CONTRIBUTION_GIT_CHECKOUT` | empty | Empty or an absolute, clean checkout of `getbible/robot` owned by the publisher | Setup-manager-only repository publication checkout |
-| `CONTRIBUTION_GIT_USER` | empty | Existing dedicated non-root operating-system user; must differ from the bot service account | Setup-manager-only identity used for Git import, commit, and push |
+| `BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS` | `21600` | `300`–`604800` | How often the robot reads the Bookmarks API `index.json` to learn that accepted contributions are live; used only when a contribution store is configured |
+| `CONTRIBUTION_GIT_CHECKOUT` | empty | Empty or an absolute, clean clone of `getbible/v1_bookmark_builder` owned by the publisher | Setup-manager-only publication checkout of the builder repository |
+| `CONTRIBUTION_GIT_USER` | empty | Existing dedicated non-root operating-system user; must differ from the bot service account | Setup-manager-only identity used for the builder import, commit, and push |
+| `CONTRIBUTION_GITHUB_TOKEN` | empty | Empty or a fine-grained GitHub token limited to `getbible/v1_bookmark_builder` with Contents and Pull requests read/write | Setup-manager-only; when set, **Publish** opens the pull request itself, otherwise it prints the compare URL |
+| `CONTRIBUTION_BUILDER_PYTHON` | `python3` | Interpreter name or absolute path reporting Python 3.12 or newer | Setup-manager-only interpreter the publisher runs `src/builder.py` with |
 
 Native setup assigns
 `CONTRIBUTION_STORE_FILE=/var/lib/getbible-robot/<instance>/contributions.sqlite3`.
@@ -210,25 +214,39 @@ keeps the ordinary personal bookmark experience available while making the
 command report that applications are unavailable.
 
 Contributed source topic names and moderator-created aliases must be English.
-The stable repository key is `bookmark_topics.<english-slug>`, and the canonical
-English name is added to the generated English source. This review flow does
-not generate translations. Until a later translation update supplies a locale
-entry, the Mini App intentionally displays the canonical English name; existing
-translated topics continue to use their locale strings unchanged.
+The stable catalogue key is the topic id (`<english-slug>`), and the canonical
+English name is what the pull request adds to the builder's `data/topics.json`.
+This review flow does not generate translations: they are added to the
+builder's locale files separately and reach readers through the catalogue's
+per-locale names. Until then the Mini App intentionally displays the canonical
+English name; already translated topics use their locale names unchanged.
 
-`CONTRIBUTION_GIT_CHECKOUT` and `CONTRIBUTION_GIT_USER` are read by
-`getbible-robot contributions`, not by the running Robot. Keep Git credentials
-in the dedicated publisher user's normal credential mechanism, never in an
-instance environment file. Live publication does not require either Git
-setting and is not rolled back when a later export or branch push fails.
+The `CONTRIBUTION_GIT_*`, `CONTRIBUTION_GITHUB_TOKEN`, and
+`CONTRIBUTION_BUILDER_PYTHON` settings are read by
+`getbible-robot contributions`, not by the running Robot, and have no
+container equivalent. Keep Git credentials in the dedicated publisher user's normal
+credential mechanism, never in an instance environment file. The GitHub token
+is the one exception: it lives in the instance environment file, which is
+root-owned and mode-restricted, is handed to the publisher process for one
+publication, and is never echoed or logged. Scope it to the builder
+repository only with Contents and Pull requests read/write; without it,
+**Publish** still pushes the branch and prints the compare URL. Acceptance
+into the submission ledger needs none of these settings and is not rolled
+back when a later export, push, or pull-request creation fails.
 
-Configure the commit identity in that checkout's local Git config. Global
-configuration, including root's identity, is intentionally ignored:
+Clone the builder repository for the publisher and configure the commit
+identity in that checkout's local Git config. Global configuration, including
+root's identity, is intentionally ignored:
 
 ```bash
-sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/robot config --local user.name "GetBible Contribution Publisher"
-sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/robot config --local user.email "publisher@getbible.net"
+sudo -u getbible-publisher git clone https://github.com/getbible/v1_bookmark_builder.git /srv/getbible-robot-publisher/v1_bookmark_builder
+sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/v1_bookmark_builder config --local user.name "GetBible Contribution Publisher"
+sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/v1_bookmark_builder config --local user.email "publisher@getbible.net"
 ```
+
+The builder needs Python 3.12 or newer; when the host's `python3` is older,
+set `CONTRIBUTION_BUILDER_PYTHON` to a newer interpreter the publisher can
+run.
 
 ## Repository and worker timeouts
 
@@ -438,11 +456,15 @@ USER_PREFERENCE_LIMIT="10000"
 CONTRIBUTION_STORE_FILE="/var/lib/getbible-robot/production/contributions.sqlite3"
 CONTRIBUTION_CONTRIBUTOR_LIMIT="10000"
 CONTRIBUTION_EVENT_LIMIT="250000"
-CONTRIBUTION_GIT_CHECKOUT="/srv/getbible-robot-publisher/robot"
+CONTRIBUTION_GIT_CHECKOUT="/srv/getbible-robot-publisher/v1_bookmark_builder"
 CONTRIBUTION_GIT_USER="getbible-publisher"
+CONTRIBUTION_GITHUB_TOKEN=""
+CONTRIBUTION_BUILDER_PYTHON="python3"
 GETBIBLE_API_BASE_URL="https://api.getbible.net"
 GETBIBLE_QUERY_BASE_URL="https://query.getbible.net"
 GETBIBLE_SEARCH_BASE_URL="https://search.getbible.net"
+GETBIBLE_BOOKMARKS_BASE_URL="https://bookmarks.getbible.net"
+BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS="21600"
 GETBIBLE_WEB_BASE_URL="https://getbible.life"
 GETBIBLE_MAX_RESPONSE_BYTES="41943040"
 SEARCH_TIMEOUT="30"

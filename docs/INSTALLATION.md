@@ -38,7 +38,7 @@ Running `sudo getbible-robot` without a command opens the operations menu.
 
 - Linux with `systemd`.
 - Python 3.10, 3.11, 3.12, 3.13, or 3.14.
-- Outbound HTTPS to Telegram, PyPI during installation, GitHub when cloning, and `https://api.getbible.net`, `https://query.getbible.net`, and `https://search.getbible.net` at runtime.
+- Outbound HTTPS to Telegram, PyPI during installation, GitHub when cloning, and `https://api.getbible.net`, `https://query.getbible.net`, `https://search.getbible.net`, and `https://bookmarks.getbible.net` at runtime; `https://api.github.com` as well from the publisher account when `CONTRIBUTION_GITHUB_TOKEN` is set so that publishing contributions can open the pull request.
 - `git`, `curl`, `tar`, `logrotate`, `iproute2`, and the matching Python `venv` package.
 - A dedicated Telegram Bot API token from `@BotFather` for each running instance.
 - The default production resource profile targets an 8 GiB, i3-class or
@@ -232,7 +232,7 @@ Confirm:
 - in a group, browsing remains private to the initiating user and only the
   final Scripture is posted;
 - links use `https://getbible.life`;
-- Scripture comes from `https://api.getbible.net`, `https://query.getbible.net`, and `https://search.getbible.net`;
+- Scripture comes from `https://api.getbible.net`, `https://query.getbible.net`, and `https://search.getbible.net`, and the global bookmark topics from `https://bookmarks.getbible.net`;
 - invalid or oversized input returns a safe generic response;
 - no token, raw exception, secret path, Telegram user ID, or chat ID appears in logs;
 - exact query content appears only when content audit mode was deliberately enabled.

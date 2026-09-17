@@ -601,6 +601,77 @@ class SettingsTestCase(unittest.TestCase):
                 ):
                     Settings.from_env(load_environment_file=False)
 
+    def test_bookmarks_origin_defaults_and_requires_https(self) -> None:
+        with patch.dict(os.environ, self.environment(), clear=True):
+            settings = Settings.from_env(load_environment_file=False)
+        self.assertEqual(
+            settings.bookmarks_base_url, "https://bookmarks.getbible.net"
+        )
+
+        with patch.dict(
+            os.environ,
+            self.environment(
+                GETBIBLE_BOOKMARKS_BASE_URL="https://bookmarks.example.org/"
+            ),
+            clear=True,
+        ):
+            settings = Settings.from_env(load_environment_file=False)
+        self.assertEqual(settings.bookmarks_base_url, "https://bookmarks.example.org")
+
+        invalid = (
+            "http://bookmarks.getbible.net",
+            "https://user@bookmarks.getbible.net",
+            "https://bookmarks.getbible.net/v1",
+            "https://bookmarks.getbible.net/?v=1",
+            "https://bookmarks.getbible.net/#v1",
+            "ftp://bookmarks.getbible.net",
+            "bookmarks.getbible.net",
+        )
+        for value in invalid:
+            with (
+                self.subTest(value=value),
+                patch.dict(
+                    os.environ,
+                    self.environment(GETBIBLE_BOOKMARKS_BASE_URL=value),
+                    clear=True,
+                ),
+                self.assertRaises(ConfigurationError),
+            ):
+                Settings.from_env(load_environment_file=False)
+
+    def test_bookmark_catalog_check_interval_defaults_and_range(self) -> None:
+        # The watcher reads the Bookmarks API index; six hours by default,
+        # never more often than every five minutes nor less than weekly.
+        with patch.dict(os.environ, self.environment(), clear=True):
+            settings = Settings.from_env(load_environment_file=False)
+        self.assertEqual(settings.bookmark_catalog_check_interval_seconds, 21_600)
+
+        for value, expected in (("300", 300), ("3600", 3_600), ("604800", 604_800)):
+            with (
+                self.subTest(value=value),
+                patch.dict(
+                    os.environ,
+                    self.environment(BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS=value),
+                    clear=True,
+                ),
+            ):
+                settings = Settings.from_env(load_environment_file=False)
+                self.assertEqual(
+                    settings.bookmark_catalog_check_interval_seconds, expected
+                )
+
+        for value in ("0", "299", "604801", "-300", "6h", ""):
+            with (
+                self.subTest(value=value),
+                patch.dict(
+                    os.environ,
+                    self.environment(BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS=value),
+                    clear=True,
+                ),
+                self.assertRaises(ConfigurationError),
+            ):
+                Settings.from_env(load_environment_file=False)
+
     def test_search_timeout_is_a_request_deadline_with_a_compatible_range(
         self,
     ) -> None:

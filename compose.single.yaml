@@ -56,10 +56,14 @@ services:
       CONTAINER_INSTANCE_MEMORY_LIMIT_MB: "${CONTAINER_INSTANCE_MEMORY_LIMIT_MB:-1792}"
       CONTAINER_INSTANCE_MEMORY_WARNING_PERCENT: "${CONTAINER_INSTANCE_MEMORY_WARNING_PERCENT:-80}"
       # Public GetBible origins the robot calls. The Mini App reaches the
-      # same three services directly from the browser.
+      # same four services directly from the browser.
       GETBIBLE_API_BASE_URL: "${GETBIBLE_API_BASE_URL:-https://api.getbible.net}"
       GETBIBLE_QUERY_BASE_URL: "${GETBIBLE_QUERY_BASE_URL:-https://query.getbible.net}"
       GETBIBLE_SEARCH_BASE_URL: "${GETBIBLE_SEARCH_BASE_URL:-https://search.getbible.net}"
+      GETBIBLE_BOOKMARKS_BASE_URL: "${GETBIBLE_BOOKMARKS_BASE_URL:-https://bookmarks.getbible.net}"
+      # How often the robot reads the Bookmarks API index to learn that accepted
+      # contributions are live.
+      BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS: "${BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS:-21600}"
       GETBIBLE_CONNECT_TIMEOUT: "${GETBIBLE_CONNECT_TIMEOUT:-3.05}"
       GETBIBLE_READ_TIMEOUT: "${GETBIBLE_READ_TIMEOUT:-6}"
       GETBIBLE_REQUEST_RETRIES: "${GETBIBLE_REQUEST_RETRIES:-1}"

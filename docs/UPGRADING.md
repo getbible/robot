@@ -215,13 +215,73 @@ Rollback reinstalls the previous release's own lock, Librarian included, and
 reads the same environment file. This release does not change the preference
 vocabulary, so rollback is not lossy for preferences.
 
+### Bookmarks come from the public API
+
+This release removes the bundled global topic catalogue from the robot. The
+Mini App reads the shared catalogue from `https://bookmarks.getbible.net/v1`,
+and accepted contributions reach it through a pull request on
+`getbible/v1_bookmark_builder` instead of a branch on this repository. See
+[Operations](OPERATIONS.md#contributor-enrolment-and-moderation). Expect the
+following.
+
+- **Outbound HTTPS from the host now also reaches `bookmarks.getbible.net`**,
+  and from the publisher account `api.github.com` when a token is configured.
+  Update egress firewalls and proxies before the upgrade; a blocked origin
+  leaves every accepted contribution pending and is logged as a warning at
+  each catalogue check.
+- **The Mini App's Content Security Policy gains `https://bookmarks.getbible.net`**
+  in both the HTML shell and the Tornado header. An external proxy that
+  rewrites the header must include it, or the browser blocks every catalogue
+  load and the Bookmarks surface reports global topics as unavailable.
+- **Two new runtime settings.** `GETBIBLE_BOOKMARKS_BASE_URL`
+  (`https://bookmarks.getbible.net`, HTTPS only) and
+  `BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS` (`21600`, range 300 to 604800).
+  The manager adds both on upgrade; the defaults apply where they are absent.
+- **The publisher checkout changes repository.** `CONTRIBUTION_GIT_CHECKOUT`
+  must now be a clean clone of `getbible/v1_bookmark_builder` owned by
+  `CONTRIBUTION_GIT_USER`; a checkout of `getbible/robot` is refused. Clone
+  it, set the checkout-local commit identity, and make sure the publisher can
+  run Python 3.12 or newer. Node.js and npm are no longer used by the
+  publisher.
+- **Two new manager settings.** `CONTRIBUTION_GITHUB_TOKEN` (optional; a
+  fine-grained token limited to the builder repository with Contents and
+  Pull requests read/write lets **Publish** open the pull request itself,
+  otherwise it prints the compare URL) and `CONTRIBUTION_BUILDER_PYTHON`
+  (`python3`; the interpreter the publisher runs the builder with). The
+  manager seeds both on upgrade.
+- **The local live overlay disappears.** "Publish to this live instance" is
+  gone; **Publish** accepts approved work into the submission ledger and opens
+  the pull request, and the instance serves no `GET /api/v1/bookmarks/catalog`.
+  Work published to the live instance but never pushed remains in the ledger
+  and goes out with the next **Publish**, which exports the cumulative ledger.
+  Readers see it only after the pull request merges and the robot's catalogue
+  check observes it; their **P** markers then become **G** and each
+  contributor receives one notice.
+- **Contributed topics read as pending until observed.** A topic reported as
+  published by a live-instance revision is reported as published again only
+  once the robot has seen it in the public catalogue; the first check runs
+  shortly after the upgraded instance starts.
+- **First catalogue load seeds default topics.** The first time the catalogue
+  loads on a device, the catalogue's default topics are ensured as personal
+  topics once per scope and recorded in the preference record so it never
+  repeats; topics a reader already has keep their ids and colours.
+- **Topic names come from the catalogue.** The `bookmark_topics.*` message
+  keys are no longer shipped; names come from the catalogue's per-locale
+  names with English fallback. There is nothing to regenerate:
+  `npm run generate:global-bookmarks`, the importer, and
+  `data/global-bookmarks/` are gone.
+
+Rollback reinstalls the previous release, which serves its bundled catalogue
+and live overlay again and ignores the new environment keys. Work accepted
+into the ledger by this release remains in the store.
+
 ### Contribution store schema
 
-The contribution store remains schema v5. A production database left at
-`user_version=6` by the withdrawn Telegram `web_app_data` push transport is
-downgraded automatically the next time Robot opens it: the two dormant push
-staging tables are dropped and `user_version` returns to 5. Contributor,
-event, and catalogue state are untouched, and no operator action is required.
+The contribution store moves to schema v6. The migration adds the table that
+records the last observed public catalogue, a live-at stamp on events, and the
+pull request and observed-catalogue columns of the publication state. It runs
+the next time Robot opens a v5 database, touches no contributor, event, or
+ledger row, is idempotent, and needs no operator action.
 
 ## Docker upgrade and rollback
 

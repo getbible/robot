@@ -18,6 +18,10 @@ A commit is deployable only when every applicable item below is satisfied on the
 - Translation metadata, books, chapters, chapter text, and hashes use `api.getbible.net/v2` directly from the browser.
 - Explicit and grouped references use `query.getbible.net/v2` directly from the browser.
 - Full-text search uses `search.getbible.net/v2` directly from the browser.
+- The shared bookmark topic catalogue is read from `bookmarks.getbible.net/v1`
+  directly from the browser and accepted only when the SHA-256 of `all.json`
+  equals the checksum in `index.json`; Robot ships no copy of it and serves no
+  catalogue route.
 - Public API requests contain no Telegram or Robot credentials.
 - `BrowserSelectionStore` solely owns select, unselect, reorder, clear, counters, highlighting, and copy state.
 - Reader and search verses share coordinate identity.
@@ -110,6 +114,10 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - The **G** marker is visually centered, and an approved-contributor-only
   **Manage Contribution** panel appears directly below Global topics,
   separate from the add-topic form.
+- New stores start with no topics; the catalogue's default topics are seeded
+  once per scope. A personal bookmark is merged into a global link only after
+  a day of network-verified coverage, never from a cache-only or unavailable
+  catalogue, and the merge count is reported.
 - History, selections, translation catalogs, chapters, and public cache entries
   never enter Telegram user storage.
 
@@ -123,8 +131,8 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
   network path that carries an ordinary API request carries a
   synchronization.
 - Every response returns the complete result set: receipt counts, the full
-  detailed contributor status, and the live catalogue revision/checksum, so
-  the final batch settles the panel in one round trip. Unavailable catalogue
+  detailed contributor status, and the accepted-ledger revision/checksum, so
+  the final batch settles the panel in one round trip. Unavailable ledger
   enrichment cannot turn a committed batch into a reported failure.
 - A redelivered event replays idempotently per contributor and
   `client_event_id`; a reused ID with different content fails closed.
@@ -149,10 +157,34 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
   server instruction.
 - Personal topics and bookmarks are never altered by any synchronization
   outcome: a failed or pending synchronization leaves them untouched, only a
-  topic verifiably published in the live core catalogue is ever marked **G**,
-  and nothing is removed.
+  topic the host has observed in the public Bookmarks API catalogue is ever
+  marked **G**, and synchronization removes nothing.
 - No WebSocket, extra port, custom header, or special body budget
   participates; every batch fits the ordinary 64 KiB API bound.
+
+## Catalogue publication
+
+- The maintainer workflow has five stages — status, applications, topics,
+  verses, publish — and reviews topics and verses against a catalogue
+  document downloaded from the Bookmarks API and verified against
+  `checksums.json`, never against a file in this repository.
+- **Publish** accepts approved work into the store's submission ledger,
+  exports the bundle, pushes a `contributions/<stamp>-<checksum>` branch to a
+  clean clone of `getbible/v1_bookmark_builder` after `import-bundle` and
+  `validate` with Python 3.12 or newer, refuses changes outside
+  `data/topics.json` and `data/links/`, and opens the pull request through the
+  GitHub API when `CONTRIBUTION_GITHUB_TOKEN` is set, otherwise prints the
+  compare URL.
+- Robot serves no catalogue, publishes no overlay, and writes no catalogue
+  data locally; only the upstream merge publishes.
+- With a contribution store configured, Robot reads the Bookmarks API index
+  every `BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS`, verifies and records the
+  catalogue when it changed, marks applied events live from it, and queues one
+  "contributions live" notice per contributor; an unchanged checksum changes
+  nothing and a failed check is retried at the next interval.
+- Both CSP layers list the same four public origins.
+- The token, the bundle, the commit, the branch name, and the pull request
+  carry no Telegram identity or reviewer note.
 
 ## Bookmark portability and chat recovery
 

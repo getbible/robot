@@ -4,6 +4,63 @@ All notable GetBible Robot changes are documented here. Dates describe repositor
 
 ## Unreleased
 
+### Bookmarks come from the public Bookmarks API
+
+- The shared global topic catalogue is now read from
+  `https://bookmarks.getbible.net/v1`, the public Bookmarks API. The Mini
+  App fetches `index.json` at most once a day, downloads `all.json` only
+  when the index checksum changed, verifies the document's SHA-256 against
+  that checksum, and keeps it in IndexedDB; an explicit **Add all** or
+  per-topic load always revalidates against the network. Topic names follow
+  the catalogue's per-locale translations with English fallback. A
+  first-time reader's default topics are seeded once from the catalogue's
+  default topics. When the API is unreachable and nothing is cached, the
+  Bookmarks surface reports that global topics are unavailable until online
+  instead of showing a bundled list.
+- A personal bookmark whose verse an enabled global topic also links is now
+  merged into the global row: it is removed from personal storage only after
+  a network-verified catalogue has covered it for a day, never from a
+  cache-only or unavailable catalogue, and the status line reports how many
+  bookmarks were merged.
+- The robot ships no catalogue any more. `data/global-bookmarks/`, the
+  generated `miniapp/lib/global-bookmark-data.js` and
+  `bookmark-topic-definitions.js`, the generator and importer scripts, the
+  `generate:global-bookmarks` package script, the per-locale
+  `bookmark_topics.*` message keys, the live overlay, and the authenticated
+  `GET /api/v1/bookmarks/catalog` route are gone. The Content Security
+  Policy, in the HTML shell and the Tornado header alike, gains
+  `https://bookmarks.getbible.net`.
+- Contributors send contributions exactly as before. What changed is
+  acceptance: `sudo getbible-robot contributions <instance>` now has five
+  stages — status, applications, topics, verses, publish. Topic and verse
+  review read the current catalogue from the API (`fetch-catalog`) instead
+  of repository files. **Publish** accepts the approved changes into the
+  submission ledger, exports the bundle, pushes a
+  `contributions/<stamp>-<checksum>` branch to a local checkout of
+  `getbible/v1_bookmark_builder` (`python3 src/builder.py import-bundle`
+  and `validate`, Python 3.12 or newer), and opens a pull request through
+  the GitHub API when `CONTRIBUTION_GITHUB_TOKEN` is set; otherwise it
+  prints the compare URL. Publication to the running instance no longer
+  exists: only the upstream merge publishes.
+- The robot watches the Bookmarks API index every
+  `BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS` (default six hours) when a
+  contribution store is configured, records the live catalogue, marks the
+  applied events that appear in it as live, and sends each affected
+  contributor one private "contributions live" notice. A contributed topic
+  is reported as published only once it has been seen in the public
+  catalogue; the Mini App's published/global markers follow the API.
+- New settings: `GETBIBLE_BOOKMARKS_BASE_URL` (HTTPS only, default
+  `https://bookmarks.getbible.net`), `BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS`
+  (300 to 604800), `CONTRIBUTION_GITHUB_TOKEN` (optional fine-grained
+  token limited to `getbible/v1_bookmark_builder` with Contents and Pull
+  requests read/write, read only by the setup manager), and
+  `CONTRIBUTION_BUILDER_PYTHON` (default `python3`).
+  `CONTRIBUTION_GIT_CHECKOUT` is now a checkout of
+  `getbible/v1_bookmark_builder`; the publisher needs Git and Python 3.12
+  or newer instead of Node.js and npm. Hosts must allow outbound HTTPS to
+  `bookmarks.getbible.net`, and to `api.github.com` when the token is set.
+  The contribution store migrates to schema v6 in place.
+
 ### Search moves to the public Search API
 
 - The Mini App now searches `https://search.getbible.net/v2` directly

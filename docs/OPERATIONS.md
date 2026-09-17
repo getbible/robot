@@ -146,7 +146,15 @@ candidate the hidden `/contributor` command; it does not appear in the bot
 command menu and refuses applications outside a private chat. Repeating the
 command is idempotent: pending applicants see that review is in progress, and
 approved users see that they are enrolled and that approved changes can become
-part of the shared core catalogue.
+part of the shared getBible catalogue.
+
+The shared catalogue lives outside this repository. Its source of truth is
+[getbible/v1_bookmark_builder](https://github.com/getbible/v1_bookmark_builder),
+and its published form is the public Bookmarks API at
+`https://bookmarks.getbible.net/v1`. The robot ships no copy of it, serves no
+catalogue route, and never publishes to it directly: a maintainer's
+publication is a pull request on the builder repository, and only the
+upstream merge publishes.
 
 Open the native review workflow with:
 
@@ -154,8 +162,8 @@ Open the native review workflow with:
 sudo getbible-robot contributions production
 ```
 
-For a container instance, the same live stages and a privacy-safe export are
-available without granting Git access to the runtime image:
+For a container instance, status and a privacy-safe export are available
+without granting Git access to the runtime image:
 
 ```bash
 docker exec -it getbible-robot-production \
@@ -167,26 +175,40 @@ docker exec getbible-robot-production \
 ```
 
 The export command prints its exact mode-`0600` path below
-`/data/<instance>/state/contribution-exports/`. Automated Git publication from
-a container export is not supported in this release; retain it only for a
-separately reviewed manual repository import. Run a native deployment when the
-guarded one-command branch workflow is required.
+`/data/<instance>/state/contribution-exports/`. Automated publication from a
+container export is not supported; apply such a bundle by hand in a checkout
+of the builder repository with `python3 src/builder.py import-bundle
+<bundle.json>` followed by `python3 src/builder.py validate`, and open the
+pull request yourself. Run a native deployment when the guarded one-command
+publication is required.
 
-Use its stages in order:
+The native menu has five stages. Use them in order:
 
-1. review pending applications, optionally revoke an enrolled contributor, and
-   optionally reinstate a previously revoked or rejected one — a removed
-   contributor's record stays in the store keyed by their Telegram ID, and a
-   fresh `/contributor` request never resets that state on its own, so this
-   stage is the one place access is restored (the enrolment notice is queued
-   again and the disclosure must be re-acknowledged before new submissions);
-2. map each contributor-local topic to an existing canonical topic, merge it
-   with another pending proposal, create/correct an English canonical topic, or
-   reject/defer it;
-3. review verse additions and removals only after topic mappings are resolved;
-4. publish approved changes to the running instance;
-5. optionally export the privacy-safe live revision and push a repository
-   branch.
+1. **Status** — pending applications, unresolved topics, approved work, the
+   ledger revision, the last pull request, and the catalogue version and
+   checksum last observed from the Bookmarks API with the time of that check.
+2. **Applications** — review pending applications, optionally revoke an
+   enrolled contributor, and optionally reinstate a previously revoked or
+   rejected one. A removed contributor's record stays in the store keyed by
+   their Telegram ID, and a fresh `/contributor` request never resets that
+   state on its own, so this stage is the one place access is restored (the
+   enrolment notice is queued again and the disclosure must be
+   re-acknowledged before new submissions).
+3. **Topics** — map each contributor-local topic to an existing catalogue
+   topic, merge it with another pending proposal, create/correct an English
+   canonical topic, or reject/defer it.
+4. **Verses** — review verse additions and removals, only after topic
+   mappings are resolved.
+5. **Publish** — accept the approved changes into the submission ledger,
+   export the bundle, push a branch to the builder checkout, and open the
+   pull request.
+
+Before stages 3, 4, and 5 the manager downloads the current catalogue from
+the Bookmarks API (`fetch-catalog`, verified against `checksums.json`) into
+the instance's `contribution-exports/bookmarks-catalog.json` and passes it to
+the review commands as `--catalog-file`. Those stages refuse to run when
+`bookmarks.getbible.net` cannot be reached: review is always against the
+catalogue readers see, never against a file in this repository.
 
 Application decisions queue a private Telegram notification. Approval also
 causes the Mini App to show a one-time disclosure before anything is sent;
@@ -201,7 +223,7 @@ each batch body also carries the contributor's short-lived
 payloads. A `403` means the user is not an approved contributor or the token
 went stale; the app recovers automatically with one ordinary status refresh.
 Every response reports receipt counts, the contributor's detailed status, and
-the live catalogue revision. Sessions without contribution authority do not
+the accepted-ledger revision. Sessions without contribution authority do not
 receive that panel; application decisions continue to arrive through the
 private bot notification.
 Personal bookmark writes remain local-first: a network or moderation-server
@@ -211,60 +233,102 @@ later synchronization.
 Topic proposals must use an English source name. The topic stage is where an
 operator resolves spelling, aliases, colors, and overlapping proposals into
 one stable canonical ID. Contributor deletion/recolor/rename events are review
-requests, never authority to mutate the core directly. Verse review shows the
-operation, canonical topic, contributor, reference, and authoritative text
+requests, never authority to mutate the catalogue directly. Verse review shows
+the operation, canonical topic, contributor, reference, and authoritative text
 from the configured GetBible Query API translation. If that text cannot be
 retrieved or validated, the CLI defers the affected work instead of displaying
 client text or silently approving it.
 
-A canonical topic becomes permanent when it first appears in a live catalogue
-revision. From that point its ID, English definition, and existence are locked:
-a repository branch may already contain it, and the version-1 contribution
-bundle has no topic-deletion tombstone that could prevent a later branch merge
-from resurrecting it. A `topic_delete` can therefore cancel only a contributed
-topic that has never been live. Operators may still review individual verse
-removals from a permanent topic, but the CLI defers the removal that would
-leave it with no effective verse association. True published-topic deletion
-requires a future, versioned bundle schema with explicit provenance-aware
-tombstones.
+A canonical topic becomes permanent once it is part of the public catalogue.
+From that point its ID, English definition, and existence are locked: the
+version-1 contribution bundle has no topic-deletion tombstone, so a
+`topic_delete` can cancel only a contributed topic that has never been
+published. Operators may still review individual verse removals from a
+permanent topic, but the CLI defers the removal that would leave it with no
+effective verse association. Deleting a published topic is a change in the
+builder repository, outside this pipeline.
 
-One live publication revision accepts at most 10,000 approved events. This is
-an intentional dependency-safety ceiling: publish reviewed work in smaller
-cycles before the queue reaches that size, because the CLI does not split an
-approved topic-and-verse dependency chain automatically.
+One acceptance takes at most 10,000 approved events. This is an intentional
+dependency-safety ceiling: publish reviewed work in smaller cycles before the
+queue reaches that size, because the CLI does not split an approved
+topic-and-verse dependency chain automatically.
 
-**Publish to this live instance** creates a cumulative, checksummed catalogue
-revision in the same private SQLite store, so the instance serves it
-immediately. Mini Apps revalidate on their next open, reconnect, or explicit
-global-topic pull; an already-open idle reader is not interrupted. The bundled
-catalogue remains the offline/error fallback. This step is independent of Git
-and survives restarts and application upgrades.
+### Publishing
 
-Repository publication is deliberately separate. Configure
-`CONTRIBUTION_GIT_CHECKOUT` and `CONTRIBUTION_GIT_USER` through
-`getbible-robot config`. The user must be a dedicated non-root account, must own
-a clean checkout whose `origin` is `getbible/robot`, and must already have a
-non-interactive Git credential with branch-push permission. The publisher
-fetches `origin/master`, creates a unique `contributions/...` branch, imports
-the deterministic JSON export, regenerates English topic constants and global
-catalogue assets, runs the Mini App checks, commits, and pushes. Install
-Node.js 22 or newer and npm for that publisher account before using this step.
+**Publish** first accepts the approved topics, additions, and removals into
+the store's submission ledger — a cumulative, checksummed record of what this
+instance has accepted, kept in the same private SQLite store and never served
+to readers. It then exports the bundle, takes a per-checkout lock and a
+publication lease, and runs the publisher as the dedicated Git user:
 
-Set the publisher's commit identity in the checkout-local Git config; global
-configuration, including root's identity, is not used:
+1. verify the bundle checksum, the publisher identity, and the checkout;
+2. fetch `origin/main` and base a unique `contributions/<UTC stamp>-<checksum>`
+   branch on it;
+3. `python3 src/builder.py import-bundle <bundle>`, then
+   `python3 src/builder.py validate`;
+4. refuse any change outside `data/topics.json` and `data/links/<topic>.json`;
+5. commit and `git push --set-upstream origin <branch>`;
+6. open the pull request against `main` through the GitHub API when
+   `CONTRIBUTION_GITHUB_TOKEN` is set; otherwise print the compare URL to open
+   by hand.
+
+The pull request URL, branch, and commit are recorded in the store and shown
+by **Status**. A failed publisher run cannot roll back the acceptance; the
+export is retained for diagnosis, and **Publish** can be run again. A pushed
+branch whose pull request could not be opened is still complete: open it from
+the printed compare URL.
+
+Configure `CONTRIBUTION_GIT_CHECKOUT`, `CONTRIBUTION_GIT_USER`, and
+optionally `CONTRIBUTION_GITHUB_TOKEN` and `CONTRIBUTION_BUILDER_PYTHON`
+through `getbible-robot config`. The user must be a dedicated non-root
+account, must own a clean clone of `getbible/v1_bookmark_builder` whose
+`origin` resolves to that repository, and must already have a
+non-interactive Git credential with branch-push permission. The builder is
+standard-library Python and requires Python 3.12 or newer; point
+`CONTRIBUTION_BUILDER_PYTHON` at such an interpreter when the system
+`python3` is older. Node.js and npm are no longer needed. The token is a
+fine-grained GitHub token limited to that one repository with Contents and
+Pull requests read/write; it is read by the setup manager only, handed to the
+publisher process for the duration of one publication, and never logged.
+
+Clone the builder for the publisher and set its commit identity in the
+checkout-local Git config; global configuration, including root's identity,
+is not used:
 
 ```bash
-sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/robot config --local user.name "GetBible Contribution Publisher"
-sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/robot config --local user.email "publisher@getbible.net"
+sudo -u getbible-publisher git clone https://github.com/getbible/v1_bookmark_builder.git /srv/getbible-robot-publisher/v1_bookmark_builder
+sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/v1_bookmark_builder config --local user.name "GetBible Contribution Publisher"
+sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/v1_bookmark_builder config --local user.email "publisher@getbible.net"
 ```
 
-It does not
-open or merge a pull request. A failed export or Git operation cannot roll back
-the live revision; the restricted export is retained for diagnosis and retry.
+### Going live
+
+Merging the pull request is a maintainer action on GitHub. The builder's own
+workflow then validates the sources, renders the API, and publishes it. The
+robot learns of it on its own: when a contribution store is configured, a
+background task reads `index.json` from `GETBIBLE_BOOKMARKS_BASE_URL` every
+`BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS`, the first time shortly after
+start. When the catalogue version or checksum moved, it downloads and verifies
+the catalogue, records it, and decides for every applied event whether it is
+now part of the public catalogue: an addition whose verse the topic now links,
+a removal whose verse it no longer links, a topic that now exists, a deletion
+whose topic is absent. Newly live events are stamped, and each affected
+contributor receives one private "contributions live" notice naming the
+catalogue version, through the same notification outbox as application
+decisions. The check is idempotent; an unchanged checksum changes nothing,
+and a failed check is logged as a warning and retried at the next interval.
+
+Only that observation marks a contribution as published. The Mini App's
+detailed status reports a topic as published once its canonical topic has
+been seen in the public catalogue and its latest applied transition is not a
+deletion, and the panel's **P** marker becomes **G** on the next status
+refresh. Readers everywhere pick the change up from the API on their next
+daily revalidation or explicit **Add all**; nothing on this instance is
+served to them.
 
 Telegram IDs, usernames, profile names, application decisions, and reviewer
-notes remain in the private per-instance database and never enter the live
-catalogue response, JSON export, Git diff, commit message, or branch name.
+notes remain in the private per-instance database and never enter the live catalogue,
+bundle export, Git diff, commit message, branch name, or pull request.
 Protect and retain that database as personal moderation data. Audit-log
 identity mode does not weaken this database boundary.
 
@@ -378,8 +442,9 @@ Alert on:
 - Mini App listener loss, authorization failures, expired-launch growth, or
   unexpected public API access without Telegram authorization;
 - contribution-store failures, pending notification retries, sustained event
-  growth near `CONTRIBUTION_EVENT_LIMIT`, or approved work awaiting live
-  publication;
+  growth near `CONTRIBUTION_EVENT_LIMIT`, accepted work whose pull request
+  has not merged, or a Bookmarks API check that keeps failing (the catalogue
+  watcher logs a warning and retries at the next interval);
 - interactive session evictions or saturation;
 - `instance_memory_pressure`, memory approaching `MemoryMax`, or a child RSS
   guard restart;
