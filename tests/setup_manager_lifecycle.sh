@@ -140,8 +140,6 @@ verify_mini_app_local() {
     [[ "$listen" != "0.0.0.0" ]] || listen="127.0.0.1"
     port=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PORT")
     base_url="http://${listen}:${port}${public_path%/}/"
-    printf 'local GET %sapi/v1/bookmarks/catalog\n' \
-        "$base_url" >>"$MINI_APP_VERIFY_LOG"
     printf 'local GET %sapi/v1/contributions/status\n' \
         "$base_url" >>"$MINI_APP_VERIFY_LOG"
     printf 'local POST %sapi/v1/contributions/events\n' \
@@ -155,8 +153,6 @@ verify_mini_app_public() {
     local base_url
     base_url=$(dotenv_value "$app_dir" "$env_file" "MINI_APP_PUBLIC_URL")
     base_url="${base_url%/}/"
-    printf 'public GET %sapi/v1/bookmarks/catalog\n' \
-        "$base_url" >>"$MINI_APP_VERIFY_LOG"
     printf 'public GET %sapi/v1/contributions/status\n' \
         "$base_url" >>"$MINI_APP_VERIFY_LOG"
     printf 'public POST %sapi/v1/contributions/events\n' \
@@ -436,8 +432,7 @@ systemctl() {
 create_source_fixture() {
     mkdir -p \
         "$SOURCE_DIR/deploy" \
-        "$SOURCE_DIR/scripts/lib" \
-        "$SOURCE_DIR/data/global-bookmarks" \
+        "$SOURCE_DIR/scripts" \
         "$SOURCE_DIR/miniapp/lib"
     cp -- "$ROOT/setup.sh" "$SOURCE_DIR/setup.sh"
     cp -- "$ROOT/deploy/getbible-robot@.service" \
@@ -447,14 +442,6 @@ create_source_fixture() {
     cp -- "$ROOT/.env.template" "$SOURCE_DIR/.env.template"
     cp -- "$ROOT/scripts/contribution_review.py" \
         "$SOURCE_DIR/scripts/contribution_review.py"
-    cp -- "$ROOT/scripts/import_contribution_bundle.mjs" \
-        "$SOURCE_DIR/scripts/import_contribution_bundle.mjs"
-    cp -- "$ROOT/scripts/lib/global_bookmark_sources.mjs" \
-        "$SOURCE_DIR/scripts/lib/global_bookmark_sources.mjs"
-    cp -- "$ROOT/data/global-bookmarks/topics.json" \
-        "$SOURCE_DIR/data/global-bookmarks/topics.json"
-    cp -- "$ROOT/data/global-bookmarks/tag-verse.csv" \
-        "$SOURCE_DIR/data/global-bookmarks/tag-verse.csv"
     cp -- "$ROOT/miniapp/lib/bible-canon.js" \
         "$SOURCE_DIR/miniapp/lib/bible-canon.js"
     printf 'print("fixture")\n' >"$SOURCE_DIR/bot.py"
@@ -468,12 +455,10 @@ create_source_fixture() {
 }
 
 assert_contribution_assets() {
+    # The review CLI is the only contribution asset a deployment carries; the
+    # shared catalogue comes from bookmarks.getbible.net at review time.
     local app_dir=$1
     assert_file "$app_dir/scripts/contribution_review.py"
-    assert_file "$app_dir/scripts/import_contribution_bundle.mjs"
-    assert_file "$app_dir/scripts/lib/global_bookmark_sources.mjs"
-    assert_file "$app_dir/data/global-bookmarks/topics.json"
-    assert_file "$app_dir/data/global-bookmarks/tag-verse.csv"
     assert_file "$app_dir/miniapp/lib/bible-canon.js"
 }
 
@@ -542,7 +527,6 @@ assert_contribution_assets "$(application_dir_for beta)"
 assert_mode "$(application_dir_for alpha)" "750"
 assert_mode "$(application_dir_for alpha)/bot.py" "640"
 assert_mode "$(application_dir_for alpha)/scripts/contribution_review.py" "640"
-assert_mode "$(application_dir_for alpha)/data/global-bookmarks/topics.json" "640"
 assert_mode "$(application_dir_for alpha)/venv" "750"
 assert_contains "$RUNUSER_LOG" "gb-alpha"
 assert_contains "$RUNUSER_LOG" "gb-beta"
@@ -1055,13 +1039,9 @@ assert_equal \
 [[ "$REFRESH_OUTPUT" == *"Deployment refresh succeeded"* ]] ||
     fail "same-commit update did not report a deployment refresh"
 assert_contains "$MINI_APP_VERIFY_LOG" \
-    'local GET http://127.0.0.1:9201/getbible/alpha/api/v1/bookmarks/catalog'
-assert_contains "$MINI_APP_VERIFY_LOG" \
     'local GET http://127.0.0.1:9201/getbible/alpha/api/v1/contributions/status'
 assert_contains "$MINI_APP_VERIFY_LOG" \
     'local POST http://127.0.0.1:9201/getbible/alpha/api/v1/contributions/events'
-assert_contains "$MINI_APP_VERIFY_LOG" \
-    'public GET https://bot.example.com/getbible/alpha/api/v1/bookmarks/catalog'
 assert_contains "$MINI_APP_VERIFY_LOG" \
     'public GET https://bot.example.com/getbible/alpha/api/v1/contributions/status'
 assert_contains "$MINI_APP_VERIFY_LOG" \

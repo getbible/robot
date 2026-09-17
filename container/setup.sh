@@ -10,8 +10,8 @@ CONTRIBUTION_PYTHON="${ROBOT_PYTHON:-python}"
 CONTRIBUTION_INSTANCE=""
 CONTRIBUTION_STORE=""
 CONTRIBUTION_TRANSLATION=""
-CONTRIBUTION_TOPICS=""
-CONTRIBUTION_ASSOCIATIONS=""
+CONTRIBUTION_CATALOG=""
+CONTRIBUTION_EXPORT_ROOT=""
 CONTRIBUTION_SCRIPT=""
 
 usage() {
@@ -29,15 +29,19 @@ Usage:
   setup.sh reload
   setup.sh contributions [INSTANCE]
   setup.sh contributions INSTANCE status|export
+  setup.sh contributions INSTANCE applications|topics|verses|accept
   setup.sh shell
 
 Configuration is supplied by the container environment in single mode or by
 /config/instances/*.env in multi mode. Configuration errors are written to
 standard output/error and are visible through docker logs.
 
-Contribution review and live publication are supported inside the container.
-The container can also write a privacy-safe JSON export, but automated Git
-branch publication from that export is not supported in this release.
+Contribution review and acceptance into the submission ledger are supported
+inside the container. Topic, verse, and acceptance review compare against the
+shared catalogue fetched from bookmarks.getbible.net. The container can also
+write a privacy-safe JSON export, but automated pull-request publication to
+getbible/v1_bookmark_builder from that export is not supported in this
+release; use a native deployment for that.
 EOF
 }
 
@@ -122,19 +126,16 @@ load_contribution_context() {
         return 1
     }
     CONTRIBUTION_SCRIPT="${CONTRIBUTION_APP_ROOT}/scripts/contribution_review.py"
-    CONTRIBUTION_TOPICS="${CONTRIBUTION_APP_ROOT}/data/global-bookmarks/topics.json"
-    CONTRIBUTION_ASSOCIATIONS="${CONTRIBUTION_APP_ROOT}/data/global-bookmarks/tag-verse.csv"
     local instance_root="${CONTRIBUTION_DATA_ROOT}/${instance}"
     local state_root="${instance_root}/state"
     CONTRIBUTION_STORE="${state_root}/contributions.sqlite3"
-    for required in "$CONTRIBUTION_SCRIPT" "$CONTRIBUTION_TOPICS" \
-        "$CONTRIBUTION_ASSOCIATIONS"; do
-        [[ -f "$required" && ! -L "$required" ]] || {
-            printf 'ERROR: Container contribution review asset is unavailable: %s\n' \
-                "$required" >&2
-            return 1
-        }
-    done
+    CONTRIBUTION_EXPORT_ROOT="${state_root}/contribution-exports"
+    CONTRIBUTION_CATALOG="${CONTRIBUTION_EXPORT_ROOT}/bookmarks-catalog.json"
+    [[ -f "$CONTRIBUTION_SCRIPT" && ! -L "$CONTRIBUTION_SCRIPT" ]] || {
+        printf 'ERROR: Container contribution review asset is unavailable: %s\n' \
+            "$CONTRIBUTION_SCRIPT" >&2
+        return 1
+    }
     [[ -d "$CONTRIBUTION_DATA_ROOT" && ! -L "$CONTRIBUTION_DATA_ROOT" &&
         -d "$instance_root" && ! -L "$instance_root" &&
         -d "$state_root" && ! -L "$state_root" ]] || {
@@ -156,28 +157,52 @@ run_contribution_review() {
         cd "$CONTRIBUTION_APP_ROOT"
         "$CONTRIBUTION_PYTHON" -m scripts.contribution_review "$command" \
             --store "$CONTRIBUTION_STORE" \
-            --actor "container:${CONTRIBUTION_INSTANCE}" \
-            --topics-file "$CONTRIBUTION_TOPICS" \
-            --associations-file "$CONTRIBUTION_ASSOCIATIONS" "$@"
+            --actor "container:${CONTRIBUTION_INSTANCE}" "$@"
     )
 }
 
-export_contributions() {
-    local export_root="${CONTRIBUTION_DATA_ROOT}/${CONTRIBUTION_INSTANCE}/state/contribution-exports"
-    local stamp
-    local destination
+run_catalogue_review() {
+    # Topic, verse, and acceptance review compare against the shared
+    # catalogue.  It is fetched fresh from the public Bookmarks API first and
+    # the command is not started when that verified download is unavailable.
+    local command=$1
+    shift
+    fetch_contribution_catalog || return 1
+    run_contribution_review "$command" --catalog-file "$CONTRIBUTION_CATALOG" "$@"
+}
+
+ensure_export_root() {
     # Multiple operators may export at once. `mkdir -p` makes directory
     # creation idempotent; validate the resulting object before using it so an
     # existing symlink or non-directory is still rejected.
-    mkdir -p -- "$export_root" || {
+    mkdir -p -- "$CONTRIBUTION_EXPORT_ROOT" || {
         printf 'ERROR: The private contribution export directory could not be created.\n' >&2
         return 1
     }
-    [[ -d "$export_root" && ! -L "$export_root" ]] || {
+    [[ -d "$CONTRIBUTION_EXPORT_ROOT" && ! -L "$CONTRIBUTION_EXPORT_ROOT" ]] || {
         printf 'ERROR: The private contribution export directory is unsafe.\n' >&2
         return 1
     }
-    chmod 0700 -- "$export_root"
+    chmod 0700 -- "$CONTRIBUTION_EXPORT_ROOT"
+}
+
+fetch_contribution_catalog() {
+    ensure_export_root || return 1
+    if ! (
+        cd "$CONTRIBUTION_APP_ROOT"
+        "$CONTRIBUTION_PYTHON" -m scripts.contribution_review fetch-catalog \
+            --output "$CONTRIBUTION_CATALOG"
+    ); then
+        printf 'ERROR: The shared bookmark catalogue could not be fetched from bookmarks.getbible.net; this review step needs it and was not started.\n' >&2
+        return 1
+    fi
+}
+
+export_contributions() {
+    local export_root=$CONTRIBUTION_EXPORT_ROOT
+    local stamp
+    local destination
+    ensure_export_root || return 1
     stamp=$(date --utc +'%Y%m%d-%H%M%S')
     destination=$(mktemp \
         --tmpdir="$export_root" \
@@ -197,8 +222,8 @@ export_contributions() {
         return 1
     fi
     printf 'Privacy-safe repository export: %s\n' "$destination"
-    printf 'Automated Git branch publication from a container export is not supported in this release.\n'
-    printf 'Retain the JSON only for a separately reviewed manual repository import.\n'
+    printf 'Automated pull-request publication to getbible/v1_bookmark_builder from a container export is not supported in this release.\n'
+    printf 'Retain the JSON only for a separately reviewed manual import with the builder (python3 src/builder.py import-bundle).\n'
 }
 
 contribution_menu() {
@@ -212,23 +237,24 @@ Container contribution review
   2) Resolve and merge contributor topics
   3) Review verse additions and removals
   4) Show review status
-  5) Publish approved changes to this live instance
+  5) Accept approved changes into the submission ledger
   6) Write a privacy-safe repository export
   0) Return
 
-Automated repository branch publication is unavailable for container instances in this release.
-Use a native deployment for the guarded one-command Git publication workflow.
+Topic, verse, and acceptance review fetch the shared catalogue from bookmarks.getbible.net first.
+Automated pull-request publication to getbible/v1_bookmark_builder is unavailable for container instances in this release.
+Use a native deployment for the guarded one-command pull-request publication workflow.
 EOF
         read -r -p "Selection: " selection
         case "$selection" in
             1) run_contribution_review applications || true ;;
-            2) run_contribution_review topics || true ;;
+            2) run_catalogue_review topics || true ;;
             3)
-                run_contribution_review verses \
+                run_catalogue_review verses \
                     --translation "$CONTRIBUTION_TRANSLATION" || true
                 ;;
             4) run_contribution_review status || true ;;
-            5) run_contribution_review publish-live || true ;;
+            5) run_catalogue_review accept || true ;;
             6) export_contributions || true ;;
             0) return ;;
             *) printf 'WARNING: Unknown selection.\n' >&2 ;;
@@ -248,14 +274,18 @@ contributions_command() {
         "") contribution_menu ;;
         status) run_contribution_review status ;;
         export) export_contributions ;;
-        applications|topics|verses|publish-live)
+        applications)
             require_interactive || return 1
-            if [[ "$action" == "verses" ]]; then
-                run_contribution_review verses \
-                    --translation "$CONTRIBUTION_TRANSLATION"
-            else
-                run_contribution_review "$action"
-            fi
+            run_contribution_review applications
+            ;;
+        topics|accept)
+            require_interactive || return 1
+            run_catalogue_review "$action"
+            ;;
+        verses)
+            require_interactive || return 1
+            run_catalogue_review verses \
+                --translation "$CONTRIBUTION_TRANSLATION"
             ;;
         *)
             printf 'ERROR: Unknown contribution action: %s\n' "$action" >&2
