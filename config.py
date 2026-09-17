@@ -27,6 +27,7 @@ _DELIVERY_MODES = frozenset({"polling", "webhook"})
 _WEBHOOK_SECRET_RE = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
 _WEBHOOK_PATH_RE = re.compile(r"/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\Z")
 _MINI_APP_PATH_RE = re.compile(r"(?:/[A-Za-z0-9_-]+)*\Z")
+LOGGER = logging.getLogger(__name__)
 _TELEGRAM_WEBHOOK_PORTS = frozenset({80, 88, 443, 8443})
 _WILDCARD_LISTENERS = frozenset(
     {str(IPv4Address(0)), str(IPv6Address(0))}
@@ -67,6 +68,34 @@ def _boolean(name: str, default: bool) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     raise ConfigurationError(f"{name} must be true or false.")
+
+
+#: Settings that configured the in-process Scripture index the robot no longer
+#: keeps. They are ignored rather than refused so an existing environment file
+#: keeps working across the upgrade; the warning tells the operator what to drop.
+RETIRED_SETTINGS: tuple[str, ...] = (
+    "BOOKS_CACHE_LIMIT",
+    "CACHE_MAINTENANCE_INTERVAL_SECONDS",
+    "CACHE_MAX_BYTES",
+    "CHAPTER_CACHE_LIMIT",
+    "MINI_APP_MAX_SEARCHES_PER_SESSION",
+    "PREWARM_DEFAULT_TRANSLATION",
+    "REFERENCE_CACHE_LIMIT",
+    "SEARCH_CORPUS_LIMIT",
+    "SEARCH_DEADLINE_SECONDS",
+    "SEARCH_INDEX_BUILD_SECONDS",
+    "SEARCH_SHARED_CORPUS_LIMIT",
+    "TRANSLATION_CACHE_LIMIT",
+)
+
+
+def _warn_about_retired_settings() -> None:
+    present = [name for name in RETIRED_SETTINGS if _env(name)]
+    if present:
+        LOGGER.warning(
+            "Ignoring retired settings that no longer apply: %s",
+            ", ".join(present),
+        )
 
 
 def _listener(
@@ -442,6 +471,8 @@ class Settings:
     contribution_rate_capacity: int
     contribution_rate_refill_per_second: float
     api_base_url: str
+    query_base_url: str
+    search_base_url: str
     web_base_url: str
     welcome_message: str
     help_message: str
@@ -452,22 +483,12 @@ class Settings:
     request_retries: int
     max_response_bytes: int
     search_max_response_bytes: int
-    reference_cache_limit: int
-    books_cache_limit: int
-    chapter_cache_limit: int
-    search_corpus_limit: int
-    search_shared_corpus_limit: int
-    translation_cache_limit: int
-    cache_max_bytes: int
-    cache_maintenance_interval_seconds: int
     max_input_length: int
     max_references: int
     max_verses_per_reference: int
     max_total_verses: int
     max_output_chunks: int
     search_result_limit: int
-    search_deadline_seconds: float
-    search_index_build_seconds: float
     search_timeout: float
     max_concurrent_lookups: int
     max_concurrent_searches: int
@@ -489,7 +510,6 @@ class Settings:
     circuit_recovery_seconds: float
     delete_command_messages: bool
     drop_pending_updates: bool
-    prewarm_default_translation: bool
     health_host: str
     health_port: int
     instance_name: str
@@ -509,7 +529,6 @@ class Settings:
     mini_app_session_ttl_seconds: int = 7_776_000
     mini_app_session_limit: int = 200
     mini_app_sessions_per_user: int = 2
-    mini_app_max_searches_per_session: int = 2
     mini_app_max_available_selections: int = 256
     mini_app_max_selections: int = 100
     mini_app_body_timeout_seconds: float = 10.0
@@ -582,23 +601,12 @@ class Settings:
                 "MAX_TOTAL_VERSES cannot be lower than MAX_VERSES_PER_REFERENCE."
             )
 
-        # A search waits for its own work, including the one-off index build the
-        # first search of a translation triggers. Granting the build 120 seconds
-        # and then abandoning the caller after 20 produced the worst of both: the
-        # reader was told the search timed out while the build they paid for ran
-        # on without them. The request budget must therefore cover the build it
-        # can provoke, plus the matching deadline inside it.
-        search_deadline_seconds = _number("SEARCH_DEADLINE_SECONDS", 5.0, 0.1, 30.0)
-        search_index_build_seconds = _number(
-            "SEARCH_INDEX_BUILD_SECONDS", 120.0, 1.0, 600.0
-        )
-        search_timeout = _number("SEARCH_TIMEOUT", 150.0, 1.0, 900.0)
-        minimum_search_timeout = search_index_build_seconds + search_deadline_seconds
-        if search_timeout < minimum_search_timeout:
-            raise ConfigurationError(
-                "SEARCH_TIMEOUT cannot be lower than "
-                "SEARCH_INDEX_BUILD_SECONDS plus SEARCH_DEADLINE_SECONDS."
-            )
+        # A search is one bounded request to the public Search API. Its own
+        # execution deadline is a few seconds; the budget here also covers a
+        # cold translation the service still has to load, and stays generous
+        # enough that a slow answer is delivered rather than abandoned.
+        search_timeout = _number("SEARCH_TIMEOUT", 30.0, 1.0, 900.0)
+        _warn_about_retired_settings()
 
         health_host = _listener(
             "HEALTH_HOST",
@@ -688,6 +696,12 @@ class Settings:
                 1_000.0,
             ),
             api_base_url=_base_url("GETBIBLE_API_BASE_URL", "https://api.getbible.net"),
+            query_base_url=_base_url(
+                "GETBIBLE_QUERY_BASE_URL", "https://query.getbible.net"
+            ),
+            search_base_url=_base_url(
+                "GETBIBLE_SEARCH_BASE_URL", "https://search.getbible.net"
+            ),
             web_base_url=_base_url("GETBIBLE_WEB_BASE_URL", "https://getbible.life"),
             welcome_message=_message(
                 "WELCOME_MESSAGE",
@@ -723,40 +737,12 @@ class Settings:
                 64 * 1024,
                 16 * 1024 * 1024,
             ),
-            reference_cache_limit=_integer(
-                "REFERENCE_CACHE_LIMIT", 1000, 100, 50_000
-            ),
-            books_cache_limit=_integer("BOOKS_CACHE_LIMIT", 16, 1, 1000),
-            chapter_cache_limit=_integer(
-                "CHAPTER_CACHE_LIMIT", 256, 16, 10_000
-            ),
-            search_corpus_limit=_integer("SEARCH_CORPUS_LIMIT", 1, 1, 4),
-            search_shared_corpus_limit=_integer(
-                "SEARCH_SHARED_CORPUS_LIMIT", 8, 1, 32
-            ),
-            translation_cache_limit=_integer(
-                "TRANSLATION_CACHE_LIMIT", 1, 1, 8
-            ),
-            cache_max_bytes=_integer(
-                "CACHE_MAX_BYTES",
-                256 * 1024 * 1024,
-                32 * 1024 * 1024,
-                8 * 1024 * 1024 * 1024,
-            ),
-            cache_maintenance_interval_seconds=_integer(
-                "CACHE_MAINTENANCE_INTERVAL_SECONDS",
-                6 * 60 * 60,
-                300,
-                7 * 24 * 60 * 60,
-            ),
             max_input_length=max_input_length,
             max_references=max_references,
             max_verses_per_reference=max_verses_per_reference,
             max_total_verses=max_total_verses,
             max_output_chunks=_integer("MAX_OUTPUT_CHUNKS", 8, 1, 32),
             search_result_limit=_integer("SEARCH_RESULT_LIMIT", 50, 1, 200),
-            search_deadline_seconds=search_deadline_seconds,
-            search_index_build_seconds=search_index_build_seconds,
             search_timeout=search_timeout,
             max_concurrent_lookups=_integer("MAX_CONCURRENT_LOOKUPS", 8, 1, 32),
             max_concurrent_searches=_integer("MAX_CONCURRENT_SEARCHES", 4, 1, 64),
@@ -803,7 +789,6 @@ class Settings:
             ),
             delete_command_messages=_boolean("DELETE_COMMAND_MESSAGES", False),
             drop_pending_updates=_boolean("DROP_PENDING_UPDATES", True),
-            prewarm_default_translation=_boolean("PREWARM_DEFAULT_TRANSLATION", True),
             health_host=health_host,
             health_port=health_port,
             instance_name=_instance_name(),
@@ -835,9 +820,6 @@ class Settings:
             ),
             mini_app_sessions_per_user=_integer(
                 "MINI_APP_SESSIONS_PER_USER", 2, 1, 10
-            ),
-            mini_app_max_searches_per_session=_integer(
-                "MINI_APP_MAX_SEARCHES_PER_SESSION", 2, 1, 8
             ),
             mini_app_max_available_selections=_integer(
                 "MINI_APP_MAX_AVAILABLE_SELECTIONS", 256, 250, 1000

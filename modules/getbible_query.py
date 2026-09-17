@@ -1,9 +1,12 @@
-"""Strict GetBible Query API client for authoritative verse review text.
+"""Strict GetBible Query API client for authoritative Scripture text.
 
-The contribution moderator must never make a decision from guessed, partial, or
-client-supplied scripture text.  This module therefore treats every Query API
-response as untrusted input and returns a batch only when every requested verse
-has been validated.
+Two callers depend on this module and neither may act on guessed, partial, or
+client-supplied Scripture: the contribution moderator reviews verse text it
+fetched itself, and the robot posts a ``/bible`` reference only after the
+Query API resolved it.  Every response is therefore treated as untrusted input
+and returned only after the transport, size, content type, and document shape
+have been validated.  The robot keeps no reference parser of its own: the Query
+API is the authority on what a reference means.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 QUERY_API_BASE_URL = "https://query.getbible.net/v2"
 
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
+_REFERENCE_RE = re.compile(r"[\w\s:;,.\-\u2013'\u2019]{1,512}\Z")
 _MAX_REFERENCE_COMPONENT = 999
 _MAX_DISPLAY_REFERENCE_LENGTH = 256
 _MAX_VERSE_TEXT_LENGTH = 16_384
@@ -31,6 +35,9 @@ _DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024
 _DEFAULT_BATCH_SIZE = 40
 _DEFAULT_MAX_URL_LENGTH = 4096
 _DEFAULT_MAX_REFERENCES = 5000
+_MAX_PROBLEM_BYTES = 16 * 1024
+_MAX_PROBLEM_FIELD_LENGTH = 512
+_MAX_SCRIPTURE_CHAPTERS = 64
 
 
 class _RejectRedirectHandler(HTTPRedirectHandler):
@@ -68,6 +75,10 @@ class QueryInputError(GetBibleQueryError):
         super().__init__(message, retryable=False)
 
 
+class QueryLimitError(QueryInputError):
+    """The selection is larger than the caller allows."""
+
+
 class QueryTransportError(GetBibleQueryError):
     """The Query API could not be reached before the configured deadline."""
 
@@ -81,13 +92,42 @@ class QueryTransportError(GetBibleQueryError):
 class QueryHTTPError(GetBibleQueryError):
     """The Query API returned a non-successful HTTP status."""
 
-    def __init__(self, status_code: int) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        *,
+        code: str = "",
+        detail: str = "",
+        retry_after: int | None = None,
+    ) -> None:
         self.status_code = status_code
+        self.code = code
+        self.detail = detail
+        self.retry_after = retry_after
         retryable = status_code in {408, 425, 429} or 500 <= status_code <= 599
         super().__init__(
-            f"The GetBible Query API returned HTTP {status_code}; defer this review.",
+            f"The GetBible Query API returned HTTP {status_code}"
+            f"{f' ({code})' if code else ''}; defer this review.",
             retryable=retryable,
         )
+
+    @property
+    def translation_not_found(self) -> bool:
+        return self.status_code == 404 and self.code == "translation_not_found"
+
+    @property
+    def request_limit(self) -> bool:
+        return self.status_code == 400 and self.code == "request_limit"
+
+    @property
+    def invalid_reference(self) -> bool:
+        """True when the API rejected the reference rather than its own state."""
+        if self.status_code == 400:
+            return not self.request_limit
+        return self.status_code == 404 and self.code not in {
+            "translation_not_found",
+            "unknown_version",
+        }
 
 
 class QueryResponseError(GetBibleQueryError):
@@ -188,6 +228,7 @@ class GetBibleQueryClient:
         self,
         *,
         translation: str = "kjv",
+        base_url: str = QUERY_API_BASE_URL,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         max_response_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES,
         batch_size: int = _DEFAULT_BATCH_SIZE,
@@ -221,7 +262,15 @@ class GetBibleQueryClient:
                     f"Query {label} must be an integer of at least {minimum}."
                 )
 
+        if (
+            not isinstance(base_url, str)
+            or not base_url.startswith("https://")
+            or "?" in base_url
+            or "#" in base_url
+        ):
+            raise QueryInputError("Query API base URL must be an https URL.")
         self.translation = normalized_translation
+        self.base_url = base_url.rstrip("/")
         self.timeout_seconds = float(timeout_seconds)
         self.max_response_bytes = max_response_bytes
         self.batch_size = batch_size
@@ -252,6 +301,175 @@ class GetBibleQueryClient:
         # Construct a fresh insertion-ordered mapping in caller order.  The
         # indexing is safe because each batch is rejected if anything is absent.
         return {reference: resolved[reference] for reference in requested}
+
+    def fetch_scripture(
+        self,
+        reference: str,
+        *,
+        translation: str | None = None,
+        max_verses: int | None = None,
+    ) -> dict[str, Any]:
+        """Resolve one free-form reference and return the chapter-grouped document.
+
+        ``reference`` uses the Query API's own syntax (``John 3:16``,
+        ``Genesis 1:1-3;John 3:16``).  The document is returned exactly as the
+        API groups it — one entry per chapter keyed ``{translation}_{book}_{chapter}``
+        — after every chapter and verse has been validated, so it can be rendered
+        without a second pass.  ``max_verses`` bounds the whole selection; a
+        larger answer raises :class:`QueryLimitError` instead of being truncated.
+        """
+        code = self._translation_code(translation)
+        text = self._reference_text(reference)
+        if max_verses is not None and (
+            isinstance(max_verses, bool)
+            or not isinstance(max_verses, int)
+            or max_verses < 1
+        ):
+            raise QueryInputError("Maximum verse count must be a positive integer.")
+        document = self._get_json(self._build_reference_url(code, text))
+        return self._parse_scripture_document(document, code, max_verses)
+
+    def _translation_code(self, translation: str | None) -> str:
+        if translation is None:
+            return self.translation
+        if not isinstance(translation, str):
+            raise QueryInputError("Translation must be a GetBible abbreviation.")
+        code = translation.strip().lower()
+        if not _TRANSLATION_RE.fullmatch(code):
+            raise QueryInputError(
+                "Translation must be a lowercase GetBible abbreviation containing "
+                "only letters, numbers, periods, underscores, or hyphens."
+            )
+        return code
+
+    @staticmethod
+    def _reference_text(reference: str) -> str:
+        if not isinstance(reference, str):
+            raise QueryInputError("A Scripture reference must be text.")
+        text = " ".join(reference.split())
+        if not text or _REFERENCE_RE.fullmatch(text) is None:
+            raise QueryInputError("The Scripture reference is invalid.")
+        if not any(character.isalnum() for character in text):
+            raise QueryInputError("The Scripture reference is invalid.")
+        return text
+
+    def _build_reference_url(self, translation: str, reference: str) -> str:
+        encoded_reference = quote(reference, safe=":;,-")
+        encoded_translation = quote(translation, safe="")
+        url = f"{self.base_url}/{encoded_translation}/{encoded_reference}"
+        if len(url) > self.max_url_length:
+            raise QueryInputError(
+                "The Scripture reference exceeds the configured Query API URL limit."
+            )
+        return url
+
+    def _parse_scripture_document(
+        self,
+        document: Any,
+        translation: str,
+        max_verses: int | None,
+    ) -> dict[str, Any]:
+        if not isinstance(document, dict) or not document:
+            raise QueryResponseError(
+                "The GetBible Query API response was not a non-empty object."
+            )
+        if len(document) > _MAX_SCRIPTURE_CHAPTERS:
+            raise QueryResponseError(
+                "The GetBible Query API returned too many chapters."
+            )
+        validated: dict[str, Any] = {}
+        seen: set[VerseReference] = set()
+        for key, chapter_payload in document.items():
+            if not isinstance(key, str) or not isinstance(chapter_payload, dict):
+                raise QueryResponseError(
+                    "The GetBible Query API returned an invalid chapter object."
+                )
+            abbreviation = self._required_text(
+                chapter_payload,
+                "abbreviation",
+                maximum=64,
+            ).casefold()
+            if abbreviation != translation:
+                raise QueryResponseError(
+                    "The GetBible Query API returned a different translation."
+                )
+            translation_name = self._required_text(
+                chapter_payload,
+                "translation",
+                maximum=256,
+            )
+            book_name = self._required_text(chapter_payload, "book_name", maximum=256)
+            book = self._required_integer(chapter_payload, "book_nr")
+            chapter = self._required_integer(chapter_payload, "chapter")
+            verses = chapter_payload.get("verses")
+            if not isinstance(verses, list) or not verses:
+                raise QueryResponseError(
+                    "The GetBible Query API returned an invalid verse list."
+                )
+            rendered_verses: list[dict[str, Any]] = []
+            for verse_payload in verses:
+                if not isinstance(verse_payload, dict):
+                    raise QueryResponseError(
+                        "The GetBible Query API returned an invalid verse object."
+                    )
+                verse = self._required_integer(verse_payload, "verse")
+                if "chapter" in verse_payload and (
+                    self._required_integer(verse_payload, "chapter") != chapter
+                ):
+                    raise QueryResponseError(
+                        "The GetBible Query API returned inconsistent chapter metadata."
+                    )
+                try:
+                    coordinate = VerseReference(book, chapter, verse)
+                except QueryInputError:
+                    raise QueryResponseError(
+                        "The GetBible Query API returned invalid verse coordinates."
+                    ) from None
+                if coordinate in seen:
+                    raise QueryResponseError(
+                        "The GetBible Query API returned a duplicate verse."
+                    )
+                seen.add(coordinate)
+                if max_verses is not None and len(seen) > max_verses:
+                    raise QueryLimitError(
+                        f"The selection exceeds the {max_verses}-verse limit."
+                    )
+                text = self._required_text(
+                    verse_payload,
+                    "text",
+                    maximum=_MAX_VERSE_TEXT_LENGTH,
+                )
+                name = verse_payload.get("name")
+                rendered_verses.append(
+                    {
+                        "chapter": chapter,
+                        "verse": verse,
+                        "name": (
+                            self._required_text(
+                                verse_payload,
+                                "name",
+                                maximum=_MAX_DISPLAY_REFERENCE_LENGTH,
+                            )
+                            if isinstance(name, str)
+                            else f"{book_name} {chapter}:{verse}"
+                        ),
+                        "text": text,
+                    }
+                )
+            validated[key] = {
+                "translation": translation_name,
+                "abbreviation": abbreviation,
+                "book_nr": book,
+                "book_name": book_name,
+                "chapter": chapter,
+                "name": (
+                    self._required_text(chapter_payload, "name", maximum=256)
+                    if isinstance(chapter_payload.get("name"), str)
+                    else f"{book_name} {chapter}"
+                ),
+                "verses": rendered_verses,
+            }
+        return validated
 
     def _normalize_references(
         self,
@@ -320,17 +538,22 @@ class GetBibleQueryClient:
         # whitespace, and every other unsafe character.
         encoded_query = quote(query, safe=":;,-")
         encoded_translation = quote(self.translation, safe="")
-        return f"{QUERY_API_BASE_URL}/{encoded_translation}/{encoded_query}"
+        return f"{self.base_url}/{encoded_translation}/{encoded_query}"
 
     def _fetch_batch(
         self,
         references: tuple[VerseReference, ...],
     ) -> dict[VerseReference, AuthoritativeVerse]:
+        document = self._get_json(self._build_url(references))
+        return self._parse_document(document, references)
+
+    def _get_json(self, url: str) -> Any:
+        """Perform one bounded GET and return the decoded JSON document."""
         request = Request(
-            self._build_url(references),
+            url,
             headers={
                 "Accept": "application/json",
-                "User-Agent": "GetBible-Robot-Contribution-Review/2",
+                "User-Agent": "getbible-robot/2.2",
             },
             method="GET",
         )
@@ -347,8 +570,9 @@ class GetBibleQueryClient:
                 self._validate_content_length(response.headers)
                 payload = response.read(self.max_response_bytes + 1)
         except HTTPError as error:
+            problem = self._problem(error)
             error.close()
-            raise QueryHTTPError(error.code) from None
+            raise QueryHTTPError(error.code, **problem) from None
         except (TimeoutError, URLError, OSError, HTTPException):
             raise QueryTransportError() from None
 
@@ -362,12 +586,52 @@ class GetBibleQueryClient:
             )
         try:
             decoded = payload.decode("utf-8")
-            document = json.loads(decoded, parse_constant=self._reject_json_constant)
+            return json.loads(decoded, parse_constant=self._reject_json_constant)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             raise QueryResponseError(
                 "The GetBible Query API returned malformed JSON."
             ) from None
-        return self._parse_document(document, references)
+
+    def _problem(self, error: HTTPError) -> dict[str, Any]:
+        """Read a bounded RFC 9457 problem document without trusting it."""
+        details: dict[str, Any] = {"code": "", "detail": "", "retry_after": None}
+        headers: Mapping[str, str] = dict(error.headers.items()) if error.headers else {}
+        retry_after = self._header(headers, "Retry-After")
+        if isinstance(retry_after, str) and retry_after.strip().isdigit():
+            details["retry_after"] = min(int(retry_after.strip()), 3600)
+        try:
+            raw = error.read(_MAX_PROBLEM_BYTES + 1)
+        except (OSError, HTTPException, ValueError):
+            return details
+        if not isinstance(raw, bytes) or len(raw) > _MAX_PROBLEM_BYTES:
+            return details
+        try:
+            document = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return details
+        if not isinstance(document, dict):
+            return details
+        for field in ("code", "detail"):
+            value = document.get(field)
+            if (
+                isinstance(value, str)
+                and 0 < len(value) <= _MAX_PROBLEM_FIELD_LENGTH
+                and not any(
+                    unicodedata.category(character) in {"Cc", "Cs"}
+                    and not character.isspace()
+                    for character in value
+                )
+            ):
+                details[field] = " ".join(value.split())
+        raw_retry = document.get("retry_after")
+        if (
+            details["retry_after"] is None
+            and isinstance(raw_retry, int)
+            and not isinstance(raw_retry, bool)
+            and raw_retry >= 0
+        ):
+            details["retry_after"] = min(raw_retry, 3600)
+        return details
 
     @staticmethod
     def _reject_json_constant(value: str) -> None:
@@ -561,6 +825,7 @@ __all__ = [
     "MissingVerseError",
     "QueryHTTPError",
     "QueryInputError",
+    "QueryLimitError",
     "QueryResponseError",
     "QueryTransportError",
     "VerseReference",

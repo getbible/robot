@@ -47,3 +47,35 @@ class CircuitOpen(RobotError):
 
 class ScriptureUnavailable(RobotError):
     """The Scripture repository or worker failed safely."""
+
+
+class ReferenceValidationError(RobotInputError):
+    """A Scripture reference could not be parsed or resolved."""
+
+
+class RequestLimitError(ReferenceValidationError):
+    """A request asked for more references, verses, or results than allowed."""
+
+
+class SearchValidationError(RobotInputError):
+    """Search words or filters were rejected by the search service."""
+
+
+class TranslationNotFoundError(RobotError):
+    """The requested Bible translation is not published."""
+
+
+class RepositoryError(RobotError):
+    """A public GetBible API could not be read completely."""
+
+
+class RepositoryResponseError(RepositoryError):
+    """A public GetBible API returned a malformed or unexpected response."""
+
+
+class RepositoryResponseTooLarge(RepositoryResponseError):
+    """A public GetBible API response exceeded its configured size bound."""
+
+
+class CacheIntegrityError(RepositoryError):
+    """Published content did not match its advertised checksum."""

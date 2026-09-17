@@ -1,4 +1,12 @@
-"""Bounded, non-blocking boundary around the synchronous GetBible client."""
+"""Bounded, non-blocking boundary around the public GetBible APIs.
+
+The robot holds no Scripture of its own.  Navigation data comes from the Main
+API catalogue, an explicit reference is resolved by the Query API, and a
+full-text search is answered by the Search API.  Each upstream is reached from
+a fixed worker pool behind a semaphore, a timeout, and a circuit breaker, so a
+slow or failing service can neither block the event loop nor take the other
+paths down with it.
+"""
 
 from __future__ import annotations
 
@@ -16,22 +24,6 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, TypeVar, cast
 
-from getbible import (
-    SEARCH_ENGINE_VERSION,
-    CacheIntegrityError,
-    GetBible,
-    GetBibleReference,
-    ReferenceValidationError,
-    RepositoryError,
-    RequestLimitError,
-    RequestLimits,
-    SearchBible,
-    SearchLimits,
-    SearchValidationError,
-    TranslationNotFoundError,
-)
-from getbible.search import shared_registry
-
 from config import Settings
 
 from .audit import audit_event
@@ -42,12 +34,44 @@ from .catalog import (
     ChapterOption,
     TranslationOption,
 )
-from .errors import CircuitOpen, RobotBusy, RobotInputError, ScriptureUnavailable
+from .errors import (
+    CircuitOpen,
+    ReferenceValidationError,
+    RepositoryError,
+    RequestLimitError,
+    RobotBusy,
+    RobotInputError,
+    ScriptureUnavailable,
+    SearchValidationError,
+    TranslationNotFoundError,
+)
+from .getbible_query import (
+    GetBibleQueryClient,
+    GetBibleQueryError,
+    QueryHTTPError,
+    QueryInputError,
+    QueryLimitError,
+    QueryTransportError,
+)
+from .getbible_search import MAX_LIMIT as SEARCH_API_MAX_LIMIT
+from .getbible_search import (
+    MAX_QUERY_LENGTH,
+    GetBibleSearchClient,
+    GetBibleSearchError,
+    SearchCriteria,
+    SearchHTTPError,
+    SearchInputError,
+    SearchTransportError,
+)
 from .interactions import SearchOptions, SearchResult
 
 LOGGER = logging.getLogger(__name__)
 _TRANSLATION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,29}\Z")
+#: A reference is book words, numbers, and the punctuation the Query API reads.
+#: Anything else is refused before a request is spent on it.
+_REFERENCE_RE = re.compile(r"[\w\s:,.\-–'’]{1,100}\Z")
 MAX_SEARCH_TOTAL = 1_000_000
+MAX_SEARCH_TERMS = 64
 _T = TypeVar("_T")
 
 
@@ -65,6 +89,9 @@ class SearchPage:
     translation: str
     total: int
     items: tuple[SearchResult, ...]
+    kind: str = "search"
+    offset: int = 0
+    has_more: bool = False
 
 
 class Metrics:
@@ -84,7 +111,7 @@ class Metrics:
 
 
 class CircuitBreaker:
-    """Fail fast after repeated repository failures and permit one recovery probe."""
+    """Fail fast after repeated upstream failures and permit one recovery probe."""
 
     def __init__(
         self,
@@ -155,71 +182,46 @@ class CircuitBreaker:
 
 
 class ScriptureService:
-    """Coordinates strict parsing, bounded work, repository access, and shutdown."""
+    """Coordinates strict validation, bounded work, upstream access, and shutdown."""
 
     def __init__(
         self,
         settings: Settings,
         *,
-        client: GetBible | None = None,
-        parser: GetBibleReference | None = None,
+        query_client: GetBibleQueryClient | None = None,
+        search_client: GetBibleSearchClient | None = None,
+        catalog: CatalogClient | None = None,
     ) -> None:
         self.settings = settings
-        limits = RequestLimits(
-            max_input_length=settings.max_input_length,
-            max_references=settings.max_references,
-            max_verses_per_reference=settings.max_verses_per_reference,
-            max_total_verses=settings.max_total_verses,
-        )
-        self._client = client or GetBible(
-            repo_path=settings.api_base_url,
-            request_timeout=(settings.connect_timeout, settings.read_timeout),
-            request_retries=settings.request_retries,
-            request_limits=limits,
-            search_limits=SearchLimits(
-                max_response_bytes=settings.search_max_response_bytes,
-                max_query_length=settings.max_input_length,
-                max_limit=settings.search_result_limit,
-                deadline_seconds=settings.search_deadline_seconds,
-                # An index build serves every later request, so Librarian 2 bounds
-                # it separately instead of charging it to whichever request arrived
-                # first and leaving nothing cached behind the failure.
-                index_build_seconds=settings.search_index_build_seconds,
-            ),
-            negative_translation_cache_limit=64,
-            negative_translation_ttl=300.0,
-            max_response_bytes=settings.max_response_bytes,
-            reference_cache_limit=settings.reference_cache_limit,
-            books_cache_limit=settings.books_cache_limit,
-            chapter_cache_limit=settings.chapter_cache_limit,
-            search_corpus_limit=settings.search_corpus_limit,
-            translation_cache_limit=settings.translation_cache_limit,
-        )
-        # Two different caches, deliberately sized apart. `search_corpus_limit`
-        # bounds this client's handle dictionary; the corpora themselves live in
-        # Librarian's process-wide registry, and that registry is what lets a
-        # second search of a translation skip the parse-and-analyse entirely.
-        # Sizing it down to the per-client limit would defeat the point: every
-        # switch between translations would re-read and re-index from scratch.
-        # It is therefore configured on its own, for reuse first.
-        shared_registry().resize(settings.search_shared_corpus_limit)
-        self._catalog = CatalogClient(
+        self._catalog = catalog or CatalogClient(
             base_url=settings.api_base_url,
             timeout=(settings.connect_timeout, settings.read_timeout),
             request_retries=settings.request_retries,
             max_response_bytes=settings.max_response_bytes,
             cache_ttl_seconds=settings.catalog_cache_ttl_seconds,
         )
-        self._parser = parser or GetBibleReference(
-            cache_limit=settings.reference_cache_limit,
-            max_reference_length=min(settings.max_input_length, 100),
-            max_verses=settings.max_verses_per_reference,
-            max_verse_number=1000,
+        # One socket deadline per attempt; the lookup budget bounds the whole
+        # wait, so a single stalled read can never consume it all by itself.
+        self._query = query_client or GetBibleQueryClient(
+            translation=settings.default_translation,
+            base_url=f"{settings.query_base_url}/v2",
+            timeout_seconds=settings.connect_timeout + settings.read_timeout,
+            max_response_bytes=settings.max_response_bytes,
+            max_references=max(settings.max_total_verses, 1),
+        )
+        self._search = search_client or GetBibleSearchClient(
+            base_url=f"{settings.search_base_url}/v2",
+            timeout_seconds=settings.search_timeout,
+            max_response_bytes=settings.search_max_response_bytes,
+            max_query_length=min(settings.max_input_length, MAX_QUERY_LENGTH),
         )
         self._executor = ThreadPoolExecutor(
             max_workers=settings.max_concurrent_lookups,
             thread_name_prefix="getbible",
         )
+        # Search keeps its own workers, permits, and circuit: the search service
+        # is a different upstream from the catalogue and the Query API, and its
+        # trouble must never cost a reader a chapter or a reference.
         self._search_executor = ThreadPoolExecutor(
             max_workers=settings.max_concurrent_searches,
             thread_name_prefix="getbible-search",
@@ -245,7 +247,13 @@ class ScriptureService:
         *,
         default_translation: str | None = None,
     ) -> ScriptureQuery:
-        """Resolve command arguments without probing the network for ordinary references."""
+        """Split command arguments into a reference and a translation.
+
+        The Query API is the authority on what a reference means, so nothing is
+        parsed here beyond the bounds a request must satisfy.  A trailing word
+        names a translation only when the catalogue publishes it — ``John 3:16
+        aov`` — and is otherwise part of the reference the API will judge.
+        """
         raw = " ".join(arguments).strip()
         if not raw:
             raise RobotInputError("A Scripture reference is required.")
@@ -262,43 +270,33 @@ class ScriptureService:
         if _TRANSLATION_RE.fullmatch(translation) is None:
             raise RobotInputError("The preferred Scripture translation is invalid.")
 
-        try:
-            self._validate_reference_set(raw, translation)
-            return ScriptureQuery(raw, translation)
-        except RequestLimitError:
-            raise
-        except ReferenceValidationError:
-            pass
-
+        reference = raw
         prefix, separator, candidate = raw.rpartition(" ")
         candidate = candidate.casefold()
         if (
-            not separator
-            or not prefix.strip()
-            or _TRANSLATION_RE.fullmatch(candidate) is None
+            separator
+            and prefix.strip()
+            and _looks_like_translation(candidate)
+            and await self.translation_exists(candidate)
         ):
-            raise RobotInputError("The Scripture reference is invalid.")
-
-        reference = prefix.strip()
-        self._validate_reference_set(reference, candidate)
-        if not await self.translation_exists(candidate):
-            raise TranslationNotFoundError(f"Translation ({candidate}) not found.")
-        return ScriptureQuery(reference, candidate)
+            reference = prefix.strip()
+            translation = candidate
+        self._validate_reference_set(reference)
+        return ScriptureQuery(reference, translation)
 
     async def translation_exists(self, abbreviation: str) -> bool:
         code = abbreviation.casefold()
         if _TRANSLATION_RE.fullmatch(code) is None:
             return False
-        return await self._repository_call(
-            "translation_checks",
-            self._client.valid_translation,
-            code,
-        )
+        options = await self.translations()
+        self.metrics.increment("translation_checks")
+        return any(option.code == code for option in options)
 
     async def select(self, query: ScriptureQuery) -> dict[str, Any]:
+        """Resolve one validated query through the Query API."""
         return await self._repository_call(
             "scripture_lookups",
-            self._client.select,
+            self._fetch_scripture,
             query.references,
             query.translation,
         )
@@ -337,7 +335,7 @@ class ScriptureService:
         book: BookOption,
         chapter: ChapterOption,
     ) -> ChapterContent:
-        """Load one complete chapter from the Main API, not Librarian."""
+        """Load one complete chapter from the Main API."""
         return await self._catalog_call(
             (
                 "chapter",
@@ -390,70 +388,43 @@ class ScriptureService:
         self,
         query: str,
         options: SearchOptions,
+        *,
+        offset: int = 0,
     ) -> SearchPage:
-        """Run one bounded Librarian search and validate its public contract.
+        """Run one bounded search through the Search API and validate its contract.
 
-        Librarian 2 derives the matching strategy from the query text itself, so
-        the application passes the user's criteria through unaltered. The 1.x
-        habit of flipping ``whole_word`` to ``substring`` on seeing a continuous
-        script is gone: it loosened the space-delimited terms of a mixed query,
-        so ``all`` began matching inside ``shall``.
-
-        The wait is the search budget, not the reference-lookup budget. The first
-        search of a translation builds that translation's index, and the generic
-        lookup timeout was shorter than the build it was waiting on, so searching
-        anything other than the prewarmed default reliably failed on its first
-        attempt while the build ran on in its worker.
+        The reader's criteria are passed through unaltered: the search service
+        reads the writing system of the query itself.  One page is at most the
+        configured result limit, clamped to the service's own maximum.
         """
-        criteria = SearchBible(
-            words=options.words,
-            match=options.match,
-            case_sensitive=options.case_sensitive,
-            scope=options.scope,
-            books=options.books,
-            diacritics=options.diacritics,
-            exclude=options.exclude,
-            proximity=options.proximity,
-            sort=options.sort,
-            limit=self.settings.search_result_limit,
-            offset=0,
-        )
+        limit = min(self.settings.search_result_limit, SEARCH_API_MAX_LIMIT)
+        try:
+            criteria = SearchCriteria(
+                words=options.words,
+                match=options.match,
+                case_sensitive=options.case_sensitive,
+                scope=options.scope,
+                books=tuple(options.books),
+                diacritics=options.diacritics,
+                exclude=tuple(options.exclude),
+                proximity=options.proximity,
+                sort=options.sort,
+                limit=limit,
+                offset=offset,
+            )
+        except SearchInputError as error:
+            raise SearchValidationError(str(error)) from error
         response = await self._search_call(
             "scripture_searches",
-            self._client.search,
+            self._search_request,
             query,
             options.translation,
             criteria,
-            timeout=self.settings.search_timeout,
+            # The socket deadline inside the worker fires first; this bound only
+            # keeps a worker that ignores it from holding the caller forever.
+            timeout=self.settings.search_timeout + 1.0,
         )
-        return self._search_page(response, query, options.translation)
-
-    async def warm_default_translation(self) -> dict[str, Any]:
-        """Load the default corpus and index before Telegram accepts traffic.
-
-        A cold build is bounded by the index budget rather than the interactive
-        lookup timeout. Paying it once here is what keeps every later request off
-        the build path, and Librarian shares the result process-wide.
-
-        The case and diacritics policy must be passed explicitly and must match
-        the policy a default search uses. An index is keyed by that pair, so
-        warming under a different one builds an index no search will read: the
-        prewarm becomes dead work and the first real search pays the whole build
-        inside the request path. Librarian's hardened facade still defaults this
-        argument to the 1.x spelling, which resolves to `exact`, so relying on
-        its default would warm the wrong index.
-        """
-        policy = SearchOptions()
-        return await self._search_call(
-            "search_warmups",
-            partial(
-                self._client.warm_translation,
-                case_sensitive=policy.case_sensitive,
-                diacritics=policy.diacritics,
-            ),
-            self.settings.default_translation,
-            timeout=self.settings.search_index_build_seconds,
-        )
+        return self._search_page(response, query, options.translation, limit)
 
     async def ready(self) -> bool:
         state = await self._circuit.snapshot()
@@ -464,21 +435,12 @@ class ScriptureService:
             self._circuit.snapshot(),
             self._search_circuit.snapshot(),
         )
-        state = {
+        return {
             "closed": self._closed,
             "metrics": self.metrics.snapshot(),
             "circuit": repository_circuit,
             "search_circuit": search_circuit,
-            # Matching semantics can change without a translation SHA changing.
-            # Publishing the engine version is what lets an operator tell an
-            # upgrade apart from a regression when result counts move.
-            "search_engine_version": SEARCH_ENGINE_VERSION,
         }
-        try:
-            state["librarian"] = self._client.cache_info()
-        except Exception:  # telemetry must never affect serving
-            state["librarian"] = {"available": False}
-        return state
 
     async def close(self) -> None:
         if self._closed:
@@ -495,25 +457,99 @@ class ScriptureService:
                 partial(self._search_executor.shutdown, wait=True, cancel_futures=True),
             ),
         )
-        self._client.close()
 
-    def _validate_reference_set(self, value: str, translation: str) -> None:
+    def _validate_reference_set(self, value: str) -> None:
         references = value.split(";")
         if len(references) > self.settings.max_references:
             raise RequestLimitError(
                 f"A request cannot contain more than {self.settings.max_references} references."
             )
-        total = 0
+        maximum_length = min(self.settings.max_input_length, 100)
         for raw_reference in references:
             reference = raw_reference.strip()
             if not reference:
                 raise ReferenceValidationError("Invalid empty reference.")
-            parsed = self._parser.ref(reference, translation)
-            total += len(parsed.verses)
-            if total > self.settings.max_total_verses:
-                raise RequestLimitError(
-                    f"A request cannot select more than {self.settings.max_total_verses} verses."
+            if len(reference) > maximum_length:
+                raise ReferenceValidationError(
+                    f"A reference cannot exceed {maximum_length} characters."
                 )
+            if _REFERENCE_RE.fullmatch(reference) is None or not any(
+                character.isalnum() for character in reference
+            ):
+                raise ReferenceValidationError("The Scripture reference is invalid.")
+
+    def _fetch_scripture(self, references: str, translation: str) -> dict[str, Any]:
+        """Resolve a reference set in a worker thread, retrying only transport faults."""
+        attempts = self.settings.request_retries + 1
+        for attempt in range(attempts):
+            try:
+                return self._query.fetch_scripture(
+                    references,
+                    translation=translation,
+                    max_verses=self.settings.max_total_verses,
+                )
+            except QueryLimitError as error:
+                raise RequestLimitError(
+                    "A request cannot select more than "
+                    f"{self.settings.max_total_verses} verses."
+                ) from error
+            except QueryInputError as error:
+                raise ReferenceValidationError("The Scripture reference is invalid.") from error
+            except QueryHTTPError as error:
+                if error.translation_not_found:
+                    raise TranslationNotFoundError(
+                        f"Translation ({translation}) not found."
+                    ) from error
+                if error.request_limit:
+                    raise RequestLimitError(
+                        "That request exceeds the Scripture service limits."
+                    ) from error
+                if error.invalid_reference:
+                    raise ReferenceValidationError(
+                        "The Scripture reference is invalid."
+                    ) from error
+                if error.retryable and attempt + 1 < attempts:
+                    time.sleep(_backoff(attempt))
+                    continue
+                raise RepositoryError(
+                    f"The Query API returned HTTP {error.status_code}."
+                ) from error
+            except QueryTransportError as error:
+                if attempt + 1 < attempts:
+                    time.sleep(_backoff(attempt))
+                    continue
+                raise RepositoryError("The Query API could not be reached.") from error
+            except GetBibleQueryError as error:
+                raise RepositoryError("The Query API returned an unusable answer.") from error
+        raise RepositoryError("The Query API could not be reached.")
+
+    def _search_request(
+        self,
+        query: str,
+        translation: str,
+        criteria: SearchCriteria,
+    ) -> dict[str, Any]:
+        """Run one search in a worker thread and classify what came back."""
+        try:
+            return self._search.search(query, translation, criteria)
+        except SearchInputError as error:
+            raise SearchValidationError(str(error)) from error
+        except SearchHTTPError as error:
+            if error.translation_not_found:
+                raise TranslationNotFoundError(
+                    f"Translation ({translation}) not found."
+                ) from error
+            if error.invalid_request:
+                raise SearchValidationError(
+                    error.detail or "The search words or filters were rejected."
+                ) from error
+            raise RepositoryError(
+                f"The Search API returned HTTP {error.status_code}."
+            ) from error
+        except SearchTransportError as error:
+            raise RepositoryError("The Search API could not be reached.") from error
+        except GetBibleSearchError as error:
+            raise RepositoryError("The Search API returned an unusable answer.") from error
 
     async def _repository_call(
         self,
@@ -613,12 +649,8 @@ class ScriptureService:
                 level=logging.WARNING,
             )
             raise
-        except (
-            ReferenceValidationError,
-            RequestLimitError,
-            SearchValidationError,
-            TranslationNotFoundError,
-        ):
+        except (RobotInputError, TranslationNotFoundError):
+            # The caller's input was refused; the upstream itself is healthy.
             await circuit.success()
             raise
         except (TimeoutError, asyncio.TimeoutError) as error:
@@ -642,7 +674,7 @@ class ScriptureService:
                 wrapped_future.add_done_callback(_consume_background_result)
             await circuit.abandoned()
             raise
-        except (RepositoryError, CacheIntegrityError, OSError) as error:
+        except (RepositoryError, OSError) as error:
             self.metrics.increment("repository_failures")
             await circuit.failure()
             raise ScriptureUnavailable("The Scripture repository is unavailable.") from error
@@ -669,9 +701,10 @@ class ScriptureService:
         response: object,
         query: str,
         translation: str,
+        limit: int,
     ) -> SearchPage:
         if not isinstance(response, dict):
-            raise ScriptureUnavailable("Librarian returned a malformed search response.")
+            raise ScriptureUnavailable("The search service returned a malformed response.")
         metadata = response.get("query")
         grouped = response.get("results")
         matches = response.get("matches")
@@ -680,24 +713,35 @@ class ScriptureService:
             or not isinstance(grouped, dict)
             or not isinstance(matches, list)
         ):
-            raise ScriptureUnavailable("Librarian returned a malformed search response.")
+            raise ScriptureUnavailable("The search service returned a malformed response.")
+        kind = metadata.get("kind")
         total = metadata.get("total")
         if (
-            not isinstance(total, int)
+            kind not in {"search", "reference"}
+            or not isinstance(total, int)
             or isinstance(total, bool)
             or total < 0
             or total > MAX_SEARCH_TOTAL
-            or len(matches) > self.settings.search_result_limit
+            or len(matches) > limit
             or total < len(matches)
-            or len(grouped) > self.settings.search_result_limit
+            or len(grouped) > limit
         ):
-            raise ScriptureUnavailable("Librarian returned invalid search pagination.")
+            raise ScriptureUnavailable("The search service returned invalid pagination.")
+        offset = metadata.get("offset", 0) if kind == "search" else 0
+        has_more = metadata.get("has_more", False) if kind == "search" else False
+        if (
+            isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or offset < 0
+            or not isinstance(has_more, bool)
+        ):
+            raise ScriptureUnavailable("The search service returned invalid pagination.")
 
         verses: dict[tuple[int, int, int], tuple[str, str]] = {}
         verse_count = 0
         for chapter in grouped.values():
             if not isinstance(chapter, dict):
-                raise ScriptureUnavailable("Librarian returned malformed search results.")
+                raise ScriptureUnavailable("The search service returned malformed results.")
             book_number = chapter.get("book_nr")
             book_name = chapter.get("book_name")
             chapter_number = chapter.get("chapter")
@@ -713,7 +757,7 @@ class ScriptureService:
                 or not 1 <= chapter_number <= 1000
                 or not isinstance(chapter_verses, list)
             ):
-                raise ScriptureUnavailable("Librarian returned malformed search results.")
+                raise ScriptureUnavailable("The search service returned malformed results.")
             for verse in chapter_verses:
                 verse_number = verse.get("verse") if isinstance(verse, dict) else None
                 text = verse.get("text") if isinstance(verse, dict) else None
@@ -725,17 +769,17 @@ class ScriptureService:
                     or not text.strip()
                 ):
                     raise ScriptureUnavailable(
-                        "Librarian returned malformed search verse data."
+                        "The search service returned malformed verse data."
                     )
                 key = (book_number, chapter_number, verse_number)
                 if key in verses:
                     raise ScriptureUnavailable(
-                        "Librarian returned duplicate search verse data."
+                        "The search service returned duplicate verse data."
                     )
                 verse_count += 1
-                if verse_count > self.settings.search_result_limit:
+                if verse_count > limit:
                     raise ScriptureUnavailable(
-                        "Librarian returned too many search verse records."
+                        "The search service returned too many verse records."
                     )
                 verses[key] = (
                     book_name.strip(),
@@ -746,12 +790,15 @@ class ScriptureService:
         seen_matches: set[tuple[int, int, int]] = set()
         for match in matches:
             if not isinstance(match, dict):
-                raise ScriptureUnavailable("Librarian returned malformed match metadata.")
+                raise ScriptureUnavailable("The search service returned malformed match metadata.")
             reference = match.get("reference")
             book_number = match.get("book_nr")
             chapter_number = match.get("chapter")
             verse_number = match.get("verse")
-            terms = match.get("terms")
+            # A reference-kind answer carries no matched terms at all.
+            terms = match.get("terms", [])
+            if terms is None:
+                terms = []
             if (
                 not isinstance(reference, str)
                 or not 1 <= len(reference.strip()) <= self.settings.max_input_length
@@ -765,24 +812,24 @@ class ScriptureService:
                 or isinstance(verse_number, bool)
                 or not 1 <= verse_number <= 2000
                 or not isinstance(terms, list)
-                or not 1 <= len(terms) <= 64
+                or len(terms) > MAX_SEARCH_TERMS
                 or any(
                     not isinstance(term, str)
                     or not 1 <= len(term.strip()) <= self.settings.max_input_length
                     for term in terms
                 )
             ):
-                raise ScriptureUnavailable("Librarian returned malformed match metadata.")
+                raise ScriptureUnavailable("The search service returned malformed match metadata.")
             key = (book_number, chapter_number, verse_number)
             if key in seen_matches:
                 raise ScriptureUnavailable(
-                    "Librarian returned duplicate search match metadata."
+                    "The search service returned duplicate match metadata."
                 )
             seen_matches.add(key)
             verse_data = verses.get(key)
             if verse_data is None:
                 raise ScriptureUnavailable(
-                    "Librarian search metadata did not match its result set."
+                    "The search service metadata did not match its result set."
                 )
             book_name, text = verse_data
             items.append(
@@ -802,7 +849,22 @@ class ScriptureService:
             translation=translation,
             total=total,
             items=tuple(items),
+            kind=kind,
+            offset=offset,
+            has_more=has_more,
         )
+
+
+def _looks_like_translation(candidate: str) -> bool:
+    """A trailing word can only name a translation if it reads like one."""
+    return (
+        _TRANSLATION_RE.fullmatch(candidate) is not None
+        and any(character.isalpha() for character in candidate)
+    )
+
+
+def _backoff(attempt: int) -> float:
+    return min(0.25 * (2**attempt), 1.0)
 
 
 def _consume_background_result(future: asyncio.Future[Any]) -> None:

@@ -7,9 +7,7 @@ from collections.abc import Iterable
 from typing import Any
 from urllib.parse import quote
 
-from getbible import RequestLimitError
-
-from .errors import ScriptureUnavailable
+from .errors import RequestLimitError, ScriptureUnavailable
 
 TELEGRAM_TEXT_LIMIT = 4096
 DEFAULT_CHUNK_LIMIT = 3900
