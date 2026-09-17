@@ -35,7 +35,6 @@ from .contributions import (
     ContributionIdempotencyConflict,
     ContributionNotAllowed,
     ContributionStore,
-    normalize_catalog,
 )
 from .errors import (
     CircuitOpen,
@@ -86,21 +85,6 @@ _DIRECT_SELECTION_RE = re.compile(
 MAX_MINIAPP_CHAPTER_VERSES = 250
 _MAX_JAVASCRIPT_SAFE_INTEGER = (1 << 53) - 1
 _PREFERENCE_UNCHANGED = object()
-_EMPTY_CONTRIBUTION_CATALOG = normalize_catalog(
-    {
-        "schema_version": 1,
-        "topics": [],
-        "associations": {"add": [], "remove": []},
-    }
-)
-_EMPTY_CONTRIBUTION_CHECKSUM = hashlib.sha256(
-    json.dumps(
-        _EMPTY_CONTRIBUTION_CATALOG,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-).hexdigest()
 
 
 def _unavailable_contribution_status() -> dict[str, object]:
@@ -125,6 +109,7 @@ def _unavailable_contribution_status() -> dict[str, object]:
                 "rejected": 0,
                 "deferred": 0,
                 "applied": 0,
+                "live": 0,
             },
         },
     }
@@ -389,8 +374,7 @@ class MiniAppApi:
                 extra_headers={
                     "Access-Control-Allow-Methods": ("GET, POST, PUT, PATCH, DELETE, OPTIONS"),
                     "Access-Control-Allow-Headers": (
-                        "Authorization, Content-Type, If-None-Match, "
-                        "X-Telegram-Init-Data"
+                        "Authorization, Content-Type, X-Telegram-Init-Data"
                     ),
                     "Access-Control-Max-Age": "600",
                 },
@@ -468,10 +452,6 @@ class MiniAppApi:
                 if method != "POST":
                     return self._method_not_allowed("POST, OPTIONS")
                 return await self._submit_contribution_events(session, request)
-            if parts.path == f"{self._api_prefix}/bookmarks/catalog":
-                if method != "GET":
-                    return self._method_not_allowed("GET, OPTIONS")
-                return self._contribution_catalog(request)
             if parts.path == f"{self._api_prefix}/bookmarks/backup":
                 if method != "POST":
                     return self._method_not_allowed("POST, OPTIONS")
@@ -599,7 +579,6 @@ class MiniAppApi:
             f"{self._api_prefix}/preferences": ("PUT",),
             f"{self._api_prefix}/contributions/status": ("GET",),
             f"{self._api_prefix}/contributions/events": ("POST",),
-            f"{self._api_prefix}/bookmarks/catalog": ("GET",),
             f"{self._api_prefix}/bookmarks/backup": ("POST",),
             f"{self._api_prefix}/bookmarks/restore": ("GET", "DELETE"),
             f"{self._api_prefix}/post": ("POST",),
@@ -1172,7 +1151,6 @@ class MiniAppApi:
             "preferences",
             "contributions/status",
             "contributions/events",
-            "bookmarks/catalog",
             "bookmarks/backup",
             "bookmarks/restore",
             "post",
@@ -1638,38 +1616,6 @@ class MiniAppApi:
                 "status": status,
                 "catalog": catalog,
             },
-        )
-
-    def _contribution_catalog(
-        self,
-        request: MiniAppHttpRequest,
-    ) -> MiniAppHttpResponse:
-        store = self._contributions
-        if store is None:
-            revision = 0
-            checksum = _EMPTY_CONTRIBUTION_CHECKSUM
-            catalog = _EMPTY_CONTRIBUTION_CATALOG
-            etag = f'"gb-catalog-0-{checksum[:16]}"'
-        else:
-            current = store.current_catalog()
-            revision = current.revision
-            checksum = current.checksum
-            catalog = current.catalog
-            etag = current.etag
-        headers = {
-            "Cache-Control": "private, no-cache, max-age=0, must-revalidate",
-            "ETag": etag,
-        }
-        if _header(request.headers, "if-none-match") == etag:
-            return self._response(304, None, extra_headers=headers)
-        return self._response(
-            200,
-            {
-                "revision": revision,
-                "checksum": checksum,
-                "catalog": catalog,
-            },
-            extra_headers=headers,
         )
 
     async def _update_preferences(

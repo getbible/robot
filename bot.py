@@ -64,13 +64,14 @@ from modules.commands import (
     start_command,
     unknown_command,
 )
-from modules.contributions import ContributionStore
+from modules.contributions import ContributionStore, LiveCatalogUpdate
 from modules.contributor_command import (
     CONTRIBUTION_STORE_SLOT,
     contributor_command,
 )
 from modules.dependencies import ApplicationServices
 from modules.ephemeral import delete_ephemeral_text, send_ephemeral_text
+from modules.getbible_bookmarks import GetBibleBookmarksClient, GetBibleBookmarksError
 from modules.health import HealthServer
 from modules.interactions import InteractionStore
 from modules.miniapp_sessions import MiniAppLaunch
@@ -84,6 +85,10 @@ from modules.service import ScriptureQuery, ScriptureService
 HEALTH_SLOT = "health_server"
 NOTIFIER_SLOT = "runtime_notifier"
 CONTRIBUTION_NOTIFICATION_TASK_SLOT = "contribution_notification_task"
+BOOKMARK_CATALOG_WATCH_TASK_SLOT = "bookmark_catalog_watch_task"
+# The first Bookmarks API check waits until startup work has settled; later
+# checks follow settings.bookmark_catalog_check_interval_seconds.
+BOOKMARK_CATALOG_WATCH_INITIAL_DELAY_SECONDS = 30.0
 LOGGER = logging.getLogger(__name__)
 ALLOWED_UPDATES = ("message", "callback_query")
 
@@ -224,6 +229,20 @@ def _build_contribution_store(settings: Settings) -> ContributionStore | None:
             exc_info=True,
         )
         raise RuntimeError("Configured contributor storage is unavailable.") from error
+
+
+def _build_bookmarks_client(settings: Settings) -> GetBibleBookmarksClient | None:
+    """Return the Bookmarks API client the catalogue watcher reads from."""
+    base_url = getattr(settings, "bookmarks_base_url", "https://bookmarks.getbible.net")
+    try:
+        return GetBibleBookmarksClient(base_url=f"{base_url}/v1")
+    except GetBibleBookmarksError as error:
+        LOGGER.warning(
+            "Bookmarks API catalogue watching is disabled: the client could not "
+            "be configured (%s)",
+            type(error).__name__,
+        )
+        return None
 
 
 def build_application(settings: Settings) -> Application:
@@ -624,6 +643,18 @@ async def _post_init(application: Application) -> None:
                 name="deliver-contribution-notifications",
             )
         )
+        bookmarks_client = _build_bookmarks_client(settings)
+        if bookmarks_client is not None:
+            application.bot_data[BOOKMARK_CATALOG_WATCH_TASK_SLOT] = asyncio.create_task(
+                _watch_bookmark_catalog(
+                    contributions,
+                    bookmarks_client,
+                    interval_seconds=float(
+                        getattr(settings, "bookmark_catalog_check_interval_seconds", 21_600)
+                    ),
+                ),
+                name="watch-bookmark-catalog",
+            )
     await _synchronize_telegram_profile(application, settings)
     # The robot holds no Scripture corpus or index: references, navigation and
     # search are all answered by the public GetBible services on demand, so
@@ -695,6 +726,82 @@ async def _deliver_contribution_notifications(
         await asyncio.sleep(1)
 
 
+async def _observe_bookmark_catalog(
+    store: ContributionStore,
+    client: GetBibleBookmarksClient,
+) -> LiveCatalogUpdate:
+    """Run one Bookmarks API check and settle contribution liveness from it.
+
+    The index document is cheap and carries the catalogue version and content
+    checksum; the full catalogue is downloaded only when either differs from
+    what the store recorded last.  Every store call runs in a worker thread
+    because the SQLite store is synchronous.
+    """
+    index = await asyncio.to_thread(client.index)
+    state = await asyncio.to_thread(store.live_catalog_state)
+    unchanged = (
+        state.get("catalog_version") == index.catalog_version
+        and state.get("checksum") == index.checksum
+    )
+    if unchanged:
+        update = await asyncio.to_thread(
+            store.record_live_catalog_check,
+            index.catalog_version,
+            index.checksum,
+        )
+    else:
+        catalog = await asyncio.to_thread(client.catalog)
+        update = await asyncio.to_thread(
+            store.record_live_catalog,
+            index.catalog_version,
+            index.checksum,
+            [topic.as_dict() for topic in catalog.topics],
+        )
+        LOGGER.info(
+            "Bookmarks API catalogue version %d observed (%d topics, %d verse links)",
+            index.catalog_version,
+            len(catalog.topics),
+            catalog.link_count,
+        )
+    if update.newly_live_event_ids:
+        LOGGER.info(
+            "Bookmarks API catalogue version %d made %d accepted contribution "
+            "events live for %d contributors",
+            update.catalog_version,
+            len(update.newly_live_event_ids),
+            len(update.notified_contributor_ids),
+        )
+    return update
+
+
+async def _watch_bookmark_catalog(
+    store: ContributionStore,
+    client: GetBibleBookmarksClient,
+    *,
+    interval_seconds: float,
+    initial_delay_seconds: float = BOOKMARK_CATALOG_WATCH_INITIAL_DELAY_SECONDS,
+) -> None:
+    """Notice upstream catalogue publications so contributors learn they are live.
+
+    No failure ends the loop: an unreachable API, a rejected document or a
+    store error is logged with its type only and retried after the next
+    interval.  Cancellation propagates so shutdown stays prompt.
+    """
+    await asyncio.sleep(initial_delay_seconds)
+    while True:
+        try:
+            await _observe_bookmark_catalog(store, client)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            LOGGER.warning(
+                "Bookmarks API catalogue check failed (%s); retrying in %d seconds",
+                type(error).__name__,
+                int(interval_seconds),
+            )
+        await asyncio.sleep(interval_seconds)
+
+
 async def _post_shutdown(application: Application) -> None:
     health: HealthServer = application.bot_data[HEALTH_SLOT]
     notifier: RuntimeNotifier = application.bot_data[NOTIFIER_SLOT]
@@ -707,12 +814,18 @@ async def _post_shutdown(application: Application) -> None:
     contribution_notifications: asyncio.Task[None] | None = application.bot_data.get(
         CONTRIBUTION_NOTIFICATION_TASK_SLOT
     )
+    catalog_watcher: asyncio.Task[None] | None = application.bot_data.get(
+        BOOKMARK_CATALOG_WATCH_TASK_SLOT
+    )
     health.mark_not_ready()
     await notifier.stopping()
-    if contribution_notifications is not None and not contribution_notifications.done():
-        contribution_notifications.cancel()
-        with suppress(asyncio.CancelledError):
-            await contribution_notifications
+    # The watcher stops first: an observation that completes during shutdown
+    # may queue notices, and the deliverer is still there to drain them.
+    for task in (catalog_watcher, contribution_notifications):
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
     if mini_app is not None:
         await mini_app.close()
     await health.close()

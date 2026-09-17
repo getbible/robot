@@ -206,13 +206,15 @@ class MiniAppShellRoutingTestCase(AsyncHTTPTestCase):
         self.assertEqual(shell.headers["Cache-Control"], "no-store, max-age=0")
         self.assertEqual(shell.headers["Content-Type"], "text/html; charset=utf-8")
         self.assertIn("default-src 'none'", shell.headers["Content-Security-Policy"])
-        # The page talks to exactly three public GetBible origins beside its
-        # own: the catalogue, the Query API, and the Search API it now calls
-        # directly instead of the robot.
+        # The page talks to exactly four public GetBible origins beside its
+        # own: the catalogue, the Query API, the Search API it calls directly
+        # instead of the robot, and the Bookmarks API that publishes the
+        # shared topic catalogue.
         self.assertEqual(
             _csp_directive(shell.headers["Content-Security-Policy"], "connect-src"),
             "connect-src 'self' https://api.getbible.net "
-            "https://query.getbible.net https://search.getbible.net",
+            "https://query.getbible.net https://search.getbible.net "
+            "https://bookmarks.getbible.net",
         )
         body = shell.body.decode("utf-8")
         self.assertIn(f'src="./build/{build_id}/app.js"', body)
@@ -492,7 +494,8 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
         self.assertEqual(
             _csp_directive(shell.headers["Content-Security-Policy"], "connect-src"),
             "connect-src 'self' https://api.getbible.net "
-            "https://query.getbible.net https://search.getbible.net",
+            "https://query.getbible.net https://search.getbible.net "
+            "https://bookmarks.getbible.net",
         )
         self.assertIn("noindex", shell.headers["X-Robots-Tag"])
 

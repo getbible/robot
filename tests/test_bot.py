@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import unittest
 from types import SimpleNamespace
@@ -7,7 +8,111 @@ from telegram.error import BadRequest
 from telegram.ext import CommandHandler
 
 import bot
+from modules.contributions import LIVE_NOTIFICATION_KIND, ContributionStore
+from modules.getbible_bookmarks import (
+    BookmarksCatalog,
+    BookmarksIndex,
+    BookmarksTransportError,
+    BookmarkTopic,
+)
 from modules.service import ScriptureQuery
+
+
+def _index(version: int, checksum: str) -> BookmarksIndex:
+    return BookmarksIndex(
+        catalog_version=version,
+        checksum=checksum,
+        topics=1,
+        verses=1,
+        locales=("en",),
+    )
+
+
+def _catalog(*verses: tuple[int, int, int]) -> BookmarksCatalog:
+    topic = BookmarkTopic(
+        id="grace",
+        name="Grace",
+        color="#bbf7d0",
+        aliases=(),
+        default=False,
+        verses=tuple(verses),
+    )
+    return BookmarksCatalog(checksum="d" * 64, topics=(topic,), document=b"{}")
+
+
+class _FakeBookmarksClient:
+    """A scripted Bookmarks API: each index() call pops the next answer."""
+
+    def __init__(self, *answers: BookmarksIndex | BaseException) -> None:
+        self.answers = list(answers)
+        self.catalog_calls = 0
+        self.catalog_answer = _catalog((43, 3, 16))
+
+    def index(self) -> BookmarksIndex:
+        # The last scripted answer repeats so a loop can keep observing it.
+        answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    def catalog(self) -> BookmarksCatalog:
+        self.catalog_calls += 1
+        return self.catalog_answer
+
+
+def _accepted_store(user_id: int = 42) -> ContributionStore:
+    """An in-memory store holding one accepted, not yet live, contribution."""
+    store = ContributionStore(path=None)
+    store.submit_application(user_id, first_name="Grace")
+    store.decide_application(user_id, "approved", actor="admin")
+    store.acknowledge_disclosure(user_id)
+    result = store.record_events(
+        user_id,
+        [
+            {
+                "client_event_id": "topic.grace.v1",
+                "type": "topic_upsert",
+                "topic": {"local_topic_id": "local.grace", "name": "Grace", "color": "#bbf7d0"},
+            },
+            {
+                "client_event_id": "verse.grace.43.3.16",
+                "type": "verse_add",
+                "topic": {"local_topic_id": "local.grace"},
+                "verse": {"book": 43, "chapter": 3, "verse": 16},
+            },
+        ],
+    )
+    store.set_topic_mapping(
+        user_id,
+        "local.grace",
+        "grace",
+        state="mapped",
+        actor="admin",
+        canonical_definition={"id": "grace", "name": "Grace", "color": "#bbf7d0", "aliases": []},
+    )
+    for event_id in result.event_ids.values():
+        store.decide_event(event_id, "approved", actor="admin")
+    store.publish_approved_events_atomically(
+        {
+            "schema_version": 1,
+            "topics": [{"id": "grace", "name": "Grace", "color": "#bbf7d0", "aliases": []}],
+            "associations": {
+                "add": [{"topic_id": "grace", "book": 43, "chapter": 3, "verse": 16}],
+                "remove": [],
+            },
+        },
+        list(result.event_ids.values()),
+        actor="admin",
+    )
+    return store
+
+
+def _live_notifications(store: ContributionStore) -> list[int]:
+    return [
+        notification.contributor_id
+        for notification in store.list_notifications()
+        if notification.kind == LIVE_NOTIFICATION_KIND
+    ]
 
 
 class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
@@ -39,6 +144,8 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             bot_name="GetBible Robot",
             bot_description="Read and search Scripture in Telegram with GetBible.",
             bot_short_description="Read and search Scripture with GetBible.",
+            bookmarks_base_url="https://bookmarks.getbible.net",
+            bookmark_catalog_check_interval_seconds=21_600,
         )
 
     def test_every_public_command_alias_and_interaction_handler_is_registered(
@@ -276,6 +383,159 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
                 "preferences.close",
             ],
         )
+
+    async def test_catalog_watcher_runs_with_the_store_and_stops_before_notifications(
+        self,
+    ) -> None:
+        health = SimpleNamespace(
+            start=AsyncMock(),
+            close=AsyncMock(),
+            mark_ready=Mock(),
+            mark_not_ready=Mock(),
+        )
+        notifier = SimpleNamespace(ready=Mock(), stopping=AsyncMock())
+        service = SimpleNamespace(close=AsyncMock())
+        preferences = SimpleNamespace(close=Mock())
+        store = ContributionStore(path=None)
+        application = SimpleNamespace(
+            bot=SimpleNamespace(
+                set_my_commands=AsyncMock(),
+                set_my_name=AsyncMock(),
+                set_my_description=AsyncMock(),
+                set_my_short_description=AsyncMock(),
+            ),
+            bot_data={
+                bot.HEALTH_SLOT: health,
+                bot.SERVICE_SLOT: service,
+                bot.SETTINGS_SLOT: self.settings(),
+                bot.PREFERENCES_SLOT: preferences,
+                bot.NOTIFIER_SLOT: notifier,
+                bot.CONTRIBUTION_STORE_SLOT: store,
+            },
+        )
+
+        await bot._post_init(application)
+        watcher = application.bot_data[bot.BOOKMARK_CATALOG_WATCH_TASK_SLOT]
+        deliverer = application.bot_data[bot.CONTRIBUTION_NOTIFICATION_TASK_SLOT]
+        self.assertEqual(watcher.get_name(), "watch-bookmark-catalog")
+        self.assertEqual(deliverer.get_name(), "deliver-contribution-notifications")
+        self.assertFalse(watcher.done())
+        # The first check waits for startup to settle, so nothing reached the
+        # network or the store yet.
+        await asyncio.sleep(0)
+        self.assertFalse(watcher.done())
+        self.assertFalse(store.live_catalog_state()["observed"])
+
+        await bot._post_shutdown(application)
+        self.assertTrue(watcher.cancelled())
+        self.assertTrue(deliverer.cancelled())
+
+        # Shutdown cancels the watcher before the deliverer, so a notice queued
+        # by a final observation still has a deliverer to drain it.
+        order: list[str] = []
+
+        async def cancellable(name: str) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                order.append(name)
+                raise
+
+        watcher = asyncio.create_task(cancellable("watcher"))
+        deliverer = asyncio.create_task(cancellable("deliverer"))
+        await asyncio.sleep(0)
+        application.bot_data[bot.BOOKMARK_CATALOG_WATCH_TASK_SLOT] = watcher
+        application.bot_data[bot.CONTRIBUTION_NOTIFICATION_TASK_SLOT] = deliverer
+        application.bot_data[bot.CONTRIBUTION_STORE_SLOT] = ContributionStore(path=None)
+        await bot._post_shutdown(application)
+        self.assertEqual(order, ["watcher", "deliverer"])
+
+    async def test_catalog_watcher_is_not_started_without_a_client(self) -> None:
+        settings = self.settings()
+        settings.bookmarks_base_url = "http://bookmarks.example"  # rejected: not https
+        with self.assertLogs(bot.LOGGER, level="WARNING") as captured:
+            self.assertIsNone(bot._build_bookmarks_client(settings))
+        self.assertIn("BookmarksResponseError", captured.output[0])
+        client = bot._build_bookmarks_client(self.settings())
+        assert client is not None
+        self.assertEqual(client.base_url, "https://bookmarks.getbible.net/v1")
+
+    async def test_catalog_observation_downloads_only_a_changed_catalogue(self) -> None:
+        store = _accepted_store()
+        try:
+            self.assertEqual(_live_notifications(store), [])
+            client = _FakeBookmarksClient(_index(3, "c" * 64))
+
+            with self.assertLogs(bot.LOGGER, level="INFO") as captured:
+                update = await bot._observe_bookmark_catalog(store, client)  # type: ignore[arg-type]
+            self.assertTrue(update.changed)
+            self.assertEqual(update.catalog_version, 3)
+            self.assertEqual(len(update.newly_live_event_ids), 2)
+            self.assertEqual(update.notified_contributor_ids, (42,))
+            self.assertEqual(client.catalog_calls, 1)
+            state = store.live_catalog_state()
+            self.assertEqual((state["catalog_version"], state["checksum"]), (3, "c" * 64))
+            self.assertEqual(_live_notifications(store), [42])
+            self.assertTrue(any("version 3 observed" in line for line in captured.output))
+            self.assertTrue(
+                any("made 2 accepted contribution events live" in line for line in captured.output)
+            )
+
+            # An unchanged index is a cheap check: no catalogue download, the
+            # check time moves, nothing new is live and nobody is told twice.
+            checked_before = state["checked_at"]
+            again = await bot._observe_bookmark_catalog(store, client)  # type: ignore[arg-type]
+            self.assertFalse(again.changed)
+            self.assertEqual(again.newly_live_event_ids, ())
+            self.assertEqual(client.catalog_calls, 1)
+            self.assertGreater(store.live_catalog_state()["checked_at"], checked_before)
+            self.assertEqual(_live_notifications(store), [42])
+
+            # A new version with the same content changes the version only.
+            client.answers = [_index(4, "c" * 64)]
+            bumped = await bot._observe_bookmark_catalog(store, client)  # type: ignore[arg-type]
+            self.assertFalse(bumped.changed)
+            self.assertEqual(client.catalog_calls, 2)
+            self.assertEqual(store.live_catalog_state()["catalog_version"], 4)
+        finally:
+            store.close()
+
+    async def test_catalog_watcher_logs_failures_and_keeps_checking(self) -> None:
+        store = _accepted_store()
+        try:
+            client = _FakeBookmarksClient(
+                BookmarksTransportError(),
+                RuntimeError("store exploded"),
+                _index(9, "e" * 64),
+            )
+            with self.assertLogs(bot.LOGGER, level="WARNING") as captured:
+                task = asyncio.create_task(
+                    bot._watch_bookmark_catalog(
+                        store,
+                        client,  # type: ignore[arg-type]
+                        interval_seconds=0.01,
+                        initial_delay_seconds=0.0,
+                    ),
+                    name="watch-bookmark-catalog",
+                )
+                for _ in range(500):
+                    if store.live_catalog_state()["observed"]:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(store.live_catalog_state()["observed"])
+                self.assertFalse(task.done())
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            self.assertEqual(store.live_catalog_state()["catalog_version"], 9)
+            self.assertEqual(_live_notifications(store), [42])
+            warnings = [line for line in captured.output if "catalogue check failed" in line]
+            self.assertEqual(len(warnings), 2)
+            self.assertIn("BookmarksTransportError", warnings[0])
+            self.assertIn("RuntimeError", warnings[1])
+            self.assertNotIn("store exploded", "".join(captured.output))
+        finally:
+            store.close()
 
     async def test_ephemeral_registration_failure_uses_ordinary_group_commands(
         self,
