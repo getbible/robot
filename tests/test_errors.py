@@ -2,7 +2,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from getbible import ReferenceValidationError, RequestLimitError
 from telegram.error import Conflict
 
 from modules.commands import (
@@ -10,7 +9,12 @@ from modules.commands import (
     _safe_error_message,
     error_handler,
 )
-from modules.errors import RobotRateLimited, ScriptureUnavailable
+from modules.errors import (
+    ReferenceValidationError,
+    RequestLimitError,
+    RobotRateLimited,
+    ScriptureUnavailable,
+)
 
 
 class SafeErrorMessageTestCase(unittest.TestCase):

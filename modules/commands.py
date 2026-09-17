@@ -12,14 +12,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import TypeVar, cast
 
-import regex
-from getbible import (
-    ReferenceValidationError,
-    RequestLimitError,
-    SearchValidationError,
-    TranslationNotFoundError,
-)
-from getbible.search import ScriptFamily, casefold_text, classify_text, fold_marks
 from telegram import (
     ForceReply,
     InlineKeyboardButton,
@@ -49,10 +41,14 @@ from modules.ephemeral import (
 )
 from modules.errors import (
     CircuitOpen,
+    ReferenceValidationError,
+    RequestLimitError,
     RobotBusy,
     RobotInputError,
     RobotRateLimited,
     ScriptureUnavailable,
+    SearchValidationError,
+    TranslationNotFoundError,
 )
 from modules.interactions import (
     InteractionSession,
@@ -66,6 +62,13 @@ from modules.miniapp_tornado import MiniAppServer
 from modules.posting import post_scripture
 from modules.preferences import UserPreferenceStore
 from modules.rate_limit import InboundRateLimiter
+from modules.search_text import (
+    ScriptFamily,
+    casefold_text,
+    classify_text,
+    fold_marks,
+    graphemes,
+)
 from modules.service import ScriptureQuery, ScriptureService
 from modules.utils import safe_delete_command, safe_delete_messages, send_typing
 
@@ -91,11 +94,8 @@ _CALLBACK_RE = re.compile(r"gb:([A-Za-z0-9_-]{8,16}):([a-z]{1,8}):([A-Za-z0-9_-]
 _INCOMPLETE_REFERENCE_RE = re.compile(r"[\w\s-]{1,512}\Z")
 _T = TypeVar("_T")
 
-#: Grapheme clusters, so composition and folding cannot desynchronise a span
-#: from the text it points into. `regex` supplies `\X`; `re` has no equivalent.
-_GRAPHEME = regex.compile(r"\X")
-#: Closed-class particles that attach to the front of an abjad word. Librarian
-#: indexes the stem behind one of these and nothing else, so `אור` reaches
+#: Closed-class particles that attach to the front of an abjad word. The search
+#: service indexes the stem behind one of these and nothing else, so `אור` reaches
 #: `והאור` while `אמר` never reaches `ויאמר` — that word yields `יאמר`, not
 #: `אמר`. Highlighting has to agree, or it marks a match nobody made.
 _ABJAD_PROCLITICS = frozenset(
@@ -106,9 +106,9 @@ _ABJAD_PROCLITICS = frozenset(
         "وال", "فال", "بال", "لل", "كال",
     }
 )
-#: Hebrew and Arabic roots are overwhelmingly triliteral, and Librarian will not
-#: invent a stem shorter than this out of a word that merely starts with a
-#: particle letter.
+#: Hebrew and Arabic roots are overwhelmingly triliteral, and the search service
+#: will not invent a stem shorter than this out of a word that merely starts
+#: with a particle letter.
 _MIN_ABJAD_STEM = 3
 #: Writing systems whose marks are accents or optional pointing, and so fold.
 #: Brahmic and continuous scripts are absent because their marks carry vowels.
@@ -685,32 +685,42 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     default_translation=preferred_translation,
                 )
             except (ReferenceValidationError, RobotInputError):
-                if mini_app is None or not _looks_like_incomplete_reference(
-                    raw_reference
-                ):
-                    raise
-                await _send_mini_app_launch(
+                if not await _offer_reference_completion(
                     update,
                     context,
                     mini_app,
-                    route="bible",
-                    query=raw_reference,
-                    text="Complete this Scripture reference in getBible.Life.",
-                )
-                if not ephemeral:
-                    await _cleanup_command_source(update, context, chat_id=chat_id)
+                    raw_reference,
+                    chat_id=chat_id,
+                    ephemeral=ephemeral,
+                ):
+                    raise
                 return
             if not ephemeral:
                 await send_typing(update, context)
-            await _post_scripture(
-                chat_id,
-                query,
-                settings,
-                service,
-                context,
-                source="bible_direct",
-                message_thread_id=message_thread_id,
-            )
+            try:
+                await _post_scripture(
+                    chat_id,
+                    query,
+                    settings,
+                    service,
+                    context,
+                    source="bible_direct",
+                    message_thread_id=message_thread_id,
+                )
+            except ReferenceValidationError:
+                # Static validation lets a bare book name or a chapter fragment
+                # through; the Query API judges it inside the post, before any
+                # message is sent, so the reader can still be offered here.
+                if not await _offer_reference_completion(
+                    update,
+                    context,
+                    mini_app,
+                    raw_reference,
+                    chat_id=chat_id,
+                    ephemeral=ephemeral,
+                ):
+                    raise
+                return
             await _cleanup_command_source(update, context, chat_id=chat_id)
             return
 
@@ -769,6 +779,36 @@ async def bible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             reply_to_ephemeral_message_id=source_ephemeral_message_id,
             message_thread_id=message_thread_id,
         )
+
+
+async def _offer_reference_completion(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    mini_app: MiniAppServer | None,
+    raw_reference: str,
+    *,
+    chat_id: int,
+    ephemeral: bool,
+) -> bool:
+    """Open the Mini App reader on a reference fragment the service rejected.
+
+    Returns False when there is nothing to offer — no Mini App, or input that
+    is malformed rather than merely incomplete — so the caller reports the
+    rejection instead.
+    """
+    if mini_app is None or not _looks_like_incomplete_reference(raw_reference):
+        return False
+    await _send_mini_app_launch(
+        update,
+        context,
+        mini_app,
+        route="bible",
+        query=raw_reference,
+        text="Complete this Scripture reference in getBible.Life.",
+    )
+    if not ephemeral:
+        await _cleanup_command_source(update, context, chat_id=chat_id)
+    return True
 
 
 def _looks_like_incomplete_reference(value: str) -> bool:
@@ -1510,7 +1550,7 @@ async def _dispatch_callback(
             session,
             context,
             "Choose the maximum number of intervening words.\n"
-            "Proximity uses Librarian's “all words” mode.",
+            "Proximity uses the all-words mode.",
             _search_proximity_keyboard(session),
         )
         return
@@ -1747,8 +1787,8 @@ async def _run_search(
 ) -> None:
     if not query:
         raise RobotInputError("Search words are required.")
-    # Librarian 2 reads the query's writing system itself, so the user's chosen
-    # match mode survives the search instead of being rewritten under them.
+    # The search service reads the query's writing system itself, so the user's
+    # chosen match mode survives the search instead of being rewritten under them.
     page = await service.search(query, session.search_options)
     session.search_query = page.query
     session.search_total = page.total
@@ -3365,10 +3405,10 @@ def _search_match_spans(
 ) -> tuple[tuple[int, int], ...]:
     """Locate merged match spans while retaining original Unicode positions.
 
-    Each term is read under the rules of its own writing system, the way
-    Librarian reads it, so a verse the engine matched is a verse this can
-    highlight. Applying one set of rules to every script is what made 1.x
-    highlighting silently empty for the languages 2.x newly reaches.
+    Each term is read under the rules of its own writing system, the way the
+    search service reads it, so a verse the engine matched is a verse this can
+    highlight. Applying one set of rules to every script is what once left
+    highlighting silently empty for every language the engine newly reached.
     """
     spans: list[tuple[int, int]] = []
     prepared: dict[bool, tuple[str, tuple[int, ...], tuple[int, ...]]] = {}
@@ -3379,7 +3419,7 @@ def _search_match_spans(
         family = classify_text(stripped)
         # Marks are accents or optional pointing in alphabetic and abjad text.
         # In Brahmic and continuous text they carry vowels, so folding them
-        # would change the word; Librarian leaves them alone and so must this.
+        # would change the word; the engine leaves them alone and so must this.
         fold = options.diacritics == "fold" and family in _FOLDED_FAMILIES
         if fold not in prepared:
             prepared[fold] = _normalized_search_value(
@@ -3408,12 +3448,12 @@ def _search_match_spans(
             if options.match == "whole_word" and delimited:
                 # Nothing delimits a word in a continuous script, so there is no
                 # boundary to test. In an abjad a closed-class particle attaches
-                # to the front and Librarian still matches the stem behind it,
+                # to the front and the engine still matches the stem behind it,
                 # so only the trailing edge is a real boundary there.
                 leading = _continues_search_word(normalized, match_at - 1)
                 if leading and family is ScriptFamily.ABJAD:
                     # Only a closed-class particle may sit in front, and only
-                    # ahead of a stem long enough for Librarian to have derived.
+                    # ahead of a stem long enough for the engine to have derived.
                     start = match_at
                     while _continues_search_word(normalized, start - 1):
                         start -= 1
@@ -3461,26 +3501,28 @@ def _normalized_search_value(
     because normalization is not one-to-one in either direction: casefolding can
     expand a character and composition can contract several.
 
-    The pipeline is Librarian's, in Librarian's order — compose, then case, then
-    marks — because a query can only match what the same analysis produced from
-    the verse:
+    The pipeline is the search service's, in its order — compose, then case,
+    then marks — because a query can only match what the same analysis produced
+    from the verse:
 
-    * **Compose (NFC).** `Analyzer.prepare()` composes before anything else. A
-      corpus served as decomposed Hangul jamo is indexed under its composed form,
-      so without this a term the engine matched is absent from the text here.
+    * **Compose (NFC).** The engine composes before anything else. A corpus
+      served as decomposed Hangul jamo is indexed under its composed form, so
+      without this a term the engine matched is absent from the text here.
       Composing per grapheme is what allows the offsets above to stay exact.
+      Walking grapheme clusters rather than code points is what keeps a span
+      from ending between a letter and its own mark.
     * **Case.** Casefolding a Greek iota subscript expands it into a full iota,
       so `ῷ` becomes `ωι` in this order and a bare `ω` in the other. A term the
       engine indexed as `τωι` would then never be found in the verse to mark.
-    * **Marks.** Folding is Librarian's own, so a letter the engine folds folds
-      here too. Unicode decomposition alone cannot reach `đ`, `ø`, `ł` or `Ð`,
-      which is why a locally written NFKD pass left `Duc` unable to mark `Ðức`.
+    * **Marks.** Folding is the engine's own table, so a letter the engine folds
+      folds here too. Unicode decomposition alone cannot reach `đ`, `ø`, `ł` or
+      `Ð`, which is why a bare NFKD pass left `Duc` unable to mark `Ðức`.
     """
     characters: list[str] = []
     starts: list[int] = []
     ends: list[int] = []
     offset = 0
-    for grapheme in _GRAPHEME.findall(value):
+    for grapheme in graphemes(value):
         end = offset + len(grapheme)
         normalized = unicodedata.normalize("NFC", grapheme)
         if not case_sensitive:
@@ -3498,7 +3540,7 @@ def _normalized_search_value(
 def _continues_search_word(value: str, index: int) -> bool:
     """Report whether the character at `index` continues the word beside it.
 
-    Mirrors Librarian's word pattern, where an apostrophe carries a word onward
+    Mirrors the engine's word pattern, where an apostrophe carries a word onward
     only when a letter or number follows it. Treating a trailing apostrophe as
     part of the word made `priests` fail to mark `priests'` — the engine returns
     that verse, because it indexed the unit as `priests` too.

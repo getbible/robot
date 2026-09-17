@@ -19,7 +19,7 @@ MAX_WORKFLOW_MESSAGE_IDS = 256
 
 @dataclass(frozen=True, slots=True)
 class SearchOptions:
-    """User-configurable Librarian search criteria."""
+    """User-configurable criteria for the search service."""
 
     translation: str = "kjv"
     words: str = "all"
@@ -35,7 +35,7 @@ class SearchOptions:
 
 @dataclass(frozen=True, slots=True)
 class SearchResult:
-    """One selectable verse returned by Librarian search."""
+    """One selectable verse returned by the search service."""
 
     reference: str
     book_number: int

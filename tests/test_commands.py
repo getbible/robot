@@ -4,7 +4,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from getbible import RepositoryError
 from telegram import Message
 from telegram.error import NetworkError, TelegramError
 
@@ -37,7 +36,13 @@ from modules.commands import (
     unknown_command,
 )
 from modules.ephemeral import TELEGRAM_TEXT_LIMIT, telegram_text_length
-from modules.errors import RobotInputError, RobotRateLimited, ScriptureUnavailable
+from modules.errors import (
+    ReferenceValidationError,
+    RepositoryError,
+    RobotInputError,
+    RobotRateLimited,
+    ScriptureUnavailable,
+)
 from modules.interactions import (
     InteractionSession,
     InteractionStore,
@@ -866,6 +871,93 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
             message_id=250,
         )
 
+    async def test_bare_book_rejected_by_the_query_api_opens_the_reader(
+        self,
+    ) -> None:
+        """Static validation lets `John` through; the Query API judges it in the post.
+
+        The Mini App reader is still the answer to an incomplete reference, so a
+        rejection from `select` must offer it exactly as a rejection from
+        `resolve_query` does — and nothing may have been posted first.
+        """
+        context = self.context(_Limiter())
+        service = SimpleNamespace(
+            resolve_query=AsyncMock(return_value=ScriptureQuery("John", "kjv")),
+            select=AsyncMock(
+                side_effect=ReferenceValidationError("The Scripture reference is invalid.")
+            ),
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        mini_app = Mock(spec=MiniAppServer)
+        mini_app.create_launch.return_value = SimpleNamespace(token="opaque")
+        mini_app.web_url.return_value = (
+            "https://bot.example/getbible/?launch=opaque"
+        )
+        context.application.bot_data[MINI_APP_SLOT] = mini_app
+        context.args = ["John"]
+        update = self.update()
+        update.effective_chat.type = "private"
+        update.effective_message = SimpleNamespace(
+            chat_id=100,
+            message_id=250,
+        )
+
+        await bible_command(update, context)
+
+        service.resolve_query.assert_awaited_once_with(
+            ["John"],
+            default_translation="kjv",
+        )
+        service.select.assert_awaited_once_with(ScriptureQuery("John", "kjv"))
+        mini_app.create_launch.assert_called_once_with(
+            user_id=200,
+            target_chat_id=100,
+            message_thread_id=None,
+            initial_route="bible",
+            initial_query="John",
+            source_ephemeral_message_id=None,
+            source_ephemeral_receiver_user_id=None,
+        )
+        context.bot.send_message.assert_awaited_once()
+        sent = context.bot.send_message.await_args.kwargs
+        self.assertIn("Complete this Scripture reference", sent["text"])
+        self.assertNotIn("parse_mode", sent)
+        context.bot.delete_message.assert_awaited_once_with(
+            chat_id=100,
+            message_id=250,
+        )
+
+    async def test_explicit_reference_rejected_by_the_query_api_is_reported(
+        self,
+    ) -> None:
+        """A complete-looking reference the service rejects is an error, not a launch."""
+        context = self.context(_Limiter())
+        service = SimpleNamespace(
+            resolve_query=AsyncMock(return_value=ScriptureQuery("Jn 99:1", "kjv")),
+            select=AsyncMock(
+                side_effect=ReferenceValidationError("The Scripture reference is invalid.")
+            ),
+        )
+        context.application.bot_data[SERVICE_SLOT] = service
+        mini_app = Mock(spec=MiniAppServer)
+        context.application.bot_data[MINI_APP_SLOT] = mini_app
+        context.args = ["Jn", "99:1"]
+        update = self.update()
+        update.effective_chat.type = "private"
+        update.effective_message = SimpleNamespace(
+            chat_id=100,
+            message_id=250,
+        )
+
+        await bible_command(update, context)
+
+        service.select.assert_awaited_once()
+        mini_app.create_launch.assert_not_called()
+        self.assertIn(
+            "could not understand",
+            context.bot.send_message.await_args.kwargs["text"],
+        )
+
     async def test_malformed_bible_reference_does_not_become_a_mini_app_launch(
         self,
     ) -> None:
@@ -947,8 +1039,8 @@ class CommandRateLimitTestCase(unittest.IsolatedAsyncioTestCase):
         service.search.assert_awaited_once()
         options = service.search.await_args.args[1]
         self.assertEqual(options.translation, "chiuns")
-        # Librarian 2 reads the Han query itself, so the default whole-word mode
-        # survives instead of being rewritten to substring under the user.
+        # The search service reads the Han query itself, so the default
+        # whole-word mode survives instead of being rewritten to substring.
         self.assertEqual(options.match, "whole_word")
 
     async def test_group_direct_bible_posts_only_scripture_publicly(self) -> None:
@@ -1844,9 +1936,9 @@ class SelectionFormattingTestCase(unittest.TestCase):
     def test_search_highlight_marks_continuous_scripts_under_whole_word(self) -> None:
         """Nothing delimits a word in Han, so a boundary test finds no match.
 
-        Librarian 2 returns these verses under the default criteria, which 1.x
-        never did. Testing for a word boundary anyway left the languages the
-        upgrade exists to serve with every match unmarked.
+        The search service returns these verses under the default criteria.
+        Testing for a word boundary anyway left the languages the engine
+        exists to serve with every match unmarked.
         """
         rendered = _highlight_search_terms_plain(
             "神爱世人，甚至将他的独生子赐给他们。",
@@ -1860,7 +1952,7 @@ class SelectionFormattingTestCase(unittest.TestCase):
         )
 
     def test_search_highlight_marks_an_abjad_stem_behind_its_particle(self) -> None:
-        """Librarian matches `אור` inside `והאור`, so the leading edge is not a boundary."""
+        """The engine matches `אור` inside `והאור`, so the leading edge is not a boundary."""
         rendered = _highlight_search_terms_plain(
             "ויאמר אלהים יהי אור והאור טוב",
             ("אור",),
@@ -1872,10 +1964,10 @@ class SelectionFormattingTestCase(unittest.TestCase):
         self.assertEqual(rendered, "ויאמר אלהים יהי 【אור】 וה【אור】 טוב")
 
     def test_search_highlight_folds_letters_decomposition_cannot_reach(self) -> None:
-        """`Ðức` is reachable by `Duc` in Librarian, so it must be markable here.
+        """`Ðức` is reachable by `Duc` in the search service, so it must be markable.
 
-        NFKD leaves `Ð` alone, so a locally written folding pass could not mark
-        what the engine had already matched. Librarian's own folding can.
+        NFKD leaves `Ð` alone, so a bare decomposition pass could not mark
+        what the engine had already matched. The engine's own fold table can.
         """
         rendered = _highlight_search_terms_plain(
             "Ðức Chúa Trời yêu thương thế gian",
@@ -1886,7 +1978,7 @@ class SelectionFormattingTestCase(unittest.TestCase):
         self.assertEqual(rendered, "【Ðức】 Chúa 【Trời】 yêu thương thế gian")
 
     def test_search_highlight_casefolds_before_folding_marks(self) -> None:
-        """The order is Librarian's: `prepare()` casefolds, `_fold()` follows.
+        """The order is the engine's: casefolding first, mark folding after.
 
         Casefolding a Greek iota subscript expands it into a full iota, so `ῷ`
         normalizes to `ωι` this way round and to a bare `ω` the other. The
@@ -1901,7 +1993,7 @@ class SelectionFormattingTestCase(unittest.TestCase):
         self.assertEqual(rendered, "ἐν 【τῷ】 κόσμῳ ἦν")
 
     def test_search_highlight_ends_a_word_at_a_trailing_apostrophe(self) -> None:
-        """Librarian carries a word through an apostrophe only if a letter follows.
+        """The engine carries a word through an apostrophe only if a letter follows.
 
         It indexes `priests'` as the unit `priests` and returns the verse, so
         treating the trailing apostrophe as part of the word left the match the
@@ -1928,7 +2020,7 @@ class SelectionFormattingTestCase(unittest.TestCase):
         self.assertEqual(rendered, "فِي الْ【بَدْءِ】 كَانَ")
 
     def test_search_highlight_composes_before_matching(self) -> None:
-        """Librarian composes to NFC before analysing, so this must too.
+        """The engine composes to NFC before analysing, so this must too.
 
         A corpus served as decomposed Hangul jamo is indexed under its composed
         form and returns the verse. Without composing here, the term the engine
@@ -1949,15 +2041,15 @@ class SelectionFormattingTestCase(unittest.TestCase):
             "하나님이 세상을 이처럼 【사랑】하사",
         )
 
-    def test_search_highlight_marks_only_the_abjad_stems_librarian_derives(
+    def test_search_highlight_marks_only_the_abjad_stems_the_engine_derives(
         self,
     ) -> None:
         """A stem is reachable behind a particle, not behind any prefix at all.
 
-        Librarian analyses `ויאמר` into `ויאמר` and `יאמר` — never `אמר` —
+        The engine analyses `ויאמר` into `ויאמר` and `יאמר` — never `אמר` —
         because `וי` is not a closed-class particle. Skipping the leading
         boundary for all abjad text marked a match the engine never made.
-        Verified against `analyzer_for(False, True).terms()` for each word here.
+        Verified against the engine's analysis of each word here.
         """
         rendered = _highlight_search_terms_plain(
             "ויאמר אלהים ולאמר הנביא אמר יהוה",
@@ -1969,7 +2061,7 @@ class SelectionFormattingTestCase(unittest.TestCase):
         self.assertEqual(rendered, "ויאמר אלהים ול【אמר】 הנביא 【אמר】 יהוה")
 
     def test_search_highlight_will_not_invent_a_short_abjad_stem(self) -> None:
-        """Librarian requires three letters before it derives a stem at all."""
+        """The engine requires three letters before it derives a stem at all."""
         rendered = _highlight_search_terms_plain(
             "ובן האיש בן",
             ("בן",),
