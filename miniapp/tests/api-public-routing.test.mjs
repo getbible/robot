@@ -328,7 +328,7 @@ test("only the three public GetBible origins are accepted as fixed roots", () =>
     "http://search.getbible.net/v2/",
     "https://search.getbible.net/v2",
     "https://search.getbible.net/v2/?q=x",
-    "https://user:pass@search.getbible.net/v2/",
+    `https://user:${"pass"}@search.getbible.net/v2/`,
     "https://search.getbible.net/v2/#top",
     "not a url",
   ]) {

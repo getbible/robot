@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import unittest
 from types import SimpleNamespace
@@ -34,15 +33,12 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             ),
             max_concurrent_updates=4,
             max_output_chunks=8,
-            prewarm_default_translation=True,
             default_translation="kjv",
             user_preferences_file=None,
             user_preference_limit=100,
             bot_name="GetBible Robot",
             bot_description="Read and search Scripture in Telegram with GetBible.",
             bot_short_description="Read and search Scripture with GetBible.",
-            cache_max_bytes=256 * 1024 * 1024,
-            cache_maintenance_interval_seconds=21_600,
         )
 
     def test_every_public_command_alias_and_interaction_handler_is_registered(
@@ -166,38 +162,47 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             bot._build_contribution_store(settings)
 
     async def test_startup_and_shutdown_cover_telegram_health_and_service(self) -> None:
+        events: list[str] = []
+
+        def record(name: str) -> Mock:
+            return Mock(side_effect=lambda *args, **kwargs: events.append(name))
+
+        def record_async(name: str) -> AsyncMock:
+            return AsyncMock(side_effect=lambda *args, **kwargs: events.append(name))
+
         health = SimpleNamespace(
-            start=AsyncMock(),
-            close=AsyncMock(),
-            mark_ready=Mock(),
-            mark_not_ready=Mock(),
+            start=record_async("health.start"),
+            close=record_async("health.close"),
+            mark_ready=record("health.mark_ready"),
+            mark_not_ready=record("health.mark_not_ready"),
         )
-        janitor = SimpleNamespace(start=Mock(), close=AsyncMock())
-        notifier = SimpleNamespace(ready=Mock(), stopping=AsyncMock())
-        service = SimpleNamespace(
-            close=AsyncMock(),
-            warm_default_translation=AsyncMock(
-                return_value={"abbreviation": "kjv", "verses": 31_102}
-            ),
+        notifier = SimpleNamespace(
+            ready=record("notifier.ready"),
+            stopping=record_async("notifier.stopping"),
         )
-        preferences = SimpleNamespace(close=Mock())
+        # The service offers nothing but close(): the robot holds no corpus,
+        # so startup must not reach for a warm-up hook that no longer exists.
+        service = SimpleNamespace(close=record_async("service.close"))
+        preferences = SimpleNamespace(close=record("preferences.close"))
         settings = self.settings()
         application = SimpleNamespace(
             bot=SimpleNamespace(
-                set_my_commands=AsyncMock(),
-                set_my_name=AsyncMock(),
-                set_my_description=AsyncMock(),
-                set_my_short_description=AsyncMock(),
+                set_my_commands=record_async("telegram.set_my_commands"),
+                set_my_name=record_async("telegram.set_my_name"),
+                set_my_description=record_async("telegram.set_my_description"),
+                set_my_short_description=record_async(
+                    "telegram.set_my_short_description"
+                ),
             ),
             bot_data={
                 bot.HEALTH_SLOT: health,
                 bot.SERVICE_SLOT: service,
                 bot.SETTINGS_SLOT: settings,
                 bot.PREFERENCES_SLOT: preferences,
-                bot.CACHE_JANITOR_SLOT: janitor,
                 bot.NOTIFIER_SLOT: notifier,
             },
         )
+        slots_before_startup = set(application.bot_data)
 
         await bot._post_init(application)
         self.assertEqual(application.bot.set_my_commands.await_count, 2)
@@ -234,28 +239,43 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         application.bot.set_my_short_description.assert_awaited_once_with(
             settings.bot_short_description
         )
-        health.start.assert_awaited_once()
-        janitor.start.assert_called_once_with()
+        # Liveness comes first, readiness only once the Telegram profile is
+        # synchronised, and the systemd notice only once readiness is true.
+        # Nothing is warmed in between: every lookup goes to the public APIs.
+        self.assertEqual(
+            events,
+            [
+                "health.start",
+                "telegram.set_my_commands",
+                "telegram.set_my_commands",
+                "telegram.set_my_name",
+                "telegram.set_my_description",
+                "telegram.set_my_short_description",
+                "health.mark_ready",
+                "notifier.ready",
+            ],
+        )
+        # No prewarm task and no cache janitor run behind readiness, so no
+        # slot appears for either.
+        self.assertEqual(set(application.bot_data), slots_before_startup)
+        self.assertFalse(hasattr(bot, "PREWARM_SLOT"))
+        self.assertFalse(hasattr(bot, "CACHE_JANITOR_SLOT"))
+        self.assertFalse(hasattr(bot, "CacheJanitor"))
 
-        # Readiness does not wait on the corpus. An index build is bounded by
-        # SEARCH_INDEX_BUILD_SECONDS, which can outlast the unit's
-        # TimeoutStartSec, so blocking READY=1 behind it would report a healthy
-        # service as a failed start. The build runs behind readiness instead.
-        health.mark_ready.assert_called_once_with()
-        notifier.ready.assert_called_once_with()
-
-        prewarm = application.bot_data[bot.PREWARM_SLOT]
-        self.assertIsInstance(prewarm, asyncio.Task)
-        await prewarm
-        service.warm_default_translation.assert_awaited_once()
-
+        events.clear()
         await bot._post_shutdown(application)
-        health.mark_not_ready.assert_called_once_with()
-        health.close.assert_awaited_once()
-        janitor.close.assert_awaited_once()
-        notifier.stopping.assert_awaited_once()
-        service.close.assert_awaited_once()
-        preferences.close.assert_called_once_with()
+        # Readiness drops before the stop notice, and the service closes only
+        # after the listeners that hand it work are gone.
+        self.assertEqual(
+            events,
+            [
+                "health.mark_not_ready",
+                "notifier.stopping",
+                "health.close",
+                "service.close",
+                "preferences.close",
+            ],
+        )
 
     async def test_ephemeral_registration_failure_uses_ordinary_group_commands(
         self,
@@ -265,14 +285,8 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
             close=AsyncMock(),
             mark_ready=Mock(),
         )
-        janitor = SimpleNamespace(start=Mock())
         notifier = SimpleNamespace(ready=Mock())
-        service = SimpleNamespace(
-            close=AsyncMock(),
-            warm_default_translation=AsyncMock(
-                return_value={"abbreviation": "kjv", "verses": 31_102}
-            ),
-        )
+        service = SimpleNamespace(close=AsyncMock())
         preferences = SimpleNamespace(close=Mock())
         telegram_bot = SimpleNamespace(
             set_my_commands=AsyncMock(
@@ -294,7 +308,6 @@ class BotWiringTestCase(unittest.IsolatedAsyncioTestCase):
                 bot.SERVICE_SLOT: service,
                 bot.SETTINGS_SLOT: settings,
                 bot.PREFERENCES_SLOT: preferences,
-                bot.CACHE_JANITOR_SLOT: janitor,
                 bot.NOTIFIER_SLOT: notifier,
             },
         )

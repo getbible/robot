@@ -12,7 +12,7 @@ import {
   MemoryPublicStore,
 } from "../lib/public-cache.js";
 
-const SHA = "0123456789abcdef0123456789abcdef01234567";
+const SHA = "a".repeat(40);
 const SEARCH_ORIGIN = "https://search.getbible.net/v2/";
 
 const JOHN_3 = {

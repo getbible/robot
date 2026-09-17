@@ -2,11 +2,11 @@ import unittest
 from types import SimpleNamespace
 from typing import cast
 
-from getbible import RequestLimitError
 from telegram import Bot
 from telegram.error import TelegramError
 
 from config import Settings
+from modules.errors import RequestLimitError
 from modules.posting import post_scripture_queries
 from modules.service import ScriptureQuery, ScriptureService
 
