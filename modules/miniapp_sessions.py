@@ -14,15 +14,14 @@ from typing import Literal
 from urllib.parse import quote, urlencode, urlsplit
 
 from .bookmark_backup import BookmarkRestoreFile
-from .interactions import SearchResult
 from .miniapp_auth import TelegramMiniAppPrincipal
 
 MAX_MINIAPP_SELECTION_TEXT_BYTES = 4096
 # Covers the configured maximum 200-item basket plus one complete accepted
 # 250-verse chapter at the maximum validated Unicode/metadata bounds.
 MAX_MINIAPP_SESSION_RETAINED_BYTES = 8 * 1024 * 1024
-# Leave enough headroom below the supported container's 210 MiB child-RSS
-# guard for the warmed Librarian corpus, interpreter, and transient requests.
+# Retained selections are a small slice of the supported container's child-RSS
+# guard: the interpreter, catalogue caches, and transient requests keep the rest.
 MAX_MINIAPP_PROCESS_RETAINED_BYTES = 32 * 1024 * 1024
 MAX_MINIAPP_SESSION_RETAINED_SELECTIONS = 2500
 MAX_MINIAPP_PROCESS_RETAINED_SELECTIONS = 250_000
@@ -312,17 +311,6 @@ def miniapp_direct_url(
 
 
 @dataclass(frozen=True, slots=True)
-class MiniAppSearch:
-    """One authoritative, bounded Librarian result cached for client-side paging."""
-
-    token: str
-    query: str
-    translation: str
-    total: int
-    items: tuple[MiniAppSelection, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class MiniAppSelection:
     """One authoritative verse represented by an opaque, session-local ID."""
 
@@ -334,7 +322,6 @@ class MiniAppSelection:
     chapter: int
     verse: int
     text: str
-    terms: tuple[str, ...] = ()
 
 
 def _selection_identity(
@@ -356,7 +343,6 @@ def _selection_retained_bytes(selection: MiniAppSelection) -> int:
         selection.translation,
         selection.book_name,
         selection.text,
-        *selection.terms,
     )
     return _MINIAPP_SELECTION_OVERHEAD_BYTES + sum(
         len(value.encode("utf-8")) for value in strings
@@ -400,7 +386,6 @@ class MiniAppSession:
     translation: str
     launch: MiniAppLaunch
     init_data_digest: bytes
-    searches: OrderedDict[str, MiniAppSearch] = field(default_factory=OrderedDict)
     available_selections: OrderedDict[str, MiniAppSelection] = field(default_factory=OrderedDict)
     basket: list[MiniAppSelection] = field(default_factory=list)
     post_attempts: OrderedDict[str, MiniAppPostAttempt] = field(default_factory=OrderedDict)
@@ -428,7 +413,6 @@ class MiniAppSessionStore:
         max_sessions: int,
         ttl_seconds: float,
         max_sessions_per_user: int = 2,
-        max_searches_per_session: int = 4,
         max_available_selections: int = 512,
         max_basket_selections: int = 50,
         clock: Callable[[], float] = time.monotonic,
@@ -439,8 +423,6 @@ class MiniAppSessionStore:
             raise ValueError("ttl_seconds must be between 30 and 15552000.")
         if not 1 <= max_sessions_per_user <= 10:
             raise ValueError("max_sessions_per_user must be between 1 and 10.")
-        if not 1 <= max_searches_per_session <= 16:
-            raise ValueError("max_searches_per_session must be between 1 and 16.")
         if not 250 <= max_available_selections <= 5000:
             raise ValueError(
                 "max_available_selections must be between 250 and 5000."
@@ -450,7 +432,6 @@ class MiniAppSessionStore:
         self._max_sessions = max_sessions
         self._max_sessions_per_user = max_sessions_per_user
         self._ttl = ttl_seconds
-        self._max_searches = max_searches_per_session
         self._max_available = max_available_selections
         self._max_basket = max_basket_selections
         self._clock = clock
@@ -658,49 +639,6 @@ class MiniAppSessionStore:
                 if session.user_id == user_id:
                     session.translation = translation
 
-    def remember_search(
-        self,
-        session: MiniAppSession,
-        *,
-        query: str,
-        translation: str,
-        total: int,
-        items: Sequence[SearchResult],
-    ) -> MiniAppSearch:
-        with self._guard:
-            current = self._sessions.get(session.token)
-            if current is not session:
-                raise MiniAppSessionExpiredError(
-                    "Mini App session is no longer active."
-                )
-            token = self._new_token(current.searches, size=18)
-            selections = tuple(
-                self._register_selection_locked(
-                    current,
-                    reference=item.reference,
-                    translation=translation,
-                    book_number=item.book_number,
-                    book_name=item.book_name,
-                    chapter=item.chapter,
-                    verse=item.verse,
-                    text=item.text,
-                    terms=item.terms,
-                )
-                for item in items
-            )
-            search = MiniAppSearch(
-                token=token,
-                query=query,
-                translation=translation,
-                total=total,
-                items=selections,
-            )
-            current.searches[token] = search
-            while len(current.searches) > self._max_searches:
-                current.searches.popitem(last=False)
-            self._enforce_retained_selection_budget_locked(current)
-            return search
-
     def register_selection(
         self,
         session: MiniAppSession,
@@ -712,7 +650,6 @@ class MiniAppSessionStore:
         chapter: int,
         verse: int,
         text: str,
-        terms: Sequence[str] = (),
     ) -> MiniAppSelection:
         with self._guard:
             current = self._sessions.get(session.token)
@@ -729,7 +666,6 @@ class MiniAppSessionStore:
                 chapter=chapter,
                 verse=verse,
                 text=text,
-                terms=tuple(terms),
             )
 
     def basket(self, session: MiniAppSession) -> tuple[MiniAppSelection, ...]:
@@ -753,16 +689,6 @@ class MiniAppSessionStore:
                     "Mini App session is no longer active."
                 )
             selection = session.available_selections.get(selection_token)
-            if selection is None:
-                selection = next(
-                    (
-                        item
-                        for search in reversed(tuple(session.searches.values()))
-                        for item in search.items
-                        if item.token == selection_token
-                    ),
-                    None,
-                )
             if selection is None:
                 raise MiniAppSessionInputError("Selection is invalid or expired.")
             identity = _selection_identity(selection)
@@ -1005,18 +931,6 @@ class MiniAppSessionStore:
             session.launch.bookmark_restore = None
             return True
 
-    def search(self, session: MiniAppSession, token: str) -> MiniAppSearch | None:
-        if _TOKEN_RE.fullmatch(token) is None:
-            return None
-        with self._guard:
-            current = self._sessions.get(session.token)
-            if current is not session:
-                return None
-            search = current.searches.get(token)
-            if search is not None:
-                current.searches.move_to_end(token)
-            return search
-
     def snapshot(self) -> dict[str, int | float]:
         with self._guard:
             self._purge_locked()
@@ -1024,16 +938,11 @@ class MiniAppSessionStore:
                 len(session.available_selections)
                 for session in self._sessions.values()
             )
-            searches = sum(
-                len(session.searches)
-                for session in self._sessions.values()
-            )
             return {
                 "sessions": len(self._sessions),
                 "max_sessions": self._max_sessions,
                 "max_sessions_per_user": self._max_sessions_per_user,
                 "available_selections": selections,
-                "searches": searches,
                 "retained_selection_bytes": self._retained_selection_bytes,
                 "retained_selection_count": self._retained_selection_count,
                 "ttl_seconds": self._ttl,
@@ -1067,7 +976,6 @@ class MiniAppSessionStore:
         chapter: int,
         verse: int,
         text: str,
-        terms: tuple[str, ...],
     ) -> MiniAppSelection:
         if (
             not isinstance(reference, str)
@@ -1096,11 +1004,6 @@ class MiniAppSessionStore:
             normalized_reference = (
                 f"{normalized_book_name} {chapter}:{verse}"
             )
-        normalized_terms = tuple(
-            term.strip()
-            for term in terms
-            if isinstance(term, str) and 1 <= len(term.strip()) <= 80
-        )[:20]
         identity = (translation, book_number, chapter, verse)
         existing = next(
             (
@@ -1119,16 +1022,6 @@ class MiniAppSessionStore:
                 ),
                 None,
             )
-        if existing is None:
-            existing = next(
-                (
-                    item
-                    for search in reversed(tuple(session.searches.values()))
-                    for item in search.items
-                    if _selection_identity(item) == identity
-                ),
-                None,
-            )
         if existing is not None:
             current = replace(
                 existing,
@@ -1138,7 +1031,6 @@ class MiniAppSessionStore:
                 chapter=chapter,
                 verse=verse,
                 text=text,
-                terms=normalized_terms,
             )
             session.available_selections[existing.token] = current
             retained: list[MiniAppSelection] = []
@@ -1165,7 +1057,6 @@ class MiniAppSessionStore:
             chapter=chapter,
             verse=verse,
             text=text,
-            terms=normalized_terms,
         )
         session.available_selections[token] = selection
         self._evict_available_locked(session)
@@ -1207,25 +1098,6 @@ class MiniAppSessionStore:
             and session.available_selections
         ):
             protected = {item.token for item in session.basket}
-            # Retained searches are historical views. Discard the oldest
-            # snapshot before invalidating an opaque ID that was just issued
-            # for the chapter currently visible in the reader.
-            if session.searches:
-                _, expired = session.searches.popitem(last=False)
-                remaining_search_tokens = {
-                    item.token
-                    for search in session.searches.values()
-                    for item in search.items
-                }
-                for item in expired.items:
-                    if (
-                        item.token not in protected
-                        and item.token not in remaining_search_tokens
-                        and session.available_selections.get(item.token) is item
-                    ):
-                        session.available_selections.pop(item.token, None)
-                self._refresh_retained_selection_budget_locked(session)
-                continue
             removable = next(
                 (
                     token
@@ -1284,9 +1156,6 @@ class MiniAppSessionStore:
             unique[id(item)] = item
         for item in session.basket:
             unique[id(item)] = item
-        for search in session.searches.values():
-            for item in search.items:
-                unique[id(item)] = item
         current_bytes = sum(
             _selection_retained_bytes(item) for item in unique.values()
         )

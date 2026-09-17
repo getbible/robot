@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import math
 import re
 import sqlite3
 import time
@@ -16,8 +15,6 @@ from dataclasses import dataclass, replace
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 from weakref import WeakValueDictionary
-
-from getbible import RequestLimitError, TranslationNotFoundError
 
 from config import Settings
 
@@ -47,8 +44,8 @@ from .errors import (
     RobotInputError,
     RobotRateLimited,
     ScriptureUnavailable,
+    TranslationNotFoundError,
 )
-from .interactions import SearchOptions
 from .miniapp_auth import (
     MiniAppAuthenticationError,
     MiniAppReplayError,
@@ -62,7 +59,6 @@ from .miniapp_sessions import (
     MiniAppLaunch,
     MiniAppLaunchStore,
     MiniAppPostAttempt,
-    MiniAppSearch,
     MiniAppSelection,
     MiniAppSession,
     MiniAppSessionCapacityError,
@@ -90,13 +86,6 @@ _DIRECT_SELECTION_RE = re.compile(
 MAX_MINIAPP_CHAPTER_VERSES = 250
 _MAX_JAVASCRIPT_SAFE_INTEGER = (1 << 53) - 1
 _PREFERENCE_UNCHANGED = object()
-_SEARCH_ENUMS: dict[str, frozenset[str]] = {
-    "words": frozenset({"all", "any", "phrase"}),
-    "match": frozenset({"whole_word", "substring"}),
-    "scope": frozenset({"bible", "old_testament", "new_testament", "deuterocanon"}),
-    "diacritics": frozenset({"fold", "exact"}),
-    "sort": frozenset({"canonical", "relevance"}),
-}
 _EMPTY_CONTRIBUTION_CATALOG = normalize_catalog(
     {
         "schema_version": 1,
@@ -300,7 +289,6 @@ class MiniAppApi:
         abuse_warning: Callable[[int, int, str], Awaitable[None]] | None = None,
         navigation_rate_cost: float = 0.25,
         access_log: bool = True,
-        page_size: int = 10,
         max_body_bytes: int = 64 * 1024,
     ) -> None:
         origin = urlsplit(public_url)
@@ -313,8 +301,6 @@ class MiniAppApi:
             or origin.fragment
         ):
             raise ValueError("public_url must be an HTTPS URL.")
-        if not 1 <= page_size <= 25:
-            raise ValueError("page_size must be between 1 and 25.")
         if not 1024 <= max_body_bytes <= 1024 * 1024:
             raise ValueError("max_body_bytes must be between 1024 and 1048576.")
         if not 0.05 <= navigation_rate_cost <= 1.0:
@@ -332,7 +318,7 @@ class MiniAppApi:
         self._contributions = contributions
         # Contributors are a small, individually approved group with large
         # personal datasets, so their synchronization endpoint carries its own
-        # generous budget instead of competing with the public search limits.
+        # generous budget instead of competing with the public navigation limits.
         self._contribution_limiter = contribution_limiter or InboundRateLimiter(
             user_capacity=60,
             user_refill_per_second=5.0,
@@ -347,9 +333,6 @@ class MiniAppApi:
         self._origin = f"{origin.scheme}://{origin.netloc}"
         public_path = origin.path.rstrip("/")
         self._api_prefix = f"{public_path}/api/v1" if public_path else "/api/v1"
-        self._search_path_re = re.compile(
-            rf"{re.escape(self._api_prefix)}/search/([A-Za-z0-9_-]{{16,128}})\Z"
-        )
         self._basket_item_path_re = re.compile(
             rf"{re.escape(self._api_prefix)}/basket/items/"
             r"([A-Za-z0-9_-]{16,128})\Z"
@@ -360,7 +343,6 @@ class MiniAppApi:
         self._navigation_rate_cost = navigation_rate_cost
         self._access_log = access_log
         self._traffic: Counter[str] = Counter()
-        self._page_size = page_size
         self._max_body = max_body_bytes
         self._preference_locks: WeakValueDictionary[int, asyncio.Lock] = (
             WeakValueDictionary()
@@ -452,19 +434,6 @@ class MiniAppApi:
                 if method != "POST":
                     return self._method_not_allowed("POST, OPTIONS")
                 return await self._scripture(session, request)
-            if parts.path == f"{self._api_prefix}/search":
-                if method != "POST":
-                    return self._method_not_allowed("POST, OPTIONS")
-                return await self._search(session, request)
-            search_match = self._search_path_re.fullmatch(parts.path)
-            if search_match is not None:
-                if method != "GET":
-                    return self._method_not_allowed("GET, OPTIONS")
-                return self._search_page(
-                    session,
-                    search_match.group(1),
-                    parts.query,
-                )
             if parts.path == f"{self._api_prefix}/basket":
                 if method == "GET":
                     return self._basket(session)
@@ -590,7 +559,7 @@ class MiniAppApi:
                 details={"retry_after": error.retry_after},
                 extra_headers={"Retry-After": str(error.retry_after)},
             )
-        except (RobotInputError, RequestLimitError) as error:
+        except RobotInputError as error:
             return self._error_response(422, "invalid_selection", str(error))
         except (RobotBusy, CircuitOpen, ScriptureUnavailable):
             return self._error_response(
@@ -624,7 +593,6 @@ class MiniAppApi:
             f"{self._api_prefix}/books": ("GET",),
             f"{self._api_prefix}/chapters": ("GET",),
             f"{self._api_prefix}/scripture": ("POST",),
-            f"{self._api_prefix}/search": ("POST",),
             f"{self._api_prefix}/basket": ("GET", "DELETE"),
             f"{self._api_prefix}/basket/items": ("POST",),
             f"{self._api_prefix}/basket/order": ("PATCH",),
@@ -639,8 +607,6 @@ class MiniAppApi:
         allowed = exact.get(path)
         if allowed is not None:
             return allowed
-        if self._search_path_re.fullmatch(path) is not None:
-            return ("GET",)
         if self._basket_item_path_re.fullmatch(path) is not None:
             return ("DELETE",)
         return None
@@ -983,14 +949,6 @@ class MiniAppApi:
                 },
                 "translations": [_translation_payload(option) for option in options],
                 "basket": self._basket_payload(session),
-                # The browser cannot guess how long the robot is willing to work
-                # on a search, and guessing short is what made a cold index build
-                # look like a failure: the page abandoned the request and showed
-                # a timeout while the answer was still being computed. The server
-                # states its own budget once, and the page waits for it.
-                "limits": {
-                    "search_timeout_seconds": self._service.settings.search_timeout,
-                },
             },
         )
         if (
@@ -1186,7 +1144,6 @@ class MiniAppApi:
         path = urlsplit(request.target).path
         expensive = {
             f"{self._api_prefix}/scripture",
-            f"{self._api_prefix}/search",
             f"{self._api_prefix}/post",
             f"{self._api_prefix}/bookmarks/backup",
             f"{self._api_prefix}/bookmarks/restore",
@@ -1201,8 +1158,6 @@ class MiniAppApi:
         if not path.startswith(prefix):
             return "not_found"
         relative = path[len(prefix) :]
-        if self._search_path_re.fullmatch(path) is not None:
-            return "search_page"
         if self._basket_item_path_re.fullmatch(path) is not None:
             return "basket_item"
         known = {
@@ -1211,7 +1166,6 @@ class MiniAppApi:
             "books",
             "chapters",
             "scripture",
-            "search",
             "basket",
             "basket/items",
             "basket/order",
@@ -1424,68 +1378,6 @@ class MiniAppApi:
                 )
         return previous, following
 
-    async def _search(
-        self,
-        session: MiniAppSession,
-        request: MiniAppHttpRequest,
-    ) -> MiniAppHttpResponse:
-        payload = self._json_body(request)
-        if set(payload) - {"query", "options"}:
-            raise MiniAppApiInputError("Search request contains unsupported fields.")
-        query = _required_text(
-            payload,
-            "query",
-            min(self._service.settings.max_input_length, 240),
-        )
-        preferences = self._preferences.preferences_for(session.user_id)
-        options = _search_options(
-            payload.get("options"),
-            session.translation,
-            defaults=preferences.search_defaults,
-        )
-        page = await self._service.search(query, options)
-        if any(
-            len(item.text.encode("utf-8")) > MAX_MINIAPP_SELECTION_TEXT_BYTES
-            for item in page.items
-        ):
-            raise ScriptureUnavailable(
-                "The search contains a verse that exceeds the display bound."
-            )
-        try:
-            search = self._sessions.remember_search(
-                session,
-                query=page.query,
-                translation=page.translation,
-                total=page.total,
-                items=page.items,
-            )
-        except MiniAppSessionExpiredError:
-            raise
-        except ValueError as error:
-            raise ScriptureUnavailable(
-                "The search result exceeds the Mini App display bound."
-            ) from error
-        return self._response(200, self._search_payload(search, 0))
-
-    def _search_page(
-        self,
-        session: MiniAppSession,
-        search_token: str,
-        query: str,
-    ) -> MiniAppHttpResponse:
-        values = _query(query)
-        if set(values) - {"page"}:
-            raise MiniAppApiInputError("Search page contains unsupported parameters.")
-        page = _nonnegative_integer(values.get("page", "0"), "page", maximum=10_000)
-        search = self._sessions.search(session, search_token)
-        if search is None:
-            return self._error_response(
-                404,
-                "search_not_found",
-                "Search results are unavailable or expired.",
-            )
-        return self._response(200, self._search_payload(search, page))
-
     def _basket(self, session: MiniAppSession) -> MiniAppHttpResponse:
         return self._response(200, self._basket_payload(session))
 
@@ -1631,9 +1523,9 @@ class MiniAppApi:
 
         This is the whole synchronization transport: the Mini App sends its
         contribution as small ordinary session-authenticated batches — the
-        same request shape the working search flow uses — and every response
-        carries the contributor's current standing so the final batch settles
-        the panel in one round trip.
+        same request shape every other Mini App endpoint uses — and every
+        response carries the contributor's current standing so the final
+        batch settles the panel in one round trip.
         """
         store = self._contributions
         if store is None:
@@ -2218,25 +2110,6 @@ class MiniAppApi:
             )
         return tuple(queries)
 
-    def _search_payload(self, search: MiniAppSearch, page: int) -> dict[str, Any]:
-        available = len(search.items)
-        pages = max(1, math.ceil(available / self._page_size))
-        if page >= pages:
-            raise MiniAppApiInputError("page is outside the available result set.")
-        start = page * self._page_size
-        stop = min(start + self._page_size, available)
-        return {
-            "search_id": search.token,
-            "query": search.query,
-            "translation": search.translation,
-            "total": search.total,
-            "available": available,
-            "truncated": search.total > available,
-            "page": page,
-            "page_count": pages,
-            "items": [_selection_payload(search.items[index]) for index in range(start, stop)],
-        }
-
     def _basket_payload(self, session: MiniAppSession) -> dict[str, Any]:
         items = self._sessions.basket(session)
         return {
@@ -2391,93 +2264,6 @@ def _nonnegative_integer(value: object, label: str, *, maximum: int) -> int:
     return parsed
 
 
-def _search_options(
-    value: object,
-    default_translation: str,
-    *,
-    defaults: SearchDefaults,
-) -> SearchOptions:
-    if value is None:
-        payload: Mapping[str, Any] = {}
-    elif isinstance(value, dict):
-        payload = value
-    else:
-        raise MiniAppApiInputError("options must be an object.")
-
-    unknown = set(payload) - {
-        "translation",
-        "words",
-        "match",
-        "scope",
-        "case_sensitive",
-        "diacritics",
-        "sort",
-        "books",
-        "exclude",
-        "proximity",
-    }
-    if unknown:
-        raise MiniAppApiInputError("options contains unsupported fields.")
-
-    enum_values: dict[str, str] = {}
-    for key, allowed in _SEARCH_ENUMS.items():
-        candidate = payload.get(key, getattr(defaults, key))
-        if not isinstance(candidate, str) or candidate not in allowed:
-            raise MiniAppApiInputError(f"options.{key} is invalid.")
-        enum_values[key] = candidate
-
-    case_sensitive = payload.get("case_sensitive", defaults.case_sensitive)
-    if not isinstance(case_sensitive, bool):
-        raise MiniAppApiInputError("options.case_sensitive must be boolean.")
-
-    raw_books = payload.get("books", [])
-    if (
-        not isinstance(raw_books, list)
-        or len(raw_books) > 200
-        or any(
-            isinstance(book, bool) or not isinstance(book, int) or not 1 <= book <= 1000
-            for book in raw_books
-        )
-        or len(set(raw_books)) != len(raw_books)
-    ):
-        raise MiniAppApiInputError("options.books is invalid.")
-
-    raw_exclude = payload.get("exclude", [])
-    if (
-        not isinstance(raw_exclude, list)
-        or len(raw_exclude) > 20
-        or any(
-            not isinstance(term, str) or not 1 <= len(term.strip()) <= 80
-            for term in raw_exclude
-        )
-    ):
-        raise MiniAppApiInputError("options.exclude is invalid.")
-
-    raw_proximity = payload.get("proximity")
-    proximity: int | None
-    if raw_proximity is None:
-        proximity = None
-    else:
-        proximity = _nonnegative_integer(
-            raw_proximity,
-            "options.proximity",
-            maximum=100,
-        )
-
-    return SearchOptions(
-        translation=_translation(payload.get("translation"), default_translation),
-        words=enum_values["words"],
-        match=enum_values["match"],
-        scope=enum_values["scope"],
-        case_sensitive=case_sensitive,
-        diacritics=enum_values["diacritics"],
-        sort=enum_values["sort"],
-        books=tuple(raw_books),
-        exclude=tuple(term.strip() for term in raw_exclude),
-        proximity=proximity,
-    )
-
-
 def _translation_payload(option: TranslationOption) -> dict[str, object]:
     return {
         "code": option.code,
@@ -2528,7 +2314,6 @@ def _selection_payload(item: MiniAppSelection) -> dict[str, object]:
         "chapter": item.chapter,
         "verse": item.verse,
         "text": item.text,
-        "terms": list(item.terms),
     }
 
 

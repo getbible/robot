@@ -58,6 +58,18 @@ def _write_client_tree(root: Path) -> None:
     (root / "assets" / "mark.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
 
+def _csp_directive(header: str, name: str) -> str | None:
+    """Return one complete directive from a Content-Security-Policy header."""
+    return next(
+        (
+            directive.strip()
+            for directive in header.split(";")
+            if directive.strip().split(" ", 1)[0] == name
+        ),
+        None,
+    )
+
+
 def _lifecycle_settings(**changes: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "mini_app_enabled": True,
@@ -67,7 +79,6 @@ def _lifecycle_settings(**changes: object) -> SimpleNamespace:
         "mini_app_session_limit": 20,
         "mini_app_session_ttl_seconds": 10_800,
         "mini_app_sessions_per_user": 2,
-        "mini_app_max_searches_per_session": 2,
         "mini_app_max_available_selections": 256,
         "mini_app_max_selections": 100,
         "telegram_api_token": (
@@ -195,6 +206,14 @@ class MiniAppShellRoutingTestCase(AsyncHTTPTestCase):
         self.assertEqual(shell.headers["Cache-Control"], "no-store, max-age=0")
         self.assertEqual(shell.headers["Content-Type"], "text/html; charset=utf-8")
         self.assertIn("default-src 'none'", shell.headers["Content-Security-Policy"])
+        # The page talks to exactly three public GetBible origins beside its
+        # own: the catalogue, the Query API, and the Search API it now calls
+        # directly instead of the robot.
+        self.assertEqual(
+            _csp_directive(shell.headers["Content-Security-Policy"], "connect-src"),
+            "connect-src 'self' https://api.getbible.net "
+            "https://query.getbible.net https://search.getbible.net",
+        )
         body = shell.body.decode("utf-8")
         self.assertIn(f'src="./build/{build_id}/app.js"', body)
         self.assertIn(f'href="./build/{build_id}/styles.css"', body)
@@ -281,10 +300,7 @@ def _signed_init_data(user_id: int) -> str:
 
 
 class _TransportService:
-    settings = SimpleNamespace(
-        mini_app_max_selections=50,
-        search_timeout=150.0,
-    )
+    settings = SimpleNamespace(mini_app_max_selections=50)
 
     async def translations(self) -> tuple[TranslationOption, ...]:
         return (TranslationOption("kjv", "King James Version", "English"),)
@@ -473,6 +489,11 @@ class MiniAppTornadoAdapterTestCase(AsyncHTTPTestCase):
         self.assertEqual(shell.headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(shell.headers["Referrer-Policy"], "no-referrer")
         self.assertIn("default-src 'none'", shell.headers["Content-Security-Policy"])
+        self.assertEqual(
+            _csp_directive(shell.headers["Content-Security-Policy"], "connect-src"),
+            "connect-src 'self' https://api.getbible.net "
+            "https://query.getbible.net https://search.getbible.net",
+        )
         self.assertIn("noindex", shell.headers["X-Robots-Tag"])
 
         # Telegram WebViews do not reliably revalidate, so packaged modules

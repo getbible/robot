@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 from modules import miniapp_sessions
 from modules.bookmark_backup import BookmarkRestoreFile
-from modules.interactions import SearchResult
 from modules.miniapp_auth import TelegramMiniAppPrincipal
 from modules.miniapp_sessions import (
     MiniAppLaunchStore,
@@ -46,23 +45,20 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
     def test_process_budget_fits_supported_container_rss_headroom(self) -> None:
         root = Path(__file__).resolve().parents[1]
         compose = (root / "compose.yaml").read_text(encoding="utf-8")
-        docker_docs = (root / "docs" / "DOCKER.md").read_text(encoding="utf-8")
         guard_match = re.search(
             r"CONTAINER_INSTANCE_MEMORY_LIMIT_MB:-([0-9]+)",
             compose,
         )
-        warmed_match = re.search(
-            r"All four KJV search modes exercised \| ([0-9]+) MiB",
-            docker_docs,
-        )
         self.assertIsNotNone(guard_match)
-        self.assertIsNotNone(warmed_match)
         guard_mib = int(guard_match.group(1))
-        warmed_mib = int(warmed_match.group(1))
 
-        self.assertLess(
+        # Retained selections are the only content the robot keeps per reader.
+        # They must stay a small slice of the child-RSS guard so the
+        # interpreter, catalogue caches, and in-flight requests never compete
+        # with them for the remaining headroom.
+        self.assertLessEqual(
             miniapp_sessions.MAX_MINIAPP_PROCESS_RETAINED_BYTES,
-            (guard_mib - warmed_mib) * 1024 * 1024,
+            guard_mib * 1024 * 1024 // 8,
         )
 
     def test_each_user_has_a_small_independent_session_budget(self) -> None:
@@ -276,7 +272,7 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
         )
         self.assertEqual(session.init_data_digest, b"x" * 32)
 
-    def test_session_searches_and_basket_are_bounded_and_owner_scoped(
+    def test_session_selections_and_basket_are_bounded_and_owner_scoped(
         self,
     ) -> None:
         clock = _Clock()
@@ -289,7 +285,6 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
         store = MiniAppSessionStore(
             max_sessions=2,
             ttl_seconds=60,
-            max_searches_per_session=1,
             clock=clock,
         )
         session = store.create(
@@ -298,58 +293,164 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
             launch=launch,
             init_data_digest=b"x" * 32,
         )
-        item = SearchResult(
+        first = store.register_selection(
+            session,
             reference="John 3:16",
+            translation="kjv",
             book_number=43,
             book_name="John",
             chapter=3,
             verse=16,
             text="For God so loved the world.",
         )
-        first = store.remember_search(
+        # The same verse read again (a reload, another translation view of the
+        # chapter) keeps the opaque ID the page already holds and simply
+        # refreshes the authoritative text behind it.
+        second = store.register_selection(
             session,
-            query="loved",
+            reference="John 3:16",
             translation="kjv",
-            total=1,
-            items=(
-                SearchResult(
-                    reference=item.reference,
-                    book_number=item.book_number,
-                    book_name=item.book_name,
-                    chapter=item.chapter,
-                    verse=item.verse,
-                    text=item.text,
-                    terms=("loved",),
-                ),
-            ),
+            book_number=43,
+            book_name="John",
+            chapter=3,
+            verse=16,
+            text="For God so loved the world, that he gave his only begotten Son.",
         )
-        second = store.remember_search(
-            session,
-            query="world",
-            translation="kjv",
-            total=1,
-            items=(
-                SearchResult(
-                    reference=item.reference,
-                    book_number=item.book_number,
-                    book_name=item.book_name,
-                    chapter=item.chapter,
-                    verse=item.verse,
-                    text=item.text,
-                    terms=("world",),
-                ),
-            ),
-        )
-        self.assertIsNone(store.search(session, first.token))
-        self.assertIs(store.search(session, second.token), second)
-        self.assertEqual(first.items[0].terms, ("loved",))
-        self.assertEqual(second.items[0].terms, ("world",))
-        self.assertEqual(first.items[0].token, second.items[0].token)
+        self.assertEqual(first.token, second.token)
+        self.assertIs(session.available_selections[first.token], second)
+        self.assertEqual(len(session.available_selections), 1)
 
-        store.add_to_basket(session, second.items[0].token)
-        self.assertEqual(store.basket(session), (second.items[0],))
+        store.add_to_basket(session, second.token)
+        self.assertEqual(store.basket(session), (second,))
+        refreshed = store.register_selection(
+            session,
+            reference="John 3:16",
+            translation="kjv",
+            book_number=43,
+            book_name="John",
+            chapter=3,
+            verse=16,
+            text="For God so loved the world.",
+        )
+        self.assertEqual(refreshed.token, first.token)
+        self.assertEqual(store.basket(session), (refreshed,))
+        self.assertEqual(store.snapshot()["available_selections"], 1)
+        self.assertNotIn("searches", store.snapshot())
+
+        with self.assertRaisesRegex(MiniAppSessionInputError, "invalid or expired"):
+            store.add_to_basket(session, "b" * 24)
         store.clear_basket(session)
         self.assertEqual(store.basket(session), ())
+
+        other = store.create(
+            _principal(8),
+            translation="kjv",
+            launch=launches.create_launch(user_id=8, target_chat_id=8),
+            init_data_digest=b"y" * 32,
+        )
+        with self.assertRaisesRegex(MiniAppSessionInputError, "invalid or expired"):
+            store.add_to_basket(other, first.token)
+        store.revoke(session.token)
+        with self.assertRaises(miniapp_sessions.MiniAppSessionExpiredError):
+            store.register_selection(
+                session,
+                reference="John 3:16",
+                translation="kjv",
+                book_number=43,
+                book_name="John",
+                chapter=3,
+                verse=16,
+                text="For God so loved the world.",
+            )
+
+    def test_session_store_rejects_out_of_range_bounds(self) -> None:
+        for changes, message in (
+            ({"max_sessions": 0}, "max_sessions must be between 1 and 100000."),
+            ({"ttl_seconds": 29}, "ttl_seconds must be between 30 and 15552000."),
+            (
+                {"max_sessions_per_user": 11},
+                "max_sessions_per_user must be between 1 and 10.",
+            ),
+            (
+                {"max_basket_selections": 201},
+                "max_basket_selections must be between 1 and 200.",
+            ),
+        ):
+            with (
+                self.subTest(changes=changes),
+                self.assertRaisesRegex(ValueError, re.escape(message)),
+            ):
+                MiniAppSessionStore(
+                    **{"max_sessions": 2, "ttl_seconds": 60, **changes}
+                )
+
+    def test_basket_reorder_requires_every_current_selection_exactly_once(
+        self,
+    ) -> None:
+        launches = MiniAppLaunchStore(max_launches=2, ttl_seconds=60)
+        store = MiniAppSessionStore(max_sessions=2, ttl_seconds=60)
+        session = store.create(
+            _principal(7),
+            translation="kjv",
+            launch=launches.create_launch(user_id=7, target_chat_id=7),
+            init_data_digest=b"x" * 32,
+        )
+        verses = tuple(
+            store.register_selection(
+                session,
+                reference=f"John 3:{verse}",
+                translation="kjv",
+                book_number=43,
+                book_name="John",
+                chapter=3,
+                verse=verse,
+                text=f"Verse {verse}.",
+            )
+            for verse in (1, 2, 16)
+        )
+        for selection in verses:
+            store.add_to_basket(session, selection.token)
+        tokens = [selection.token for selection in verses]
+
+        reordered = store.reorder_basket(session, list(reversed(tokens)))
+        self.assertEqual(
+            [item.token for item in reordered],
+            list(reversed(tokens)),
+        )
+        self.assertEqual(store.basket(session), reordered)
+
+        for invalid in (
+            tokens[:2],
+            [*tokens, tokens[0]],
+            [tokens[0], tokens[1], "c" * 24],
+        ):
+            with (
+                self.subTest(order=invalid),
+                self.assertRaisesRegex(
+                    MiniAppSessionInputError,
+                    "every current selection once",
+                ),
+            ):
+                store.reorder_basket(session, invalid)
+        self.assertEqual(store.basket(session), reordered)
+
+        remaining = store.remove_from_basket(session, tokens[1])
+        self.assertEqual(
+            [item.token for item in remaining],
+            [tokens[2], tokens[0]],
+        )
+        self.assertEqual(store.remove_from_basket(session, "d" * 24), remaining)
+
+        store.revoke(session.token)
+        expired = miniapp_sessions.MiniAppSessionExpiredError
+        with self.assertRaises(expired):
+            store.reorder_basket(session, [tokens[2], tokens[0]])
+        with self.assertRaises(expired):
+            store.remove_from_basket(session, tokens[0])
+        with self.assertRaises(expired):
+            store.clear_basket(session)
+        with self.assertRaises(expired):
+            store.basket(session)
 
     def test_basket_capacity_uses_a_typed_client_safe_error(self) -> None:
         launches = MiniAppLaunchStore(max_launches=2, ttl_seconds=60)
@@ -514,7 +615,6 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
             launch=launches.create_launch(user_id=7, target_chat_id=7),
             init_data_digest=b"x" * 32,
         )
-        terms = tuple("🔎" * 80 for _ in range(20))
         for verse in range(1, 200):
             selection = store.register_selection(
                 session,
@@ -525,29 +625,23 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
                 chapter=1,
                 verse=verse,
                 text="😀" * 1024,
-                terms=terms,
             )
             store.add_to_basket(session, selection.token)
 
-        for book_number, chapter_number in ((44, 1), (43, 2)):
-            store.remember_search(
-                session,
-                query=f"large search {book_number}",
-                translation="kjv",
-                total=200,
-                items=tuple(
-                    SearchResult(
-                        reference="🔖" * 180,
-                        book_number=book_number,
-                        book_name="📚" * 128,
-                        chapter=chapter_number,
-                        verse=verse,
-                        text="😀" * 1024,
-                        terms=terms,
-                    )
-                    for verse in range(1, 201)
-                ),
-            )
+        # Two more maximal chapters browsed before the one under test fill the
+        # available-selection budget on top of the protected basket.
+        for book_number, chapter_number in ((44, 1), (43, 4)):
+            for verse in range(1, 201):
+                store.register_selection(
+                    session,
+                    reference="🔖" * 180,
+                    translation="kjv",
+                    book_number=book_number,
+                    book_name="📚" * 128,
+                    chapter=chapter_number,
+                    verse=verse,
+                    text="😀" * 1024,
+                )
 
         chapter = tuple(
             store.register_selection(
@@ -581,9 +675,7 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
             miniapp_sessions.MAX_MINIAPP_SESSION_RETAINED_BYTES,
         )
 
-    def test_retained_search_token_survives_later_full_chapter_eviction(
-        self,
-    ) -> None:
+    def test_evicted_chapter_selection_is_reissued_on_the_next_read(self) -> None:
         launches = MiniAppLaunchStore(max_launches=2, ttl_seconds=60)
         store = MiniAppSessionStore(
             max_sessions=2,
@@ -597,22 +689,18 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
             launch=launches.create_launch(user_id=7, target_chat_id=7),
             init_data_digest=b"x" * 32,
         )
-        search = store.remember_search(
-            session,
-            query="search",
-            translation="kjv",
-            total=200,
-            items=tuple(
-                SearchResult(
-                    reference=f"Genesis 1:{verse}",
-                    book_number=1,
-                    book_name="Genesis",
-                    chapter=1,
-                    verse=verse,
-                    text=f"Search verse {verse}.",
-                )
-                for verse in range(1, 201)
-            ),
+        genesis = tuple(
+            store.register_selection(
+                session,
+                reference=f"Genesis 1:{verse}",
+                translation="kjv",
+                book_number=1,
+                book_name="Genesis",
+                chapter=1,
+                verse=verse,
+                text=f"Genesis verse {verse}.",
+            )
+            for verse in range(1, 201)
         )
         for verse in range(1, 251):
             store.register_selection(
@@ -626,8 +714,12 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
                 text=f"Chapter verse {verse}.",
             )
 
-        self.assertIs(store.search(session, search.token), search)
-        self.assertNotIn(search.items[0].token, session.available_selections)
+        # A complete later chapter displaces the unselected earlier one, so the
+        # stale opaque ID is refused rather than resolved to a guess.
+        self.assertNotIn(genesis[0].token, session.available_selections)
+        with self.assertRaisesRegex(MiniAppSessionInputError, "invalid or expired"):
+            store.add_to_basket(session, genesis[0].token)
+
         reader_selection = store.register_selection(
             session,
             reference="Genesis 1:1",
@@ -638,15 +730,15 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
             verse=1,
             text="Reader verse 1.",
         )
-        self.assertEqual(reader_selection.token, search.items[0].token)
+        self.assertNotEqual(reader_selection.token, genesis[0].token)
 
         basket = store.add_to_basket(session, reader_selection.token)
-        repeated = store.add_to_basket(session, search.items[0].token)
+        repeated = store.add_to_basket(session, reader_selection.token)
 
         self.assertEqual(basket[-1].reference, "Genesis 1:1")
+        self.assertEqual(basket[-1].text, "Reader verse 1.")
         self.assertEqual(repeated, basket)
-        self.assertEqual(basket[-1].token, search.items[0].token)
-        self.assertIn(search.items[0].token, session.available_selections)
+        self.assertIn(reader_selection.token, session.available_selections)
 
     def test_available_selection_budget_covers_a_complete_chapter(self) -> None:
         with self.assertRaisesRegex(ValueError, "between 250 and 5000"):
@@ -789,7 +881,6 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
             launch=launches.create_launch(user_id=7, target_chat_id=7),
             init_data_digest=b"x" * 32,
         )
-        long_terms = tuple(f"term-{index}-{'x' * 70}" for index in range(64))
         with (
             patch.object(
                 miniapp_sessions,
@@ -808,11 +899,10 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
                     reference="r" * 300,
                     translation="kjv",
                     book_number=43,
-                    book_name="John",
+                    book_name="  John  ",
                     chapter=3,
                     verse=verse,
                     text="x",
-                    terms=long_terms,
                 )
 
         self.assertLessEqual(session.retained_selection_bytes, 20_000)
@@ -820,13 +910,14 @@ class MiniAppSessionStoreTestCase(unittest.TestCase):
         retained = tuple(session.available_selections.values())
         self.assertTrue(retained)
         self.assertTrue(all(len(item.reference) <= 180 for item in retained))
-        self.assertTrue(all(len(item.terms) <= 20 for item in retained))
-        self.assertTrue(
-            all(
-                len(term) <= 80
-                for item in retained
-                for term in item.terms
-            )
+        self.assertTrue(all(item.book_name == "John" for item in retained))
+        self.assertEqual(
+            {item.reference for item in retained},
+            {f"John 3:{item.verse}" for item in retained},
+        )
+        self.assertEqual(
+            store.snapshot()["retained_selection_count"],
+            session.retained_selection_count,
         )
 
     def test_process_selection_count_budget_evicts_oldest_session(self) -> None:

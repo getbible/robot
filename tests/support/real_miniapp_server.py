@@ -70,7 +70,7 @@ def signed_init_data(user_id: int) -> str:
 
 
 class _Service:
-    settings = SimpleNamespace(mini_app_max_selections=50, search_timeout=150.0)
+    settings = SimpleNamespace(mini_app_max_selections=50)
 
     async def translations(self) -> tuple[TranslationOption, ...]:
         return (TranslationOption("kjv", "King James Version", "English"),)
