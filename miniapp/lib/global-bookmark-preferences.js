@@ -1,30 +1,41 @@
 import { isMiniAppInstanceScope } from "./instance-scope.js";
 
 const STORAGE_KEY = "getbible.miniapp.global-bookmarks.v2";
-const STORAGE_VERSION = 3;
+const STORAGE_VERSION = 4;
 const TOPIC_MAPPING_PREFIX = "getbible.miniapp.global-topic-map.v1";
 const TOPIC_MAPPING_VERSION = 2;
 const MAX_ENABLED_TOPICS = 100;
 const MAX_MAPPING_PATCH_TOPIC_IDS = 1_000;
 const FALLBACK_MAX_HIDDEN_BOOKMARKS = 10_000;
+// One coverage entry per personal verse at most: the personal store itself
+// never holds more than this many verses.
+const MAX_COVERAGE_ENTRIES = 800;
+const COVERAGE_KEY_PATTERN = /^([1-9]\d?):([1-9]\d{0,2}):([1-9]\d{0,3})$/;
+const MAX_RECORD_TIMESTAMP = 2 ** 46;
 const TOPIC_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const SCOPE_PATTERN = /^[a-f0-9]{64}$/;
 const GLOBAL_BOOKMARK_ID_PATTERN =
   /^global_([A-Za-z0-9_-]{1,128})_([1-9]\d{0,1})_([1-9]\d{0,3})_([1-9]\d{0,3})$/;
 
 /**
- * Persists only which bundled global topics are visible on this device.
+ * Persists only which global topics are visible on this device.
  *
- * The catalogue itself stays in the application's static assets. The supplied
- * storage adapter scopes both preferences and the canonical-to-local mapping
- * to the authenticated user and may mirror them through Telegram
- * DeviceStorage. Neither record enters CloudStorage or backups.
+ * The catalogue itself comes from the public Bookmarks API and is cached
+ * separately. The supplied storage adapter scopes both preferences and the
+ * canonical-to-local mapping to the authenticated user and may mirror them
+ * through Telegram DeviceStorage. Neither record enters CloudStorage or
+ * backups. Besides visibility the record remembers two things about the
+ * catalogue's relationship to personal storage: which catalogue version
+ * seeded the default topics, and since when each personal verse coordinate
+ * has been covered by an enabled global topic, so a personal bookmark is only
+ * merged away once the shared row has stood beside it for a day.
  */
 export class GlobalBookmarkPreferences {
   #allowedBookmarkIds;
   #allowedTopicIds;
   #catalogVersion = 0;
   #contributionTopicMappings = new Map();
+  #coverage = new Map();
   #disabledTopicIds = new Set();
   #enabledTopicIds = new Set();
   #hiddenBookmarkIds = new Set();
@@ -36,6 +47,7 @@ export class GlobalBookmarkPreferences {
   #persistent;
   #promotedTopicIds = new Set();
   #promotionCatalogVersion = 0;
+  #seededCatalogVersion = null;
   #storage;
   #topicMappings = new Map();
 
@@ -81,6 +93,16 @@ export class GlobalBookmarkPreferences {
 
   get catalogVersion() {
     return this.#catalogVersion;
+  }
+
+  get coverage() {
+    return Object.fromEntries(
+      [...this.#coverage].sort(([left], [right]) => left.localeCompare(right)),
+    );
+  }
+
+  get seededCatalogVersion() {
+    return this.#seededCatalogVersion;
   }
 
   get enabled() {
@@ -419,6 +441,60 @@ export class GlobalBookmarkPreferences {
     return changed;
   }
 
+  /**
+   * Records which personal verse coordinates ("book:chapter:verse") an
+   * enabled global topic currently covers. A coordinate seen for the first
+   * time is stamped with `now`; one no longer covered is forgotten, so its
+   * clock restarts if it is covered again later.
+   */
+  recordCoverage(keys, now = Date.now()) {
+    const covered = normalizeCoverageKeys(keys);
+    const firstSeenAt = normalizeRecordTimestamp(now);
+    let changed = false;
+    for (const key of [...this.#coverage.keys()]) {
+      if (!covered.has(key)) {
+        this.#coverage.delete(key);
+        changed = true;
+      }
+    }
+    for (const key of covered) {
+      if (!this.#coverage.has(key)) {
+        this.#coverage.set(key, firstSeenAt);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.#write();
+    }
+    return changed;
+  }
+
+  /** Coordinates whose recorded coverage is at least `minAgeMs` old. */
+  stableCoverage(now = Date.now(), minAgeMs = 0) {
+    const at = normalizeRecordTimestamp(now);
+    if (!Number.isSafeInteger(minAgeMs) || minAgeMs < 0) {
+      throw new TypeError("The coverage age is invalid.");
+    }
+    const stable = new Set();
+    for (const [key, firstSeenAt] of this.#coverage) {
+      if (at - firstSeenAt >= minAgeMs) {
+        stable.add(key);
+      }
+    }
+    return stable;
+  }
+
+  /** Remembers that the catalogue's default topics were offered once. */
+  markSeeded(catalogVersion) {
+    const normalized = normalizeCatalogVersion(catalogVersion);
+    if (this.#seededCatalogVersion === normalized) {
+      return false;
+    }
+    this.#seededCatalogVersion = normalized;
+    this.#write();
+    return true;
+  }
+
   #readPreferences({ replaceCurrent = false } = {}) {
     if (!this.#storage) {
       return;
@@ -436,6 +512,8 @@ export class GlobalBookmarkPreferences {
         this.#enabledTopicIds = new Set();
         this.#disabledTopicIds = new Set();
         this.#hiddenBookmarkIds = new Set();
+        this.#coverage = new Map();
+        this.#seededCatalogVersion = null;
       }
       return;
     }
@@ -455,16 +533,24 @@ export class GlobalBookmarkPreferences {
         !value ||
         typeof value !== "object" ||
         Array.isArray(value) ||
-        ![2, STORAGE_VERSION].includes(value.version) ||
+        ![2, 3, STORAGE_VERSION].includes(value.version) ||
         !Number.isSafeInteger(value.catalog_version) ||
         value.catalog_version < 0
       ) {
         throw new TypeError("Global bookmark preferences are invalid.");
       }
       const enabledTopicIds = normalizeTopicIds(value.enabled_topic_ids);
-      const disabledTopicIds = value.version === STORAGE_VERSION
+      const disabledTopicIds = value.version >= 3
         ? normalizeTopicIds(value.disabled_topic_ids ?? [])
         : [];
+      // A version 3 record upgrades in place: it simply has no coverage and
+      // no seeding record yet, and is rewritten as version 4 on its next write.
+      const coverage = value.version === STORAGE_VERSION
+        ? normalizeStoredCoverage(value.coverage)
+        : new Map();
+      const seededCatalogVersion = value.version === STORAGE_VERSION
+        ? normalizeStoredSeededVersion(value.seeded_catalog_version)
+        : null;
       const hiddenBookmarks = normalizeBookmarkIds(
         value.hidden_bookmark_ids ?? [],
         null,
@@ -486,6 +572,8 @@ export class GlobalBookmarkPreferences {
       this.#hiddenBookmarkIds = new Set(
         retainedHiddenBookmarks.map((bookmark) => bookmark.id),
       );
+      this.#coverage = coverage;
+      this.#seededCatalogVersion = seededCatalogVersion;
       if (
         retainedTopicIds.length !== enabledTopicIds.length ||
         retainedDisabledTopicIds.length !== disabledTopicIds.length ||
@@ -593,6 +681,8 @@ export class GlobalBookmarkPreferences {
         enabled_topic_ids: [...this.#enabledTopicIds].sort(),
         disabled_topic_ids: [...this.#disabledTopicIds].sort(),
         hidden_bookmark_ids: this.hiddenBookmarkIds,
+        seeded_catalog_version: this.#seededCatalogVersion,
+        coverage: this.coverage,
       }));
     } catch {
       this.#disablePersistence();
@@ -739,6 +829,84 @@ function normalizeStoredCatalogVersion(value) {
     throw new TypeError("The global bookmark catalogue version is invalid.");
   }
   return value;
+}
+
+function normalizeStoredSeededVersion(value) {
+  return Number.isSafeInteger(value) && value >= 1 ? value : null;
+}
+
+function normalizeRecordTimestamp(value) {
+  if (!Number.isFinite(value) || value < 0 || value > MAX_RECORD_TIMESTAMP) {
+    throw new TypeError("The coverage timestamp is invalid.");
+  }
+  return Math.floor(value);
+}
+
+function normalizeCoverageKey(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const match = COVERAGE_KEY_PATTERN.exec(value);
+  if (
+    !match ||
+    Number.parseInt(match[1], 10) > 66 ||
+    Number.parseInt(match[2], 10) > 150 ||
+    Number.parseInt(match[3], 10) > 2_000
+  ) {
+    return null;
+  }
+  return value;
+}
+
+function normalizeCoverageKeys(value) {
+  if (
+    !value ||
+    typeof value[Symbol.iterator] !== "function" ||
+    typeof value === "string"
+  ) {
+    throw new TypeError("Global bookmark coverage keys are invalid.");
+  }
+  const keys = new Set();
+  for (const candidate of value) {
+    const key = normalizeCoverageKey(candidate);
+    if (key === null) {
+      throw new TypeError("A global bookmark coverage key is invalid.");
+    }
+    keys.add(key);
+  }
+  if (keys.size > MAX_COVERAGE_ENTRIES) {
+    throw new RangeError("Too many global bookmark coverage entries.");
+  }
+  return keys;
+}
+
+/**
+ * A stored coverage map is advisory: an entry this client cannot read is
+ * dropped rather than costing the reader every other preference, and the
+ * oldest entries win when a record somehow exceeds the bound.
+ */
+function normalizeStoredCoverage(value) {
+  if (value === undefined || value === null) {
+    return new Map();
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return new Map();
+  }
+  const entries = [];
+  for (const [candidate, firstSeenAt] of Object.entries(value)) {
+    const key = normalizeCoverageKey(candidate);
+    if (
+      key === null ||
+      !Number.isSafeInteger(firstSeenAt) ||
+      firstSeenAt < 0 ||
+      firstSeenAt > MAX_RECORD_TIMESTAMP
+    ) {
+      continue;
+    }
+    entries.push([key, firstSeenAt]);
+  }
+  entries.sort((left, right) => left[1] - right[1] || left[0].localeCompare(right[0]));
+  return new Map(entries.slice(0, MAX_COVERAGE_ENTRIES));
 }
 
 function normalizeTopicIds(value) {

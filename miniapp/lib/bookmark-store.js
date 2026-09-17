@@ -1,8 +1,3 @@
-import {
-  CORE_BOOKMARK_TOPIC_DEFINITIONS,
-  isLegacyBookmarkTopicId,
-} from "./bookmark-topic-definitions.js";
-
 const STORAGE_PREFIX = "getbible.miniapp.bookmarks.v1";
 const STORAGE_VERSION = 3;
 const BACKUP_VERSION = 4;
@@ -27,18 +22,79 @@ const COLOR_PATTERN = /^#[a-f0-9]{6}$/;
 const BACKUP_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|([+-])(\d{2}):(\d{2}))$/;
 const FORBIDDEN_CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/;
 const FORBIDDEN_CONTROL_GLOBAL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
+// Topics an earlier client numbered rather than named: a canonical topic may
+// still be matched to one of these by its English name or alias.
+const LEGACY_NUMERIC_TOPIC_ID_PATTERN = /^[1-9]\d{0,2}$/;
 
-export const DEFAULT_BOOKMARK_TOPICS = Object.freeze(
-  CORE_BOOKMARK_TOPIC_DEFINITIONS.map((definition) => Object.freeze({
-    id: definition.id,
-    name: definition.name,
-    color: definition.color,
-  })),
-);
+/**
+ * A new store starts without topics. The shared catalogue's default topics
+ * are seeded once from the public Bookmarks API when it first loads (see
+ * `seedDefaultTopics`); nothing about them is bundled with the application.
+ */
+export const DEFAULT_BOOKMARK_TOPICS = Object.freeze([]);
 
-export const BOOKMARK_TOPIC_COLORS = Object.freeze(
-  [...new Set(DEFAULT_BOOKMARK_TOPICS.map((topic) => topic.color))],
-);
+/** The fixed topic palette offered to new topics and colour inputs. */
+export const BOOKMARK_TOPIC_COLORS = Object.freeze([
+  "#f9a8b8",
+  "#93c5fd",
+  "#7dd3fc",
+  "#a16207",
+  "#fde68a",
+  "#d8b4fe",
+  "#a5b4fc",
+  "#fca5a5",
+  "#fdba74",
+  "#f0abfc",
+  "#bef264",
+  "#fcd34d",
+  "#67e8f9",
+  "#c4b5fd",
+  "#fda4af",
+  "#fef08a",
+  "#fed7aa",
+  "#fecdd3",
+  "#99f6e4",
+  "#fb7185",
+  "#bbf7d0",
+  "#86efac",
+  "#bfdbfe",
+  "#c7d2fe",
+  "#fecaca",
+  "#a7f3d0",
+  "#d9f99d",
+  "#bae6fd",
+  "#f5b7d2",
+  "#e9d5ff",
+  "#fdc4a8",
+  "#fda4a4",
+  "#a7f3e8",
+  "#ddd6fe",
+  "#fde047",
+  "#cbd5e1",
+  "#818cf8",
+  "#60a5fa",
+  "#a78bfa",
+  "#b7e4c7",
+  "#67d6e8",
+  "#c4a7a7",
+  "#8dd3c7",
+  "#a5f3fc",
+  "#fbbf8a",
+  "#f59e9e",
+  "#c084fc",
+  "#f0c36e",
+  "#6ee7b7",
+  "#5eead4",
+  "#e8a0bf",
+  "#fbbf24",
+  "#fbcfe8",
+  "#d6d3d1",
+]);
+
+export function isLegacyBookmarkTopicId(value) {
+  return typeof value === "string" &&
+    LEGACY_NUMERIC_TOPIC_ID_PATTERN.test(value);
+}
 
 export class BookmarkBackupError extends Error {
   constructor(message) {
@@ -381,6 +437,9 @@ export class BookmarkStore {
 
     if (topicsAdded > 0) {
       this.#topics = nextTopics;
+      if (this.#activeTopicId === null) {
+        this.#activeTopicId = nextTopics[0].id;
+      }
       this.#persist();
     }
     return {
@@ -388,6 +447,25 @@ export class BookmarkStore {
       topics_updated: 0,
       topic_ids: topicIds,
     };
+  }
+
+  /**
+   * Adds the catalogue's default topics to a store that has none yet.
+   *
+   * This is how a first-time reader still starts with the shared catalogue's
+   * defaults now that nothing is bundled: the caller runs it once per scope
+   * when a verified catalogue first loads and records that it did. A store
+   * that already holds topics is left alone; the reader chose those.
+   */
+  seedDefaultTopics(definitions) {
+    if (!Array.isArray(definitions)) {
+      throw new TypeError("Bookmark topic definitions are invalid.");
+    }
+    const defaults = definitions.filter((definition) => definition?.default === true);
+    if (defaults.length === 0 || this.#topics.length > 0) {
+      return { topics_added: 0, topics_updated: 0, topic_ids: {} };
+    }
+    return this.ensureTopics(defaults);
   }
 
   removeTopic(id) {
@@ -520,7 +598,7 @@ export class BookmarkStore {
     this.#topics = nextTopics;
     this.#bookmarks = nextBookmarks;
     if (!topicIds.has(this.#activeTopicId)) {
-      this.#activeTopicId = nextTopics[0].id;
+      this.#activeTopicId = nextTopics[0]?.id ?? null;
     }
     this.#persist();
     return {
@@ -566,7 +644,6 @@ export class BookmarkStore {
         ![1, 2, STORAGE_VERSION].includes(value.version) ||
         !Array.isArray(value.topics) ||
         !Array.isArray(value.bookmarks) ||
-        value.topics.length < 1 ||
         value.topics.length > MAX_TOPICS ||
         value.bookmarks.length > MAX_BOOKMARK_ENTRIES
       ) {
@@ -574,9 +651,6 @@ export class BookmarkStore {
       }
       const normalizedTopics = uniqueTopics(value.topics.map(normalizeTopic));
       const topics = normalizedTopics;
-      if (topics.length === 0) {
-        throw new TypeError("Bookmark record has no topics.");
-      }
       const topicIds = new Set(topics.map((topic) => topic.id));
       const bookmarks = compactBookmarks(
         value.bookmarks
@@ -591,7 +665,7 @@ export class BookmarkStore {
       );
       const activeTopicId = topicIds.has(value.active_topic_id)
         ? value.active_topic_id
-        : topics[0].id;
+        : topics[0]?.id ?? null;
       const recentTopicIds = value.version >= 3
         ? uniqueTopicIds(
           Array.isArray(value.recent_topic_ids)
@@ -865,7 +939,7 @@ function freshRecord() {
   const topics = DEFAULT_BOOKMARK_TOPICS.map(cloneTopic);
   return {
     version: STORAGE_VERSION,
-    active_topic_id: topics[0].id,
+    active_topic_id: topics[0]?.id ?? null,
     recent_topic_ids: [],
     record_updated_at: 0,
     topics,

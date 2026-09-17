@@ -780,6 +780,7 @@ test("keeps BookmarkStore synchronous while Telegram replication is async", asyn
     clock: () => timestamp++,
     idFactory: () => "bookmark_created",
   });
+  bookmarks.ensureTopics([{ id: "grace", name: "Grace", color: "#bbf7d0" }]);
 
   bookmarks.apply({
     translation: "kjv",

@@ -6,8 +6,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { chromium } from "playwright";
-import { CORE_BOOKMARK_TOPIC_DEFINITIONS } from "../../lib/bookmark-topic-definitions.js";
-import { GLOBAL_BOOKMARK_DATA } from "../../lib/global-bookmark-data.js";
+
+import {
+  bookmarksApiAssignmentCount,
+  bookmarksApiTopicCount,
+  bookmarksApiTopicVerseCount,
+} from "../fixtures/bookmarks-api.mjs";
+import { installBookmarksApiRoute } from "./support/bookmarks-api.mjs";
 
 const miniappRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const corsHeaders = { "access-control-allow-origin": "*" };
@@ -22,12 +27,12 @@ const globalBookmarkPreferencesMirrorKey =
   `getbible.miniapp.global-device.v1:${bookmarkScope}:preferences`;
 const readingHistoryStorageKey =
   `getbible.miniapp.reading-history.v1:${bookmarkScope}`;
-const globalTopicCount = CORE_BOOKMARK_TOPIC_DEFINITIONS.length;
-const globalAssignmentCount = Object.values(GLOBAL_BOOKMARK_DATA.bookmarks_by_topic)
-  .reduce((total, coordinates) => total + coordinates.length, 0);
-const graceGlobalCount = GLOBAL_BOOKMARK_DATA.bookmarks_by_topic.grace.length;
-const spiritualRebirthGlobalCount =
-  GLOBAL_BOOKMARK_DATA.bookmarks_by_topic["spiritual-rebirth"].length;
+// The catalogue the page reads comes from the public Bookmarks API, served
+// here from the shared fixture; every default topic is seeded on first boot.
+const globalTopicCount = bookmarksApiTopicCount();
+const globalAssignmentCount = bookmarksApiAssignmentCount();
+const graceGlobalCount = bookmarksApiTopicVerseCount("grace");
+const spiritualRebirthGlobalCount = bookmarksApiTopicVerseCount("spiritual-rebirth");
 const bookNames = [
   "Genesis", "Exodus", "Leviticus", "Numbers", "Deuteronomy", "Joshua",
   "Judges", "Ruth", "1 Samuel", "2 Samuel", "1 Kings", "2 Kings",
@@ -497,6 +502,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     publicRequests.push(new URL(route.request().url()).pathname);
     return fulfillJson(route, { error: "unexpected query request" }, 400, true);
   });
+  const bookmarksApi = await installBookmarksApiRoute(page);
 
   const searchRequests = [];
   await page.route(searchApiPattern, (route) => {
@@ -585,17 +591,6 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
         ),
         status: contributionStatus,
         catalog: { revision: 0, checksum: "0".repeat(64) },
-      });
-    }
-    if (apiPath === "bookmarks/catalog") {
-      return fulfillJson(route, {
-        revision: 0,
-        checksum: "0".repeat(64),
-        catalog: {
-          schema_version: 1,
-          topics: [],
-          associations: { add: [], remove: [] },
-        },
       });
     }
     if (apiPath === "preferences") {
@@ -973,9 +968,10 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   ));
   assert.match(await page.locator("#bookmark-list").innerText(), /John 3:2/);
   assert.equal(await page.locator("#load-topic-global-bookmarks").isVisible(), true);
-  const catalogsBeforeExplicitTopicLoad = robotRequests.filter(
-    (path) => path === "bookmarks/catalog",
-  ).length;
+  // Boot read the catalogue once (index and collection); an explicit topic
+  // pull revalidates against the API's index without re-downloading it.
+  assert.deepEqual(bookmarksApi.requests, ["index.json", "all.json"]);
+  const catalogsBeforeExplicitTopicLoad = bookmarksApi.requests.length;
   await page.locator("#load-topic-global-bookmarks").click();
   await page.waitForFunction(({ globalCount }) => (
     document.querySelectorAll("#bookmark-list .bookmark-list__item").length ===
@@ -983,10 +979,11 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     document.querySelectorAll("#bookmark-list .bookmark-list__global-badge").length ===
       globalCount
   ), { globalCount: graceGlobalCount });
-  assert.ok(
-    robotRequests.filter((path) => path === "bookmarks/catalog").length >
-      catalogsBeforeExplicitTopicLoad,
+  assert.deepEqual(
+    bookmarksApi.requests.slice(catalogsBeforeExplicitTopicLoad),
+    ["index.json"],
   );
+  assert.equal(robotRequests.some((path) => path.startsWith("bookmarks/catalog")), false);
   assert.equal(
     await page.locator("#bookmark-list [data-bookmark-remove]").count(),
     graceGlobalCount + 1,

@@ -82,6 +82,10 @@ const englishFallbackKeys = Object.freeze([
   "bookmarks.contribution_outcome_pending",
   "bookmarks.contribution_outcome_deferred",
   "bookmarks.contribution_outcome_rejected",
+  "bookmarks.contribution_outcome_live",
+  "bookmarks.global_unavailable",
+  "bookmarks.global_merged_one",
+  "bookmarks.global_merged_other",
 ]);
 const extensionKeys = Object.freeze([
   ...Object.keys(rawCatalogs.af),
@@ -233,8 +237,10 @@ for (const locale of Object.keys(rawCatalogs)) {
 }
 
 /**
- * Complete additions for the Home summary, History excerpt state, Bookmarks,
- * and stable built-in bookmark-topic names in every existing UI catalog.
+ * Complete additions for the Home summary, History excerpt state, and
+ * Bookmarks in every existing UI catalog. Global topic names are not
+ * messages: the public Bookmarks API publishes them per locale alongside the
+ * catalogue itself.
  */
 export const BOOKMARK_LOCALE_EXTENSION = Object.freeze(catalogs);
 

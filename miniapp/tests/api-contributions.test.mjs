@@ -74,17 +74,6 @@ test("submits contribution batches with the plain session bearer like search", a
     }
     if (path.endsWith("/contributions/status")) return json(STATUS);
     if (path.endsWith("/contributions/events")) return json(EVENTS_RESPONSE);
-    if (path.endsWith("/bookmarks/catalog")) {
-      return json({
-        revision: 4,
-        checksum: "b".repeat(64),
-        catalog: {
-          schema_version: 1,
-          topics: [],
-          associations: { add: [], remove: [] },
-        },
-      }, 200, { ETag: '"catalog-4"' });
-    }
     return json({ error: { code: "not_found" } }, 404);
   });
 
@@ -96,7 +85,9 @@ test("submits contribution batches with the plain session bearer like search", a
     EVENTS_RESPONSE,
   );
   assert.deepEqual(await api.submitContributionEvents(EVENTS), EVENTS_RESPONSE);
-  await api.bookmarkCatalog();
+  // The global catalogue is public data the browser reads from the Bookmarks
+  // API directly; the robot has no catalogue route to authenticate against.
+  assert.equal(typeof api.bookmarkCatalog, "undefined");
 
   const sessionRequest = requests.find(({ path }) => path.endsWith("/session"));
   assert.deepEqual(JSON.parse(sessionRequest.options.body), {
@@ -106,11 +97,12 @@ test("submits contribution batches with the plain session bearer like search", a
   assert.equal(sessionRequest.options.headers.Authorization, undefined);
 
   const authenticated = requests.filter(({ path }) =>
-    /\/(?:contributions|bookmarks\/catalog)/u.test(path)
+    /\/contributions/u.test(path)
   );
-  assert.equal(authenticated.length, 4);
+  assert.equal(authenticated.length, 3);
   assert.ok(authenticated.every(({ options }) =>
-    options.headers["X-Telegram-Init-Data"] === undefined
+    options.headers["X-Telegram-Init-Data"] === undefined &&
+    options.headers["If-None-Match"] === undefined
   ));
   assert.ok(authenticated.every(({ options }) =>
     options.headers.Authorization === `Bearer ${SESSION_TOKEN}`

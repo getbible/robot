@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 
 import { chromium, webkit } from "playwright";
 
+import { installBookmarksApiRoute } from "./support/bookmarks-api.mjs";
+
 const miniappRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const mainApiPattern = /^https:\/\/api\.getbible\.net\/v2\/.+/;
 const queryApiPattern = /^https:\/\/query\.getbible\.net\/v2\/.+/;
@@ -192,18 +194,6 @@ function contributionStatus({
   };
 }
 
-function emptyCatalog() {
-  return {
-    revision: 0,
-    checksum: "0".repeat(64),
-    catalog: {
-      schema_version: 1,
-      topics: [],
-      associations: { add: [], remove: [] },
-    },
-  };
-}
-
 async function serveStatic(route) {
   const url = new URL(route.request().url());
   const relative = url.pathname.replace(/^\/miniapp\/?/, "") || "index.html";
@@ -246,7 +236,6 @@ async function createBrowserFixture(
   const syncRequests = [];
   const requestSequence = [];
   let statusRequests = 0;
-  let catalogRequests = 0;
   let shouldFailSync = failFirstSync;
   let shouldAbortSync = abortSync;
   let abortedSyncs = 0;
@@ -312,6 +301,9 @@ async function createBrowserFixture(
   await page.route(queryApiPattern, (route) =>
     fulfillPublicJson(route, { error: "unexpected query request" }, 400)
   );
+  // The global catalogue is public data from the Bookmarks API; a Sync tap
+  // must never depend on it, and a fresh cached copy costs no request.
+  const bookmarksApi = await installBookmarksApiRoute(page);
 
   await page.route("https://app.local/**", async (route) => {
     const request = route.request();
@@ -415,17 +407,12 @@ async function createBrowserFixture(
       requestSequence.push("retired-sync");
       return fulfillJson(route, { error: "not_found" }, 404);
     }
-    if (apiPath === "bookmarks/catalog") {
-      catalogRequests += 1;
-      requestSequence.push("catalog");
-      return fulfillJson(route, emptyCatalog(), 200, { ETag: '"catalog-0"' });
-    }
     return fulfillJson(route, { error: { code: "not_found" } }, 404);
   });
 
   return {
     abortedSyncCount: () => abortedSyncs,
-    catalogRequestCount: () => catalogRequests,
+    catalogRequestCount: () => bookmarksApi.requests.length,
     failedRequests,
     page,
     pageErrors,

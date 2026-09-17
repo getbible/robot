@@ -13,7 +13,14 @@ import {
   bookmarkStorageScope,
   parseBookmarkBackup,
 } from "../lib/bookmark-store.js";
-import { GLOBAL_BOOKMARK_TOPIC_DEFINITIONS } from "../lib/global-bookmark-catalog.js";
+import { bookmarksApiCatalog } from "./fixtures/bookmarks-api.mjs";
+
+// The default topics come from the public Bookmarks API catalogue and are
+// seeded into a fresh store once; the tests below open stores that way.
+const GLOBAL_BOOKMARK_TOPIC_DEFINITIONS = bookmarksApiCatalog().topicDefinitions();
+const SEEDED_TOPICS = GLOBAL_BOOKMARK_TOPIC_DEFINITIONS
+  .filter((definition) => definition.default)
+  .map(({ id, name, color }) => ({ id, name, color }));
 
 class MemoryStorage {
   values = new Map();
@@ -44,47 +51,102 @@ function verse(overrides = {}) {
   };
 }
 
-function scopedStore(storage, scope = "a".repeat(64), options = {}) {
+function scopedStore(storage, scope = "a".repeat(64), { seed = true, ...options } = {}) {
   let id = 0;
   let now = 1_000;
-  return new BookmarkStore({
+  const store = new BookmarkStore({
     storage,
     scope,
     idFactory: () => `bookmark_${++id}`,
     clock: () => now++,
     ...options,
   });
+  if (seed) {
+    store.seedDefaultTopics(GLOBAL_BOOKMARK_TOPIC_DEFINITIONS);
+    // The offer is part of opening the store; the test clock starts after it.
+    id = 0;
+    now = 1_000;
+  }
+  return store;
 }
 
-test("ships every canonical default topic and its palette", () => {
-  const expected = GLOBAL_BOOKMARK_TOPIC_DEFINITIONS
-    .filter((topic) => topic.default)
-    .map(({ id, name, color }) => ({ id, name, color }));
+test("starts without topics until the catalogue seeds its defaults once", () => {
+  const storage = new MemoryStorage();
+  const fresh = scopedStore(storage, "a".repeat(64), { seed: false });
 
-  assert.deepEqual(DEFAULT_BOOKMARK_TOPICS, expected);
+  assert.deepEqual(DEFAULT_BOOKMARK_TOPICS, []);
+  assert.equal(Object.isFrozen(DEFAULT_BOOKMARK_TOPICS), true);
+  assert.equal(fresh.topicCount, 0);
+  assert.equal(fresh.activeTopicId, null);
+  assert.deepEqual(fresh.snapshot().topics, []);
+  assert.throws(() => fresh.apply(verse()), /not found/i);
+
+  const definitions = [
+    ...GLOBAL_BOOKMARK_TOPIC_DEFINITIONS,
+    {
+      id: "optional-topic",
+      name: "Optional Topic",
+      color: "#abcdef",
+      aliases: [],
+      default: false,
+    },
+  ];
+  const seeded = fresh.seedDefaultTopics(definitions);
+  assert.equal(seeded.topics_added, SEEDED_TOPICS.length);
+  assert.deepEqual(fresh.snapshot().topics, SEEDED_TOPICS);
+  assert.equal(fresh.topic("optional-topic"), null);
+  assert.equal(fresh.activeTopicId, SEEDED_TOPICS[0].id);
+  assert.deepEqual(
+    JSON.parse(storage.getItem(`${BOOKMARK_STORAGE_PREFIX}:${"a".repeat(64)}`)).topics,
+    SEEDED_TOPICS,
+  );
+
+  // Seeding is an offer for an empty store only: a reader's own topics, or
+  // the defaults themselves, are never touched by a second offer.
+  fresh.removeTopic("grace");
+  assert.equal(fresh.seedDefaultTopics(definitions).topics_added, 0);
+  assert.equal(fresh.topic("grace"), null);
+  const custom = scopedStore(new MemoryStorage(), "b".repeat(64), { seed: false });
+  custom.addTopic("Mine", "#123456");
+  assert.equal(custom.seedDefaultTopics(definitions).topics_added, 0);
+  assert.equal(custom.topicCount, 1);
   assert.equal(
-    new Set(DEFAULT_BOOKMARK_TOPICS.map((topic) => topic.id)).size,
-    DEFAULT_BOOKMARK_TOPICS.length,
+    scopedStore(new MemoryStorage(), "c".repeat(64), { seed: false })
+      .seedDefaultTopics([]).topics_added,
+    0,
   );
-  assert.ok(
-    DEFAULT_BOOKMARK_TOPICS.every((topic) =>
-      BOOKMARK_TOPIC_COLORS.includes(topic.color)
-    ),
-  );
-  assert.ok(DEFAULT_BOOKMARK_TOPICS.some((topic) => topic.name === "Grace"));
-  assert.ok(
-    DEFAULT_BOOKMARK_TOPICS.some(
-      (topic) => topic.name === "Authority of the Bible",
-    ),
-  );
-  assert.deepEqual(
-    DEFAULT_BOOKMARK_TOPICS.find((topic) => topic.id === "biblical-love"),
-    { id: "biblical-love", name: "Biblical Love", color: "#a16207" },
-  );
-  assert.deepEqual(
-    DEFAULT_BOOKMARK_TOPICS.find((topic) => topic.id === "fear-not"),
-    { id: "fear-not", name: "Fear Not", color: "#fef08a" },
-  );
+  assert.throws(() => fresh.seedDefaultTopics(null), TypeError);
+});
+
+test("offers a fixed topic palette", () => {
+  assert.equal(Object.isFrozen(BOOKMARK_TOPIC_COLORS), true);
+  assert.equal(new Set(BOOKMARK_TOPIC_COLORS).size, BOOKMARK_TOPIC_COLORS.length);
+  assert.ok(BOOKMARK_TOPIC_COLORS.length >= 40);
+  assert.ok(BOOKMARK_TOPIC_COLORS.every((color) => /^#[a-f0-9]{6}$/.test(color)));
+  assert.equal(BOOKMARK_TOPIC_COLORS[0], "#f9a8b8");
+  assert.ok(BOOKMARK_TOPIC_COLORS.includes("#a16207"));
+  assert.ok(BOOKMARK_TOPIC_COLORS.includes("#bbf7d0"));
+});
+
+test("opens an empty stored record without inventing a topic", () => {
+  const storage = new MemoryStorage();
+  const scope = "d".repeat(64);
+  storage.setItem(`${BOOKMARK_STORAGE_PREFIX}:${scope}`, JSON.stringify({
+    version: 3,
+    active_topic_id: null,
+    recent_topic_ids: [],
+    record_updated_at: 5,
+    topics: [],
+    bookmarks: [],
+  }));
+
+  const bookmarks = scopedStore(storage, scope, { seed: false });
+
+  assert.equal(bookmarks.persistent, true);
+  assert.equal(bookmarks.topicCount, 0);
+  assert.equal(bookmarks.activeTopicId, null);
+  const added = bookmarks.addTopic("Promises", "#123456");
+  assert.equal(bookmarks.activeTopicId, added.id);
 });
 
 test("restores canonical global topics without replacing personal topic ids", () => {
@@ -166,7 +228,7 @@ test("reuses a mapped numeric topic after the user renames it", () => {
 test("keeps fresh Biblical Love brown without rewriting stored color choices", () => {
   const storage = new MemoryStorage();
   const scope = "a".repeat(64);
-  const topics = DEFAULT_BOOKMARK_TOPICS.map((topic) => ({ ...topic }));
+  const topics = SEEDED_TOPICS.map((topic) => ({ ...topic }));
   topics.find((topic) => topic.id === "biblical-love").color = "#f9a8d4";
   topics.push({ id: "42", name: "Biblical Love", color: "#f9a8d4" });
   topics.push({ id: "custom-love", name: "My Love", color: "#f9a8d4" });
@@ -216,7 +278,7 @@ test("persists per-account bookmarks across launches without cross-account reads
   alice.apply(verse(), "grace");
 
   const reopened = scopedStore(storage, aliceScope);
-  const bob = scopedStore(storage, bobScope);
+  const bob = scopedStore(storage, bobScope, { seed: false });
 
   assert.equal(reopened.size, 1);
   assert.equal(reopened.bookmarkFor(verse())?.topic_id, "grace");
@@ -771,7 +833,7 @@ test("returns defensive snapshots", () => {
   snapshot.bookmarks[0].topic_ids.push("biblical-love");
   snapshot.bookmarks.push(verse());
 
-  assert.equal(bookmarks.topic("adultery")?.name, "Adultery");
+  assert.equal(bookmarks.topic("biblical-love")?.name, "Biblical Love");
   assert.equal(bookmarks.bookmarkFor(verse())?.reference, "John 3:16");
   assert.deepEqual(bookmarks.bookmarkFor(verse())?.topic_ids, ["grace"]);
   assert.equal(bookmarks.size, 1);

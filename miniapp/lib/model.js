@@ -50,7 +50,11 @@ const CONTRIBUTION_EVENT_SUMMARY_KEYS = Object.freeze([
   "rejected",
   "deferred",
   "applied",
+  "live",
 ]);
+// "live" counts applied events the server has since observed in the public
+// Bookmarks API. A server from before that observation simply omits it.
+const CONTRIBUTION_OPTIONAL_EVENT_SUMMARY_KEYS = new Set(["live"]);
 const MAX_CONTRIBUTION_TOPICS = 1_000;
 const ROUTES = new Set([
   "home",
@@ -926,17 +930,19 @@ function normalizeContributionSummary(value) {
       [...CONTRIBUTION_TOPIC_SUMMARY_KEYS].sort(),
     ) ||
     !isRecord(value.events) ||
-    !sameStringArray(
-      Object.keys(value.events).sort(),
-      [...CONTRIBUTION_EVENT_SUMMARY_KEYS].sort(),
+    Object.keys(value.events).some((key) =>
+      !CONTRIBUTION_EVENT_SUMMARY_KEYS.includes(key)
     ) ||
-    [...CONTRIBUTION_TOPIC_SUMMARY_KEYS, ...CONTRIBUTION_EVENT_SUMMARY_KEYS]
-      .some((key, index) => {
-        const group = index < CONTRIBUTION_TOPIC_SUMMARY_KEYS.length
-          ? value.topics
-          : value.events;
-        return !Number.isSafeInteger(group[key]) || group[key] < 0;
-      })
+    CONTRIBUTION_EVENT_SUMMARY_KEYS.some((key) =>
+      !Object.hasOwn(value.events, key) &&
+      !CONTRIBUTION_OPTIONAL_EVENT_SUMMARY_KEYS.has(key)
+    ) ||
+    CONTRIBUTION_TOPIC_SUMMARY_KEYS.some((key) =>
+      !Number.isSafeInteger(value.topics[key]) || value.topics[key] < 0
+    ) ||
+    Object.values(value.events).some((count) =>
+      !Number.isSafeInteger(count) || count < 0
+    )
   ) {
     throw new TypeError("Invalid contributor review summary.");
   }
@@ -945,7 +951,7 @@ function normalizeContributionSummary(value) {
       CONTRIBUTION_TOPIC_SUMMARY_KEYS.map((key) => [key, value.topics[key]]),
     ),
     events: Object.fromEntries(
-      CONTRIBUTION_EVENT_SUMMARY_KEYS.map((key) => [key, value.events[key]]),
+      CONTRIBUTION_EVENT_SUMMARY_KEYS.map((key) => [key, value.events[key] ?? 0]),
     ),
   };
 }

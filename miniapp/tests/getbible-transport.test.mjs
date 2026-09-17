@@ -495,3 +495,96 @@ test("incoherent or unbounded deadline policy is refused at construction", () =>
     );
   }
 });
+
+test("bookmarks documents come from the fixed Bookmarks API origin with their SHA-256", async () => {
+  const raw = `${JSON.stringify({ schema_version: 1, catalog_version: 3 })}\n`;
+  const requests = [];
+  const transport = new GetBibleTransport({
+    fetchImplementation: async (url, options) => {
+      requests.push({ url: String(url), options });
+      return response(raw);
+    },
+  });
+
+  const result = await transport.bookmarks("index.json", { maximumBytes: 64 * 1024 });
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "https://bookmarks.getbible.net/v1/index.json");
+  assert.equal(requests[0].options.method, "GET");
+  assert.equal(requests[0].options.headers.Accept, "application/json");
+  assert.equal(requests[0].options.credentials, "omit");
+  assert.equal(requests[0].options.cache, "no-store");
+  assert.equal(requests[0].options.redirect, "error");
+  assert.equal(requests[0].options.referrerPolicy, "no-referrer");
+  assert.equal(requests[0].options.headers.Authorization, undefined);
+  assert.equal(new TextDecoder().decode(result.bytes), raw);
+  assert.equal(
+    result.sha256,
+    createHash("sha256").update(raw, "utf8").digest("hex"),
+  );
+
+  await transport.bookmarks("topics/grace.json");
+  assert.equal(requests[1].url, "https://bookmarks.getbible.net/v1/topics/grace.json");
+  for (const path of ["/index.json", "../index.json", "index.txt", "Index.json", "a b.json"]) {
+    await assert.rejects(transport.bookmarks(path), TypeError, path);
+  }
+  assert.equal(requests.length, 2);
+});
+
+test("bookmarks reads carry their own byte ceiling above the chapter bound", async () => {
+  const announcing = (contentLength) => new GetBibleTransport({
+    fetchImplementation: async () =>
+      new Response("{}", {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": String(contentLength),
+        },
+      }),
+  });
+
+  await assert.rejects(
+    announcing(9 * 1024 * 1024).bookmarks("all.json"),
+    (error) =>
+      error instanceof PublicApiError &&
+      error.code === "public_api_response_too_large",
+  );
+  await assert.rejects(
+    announcing(1024).bookmarks("all.json", { maximumBytes: 9 * 1024 * 1024 }),
+    RangeError,
+  );
+  // A chapter read stays under the shared 2 MiB bound; the catalogue does not.
+  await assert.rejects(
+    announcing(1024).json("translations.json", { maximumBytes: 3 * 1024 * 1024 }),
+    RangeError,
+  );
+  const accepted = await announcing(3 * 1024 * 1024).bookmarks("all.json");
+  assert.equal(new TextDecoder().decode(accepted.bytes), "{}");
+});
+
+test("the Bookmarks API origin is pinned like the other public origins", () => {
+  const originalEnvironment = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  try {
+    assert.throws(
+      () => new GetBibleTransport({
+        fetchImplementation: async () => response("{}"),
+        bookmarksRoot: "https://bookmarks.example.net/v1/",
+      }),
+      /allowlisted/,
+    );
+    assert.throws(
+      () => new GetBibleTransport({
+        fetchImplementation: async () => response("{}"),
+        bookmarksRoot: "http://bookmarks.getbible.net/v1/",
+      }),
+      /invalid/,
+    );
+    assert.doesNotThrow(() => new GetBibleTransport({
+      fetchImplementation: async () => response("{}"),
+      bookmarksRoot: "https://bookmarks.getbible.net/v1/",
+    }));
+  } finally {
+    process.env.NODE_ENV = originalEnvironment;
+  }
+});

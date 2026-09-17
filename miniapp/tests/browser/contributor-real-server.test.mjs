@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 
 import { chromium } from "playwright";
 
+import { installBookmarksApiRoute } from "./support/bookmarks-api.mjs";
+
 /**
  * The real client against the real server. Every other browser test answers
  * the API with mocks, and every server test sends hand-written batches, so a
@@ -241,12 +243,9 @@ async function createBrowserFixture(context, serverArgs = []) {
     const errorText = request.failure()?.errorText ?? "failed";
     const pathname = new URL(request.url()).pathname;
     // Chromium reports a route-fulfilled body-less response (the keepalive
-    // cleanup 204 and the catalogue's conditional 304) as ERR_ABORTED even
-    // though the server answered; the exchange log shows the real status.
-    if (
-      errorText === "net::ERR_ABORTED" &&
-      (pathname.endsWith("/api/v1/cleanup") || pathname.endsWith("/api/v1/bookmarks/catalog"))
-    ) {
+    // cleanup 204) as ERR_ABORTED even though the server answered; the
+    // exchange log shows the real status.
+    if (errorText === "net::ERR_ABORTED" && pathname.endsWith("/api/v1/cleanup")) {
       return;
     }
     failedRequests.push(`${request.url()}: ${errorText}`);
@@ -299,6 +298,7 @@ async function createBrowserFixture(context, serverArgs = []) {
   await page.route(queryApiPattern, (route) =>
     fulfillPublicJson(route, { error: "unexpected query request" }, 400)
   );
+  await installBookmarksApiRoute(page);
   await page.route(`${publicOrigin}/**`, (route) => proxyToRealServer(route, server.port));
 
   return {

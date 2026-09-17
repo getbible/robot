@@ -1,19 +1,27 @@
-import { GLOBAL_BOOKMARK_DATA } from "./global-bookmark-data.js";
-import {
-  CORE_BOOKMARK_TOPIC_DEFINITIONS,
-  isLegacyBookmarkTopicId,
-} from "./bookmark-topic-definitions.js";
 import { BOOK_CHAPTER_COUNTS } from "./bible-canon.js";
+import { isLegacyBookmarkTopicId } from "./bookmark-store.js";
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
-const CANONICAL_TOPIC_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,79}$/;
+// The public Bookmarks API v1 contract: ids, English names, colours, aliases
+// and locale codes are validated exactly as the API publishes them so a
+// document that would not pass the builder never reaches the reader.
+const CANONICAL_TOPIC_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const ENGLISH_TOPIC_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]$/;
 const COLOR_PATTERN = /^#[a-f0-9]{6}$/;
+const CHECKSUM_PATTERN = /^[a-f0-9]{64}$/;
+const LOCALE_PATTERN = /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/;
 const GLOBAL_SOURCE = "global";
 const GLOBAL_TRANSLATION_FALLBACK = "kjv";
 const SUPPORTED_SCHEMA_VERSION = 1;
-const MAX_GLOBAL_BOOKMARK_ASSIGNMENTS = 10_000;
-const ENGLISH_TOPIC_PATTERN =
-  /^(?=[A-Za-z0-9 &'():?-]{2,80}$)(?=.*[A-Za-z])(?!.* {2})[A-Za-z0-9][A-Za-z0-9 &'():?-]*[A-Za-z0-9)]$/;
+const MAX_TOPIC_ID_LENGTH = 80;
+const MAX_TOPIC_NAME_LENGTH = 80;
+const MAX_TRANSLATED_NAME_LENGTH = 120;
+const MAX_LOCALE_LENGTH = 16;
+const MAX_TOPIC_ALIASES = 20;
+const MAX_GLOBAL_BOOKMARK_TOPICS = 1_000;
+const MAX_GLOBAL_BOOKMARK_ASSIGNMENTS = 100_000;
+const MAX_GLOBAL_BOOKMARK_LOCALES = 500;
+const MAX_VERSE = 2_000;
 
 const BOOK_NAMES = Object.freeze([
   "Genesis",
@@ -83,13 +91,16 @@ const BOOK_NAMES = Object.freeze([
   "Jude",
   "Revelation",
 ]);
+
 /**
- * Immutable, translation-independent topic-to-verse associations.
+ * Immutable, translation-independent topic-to-verse associations published
+ * by the public Bookmarks API.
  *
  * The catalogue deliberately owns no user state. A separate browser-local
- * preference records which topic overlays are visible, while the authenticated
- * live provider can merge reviewed server deltas over this bundled fallback
- * without changing personal bookmark storage, Telegram sync, or backups.
+ * preference records which topics are visible on this device, and the
+ * catalogue is only ever replaced whole by a document whose SHA-256 the API's
+ * own index vouched for. Nothing is bundled with the application any more:
+ * `EMPTY_GLOBAL_BOOKMARK_CATALOG` stands in until a verified document exists.
  */
 export class GlobalBookmarkCatalog {
   #assignmentsById = new Map();
@@ -100,59 +111,50 @@ export class GlobalBookmarkCatalog {
   #topics;
   #topicsById = new Map();
 
-  constructor({
-    data = GLOBAL_BOOKMARK_DATA,
-    topics = CORE_BOOKMARK_TOPIC_DEFINITIONS,
-    bookNames = BOOK_NAMES,
-  } = {}) {
+  constructor(document, { bookNames = BOOK_NAMES } = {}) {
     if (
-      !data ||
-      typeof data !== "object" ||
-      Array.isArray(data) ||
-      data.schema_version !== SUPPORTED_SCHEMA_VERSION ||
+      !document ||
+      typeof document !== "object" ||
+      Array.isArray(document) ||
+      document.schema_version !== SUPPORTED_SCHEMA_VERSION ||
+      !Number.isSafeInteger(document.catalog_version) ||
+      document.catalog_version < 0 ||
+      !Array.isArray(document.topics) ||
+      document.topics.length > MAX_GLOBAL_BOOKMARK_TOPICS ||
       (
-        data.catalog_version !== undefined &&
+        document.checksum !== undefined &&
+        document.checksum !== null &&
         (
-          !Number.isSafeInteger(data.catalog_version) ||
-          data.catalog_version < 1
+          typeof document.checksum !== "string" ||
+          !CHECKSUM_PATTERN.test(document.checksum)
         )
-      ) ||
-      !data.bookmarks_by_topic ||
-      typeof data.bookmarks_by_topic !== "object" ||
-      Array.isArray(data.bookmarks_by_topic)
+      )
     ) {
       throw new TypeError("The global bookmark catalogue is invalid.");
     }
-    if (!Array.isArray(topics) || !Array.isArray(bookNames)) {
+    if (!Array.isArray(bookNames) || bookNames.length > BOOK_CHAPTER_COUNTS.length) {
       throw new TypeError("The global bookmark catalogue metadata is invalid.");
     }
-    // Older generated catalogues used the schema version as their content
-    // revision. Keep those fixtures/imports readable while allowing accepted
-    // contributions to advance the catalogue independently of its format.
-    this.version = data.catalog_version ?? data.schema_version;
+    this.version = document.catalog_version;
+    this.checksum = document.checksum ?? null;
     this.#bookNames = Object.freeze(bookNames.map((name) => boundedText(name, 80)));
-    this.#topics = Object.freeze(topics.map((definition) =>
-      Object.freeze(normalizeTopicDefinition(definition))
-    ));
+    this.#topics = Object.freeze(
+      document.topics
+        .map((definition) => Object.freeze(normalizeTopicDefinition(definition)))
+        .sort((left, right) => left.id.localeCompare(right.id, "en")),
+    );
     for (const definition of this.#topics) {
       if (this.#topicsById.has(definition.id)) {
         throw new TypeError("The global bookmark catalogue has duplicate topics.");
       }
       this.#topicsById.set(definition.id, definition);
     }
-
-    const dataTopicIds = Object.keys(data.bookmarks_by_topic);
-    if (
-      dataTopicIds.length !== this.#topics.length ||
-      dataTopicIds.some((id) => !this.#topicsById.has(id))
-    ) {
-      throw new TypeError("The global bookmark catalogue topics do not match.");
-    }
-    for (const definition of this.#topics) {
-      const coordinates = data.bookmarks_by_topic[definition.id];
-      if (!Array.isArray(coordinates) || coordinates.length === 0) {
-        throw new TypeError("A global bookmark topic has no verse associations.");
+    for (const definition of document.topics) {
+      const coordinates = definition.verses;
+      if (!Array.isArray(coordinates)) {
+        throw new TypeError("A global bookmark topic has invalid verse associations.");
       }
+      const topicId = boundedText(definition.id, MAX_TOPIC_ID_LENGTH);
       const topicAssignments = [];
       const seen = new Set();
       for (const coordinate of coordinates) {
@@ -166,7 +168,7 @@ export class GlobalBookmarkCatalog {
         }
         seen.add(coordinateKey);
         const assignment = Object.freeze({
-          topic_id: definition.id,
+          topic_id: topicId,
           ...normalized,
         });
         const id = globalBookmarkId(assignment);
@@ -179,15 +181,25 @@ export class GlobalBookmarkCatalog {
         verseAssignments.push(assignment);
         this.#assignmentsByVerse.set(coordinateKey, verseAssignments);
       }
-      this.#assignmentsByTopic.set(
-        definition.id,
-        Object.freeze(topicAssignments),
+      // Sorted, unique coordinates are what the API promises; the order is
+      // repeated here so a document that arrives unsorted still renders the
+      // same list as one that does.
+      topicAssignments.sort(compareAssignments);
+      this.#assignmentsByTopic.set(topicId, Object.freeze(topicAssignments));
+    }
+    for (const assignments of this.#assignmentsByVerse.values()) {
+      assignments.sort((left, right) =>
+        left.topic_id.localeCompare(right.topic_id, "en")
       );
     }
     this.assignmentCount = this.#assignmentsById.size;
     this.uniqueVerseCount = this.#assignmentsByVerse.size;
     this.#bookmarkIds = Object.freeze([...this.#assignmentsById.keys()].sort());
     Object.freeze(this);
+  }
+
+  get topicCount() {
+    return this.#topics.length;
   }
 
   bookmarkIds() {
@@ -379,199 +391,220 @@ export class GlobalBookmarkCatalog {
   }
 }
 
-export const GLOBAL_BOOKMARK_CATALOG = new GlobalBookmarkCatalog();
 export const GLOBAL_BOOKMARK_SOURCE = GLOBAL_SOURCE;
-export const GLOBAL_BOOKMARK_CATALOG_VERSION = GLOBAL_BOOKMARK_CATALOG.version;
-export const GLOBAL_BOOKMARK_TOPIC_DEFINITIONS = Object.freeze(
-  GLOBAL_BOOKMARK_CATALOG.topicDefinitions().map(freezeTopicDefinition),
-);
-export const DEFAULT_BOOKMARK_TOPIC_DEFINITIONS = Object.freeze(
-  GLOBAL_BOOKMARK_CATALOG
-    .topicDefinitions({ defaultsOnly: true })
-    .map(freezeTopicDefinition),
-);
+export const GLOBAL_BOOKMARK_CATALOG_SCHEMA_VERSION = SUPPORTED_SCHEMA_VERSION;
+export const MAX_GLOBAL_BOOKMARK_CATALOG_TOPICS = MAX_GLOBAL_BOOKMARK_TOPICS;
+export const MAX_GLOBAL_BOOKMARK_CATALOG_ASSIGNMENTS = MAX_GLOBAL_BOOKMARK_ASSIGNMENTS;
 
 /**
- * Applies a server-published, cumulative contribution overlay to the bundled
- * catalogue. The bundled asset remains the authoritative offline fallback;
- * the overlay contains only reviewed metadata and coordinate deltas.
+ * The catalogue the application holds before a verified API document exists:
+ * version 0, no topics, no assignments. Every reader of the catalogue can rely
+ * on its shape, so "no catalogue yet" is a state rather than a null check.
  */
-export function globalBookmarkCatalogWithOverlay(value, revision = 0) {
+export const EMPTY_GLOBAL_BOOKMARK_CATALOG = new GlobalBookmarkCatalog({
+  schema_version: SUPPORTED_SCHEMA_VERSION,
+  catalog_version: 0,
+  checksum: null,
+  topics: [],
+});
+
+/**
+ * Turns the API's `all.json` and `index.json` into the plain catalogue
+ * document the constructor accepts: one entry per topic carrying its verse
+ * coordinates and every published translated name. The result is
+ * JSON-compatible so a verified download can be stored as-is and reopened
+ * later without touching the network.
+ */
+export function globalBookmarkCatalogDocumentFromApi(all, index) {
   if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    !hasExactKeys(value, ["schema_version", "topics", "associations"]) ||
-    value.schema_version !== SUPPORTED_SCHEMA_VERSION ||
-    !Array.isArray(value.topics) ||
-    !value.associations ||
-    typeof value.associations !== "object" ||
-    !hasExactKeys(value.associations, ["add", "remove"]) ||
-    !Array.isArray(value.associations.add) ||
-    !Array.isArray(value.associations.remove) ||
-    value.associations.add.length + value.associations.remove.length >
-      MAX_GLOBAL_BOOKMARK_ASSIGNMENTS ||
-    !Number.isSafeInteger(revision) ||
-    revision < 0
+    !all ||
+    typeof all !== "object" ||
+    Array.isArray(all) ||
+    all.schema_version !== SUPPORTED_SCHEMA_VERSION ||
+    !Array.isArray(all.topics) ||
+    all.topics.length > MAX_GLOBAL_BOOKMARK_TOPICS ||
+    !all.locales ||
+    typeof all.locales !== "object" ||
+    Array.isArray(all.locales)
   ) {
-    throw new TypeError("The global bookmark catalogue overlay is invalid.");
+    throw new TypeError("The Bookmarks API catalogue document is invalid.");
   }
-  if (value.topics.length > 39) {
-    throw new TypeError("The global bookmark catalogue overlay has too many topics.");
+  if (
+    !index ||
+    typeof index !== "object" ||
+    Array.isArray(index) ||
+    index.schema_version !== SUPPORTED_SCHEMA_VERSION ||
+    !Number.isSafeInteger(index.catalog_version) ||
+    index.catalog_version < 1 ||
+    typeof index.checksum !== "string" ||
+    !CHECKSUM_PATTERN.test(index.checksum)
+  ) {
+    throw new TypeError("The Bookmarks API index document is invalid.");
   }
-
-  const definitions = new Map(
-    CORE_BOOKMARK_TOPIC_DEFINITIONS.map((definition) => [
-      definition.id,
-      normalizeTopicDefinition(definition),
-    ]),
-  );
-  const overlayTopicIds = new Set();
-  const overlayTopicNames = new Set(
-    [...definitions.values()].flatMap((definition) =>
-      [definition.name, ...definition.aliases].map((candidate) =>
-        candidate.toLocaleLowerCase("en").trim().replace(/\s+/gu, " ")
-      )
-    ),
-  );
-  for (const valueTopic of value.topics) {
+  const localeEntries = Object.entries(all.locales);
+  if (localeEntries.length > MAX_GLOBAL_BOOKMARK_LOCALES) {
+    throw new TypeError("The Bookmarks API catalogue document is invalid.");
+  }
+  const namesByTopic = new Map();
+  for (const [code, locale] of localeEntries) {
     if (
-      !valueTopic ||
-      typeof valueTopic !== "object" ||
-      Array.isArray(valueTopic) ||
-      !hasExactKeys(valueTopic, ["id", "name", "color", "aliases"]) ||
-      typeof valueTopic.name !== "string" ||
-      !ENGLISH_TOPIC_PATTERN.test(valueTopic.name) ||
-      !CANONICAL_TOPIC_ID_PATTERN.test(valueTopic.id ?? "") ||
-      !Array.isArray(valueTopic.aliases) ||
-      valueTopic.aliases.length > 20 ||
-      valueTopic.aliases.some((alias) =>
-        typeof alias !== "string" || !ENGLISH_TOPIC_PATTERN.test(alias)
-      ) ||
-      new Set(valueTopic.aliases.map((alias) => alias.toLocaleLowerCase("en")))
-        .size !== valueTopic.aliases.length
+      typeof code !== "string" ||
+      code.length > MAX_LOCALE_LENGTH ||
+      !LOCALE_PATTERN.test(code) ||
+      !locale ||
+      typeof locale !== "object" ||
+      Array.isArray(locale) ||
+      locale.schema_version !== SUPPORTED_SCHEMA_VERSION ||
+      locale.locale !== code ||
+      !locale.topics ||
+      typeof locale.topics !== "object" ||
+      Array.isArray(locale.topics)
     ) {
-      throw new TypeError("A global bookmark overlay topic is invalid.");
+      throw new TypeError("A Bookmarks API locale document is invalid.");
     }
-    const normalized = normalizeTopicDefinition({
-      ...valueTopic,
-      name_key: `bookmark_topics.${valueTopic?.id ?? ""}`,
-      default: definitions.get(valueTopic?.id)?.default ?? true,
-    });
-    if (overlayTopicIds.has(normalized.id)) {
-      throw new TypeError("The global bookmark catalogue overlay has duplicate topics.");
-    }
-    overlayTopicIds.add(normalized.id);
-    const bundled = definitions.get(normalized.id);
-    if (bundled) {
-      // A deployed repository update can make an older cumulative overlay
-      // repeat this now-bundled definition, including metadata which the PR
-      // corrected. The repository copy is authoritative; ignore the stale
-      // metadata while retaining its association deltas and later live topics.
-      continue;
-    }
-    for (const candidate of [valueTopic.name, ...valueTopic.aliases]) {
-      const normalizedName = candidate.toLocaleLowerCase("en")
-        .trim()
-        .replace(/\s+/gu, " ");
-      if (overlayTopicNames.has(normalizedName)) {
-        throw new TypeError("The global bookmark overlay reuses a topic name.");
+    for (const [topicId, name] of Object.entries(locale.topics)) {
+      if (
+        typeof name !== "string" ||
+        name.trim().length === 0 ||
+        name.length > MAX_TRANSLATED_NAME_LENGTH
+      ) {
+        throw new TypeError("A Bookmarks API locale document is invalid.");
       }
-      overlayTopicNames.add(normalizedName);
-    }
-    definitions.set(normalized.id, normalized);
-  }
-  if (definitions.size > 100) {
-    throw new TypeError("The global bookmark catalogue overlay has too many topics.");
-  }
-
-  const coordinates = new Map(
-    Object.entries(GLOBAL_BOOKMARK_DATA.bookmarks_by_topic).map(
-      ([topicId, topicCoordinates]) => [
-        topicId,
-        new Set(topicCoordinates.map((coordinate) => coordinate.join("/"))),
-      ],
-    ),
-  );
-  for (const topicId of definitions.keys()) {
-    if (!coordinates.has(topicId)) {
-      coordinates.set(topicId, new Set());
+      const names = namesByTopic.get(topicId) ?? {};
+      names[code] = name;
+      namesByTopic.set(topicId, names);
     }
   }
-
-  const removed = new Set();
-  for (const association of value.associations.remove) {
-    const normalized = normalizeOverlayAssociation(association, definitions);
-    const key = `${normalized.topic_id}:${normalized.coordinate.join("/")}`;
-    if (removed.has(key)) {
-      throw new TypeError("The global bookmark catalogue overlay has duplicate removals.");
-    }
-    removed.add(key);
-    coordinates.get(normalized.topic_id).delete(normalized.coordinate.join("/"));
-  }
-  const added = new Set();
-  for (const association of value.associations.add) {
-    const normalized = normalizeOverlayAssociation(association, definitions);
-    const key = `${normalized.topic_id}:${normalized.coordinate.join("/")}`;
-    if (added.has(key)) {
-      throw new TypeError("The global bookmark catalogue overlay has duplicate additions.");
-    }
-    if (removed.has(key)) {
-      throw new TypeError("The global bookmark catalogue overlay has conflicting entries.");
-    }
-    added.add(key);
-    coordinates.get(normalized.topic_id).add(normalized.coordinate.join("/"));
-  }
-
-  const data = {
+  return {
     schema_version: SUPPORTED_SCHEMA_VERSION,
-    catalog_version: GLOBAL_BOOKMARK_CATALOG_VERSION + revision,
-    bookmarks_by_topic: Object.fromEntries(
-      [...definitions.keys()].sort().map((topicId) => [
-        topicId,
-        [...coordinates.get(topicId)]
-          .map((coordinate) => coordinate.split("/").map(Number))
-          .sort(compareCoordinates),
-      ]),
-    ),
+    catalog_version: index.catalog_version,
+    checksum: index.checksum,
+    topics: all.topics.map((topic) => {
+      if (!topic || typeof topic !== "object" || Array.isArray(topic)) {
+        throw new TypeError("A Bookmarks API topic is invalid.");
+      }
+      const names = { ...(namesByTopic.get(topic.id) ?? {}) };
+      if (typeof names.en !== "string") {
+        names.en = topic.name;
+      }
+      return {
+        id: topic.id,
+        name: topic.name,
+        color: topic.color,
+        aliases: Array.isArray(topic.aliases) ? [...topic.aliases] : topic.aliases,
+        default: topic.default,
+        names,
+        verses: Array.isArray(topic.verses)
+          ? topic.verses.map((coordinate) =>
+            Array.isArray(coordinate) ? [...coordinate] : coordinate
+          )
+          : topic.verses,
+      };
+    }),
   };
-  return new GlobalBookmarkCatalog({
-    data,
-    topics: [...definitions.values()].sort((left, right) =>
-      left.id.localeCompare(right.id, "en")
-    ),
-  });
+}
+
+export function globalBookmarkCatalogFromApi(all, index) {
+  return new GlobalBookmarkCatalog(globalBookmarkCatalogDocumentFromApi(all, index));
+}
+
+/**
+ * The name a topic shows in one interface locale: the exact locale, then its
+ * base language, then the API's English name, then the canonical name. The
+ * API never infers a language or fills gaps, so the fallback lives here.
+ */
+export function globalBookmarkTopicName(definition, locale) {
+  if (!definition || typeof definition !== "object") {
+    return "";
+  }
+  const names = definition.names && typeof definition.names === "object"
+    ? definition.names
+    : {};
+  const normalizedLocale = typeof locale === "string"
+    ? locale.trim().toLocaleLowerCase("en")
+    : "";
+  const candidates = [normalizedLocale];
+  const base = normalizedLocale.split("-")[0];
+  if (base && base !== normalizedLocale) {
+    candidates.push(base);
+  }
+  candidates.push("en");
+  for (const candidate of candidates) {
+    if (
+      candidate &&
+      Object.hasOwn(names, candidate) &&
+      typeof names[candidate] === "string" &&
+      names[candidate].trim().length > 0
+    ) {
+      return names[candidate];
+    }
+  }
+  return typeof definition.name === "string" ? definition.name : "";
 }
 
 function normalizeTopicDefinition(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("A global bookmark topic is invalid.");
   }
-  const id = boundedText(value.id, 128);
-  const name = boundedText(value.name, 80).normalize("NFC");
-  const nameKey = boundedText(
-    value.name_key ?? `bookmark_topics.${id}`,
-    180,
-  );
+  const id = boundedText(value.id, MAX_TOPIC_ID_LENGTH);
+  const name = boundedText(value.name, MAX_TOPIC_NAME_LENGTH).normalize("NFC");
   const color = boundedText(value.color, 7).toLowerCase();
-  const aliases = Array.isArray(value.aliases)
-    ? value.aliases.map((alias) => boundedText(alias, 80).normalize("NFC"))
-    : [];
   if (
-    !ID_PATTERN.test(id) ||
-    !/^bookmark_topics\.[a-z0-9]+(?:-[a-z0-9]+)*$/.test(nameKey) ||
-    !COLOR_PATTERN.test(color)
+    !CANONICAL_TOPIC_ID_PATTERN.test(id) ||
+    !ENGLISH_TOPIC_PATTERN.test(name) ||
+    !COLOR_PATTERN.test(color) ||
+    typeof value.default !== "boolean" ||
+    !Array.isArray(value.aliases) ||
+    value.aliases.length > MAX_TOPIC_ALIASES
+  ) {
+    throw new TypeError("A global bookmark topic is invalid.");
+  }
+  const aliases = value.aliases.map((alias) =>
+    boundedText(alias, MAX_TOPIC_NAME_LENGTH).normalize("NFC")
+  );
+  if (
+    aliases.some((alias) => !ENGLISH_TOPIC_PATTERN.test(alias)) ||
+    new Set(aliases.map((alias) => alias.toLocaleLowerCase("en"))).size !==
+      aliases.length
   ) {
     throw new TypeError("A global bookmark topic is invalid.");
   }
   return {
     id,
     name,
-    name_key: nameKey,
+    // Retained for callers that still address a topic by its message key;
+    // the translated names now travel with the definition itself.
+    name_key: `bookmark_topics.${id}`,
     color,
     aliases: Object.freeze(aliases),
-    default: value.default !== false,
+    default: value.default,
+    names: Object.freeze(normalizeTopicNames(value.names, name)),
   };
+}
+
+function normalizeTopicNames(value, englishName) {
+  const names = { en: englishName };
+  if (value === undefined || value === null) {
+    return names;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("A global bookmark topic is invalid.");
+  }
+  const entries = Object.entries(value);
+  if (entries.length > MAX_GLOBAL_BOOKMARK_LOCALES) {
+    throw new TypeError("A global bookmark topic is invalid.");
+  }
+  for (const [code, name] of entries) {
+    if (
+      typeof code !== "string" ||
+      code.length > MAX_LOCALE_LENGTH ||
+      !LOCALE_PATTERN.test(code)
+    ) {
+      throw new TypeError("A global bookmark topic is invalid.");
+    }
+    names[code] = boundedText(name, MAX_TRANSLATED_NAME_LENGTH).normalize("NFC");
+  }
+  return names;
 }
 
 function normalizeCoordinate(value, bookCount) {
@@ -585,51 +618,20 @@ function normalizeCoordinate(value, bookCount) {
     book > bookCount ||
     !Number.isInteger(chapter) ||
     chapter < 1 ||
-    chapter > 1_000 ||
+    chapter > BOOK_CHAPTER_COUNTS[book - 1] ||
     !Number.isInteger(verse) ||
     verse < 1 ||
-    verse > 2_000
+    verse > MAX_VERSE
   ) {
     throw new TypeError("A global bookmark coordinate is invalid.");
   }
   return { book, chapter, verse };
 }
 
-function normalizeOverlayAssociation(value, definitions) {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    !hasExactKeys(value, ["topic_id", "book", "chapter", "verse"])
-  ) {
-    throw new TypeError("A global bookmark overlay association is invalid.");
-  }
-  const topicId = boundedText(value.topic_id, 80);
-  if (!CANONICAL_TOPIC_ID_PATTERN.test(topicId) || !definitions.has(topicId)) {
-    throw new TypeError("A global bookmark overlay association is invalid.");
-  }
-  const coordinate = normalizeCoordinate(
-    [value.book, value.chapter, value.verse],
-    BOOK_NAMES.length,
-  );
-  if (coordinate.chapter > BOOK_CHAPTER_COUNTS[coordinate.book - 1]) {
-    throw new TypeError("A global bookmark overlay association is invalid.");
-  }
-  return {
-    topic_id: topicId,
-    coordinate: [coordinate.book, coordinate.chapter, coordinate.verse],
-  };
-}
-
-function compareCoordinates(left, right) {
-  return left[0] - right[0] || left[1] - right[1] || left[2] - right[2];
-}
-
-function hasExactKeys(value, expected) {
-  const keys = Object.keys(value).sort();
-  const wanted = [...expected].sort();
-  return keys.length === wanted.length &&
-    keys.every((key, index) => key === wanted[index]);
+function compareAssignments(left, right) {
+  return left.book - right.book ||
+    left.chapter - right.chapter ||
+    left.verse - right.verse;
 }
 
 function globalBookmarkId(assignment) {
@@ -699,12 +701,6 @@ function cloneTopicDefinition(value) {
     color: value.color,
     aliases: [...value.aliases],
     default: value.default,
+    names: { ...value.names },
   };
-}
-
-function freezeTopicDefinition(value) {
-  return Object.freeze({
-    ...value,
-    aliases: Object.freeze([...value.aliases]),
-  });
 }
