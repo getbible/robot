@@ -6,13 +6,12 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from getbible import RequestLimitError
 from telegram import Bot
 from telegram.constants import ParseMode
 
 from config import Settings
 from modules.audit import audit_event
-from modules.errors import ScriptureUnavailable
+from modules.errors import RequestLimitError, ScriptureUnavailable
 from modules.renderer import render_scripture
 from modules.service import ScriptureQuery, ScriptureService
 

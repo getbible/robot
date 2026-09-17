@@ -157,7 +157,7 @@ class GetBibleQueryClientTestCase(unittest.TestCase):
         )
         self.assertEqual(request.get_method(), "GET")
         self.assertEqual(request.get_header("Accept"), "application/json")
-        self.assertIn("Contribution-Review", request.get_header("User-agent"))
+        self.assertEqual(request.get_header("User-agent"), "getbible-robot/2.2")
 
     def test_uses_configured_translation_without_falling_back(self) -> None:
         opener = ScriptedOpener(

@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import requests
-from getbible import (
+
+from .errors import (
     CacheIntegrityError,
     RepositoryError,
     RepositoryResponseError,
