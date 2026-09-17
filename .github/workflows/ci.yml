@@ -174,15 +174,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          librarian_path=$(python - <<'PY'
-          from pathlib import Path
-
-          import getbible
-
-          print(Path(getbible.__file__).resolve().parent)
-          PY
-          )
-          bandit -q -r bot.py config.py modules container scripts "$librarian_path" -ll \
+          bandit -q -r bot.py config.py modules container scripts -ll \
             2>&1 | tee "${RUNNER_TEMP}/bandit.log"
 
       - name: Dependency vulnerability scan

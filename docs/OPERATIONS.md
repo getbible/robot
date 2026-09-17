@@ -389,13 +389,15 @@ Alert on:
 
 Runtime metrics contain aggregates only. Do not expose the loopback listener publicly without an authenticated, access-controlled proxy.
 
-`/metrics` publishes `getbible_robot_search_engine_version`. Librarian moves
-that number whenever matching semantics change, independent of any translation
-SHA, so it is the value that separates an intended upgrade from a regression
-when result counts move under a stable corpus. Record it alongside result-volume
-dashboards. A first search of a translation that has no index yet may report
-`lookup_timed_out` while the build completes in its worker; the searches after
-it are served from the built index. See [Search](SEARCH.md).
+Search is served by the public Search API, and its response carries an
+`engine_version` that moves whenever matching semantics change, independent
+of any translation `sha`; it is the value that separates an intended service
+change from a regression when result counts move under a stable corpus.
+Record it from the API response alongside result-volume dashboards; the robot
+publishes no engine version of its own. `/metrics` publishes
+`getbible_robot_search_circuit_open` for the robot's Telegram-native search
+circuit; Mini App searches go from the browser and are not visible here. See
+[Search](SEARCH.md).
 
 The structured events used for capacity diagnosis are
 `capacity_queue_rejected`, `lookup_timed_out`,
@@ -418,8 +420,8 @@ retention policy allow personal-data logs.
 3. Record `status`, `runtime`, the deployed commit, lock checksum, unit checksum, and a bounded log window.
 4. Correlate pressure events, request duration/status, aggregate metrics, and
    the configured identity fields. Determine whether the failure is abusive
-   traffic, legitimate capacity, Telegram, host networking, GetBible API,
-   Librarian, rendering, configuration, or deployment.
+   traffic, legitimate capacity, Telegram, host networking, the GetBible
+   Main, Query, or Search API, rendering, configuration, or deployment.
 5. Use `rollback` if the immediately previous application is known-good.
 6. Run `doctor`, readiness, and the private smoke test before returning to service.
 7. Add a deterministic regression test before deploying a code fix.
@@ -427,7 +429,7 @@ retention policy allow personal-data logs.
 
 ## Backups
 
-The code and exact dependency locks are recoverable from Git. Cache data is recoverable from the GetBible API. Retain securely:
+The code and exact dependency locks are recoverable from Git. The robot keeps no Scripture corpus or cache. Retain securely:
 
 - the exact deployed and prior commits;
 - an encrypted copy of `/etc/getbible-robot/<instance>.env` when policy requires it;
@@ -445,9 +447,11 @@ Do not use a copied virtual environment as a substitute for the matching commit 
 
 Increase bounds only after measuring memory, worker occupancy, Telegram output
 count, API latency, request identity distribution, circuit behavior, and
-interaction state under representative load. Full corpus downloads and
-returned search results have separate byte budgets. Search uses an independent
-pool so slow index work cannot occupy all direct-reference workers. A timed-out
+interaction state under representative load. Catalogue and Query API
+responses and Search API responses have separate byte budgets. The
+Telegram-native search uses an independent pool and circuit so a slow Search
+API cannot occupy all direct-reference workers; Mini App searches never pass
+through the robot. The robot holds no corpus or index. A timed-out
 synchronous operation intentionally retains its own permit until the
 underlying thread exits.
 

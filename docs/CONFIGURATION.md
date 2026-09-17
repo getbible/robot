@@ -55,7 +55,6 @@ and routing policy. Do not expose `TELEGRAM_WEBHOOK_PORT` generally. See
 | `MINI_APP_SESSION_TTL_SECONDS` | `7776000` | `86400`–`15552000` for new values | Absolute lifetime of authenticated server-side Mini App state; ninety days by default |
 | `MINI_APP_SESSION_LIMIT` | `200` | `10`–`20000` | Maximum active Mini App sessions |
 | `MINI_APP_SESSIONS_PER_USER` | `2` | `1`–`10` | Maximum active sessions retained for one Telegram user |
-| `MINI_APP_MAX_SEARCHES_PER_SESSION` | `2` | `1`–`8` | Retained authoritative search pages per session |
 | `MINI_APP_MAX_AVAILABLE_SELECTIONS` | `256` | `250`–`1000` | Recent selectable verse objects per session, excluding the separately bounded basket |
 | `MINI_APP_MAX_SELECTIONS` | `100` | `1`–`200` | Maximum selected verse items before normalization |
 | `MINI_APP_BODY_TIMEOUT_SECONDS` | `10` | `1`–`60` | Maximum time to receive one HTTP request body |
@@ -154,16 +153,20 @@ bodies, Telegram `initData`, or launch/session credentials.
 | `TRANSLATION` | `kjv` | Lowercase letters, numbers, `_`, or `-`; 1–30 characters | Default translation abbreviation |
 | `USER_PREFERENCES_FILE` | empty | Empty or an absolute path | SQLite database for per-user translation defaults; production setup assigns the isolated instance-state path |
 | `USER_PREFERENCE_LIMIT` | `10000` | `100`–`1000000` | Maximum saved user translation records before oldest-record eviction |
-| `GETBIBLE_API_BASE_URL` | `https://api.getbible.net` | HTTPS base URL; no credentials, path, query, or fragment; loopback HTTP is allowed for tests | Machine-readable Scripture repository |
+| `GETBIBLE_API_BASE_URL` | `https://api.getbible.net` | HTTPS base URL; no credentials, path, query, or fragment; loopback HTTP is allowed for tests | Main API: translation catalogues, books, chapters |
+| `GETBIBLE_QUERY_BASE_URL` | `https://query.getbible.net` | HTTPS base URL; no credentials, path, query, or fragment | Query API: `/bible` references and the authoritative text behind Post |
+| `GETBIBLE_SEARCH_BASE_URL` | `https://search.getbible.net` | HTTPS base URL; no credentials, path, query, or fragment | Search API: the Telegram-native `/search` when no Mini App is configured |
 | `GETBIBLE_WEB_BASE_URL` | `https://getbible.life` | Same URL rules | Base for every clickable link shown in Telegram |
 | `WELCOME_MESSAGE` | built-in text | Non-empty; at most 4096 characters | `/start` response |
 | `HELP_MESSAGE` | built-in text | Non-empty; at most 4096 characters | `/help` response |
 | `WELCOME_MESSAGE_FILE` | empty | Empty or readable absolute UTF-8 path; takes precedence over `WELCOME_MESSAGE` | Editable multi-line `/start` content |
 | `HELP_MESSAGE_FILE` | empty | Empty or readable absolute UTF-8 path; takes precedence over `HELP_MESSAGE` | Editable multi-line `/help` content |
 
-The API and website variables are intentionally different. The API value is
-used only for data access. The website value is used only for user-facing
-links. `TRANSLATION` is the application fallback. Choosing another translation
+The three API variables and the website variable are intentionally different.
+The API values are used only for the robot's own data access; the Mini App
+reaches the same three public services directly from the browser at their
+fixed addresses, which these settings do not change. The website value is
+used only for user-facing links. `TRANSLATION` is the application fallback. Choosing another translation
 in `/bible` or `/search` saves it for that Telegram user; later explicit
 references, Bible pickers, and searches use the saved value. An empty `/bible`
 never substitutes a default verse.
@@ -180,7 +183,7 @@ their manager-owned paths in the environment file.
 | `CONTRIBUTION_STORE_FILE` | empty | Empty or an absolute path | Private SQLite application, event, decision, notification, audit, and live-catalogue store; an empty value disables contribution enrolment and synchronization |
 | `CONTRIBUTION_CONTRIBUTOR_LIMIT` | `10000` | `100`–`1000000` | Maximum contributor application records accepted by one instance |
 | `CONTRIBUTION_EVENT_LIMIT` | `250000` | `1000`–`5000000` | Maximum immutable contribution events retained by one instance |
-| `CONTRIBUTION_RATE_CAPACITY` | `60` | `1`–`100000` | Token-bucket capacity of the dedicated contributor synchronization budget for `POST /api/v1/contributions/events`, separate from the public search and user limits |
+| `CONTRIBUTION_RATE_CAPACITY` | `60` | `1`–`100000` | Token-bucket capacity of the dedicated contributor synchronization budget for `POST /api/v1/contributions/events`, separate from the public Mini App and user limits |
 | `CONTRIBUTION_RATE_REFILL_PER_SECOND` | `5.0` | `0.01`–`1000.0` | Refill rate of that contribution budget; requests beyond it wait behind `429` and `Retry-After` pacing instead of failing permanently |
 | `CONTRIBUTION_GIT_CHECKOUT` | empty | Empty or an absolute, clean checkout of `getbible/robot` owned by the publisher | Setup-manager-only repository publication checkout |
 | `CONTRIBUTION_GIT_USER` | empty | Existing dedicated non-root operating-system user; must differ from the bot service account | Setup-manager-only identity used for Git import, commit, and push |
@@ -194,7 +197,7 @@ state. The contributor and event limits remain configurable per instance.
 
 Contributors are a small, individually approved group whose personal datasets
 can be large, so their event batches use the dedicated rate budget above
-rather than competing with the public search limits: a long drip can neither
+rather than competing with the public request limits: a long drip can neither
 be starved by public traffic nor starve it, and an over-budget batch waits
 for the announced `Retry-After` rather than failing.
 
@@ -233,18 +236,10 @@ sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/robot config --l
 |---|---:|---:|---|
 | `GETBIBLE_CONNECT_TIMEOUT` | `3.05` seconds | `0.1`–`30` | TCP/TLS connection timeout |
 | `GETBIBLE_READ_TIMEOUT` | `6` seconds | `0.5`–`60` | Per-response read timeout |
-| `GETBIBLE_REQUEST_RETRIES` | `1` | `0`–`5` | Retries for Librarian and navigation-catalog GET requests |
-| `GETBIBLE_MAX_RESPONSE_BYTES` | `41943040` (40 MiB) | `1024`–`134217728` | Maximum accepted full repository/corpus response body |
+| `GETBIBLE_REQUEST_RETRIES` | `1` | `0`–`5` | Retries for Main API catalogue and Query API GET requests |
+| `GETBIBLE_MAX_RESPONSE_BYTES` | `41943040` (40 MiB) | `1024`–`134217728` | Maximum accepted Main API catalogue or Query API response body |
 | `LOOKUP_TIMEOUT` | `20` seconds | `1`–`90` | Overall asynchronous wait for one direct reference or catalogue lookup |
 | `LOOKUP_QUEUE_TIMEOUT` | `2` seconds | `0.1`–`30` | Maximum wait for bounded worker capacity |
-| `REFERENCE_CACHE_LIMIT` | `1000` | `100`–`50000` | Parsed reference and selection cache entries |
-| `BOOKS_CACHE_LIMIT` | `16` | `1`–`1000` | In-memory translation book indexes |
-| `CHAPTER_CACHE_LIMIT` | `256` | `16`–`10000` | In-memory chapter payloads |
-| `SEARCH_CORPUS_LIMIT` | `1` | `1`–`4` | Corpus handles retained by one Librarian client |
-| `SEARCH_SHARED_CORPUS_LIMIT` | `8` | `1`–`32` | Translations kept parsed and indexed for reuse across every search in the process |
-| `TRANSLATION_CACHE_LIMIT` | `1` | `1`–`8` | Parsed full translation payloads retained |
-| `CACHE_MAX_BYTES` | `268435456` | 32 MiB–8 GiB | Disk-cache budget enforced after the one-day race-safety grace |
-| `CACHE_MAINTENANCE_INTERVAL_SECONDS` | `21600` | `300`–`604800` | Interval for pruning stale objects and over-budget cache entries |
 
 A lookup timeout does not pretend that its worker thread stopped. The capacity permit remains occupied until the underlying thread actually exits, preventing an unbounded executor queue.
 
@@ -257,39 +252,30 @@ A lookup timeout does not pretend that its worker thread stopped. The capacity p
 | `MAX_VERSES_PER_REFERENCE` | `100` | `1`–`200` | Maximum verses selected by one reference |
 | `MAX_TOTAL_VERSES` | `100` | `1`–`200` | Maximum verses in the whole command |
 | `MAX_OUTPUT_CHUNKS` | `8` | `1`–`32` | Maximum Telegram messages produced by one command or final Mini App post |
-| `SEARCH_RESULT_LIMIT` | `50` | `1`–`200` | Maximum selectable matches retained from one Librarian search |
-| `SEARCH_DEADLINE_SECONDS` | `5` | `0.1`–`30` | Librarian's cooperative per-search execution deadline, covering request-owned work only |
-| `SEARCH_INDEX_BUILD_SECONDS` | `120` | `1`–`600` | Bound on building one translation's search index, and the budget startup prewarming spends |
-| `SEARCH_TIMEOUT` | `150` seconds | `1`–`900` | Overall wait for one search, including the index build its first query provokes |
-| `SEARCH_MAX_RESPONSE_BYTES` | `4194304` (4 MiB) | `65536`–`16777216` | Maximum constructed Librarian search result, separate from corpus downloads |
+| `SEARCH_RESULT_LIMIT` | `50` | `1`–`200` | Matches requested per Telegram-native `/search` page; the Search API serves at most 100, so larger values are clamped at request time |
+| `SEARCH_TIMEOUT` | `30` seconds | `1`–`900` | Per-request deadline for the robot's Search API calls; the upper bound is kept so files written by earlier releases keep validating |
+| `SEARCH_MAX_RESPONSE_BYTES` | `4194304` (4 MiB) | `65536`–`16777216` | Maximum accepted Search API response body, separate from catalogue and Query API bodies |
 | `MAX_CONCURRENT_LOOKUPS` | `8` | `1`–`32` | Direct-reference/catalog worker threads and permits |
-| `MAX_CONCURRENT_SEARCHES` | `4` | `1`–`64` | Concurrent searches over the shared corpus. Past the core count this adds latency, not throughput — scale out with instances |
+| `MAX_CONCURRENT_SEARCHES` | `4` | `1`–`64` | Telegram-native searches in flight against the Search API; Mini App searches go from the browser and are not counted |
 | `MAX_CONCURRENT_UPDATES` | `16` | `1`–`64` | Telegram updates processed concurrently |
 
 `MAX_TOTAL_VERSES` may not be lower than `MAX_VERSES_PER_REFERENCE`. Telegram text is measured in UTF-16 code units, not Python characters, before chunks are sent.
 
-An index build serves every later search of that translation, so it is bounded
-by `SEARCH_INDEX_BUILD_SECONDS` instead of being charged to whichever request
-happened to arrive first. A search waits for that build rather than abandoning
-it: `SEARCH_TIMEOUT` bounds the request and must cover
-`SEARCH_INDEX_BUILD_SECONDS` plus `SEARCH_DEADLINE_SECONDS`, which the loader
-refuses to start without. `LOOKUP_TIMEOUT` sizes direct reference and catalogue
-delivery and is not charged to a search; it used to be, and being shorter than
-the build it waited on it made the first search of any translation but the
-prewarmed default fail while the build ran on without its caller. Keeping
-`PREWARM_DEFAULT_TRANSLATION` enabled still spares the default translation that
-first wait. See [Search](SEARCH.md).
+A Telegram-native search is one bounded HTTPS request to the public Search
+API. Nothing is downloaded, parsed, or indexed locally, so `SEARCH_TIMEOUT`
+is a plain per-request deadline and is not coupled to any other budget.
+`LOOKUP_TIMEOUT` sizes direct reference and catalogue delivery and is not
+charged to a search. Search has its own worker pool, semaphore, timeout and
+circuit — four workers by default against eight for direct references — so a
+slow Search API response cannot occupy a reference reader's permit. Mini App
+searches go from the browser to the Search API and never reach the robot.
+See [Search](SEARCH.md).
 
-On 26 July 2026, the largest published corpus measured by uncompressed
-`Content-Length` was `thai` at 30,950,679 bytes; KJV was 8,862,703 bytes. The
-40 MiB repository cap therefore accommodates the currently observed full
-translations, including larger non-66-book corpora, with bounded headroom.
-It does not permit a 40 MiB search result: `SEARCH_MAX_RESPONSE_BYTES`,
-`SEARCH_RESULT_LIMIT`, and Telegram message limits remain independent. Search
-also has its own worker pool, semaphore, timeout and circuit — four workers by
-default against eight for direct references — so corpus parsing and indexing
-cannot occupy a reference reader's permit, and a search that waits out an index
-build cannot delay one.
+The 40 MiB `GETBIBLE_MAX_RESPONSE_BYTES` default predates this release, when
+the robot downloaded complete translations; it is retained so existing files
+keep validating. Catalogue and Query API responses are far smaller, and
+`SEARCH_MAX_RESPONSE_BYTES`, `SEARCH_RESULT_LIMIT`, and Telegram message
+limits remain independent of it.
 
 Do not increase these values merely to make an abusive request succeed.
 Load-test memory, API behavior, Telegram output, and the `MemoryMax` service
@@ -316,10 +302,11 @@ navigating.
 | `ABUSE_BLOCK_SECONDS` | `300` | `10`–`86400` | Temporary user/client pause after the threshold |
 | `ABUSE_WARNING_MESSAGE` | built-in text | Non-empty; at most 4096 characters | Private or ephemeral notice sent when repeated activity is paused |
 
-Mini App session exchange and expensive search, Scripture, and post requests
-consume a full request token. Lightweight translation/book/chapter/verse
+Mini App session exchange and expensive requests such as posting and bookmark
+backup consume a full request token. Lightweight translation/book/chapter/verse
 navigation consumes `MINI_APP_NAVIGATION_RATE_COST`, preserving normal browsing
-responsiveness.
+responsiveness. Scripture reads and full-text search go from the browser to
+GetBible and are not charged here.
 
 User, chat, client, abuse, and rejection-notification registries use bounded
 least-recently-used retention so arbitrary identifiers cannot grow memory
@@ -358,7 +345,6 @@ Validation errors and request-limit rejections do not count as upstream failures
 |---|---:|---|---|
 | `DELETE_COMMAND_MESSAGES` | `false` | `true` or `false` | Attempt to delete standalone handled commands such as `/start` and `/help`; permission failures are non-fatal |
 | `DROP_PENDING_UPDATES` | `true` | `true` or `false` | Drop updates accumulated while the bot was offline at startup |
-| `PREWARM_DEFAULT_TRANSLATION` | `true` | `true` or `false` | Load and index the default search corpus before readiness; safe failure does not prevent direct references |
 | `HEALTH_HOST` | `127.0.0.1` | Loopback; wildcard only when `CONTAINERIZED=true` | Health listener address |
 | `HEALTH_PORT` | `8081` | `0`–`65535`; `0` disables | Health/readiness/metrics port |
 | `CONTAINER_INSTANCE_MEMORY_LIMIT_MB` | `1792` | `96`–`262144` | Container supervisor's per-bot RSS restart guard |
@@ -390,6 +376,32 @@ their intermediate panels use Bot API 10.2 per-user ephemeral delivery. This is
 independent of `DELETE_COMMAND_MESSAGES`: no ordinary group fallback is used if
 the private panel cannot be delivered. Private chats continue to use ordinary
 messages because the conversation is already private.
+
+## Removed settings
+
+The following variables belonged to the in-process Librarian search engine and
+its caches. They are no longer read:
+
+```text
+SEARCH_CORPUS_LIMIT
+SEARCH_SHARED_CORPUS_LIMIT
+SEARCH_DEADLINE_SECONDS
+SEARCH_INDEX_BUILD_SECONDS
+PREWARM_DEFAULT_TRANSLATION
+REFERENCE_CACHE_LIMIT
+BOOKS_CACHE_LIMIT
+CHAPTER_CACHE_LIMIT
+TRANSLATION_CACHE_LIMIT
+CACHE_MAX_BYTES
+CACHE_MAINTENANCE_INTERVAL_SECONDS
+MINI_APP_MAX_SEARCHES_PER_SESSION
+```
+
+A file that still contains one starts normally and logs one warning naming the
+variable; its value is not parsed. The manager does not remove them, so the
+immediately previous release can still read the same file after a rollback.
+Remove them with `sudo getbible-robot config <instance>` once rollback is no
+longer needed. See [Upgrading](UPGRADING.md#upgrading-to-the-public-search-api).
 
 ## Environment-file example
 
@@ -429,13 +441,15 @@ CONTRIBUTION_EVENT_LIMIT="250000"
 CONTRIBUTION_GIT_CHECKOUT="/srv/getbible-robot-publisher/robot"
 CONTRIBUTION_GIT_USER="getbible-publisher"
 GETBIBLE_API_BASE_URL="https://api.getbible.net"
+GETBIBLE_QUERY_BASE_URL="https://query.getbible.net"
+GETBIBLE_SEARCH_BASE_URL="https://search.getbible.net"
 GETBIBLE_WEB_BASE_URL="https://getbible.life"
 GETBIBLE_MAX_RESPONSE_BYTES="41943040"
+SEARCH_TIMEOUT="30"
 SEARCH_MAX_RESPONSE_BYTES="4194304"
 MAX_CONCURRENT_LOOKUPS="8"
 MAX_CONCURRENT_SEARCHES="4"
 MAX_CONCURRENT_UPDATES="16"
-PREWARM_DEFAULT_TRANSLATION="true"
 HEALTH_HOST="127.0.0.1"
 HEALTH_PORT="8081"
 SYSTEMD_MEMORY_HIGH_MB="1536"

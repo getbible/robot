@@ -189,6 +189,23 @@ class ContainerRuntimeTestCase(unittest.TestCase):
                 self.assertIn("MAX_CONCURRENT_LOOKUPS:-8", single)
                 self.assertIn("MAX_CONCURRENT_SEARCHES:-4", single)
                 self.assertIn("MAX_CONCURRENT_UPDATES:-16", single)
+                self.assertIn(
+                    "GETBIBLE_QUERY_BASE_URL:-https://query.getbible.net", single
+                )
+                self.assertIn(
+                    "GETBIBLE_SEARCH_BASE_URL:-https://search.getbible.net", single
+                )
+                for removed in (
+                    "PREWARM_DEFAULT_TRANSLATION",
+                    "SEARCH_INDEX_BUILD_SECONDS",
+                    "SEARCH_DEADLINE_SECONDS",
+                    "SEARCH_CORPUS_LIMIT",
+                    "SEARCH_SHARED_CORPUS_LIMIT",
+                    "MINI_APP_MAX_SEARCHES_PER_SESSION",
+                    "CACHE_MAX_BYTES",
+                    "CACHE_MAINTENANCE_INTERVAL_SECONDS",
+                ):
+                    self.assertNotIn(removed, single)
                 self.assertIn("MINI_APP_SESSION_TTL_SECONDS:-900", single)
                 self.assertIn("CONTRIBUTION_CONTRIBUTOR_LIMIT:-10000", single)
                 self.assertIn("CONTRIBUTION_EVENT_LIMIT:-250000", single)

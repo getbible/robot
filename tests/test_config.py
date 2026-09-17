@@ -26,22 +26,14 @@ class SettingsTestCase(unittest.TestCase):
             settings = Settings.from_env(load_environment_file=False)
         self.assertEqual(settings.max_response_bytes, 40 * 1024 * 1024)
         self.assertEqual(settings.search_max_response_bytes, 4 * 1024 * 1024)
-        self.assertEqual(settings.reference_cache_limit, 1000)
-        self.assertEqual(settings.chapter_cache_limit, 256)
-        # Searches share one parsed corpus and one built index, so several can
-        # run at once. Measured throughput is flat past the core count because
-        # matching is CPU-bound Python, so this stays modest: enough that one
-        # expensive query cannot stall every reader, not so many that everyone
-        # waits behind a saturated interpreter. Scale out with instances.
+        # A Telegram-native search is one HTTPS request to the public Search
+        # API on its own executor. The bound keeps a slow upstream from holding
+        # a reference reader's permit; it no longer sizes local CPU work.
         self.assertEqual(settings.max_concurrent_searches, 4)
-        self.assertEqual(settings.search_shared_corpus_limit, 8)
-        self.assertGreater(
-            settings.search_shared_corpus_limit,
-            settings.search_corpus_limit,
-        )
         self.assertEqual(settings.max_concurrent_lookups, 8)
         self.assertEqual(settings.max_concurrent_updates, 16)
-        self.assertTrue(settings.prewarm_default_translation)
+        self.assertEqual(settings.search_result_limit, 50)
+        self.assertEqual(settings.search_timeout, 30.0)
         self.assertEqual(settings.telegram_delivery_mode, "polling")
         self.assertFalse(settings.mini_app_enabled)
         self.assertIsNone(settings.mini_app_public_url)
@@ -569,53 +561,155 @@ class SettingsTestCase(unittest.TestCase):
         ):
             Settings.from_env(load_environment_file=False)
 
-    def test_search_budget_covers_the_index_build_it_can_provoke(self) -> None:
+    def test_public_getbible_origins_default_and_require_https(self) -> None:
         with patch.dict(os.environ, self.environment(), clear=True):
             settings = Settings.from_env(load_environment_file=False)
-        # A search waits for the build its first query triggers rather than
-        # reporting a timeout for work that is still running. The default must
-        # therefore leave room for a full build plus the matching deadline, and
-        # must not be the reference-delivery budget.
-        self.assertEqual(settings.search_timeout, 150.0)
-        self.assertGreaterEqual(
-            settings.search_timeout,
-            settings.search_index_build_seconds + settings.search_deadline_seconds,
-        )
-        self.assertGreater(settings.search_timeout, settings.lookup_timeout)
+        self.assertEqual(settings.api_base_url, "https://api.getbible.net")
+        self.assertEqual(settings.query_base_url, "https://query.getbible.net")
+        self.assertEqual(settings.search_base_url, "https://search.getbible.net")
 
-    def test_search_budget_shorter_than_its_index_build_is_refused(self) -> None:
-        for overrides in (
-            {"SEARCH_TIMEOUT": "20"},
-            {"SEARCH_TIMEOUT": "100", "SEARCH_INDEX_BUILD_SECONDS": "120"},
-            {
-                "SEARCH_TIMEOUT": "121",
-                "SEARCH_INDEX_BUILD_SECONDS": "120",
-                "SEARCH_DEADLINE_SECONDS": "5",
-            },
+        with patch.dict(
+            os.environ,
+            self.environment(
+                GETBIBLE_QUERY_BASE_URL="https://query.example.org",
+                GETBIBLE_SEARCH_BASE_URL="https://search.example.org/",
+            ),
+            clear=True,
+        ):
+            settings = Settings.from_env(load_environment_file=False)
+        self.assertEqual(settings.query_base_url, "https://query.example.org")
+        self.assertEqual(settings.search_base_url, "https://search.example.org")
+
+        invalid = (
+            "http://search.getbible.net",
+            "https://user@search.getbible.net",
+            "https://search.getbible.net/v2",
+            "https://search.getbible.net/?q=1",
+            "ftp://search.getbible.net",
+            "search.getbible.net",
+        )
+        for variable in ("GETBIBLE_QUERY_BASE_URL", "GETBIBLE_SEARCH_BASE_URL"):
+            for value in invalid:
+                with (
+                    self.subTest(variable=variable, value=value),
+                    patch.dict(
+                        os.environ,
+                        self.environment(**{variable: value}),
+                        clear=True,
+                    ),
+                    self.assertRaises(ConfigurationError),
+                ):
+                    Settings.from_env(load_environment_file=False)
+
+    def test_search_timeout_is_a_request_deadline_with_a_compatible_range(
+        self,
+    ) -> None:
+        # The Search API answers one bounded HTTPS request; nothing is built
+        # locally, so the deadline is no longer coupled to an index budget and
+        # need not exceed the reference-delivery budget. The upper bound stays
+        # so environment files written by earlier releases keep validating.
+        for value, expected in (
+            ("1", 1.0),
+            ("30", 30.0),
+            ("150", 150.0),
+            ("900", 900.0),
         ):
             with (
-                self.subTest(**overrides),
+                self.subTest(value=value),
                 patch.dict(
                     os.environ,
-                    self.environment(**overrides),
+                    self.environment(SEARCH_TIMEOUT=value, LOOKUP_TIMEOUT="60"),
+                    clear=True,
+                ),
+            ):
+                settings = Settings.from_env(load_environment_file=False)
+                self.assertEqual(settings.search_timeout, expected)
+        for value in ("0", "901", "soon"):
+            with (
+                self.subTest(value=value),
+                patch.dict(
+                    os.environ,
+                    self.environment(SEARCH_TIMEOUT=value),
                     clear=True,
                 ),
                 self.assertRaises(ConfigurationError),
             ):
                 Settings.from_env(load_environment_file=False)
 
-    def test_a_raised_index_build_budget_can_be_matched(self) -> None:
-        with patch.dict(
-            os.environ,
-            self.environment(
-                SEARCH_INDEX_BUILD_SECONDS="600",
-                SEARCH_DEADLINE_SECONDS="30",
-                SEARCH_TIMEOUT="700",
+    def test_search_result_limit_keeps_its_range_for_existing_files(self) -> None:
+        # The Search API serves at most 100 matches per request. Values up to
+        # 200 stay accepted so earlier files keep validating; the service
+        # clamps them at request time.
+        for value, expected in (("1", 1), ("100", 100), ("200", 200)):
+            with (
+                self.subTest(value=value),
+                patch.dict(
+                    os.environ,
+                    self.environment(SEARCH_RESULT_LIMIT=value),
+                    clear=True,
+                ),
+            ):
+                settings = Settings.from_env(load_environment_file=False)
+                self.assertEqual(settings.search_result_limit, expected)
+        for value in ("0", "201"):
+            with (
+                self.subTest(value=value),
+                patch.dict(
+                    os.environ,
+                    self.environment(SEARCH_RESULT_LIMIT=value),
+                    clear=True,
+                ),
+                self.assertRaises(ConfigurationError),
+            ):
+                Settings.from_env(load_environment_file=False)
+
+    def test_removed_librarian_settings_are_ignored_with_a_warning(self) -> None:
+        removed = {
+            "SEARCH_CORPUS_LIMIT": "1",
+            "SEARCH_SHARED_CORPUS_LIMIT": "8",
+            "SEARCH_DEADLINE_SECONDS": "5",
+            "SEARCH_INDEX_BUILD_SECONDS": "not-a-number",
+            "PREWARM_DEFAULT_TRANSLATION": "true",
+            "REFERENCE_CACHE_LIMIT": "1000",
+            "BOOKS_CACHE_LIMIT": "16",
+            "CHAPTER_CACHE_LIMIT": "256",
+            "TRANSLATION_CACHE_LIMIT": "1",
+            "CACHE_MAX_BYTES": "268435456",
+            "CACHE_MAINTENANCE_INTERVAL_SECONDS": "21600",
+            "MINI_APP_MAX_SEARCHES_PER_SESSION": "2",
+        }
+        # An instance file written by an earlier release still starts, and the
+        # legacy budget it carries is read as the per-request deadline.
+        with (
+            patch.dict(
+                os.environ,
+                self.environment(SEARCH_TIMEOUT="150", **removed),
+                clear=True,
             ),
-            clear=True,
+            self.assertLogs(level="WARNING") as captured,
         ):
             settings = Settings.from_env(load_environment_file=False)
-        self.assertEqual(settings.search_timeout, 700.0)
+        self.assertEqual(settings.search_timeout, 150.0)
+        joined = "\n".join(captured.output)
+        for variable in removed:
+            with self.subTest(variable=variable):
+                self.assertIn(variable, joined)
+        for field in (
+            "search_corpus_limit",
+            "search_shared_corpus_limit",
+            "search_deadline_seconds",
+            "search_index_build_seconds",
+            "prewarm_default_translation",
+            "reference_cache_limit",
+            "books_cache_limit",
+            "chapter_cache_limit",
+            "translation_cache_limit",
+            "cache_max_bytes",
+            "cache_maintenance_interval_seconds",
+            "mini_app_max_searches_per_session",
+        ):
+            with self.subTest(field=field):
+                self.assertFalse(hasattr(settings, field))
 
     def test_output_chunk_budget_is_bounded(self) -> None:
         for value in ("0", "33"):

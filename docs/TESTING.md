@@ -47,7 +47,10 @@ Tests must prove:
 
 - translations, books, chapters, chapter text, and hashes use `api.getbible.net/v2` directly;
 - explicit and grouped references use `query.getbible.net/v2` directly;
-- no Telegram init data, Robot token, cookie, or credential reaches either public origin;
+- full-text search uses `search.getbible.net/v2` directly, with the filters as
+  query parameters, offset pagination, and the exact total;
+- no Telegram init data, Robot token, cookie, or credential reaches any of the
+  three public origins;
 - the CSP meta element and response header contain the same fixed allowlist;
 - redirects, oversized responses, malformed schemas, coordinate mismatches, and checksum mismatches are rejected;
 - exact-scope hashes are stored and revalidated at least weekly;
@@ -63,19 +66,29 @@ Tests must prove:
 
 Tests must prove:
 
-- full-text search and pagination alone use Librarian, through Robot;
-- a Librarian failure does not affect reader navigation;
+- a Mini App search is one `GET` to `search.getbible.net/v2/<translation>`
+  carrying `q`, the filters, `limit`, and `offset`, with credentials omitted,
+  redirects refused, and the bounded problem document parsed on failure;
+- the next page requests `offset + returned` while `has_more` is true, a
+  changed `sha` restarts from the first page, and a reference-kind answer
+  offers no further page;
 - stale search and pagination responses cannot overwrite newer state;
-- search verses normalize to the same descriptor used by reader verses;
-- a query reaches Librarian with the match mode the reader asked for, in every
-  writing system, so no layer reintroduces a match-mode detector;
-- both diacritics vocabularies are accepted, and a profile stored before the
-  Librarian 2 upgrade keeps its translation and reading position;
-- a search is charged the search budget and not the reference-delivery budget,
-  so the first search of a translation waits for the index build it provokes;
-- the loader refuses a `SEARCH_TIMEOUT` shorter than the build it must cover;
-- the session response declares that budget and the page waits it out, falling
-  back to a search-shaped floor when a robot declares nothing.
+- a Search API failure does not affect reader navigation, and `429`/`503`
+  are reported as retryable with the announced `Retry-After`;
+- search verses normalize to the same descriptor and direct selection
+  identity used by reader verses, and Post accepts them;
+- the robot's thin client for Telegram-native `/search` sends the requested
+  filters unaltered in every writing system, clamps `SEARCH_RESULT_LIMIT` to
+  the API's 100, bounds the body by `SEARCH_MAX_RESPONSE_BYTES`, refuses
+  redirects, maps `400` to a validation error and `404 translation_not_found`
+  to an unknown translation, and routes `429`, `5xx`, and transport failures
+  through the search circuit;
+- highlighting in the browser and in the robot mirrors the service's script
+  analysis: no word boundary is tested in a continuous script, an abjad stem
+  is marked behind its attached particle, and Brahmic marks are kept;
+- both CSP layers list the same three public origins;
+- the removed Librarian settings are ignored with a warning, and the robot
+  serves no `/api/v1/search` route.
 
 ### Browser selection domain
 
@@ -242,7 +255,7 @@ Inject and verify independent failures for:
 - Query API timeout and unresolved references;
 - IndexedDB failure with in-memory fallback;
 - cache hash changes during download;
-- Librarian search timeout;
+- Search API timeout, `429` with `Retry-After`, and `503 busy`;
 - Robot session expiry;
 - unavailable or corrupt scoped browser-local history storage;
 - unavailable, partial, stale, or corrupt Telegram DeviceStorage/CloudStorage,

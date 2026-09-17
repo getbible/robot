@@ -1,6 +1,6 @@
 # GetBible Robot
 
-GetBible Robot is a hardened Telegram interface for Scripture reading, search, history, bookmarking, selection, copying, and posting. The Mini App uses GetBible API V2 directly for public Scripture data. Temporary selections, durable device-local history, and the public Scripture cache stay in the browser; compact personal bookmarks and the last-read coordinate additionally synchronize through Telegram Mini App storage when the client supports it. Robot remains the authenticated Telegram control plane and the sole adapter for Librarian full-text search.
+GetBible Robot is a hardened Telegram interface for Scripture reading, search, history, bookmarking, selection, copying, and posting. The Mini App uses GetBible API V2 directly for public Scripture data. Temporary selections, durable device-local history, and the public Scripture cache stay in the browser; compact personal bookmarks and the last-read coordinate additionally synchronize through Telegram Mini App storage when the client supports it. Full-text search, like every other Scripture read, goes from the browser to a public GetBible origin. Robot remains the authenticated Telegram control plane.
 
 ## Architecture at a glance
 
@@ -8,16 +8,20 @@ GetBible Robot is a hardened Telegram interface for Scripture reading, search, h
 Telegram Mini App
   ├─ translations / books / chapters / hashes → https://api.getbible.net/v2
   ├─ explicit and grouped references          → https://query.getbible.net/v2
+  ├─ full-text search, page by page           → https://search.getbible.net/v2
   ├─ temporary ordered selection              → browser memory
   ├─ coordinate-only reading history          → scoped browser localStorage
   ├─ public Scripture cache                   → browser IndexedDB
   ├─ personal bookmarks / topics / last-read  → localStorage + Telegram DeviceStorage / CloudStorage
   ├─ global topic visibility / exclusions     → scoped localStorage + Telegram DeviceStorage
-  └─ auth / preferences / search / Post / backup → Robot
-                                                   └─ search only → Librarian
+  └─ auth / preferences / Post / backup / contributions → Robot
+
+Robot
+  ├─ /bible references and authoritative Post text → https://query.getbible.net/v2
+  └─ Telegram-native /search (no Mini App)         → https://search.getbible.net/v2
 ```
 
-Only full-text search and search pagination use Librarian.
+Robot proxies no Scripture: catalogues, chapters, references, and search are all browser-to-GetBible requests. The robot installs no Scripture engine, downloads no corpus, and builds no index.
 
 A normal reader action does not pass through Robot. Selecting, unselecting, reordering, clearing, highlighting, counters, and copying are browser-owned and issue no Robot request. Final Post is the only selection synchronization boundary; Robot validates authoritative Scripture before Telegram delivery.
 
@@ -40,7 +44,7 @@ See [Architecture](docs/ARCHITECTURE.md), [Browser data](docs/BROWSER_DATA.md), 
 
 - An explicit `/bible <reference>` keeps the native fast path and posts immediately.
 - Bare `/bible` opens the Mini App reader at the saved translation/book/chapter/verse.
-- `/search <query>` opens Librarian-backed results in the Mini App.
+- `/search <query>` opens the Mini App with results from the Search API.
 - Bare `/search` opens the search form.
 - Intermediate browsing never floods the chat.
 
@@ -93,7 +97,7 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   panel immediately below Global topics.
 - **Sync now** drips the contribution to Robot in bounded idempotent batches
   of at most 50 events over the same session-authenticated same-origin request
-  path search uses. Snapshot-derived events carry deterministic
+  path the rest of the Mini App API uses. Snapshot-derived events carry deterministic
   content-derived IDs, so a redelivered event replays safely, and every
   response returns the complete result set: receipt counts, the full
   contributor status, and the live catalogue revision/checksum. The final
@@ -102,7 +106,7 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   approved contributors receive inside JSON payloads — never a custom
   header — and the drip runs on its own contribution rate budget
   (`CONTRIBUTION_RATE_CAPACITY`, `CONTRIBUTION_RATE_REFILL_PER_SECOND`)
-  separate from the public search limits. It requires no WebSocket,
+  separate from the public request limits. It requires no WebSocket,
   additional port, or repeated raw Telegram `initData` header.
 - Personal bookmark aggregate version 3, topics, the clearable recently-used
   topic order, the active topic, and the compact last-read coordinate reconcile
@@ -146,7 +150,7 @@ The bot token remains server-side. It is never placed in HTML, JavaScript, URLs,
 
 Public API transport:
 
-- uses only `https://api.getbible.net/v2/` and `https://query.getbible.net/v2/`;
+- uses only `https://api.getbible.net/v2/`, `https://query.getbible.net/v2/`, and `https://search.getbible.net/v2/`;
 - omits credentials and cookies;
 - sends no Telegram data;
 - rejects redirects;
@@ -161,15 +165,18 @@ Every cached scope stores its published SHA-1 and is revalidated at least weekly
 
 ## Search isolation
 
-Search and pagination alone use Librarian. They have separate bounded execution, timeout, cache, and circuit behavior so expensive corpus work cannot consume every direct-reference permit.
+The Mini App searches `search.getbible.net/v2` directly: one `GET` per page carrying the reader's filters, answered with matches in authoritative order, chapter-grouped verse text, an exact total, and the corpus `sha`. Pages advance by offset, a changed `sha` restarts the search, and results carry the same direct selection identity as reader verses. Robot serves no search endpoint and holds no search state.
 
-Search failure does not affect reader navigation. Main API or Query API failure does not invalidate Telegram authentication.
+Search failure does not affect reader navigation, because the search origin is separate from the Main and Query origins and from Robot. Main API, Query API, or Search API failure does not invalidate Telegram authentication.
 
-Librarian derives the matching strategy from the query text, so the robot ships
-no per-language branch and no match-mode detector. Chinese, Japanese, Korean,
-Thai, Lao, Khmer, Myanmar and Tibetan queries reach the index under the default
+The Telegram-native `/search`, used only when no Mini App is configured, is served by the robot's thin client to the same API on its own executor, semaphore, per-request deadline, response bound, and circuit, so a slow upstream cannot consume a direct-reference permit.
+
+The Search API derives the matching strategy from the query text, so the robot
+ships no per-language branch and no match-mode detector. Chinese, Japanese,
+Korean, Thai, Lao, Khmer, Myanmar and Tibetan queries match under the default
 filters, unaccented Greek reaches accented text, and an unpointed Hebrew or
-Arabic stem reaches the word behind its attached particle. See
+Arabic stem reaches the word behind its attached particle. Highlighting
+mirrors that analysis locally in both the browser and the robot. See
 [Search](docs/SEARCH.md).
 
 ## Runtime and deployment
@@ -180,7 +187,7 @@ Supported runtime:
 - Linux Docker/OCI for portable deployment;
 - Linux with `systemd` for host-native deployment;
 - a Telegram bot token;
-- outbound HTTPS to Telegram and GetBible API;
+- outbound HTTPS to Telegram and the GetBible Main, Query, and Search APIs;
 - public HTTPS when the Mini App is enabled.
 
 The host deployment keeps health, webhook, and Mini App listeners separate and loopback/private behind Caddy. Docker contains no Caddy or systemd and leaves TLS/ingress to the platform.
@@ -240,13 +247,7 @@ Do not edit generated Caddy/systemd configuration directly.
 
 Human-maintained intent lives in `requirements.in` and `requirements-dev.in`. Production and CI install exact hashed locks from `requirements.txt` and `requirements-dev.txt`.
 
-Robot supports compatible Librarian 2.x releases beginning with 2.0.0:
-
-```text
-getbible>=2.0.0,<3
-```
-
-The reviewed runtime lock currently selects a specific released version. Production never resolves an unreviewed latest dependency during startup.
+The direct runtime inputs are `python-telegram-bot`, `requests`, `tornado`, and `python-dotenv`, plus two compatibility pins for older interpreters. There is no Scripture engine among them: catalogues, references, and search are HTTPS requests to the public GetBible APIs. The reviewed runtime lock selects exact released versions. Production never resolves an unreviewed latest dependency during startup.
 
 See [Dependency policy](docs/DEPENDENCIES.md).
 
@@ -281,7 +282,7 @@ The permanent release gate requires:
 - production container build and smoke test;
 - Ruff, strict mypy, and branch coverage;
 - browser unit and real Chromium tests;
-- public API routing and CSP parity;
+- public API routing, including direct Search API routing, and CSP parity;
 - cache hash/invalidation/bounds tests;
 - browser selection add/remove/reorder/clear and visual highlight tests;
 - scoped durable reading-history move-to-front/reopen/remove/clear and persistence tests;

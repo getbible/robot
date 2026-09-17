@@ -26,36 +26,29 @@ Production installs only `requirements.txt` with `--require-hashes`. CI installs
 
 Using an unbounded `pip install --upgrade` during service startup would allow an upstream release to change production without code review, tests, rollback metadata, or a stable software bill of materials. The robot therefore updates quickly through reviewed automation, not unpredictably at runtime.
 
-## Current Librarian policy
+## Runtime dependency set
 
-Librarian 2.0.0 is published and contains the hardened reference parser,
-request limits, typed repository failures, checksum-validated translation
-cache, and the script-aware search engine required by the robot.
-
-The compatible input policy is:
+The direct runtime inputs are:
 
 ```text
-getbible>=2.0.0,<3
+python-telegram-bot[webhooks]
+requests
+tornado
+python-dotenv
 ```
 
-The exact runtime and development locks currently select:
+plus the `exceptiongroup` and `typing-extensions` compatibility pins described
+below. There is no Scripture engine among them. Catalogues, references, and
+full-text search are HTTPS requests to the public GetBible Main, Query, and
+Search APIs, made with `requests` from the robot and with `fetch` from the
+browser; the robot parses no corpus and builds no index. The former
+`getbible` (Librarian) package and its `regex` dependency are not inputs, and
+no module may import them. See [Search](SEARCH.md) for what the robot relies
+on instead.
 
-```text
-getbible==2.0.0
-```
-
-The lock also records both published artifact hashes. Production therefore
-installs the reviewed 2.0.0 artifact exactly; it does not resolve a moving
-branch or an unreviewed later 2.x release.
-
-Dependabot proposes newer compatible Librarian releases within the 2.x series. Each proposal must regenerate both locks, pass the complete robot gate, and demonstrate unchanged command/search contracts before merge. A future 3.x release requires an intentional compatibility review and input-range change.
-
-The compatible range deliberately begins at 2.0.0 because Robot depends on
-search deriving its matching strategy from the query text. Under 1.x the
-application had to detect continuous scripts itself, and the detector it
-imported — `requires_substring_matching()` — could not express a query that
-mixed writing systems. See [Search](SEARCH.md) for what the robot now relies
-on. The exact lock moves only after a new release passes Robot's complete gate.
+Dependabot proposes newer releases of each input. Each proposal must
+regenerate both locks, pass the complete robot gate, and demonstrate
+unchanged command and Mini App contracts before merge.
 
 ## Regenerating locks
 
@@ -117,13 +110,13 @@ Then run tests, Ruff, mypy, Bandit, strict source-aware dependency auditing, sec
 
 ## Auditing the complete released environment
 
-Librarian is now a normal released registry package, so the audit helper submits the complete locked environment to strict advisory auditing:
+The audit helper submits the complete locked environment to strict advisory auditing:
 
 ```bash
 venv/bin/python scripts/audit_runtime.py
 ```
 
-`scripts/audit_runtime.py` still contains fail-closed handling for a deliberately reviewed direct source should an emergency ever require one, but no requirement is currently filtered. Any vulnerability, audit error, malformed direct-source declaration, or unhashed lock fails the check. Bandit separately scans the exact installed Librarian package source in CI and `scripts/run-checks.sh`.
+Any vulnerability, audit error, or unhashed lock fails the check. Bandit separately scans the repository's own Python sources (`bot.py`, `config.py`, `modules`, `container`, and `scripts`) in CI and `scripts/run-checks.sh`.
 
 ## GitHub Actions dependencies
 

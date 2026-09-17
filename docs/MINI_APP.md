@@ -1,12 +1,14 @@
 # Telegram Mini App
 
-The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, temporary verse selection, and device-local history belong in the browser. Compact personal bookmarks and last-read coordinates additionally use Telegram Mini App storage when available. Global-topic preferences use scoped browser storage plus Telegram DeviceStorage, but deliberately remain outside CloudStorage and personal backup. Robot remains the authenticated Telegram control plane, the Librarian search adapter, the bounded relay for an explicit private-chat bookmark backup or restore, and the review boundary for approved contributor events and live global-catalogue revisions.
+The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, temporary verse selection, and device-local history belong in the browser. Compact personal bookmarks and last-read coordinates additionally use Telegram Mini App storage when available. Global-topic preferences use scoped browser storage plus Telegram DeviceStorage, but deliberately remain outside CloudStorage and personal backup. Full-text search, like every other Scripture read, goes from the browser to a public GetBible origin. Robot remains the authenticated Telegram control plane, the bounded relay for an explicit private-chat bookmark backup or restore, and the review boundary for approved contributor events and live global-catalogue revisions.
 
 ## Active doctrine
 
-Only full-text search and search pagination use Librarian. Robot also owns the
-authenticated control paths for sessions, preference compatibility, final
-Post, explicit bookmark chat backup/restore, and trusted contributions.
+Every Scripture read is browser-to-GetBible: catalogues and chapters from the
+Main API, references from the Query API, full-text search from the Search
+API. Robot owns the authenticated control paths for sessions, preference
+compatibility, final Post, explicit bookmark chat backup/restore, and trusted
+contributions.
 
 | Capability | Owner |
 | --- | --- |
@@ -25,7 +27,7 @@ Post, explicit bookmark chat backup/restore, and trusted contributions.
 | Compact last-read coordinate | Scoped `localStorage` + Telegram `DeviceStorage` / `CloudStorage`, with Robot preference compatibility |
 | Bookmark JSON download/import | Browser |
 | Private-chat bookmark backup/restore | Browser confirmation + Robot/Telegram transport |
-| Full-text search and pagination | Robot → Librarian |
+| Full-text search and pagination | Browser → `search.getbible.net/v2` |
 | Telegram authentication and launch binding | Robot |
 | Reader preference compatibility | Robot |
 | Final Telegram delivery | Robot |
@@ -39,9 +41,10 @@ never becomes a dependency of the local action.
 
 ```text
 Telegram WebView
-  ├─ signed initData / preferences / search / post / chat backup → Robot
+  ├─ signed initData / preferences / post / chat backup → Robot
   ├─ catalogs / chapters / hashes                    → api.getbible.net/v2
   ├─ explicit or grouped references                  → query.getbible.net/v2
+  ├─ full-text search, page by page                  → search.getbible.net/v2
   ├─ temporary ordered selection                     → BrowserSelectionStore
   ├─ unique coordinate history                       → scoped local ReadingHistoryStore
   ├─ personal bookmarks / topics / last-read         → local + Telegram storage adapter
@@ -55,7 +58,7 @@ Reader and search results are normalized into one verse descriptor. Coordinate i
 translation + book_number + chapter + verse
 ```
 
-Opaque Librarian tokens and deterministic reader IDs are transport details, not selection identity. A verse selected from search therefore appears selected in the reader, and a second click from either surface removes it.
+Reader verses and search results carry the same deterministic direct selection identity; there is no opaque search token. A verse selected from search therefore appears selected in the reader, and a second click from either surface removes it.
 
 ## Browser selection lifecycle
 
@@ -79,8 +82,9 @@ The browser transport accepts only these fixed HTTPS origins:
 
 - `https://api.getbible.net/v2/`
 - `https://query.getbible.net/v2/`
+- `https://search.getbible.net/v2/`
 
-Requests omit cookies and credentials, never include Telegram data, reject redirects, use `no-referrer`, enforce time and response-size bounds, and validate response coordinates and schemas before use.
+Requests omit cookies and credentials, never include Telegram data, reject redirects, use `no-referrer`, enforce time and response-size bounds, and validate response coordinates and schemas before use. Search responses are ordinary cacheable `GET`s whose freshness the API declares; a failed search is `application/problem+json` and `429`/`503` carry the wait in `Retry-After`.
 
 Both CSP enforcement layers must contain the same allowlist:
 
@@ -209,7 +213,7 @@ one-time disclosure that topic and verse-tag changes are shared for review.
 Synchronization starts only after that disclosure is acknowledged.
 
 The panel is visible to any approved contributor with a live session. Status
-reads authenticate exactly as search does: the plain opaque session bearer
+reads authenticate exactly as preferences do: the plain opaque session bearer
 issued at the initial session exchange. Event submission requires a second
 credential on top of that bearer. An approved contributor receives a
 long-lived `contribution_token` — `gbc_` plus 43 URL-safe characters, held
@@ -231,16 +235,15 @@ bounded idempotent contribution events whose `client_event_id`s derive
 deterministically from their content (`baseline:<type>:<16-hex>`), appends the
 journalled explicit global add/remove intents, and posts them to the
 same-origin `POST /api/v1/contributions/events` endpoint in sequential
-batches of at most 50 events. Each request is deliberately the size class of
-a search request — batches are additionally capped at about 2 KB of JSON —
-because a small POST is the one upload shape every deployment's network path
-has already proven. On HTTP `429` the client waits the announced
+batches of at most 50 events. Each request is deliberately small — batches
+are additionally capped at about 2 KB of JSON — because a small POST is the
+one upload shape every deployment's network path has already proven. On HTTP `429` the client waits the announced
 `Retry-After` (bounded to 1–60 seconds, at most 5 retries per batch) and
 continues, and when a request dies on the wire while smaller requests pass —
 a firewall or path-MTU element silently dropping larger uploads — the drip
 halves the failed batch, down to one event per request if necessary, so the
 contribution seeps to the server one small chunk at a time through any path
-that can carry a search.
+that can carry an ordinary API request.
 Events carry coordinate identity only, never Scripture text or Telegram
 identity, and the one-time disclosure acknowledgement rides the first batch
 as an optional `disclosure_acknowledged` field in the same POST body. Each
@@ -251,8 +254,8 @@ rotated token with one ordinary status request, and shows drip progress
 a dedicated server-side contribution rate budget, configured by
 `CONTRIBUTION_RATE_CAPACITY` (default `60`) and
 `CONTRIBUTION_RATE_REFILL_PER_SECOND` (default `5.0`) and separate from the
-public search and user limits, so a large personal dataset neither starves
-nor is starved by public search; a batch beyond the budget waits behind
+public Mini App and user limits, so a large personal dataset neither starves
+nor is starved by public traffic; a batch beyond the budget waits behind
 `429` and `Retry-After`, it never fails permanently.
 
 Every response returns the complete result set: `accepted`, `replayed`, and
@@ -308,9 +311,9 @@ Chapter acceptance requires the pre-read and post-read `.sha` values to match, S
 
 ## Search boundary
 
-`/search` is the sole content-discovery path that uses Robot and Librarian. Robot returns bounded normalized verse descriptors and paging metadata. The browser registers those descriptors with the same `BrowserSelectionStore` used by reader chapters.
+`/search` opens the Search page, and the page queries `search.getbible.net/v2` directly with the reader's filters as query parameters. It pages 25 matches at a time by offset, shows the API's exact total, and restarts from the first page if the corpus `sha` changes between pages. The browser normalizes matches into the same verse descriptor and direct selection identity as reader chapters and registers them with the same `BrowserSelectionStore`. Robot serves no search endpoint; search defaults persist through the ordinary preferences endpoint. See [Search](SEARCH.md).
 
-Search failure is isolated from reading. Reading failure is isolated from authentication. Neither may clear a valid Telegram session.
+Search failure is isolated from reading, because the search origin is separate from the Main and Query origins. Reading failure is isolated from authentication. Neither may clear a valid Telegram session.
 
 ## Post boundary
 
@@ -378,7 +381,6 @@ sudo getbible-robot doctor production
 | `MINI_APP_SESSION_TTL_SECONDS` | Ninety-day default absolute authenticated-session lifetime |
 | `MINI_APP_SESSION_LIMIT` | Bounded active sessions |
 | `MINI_APP_SESSIONS_PER_USER` | Bounded sessions per user |
-| `MINI_APP_MAX_SEARCHES_PER_SESSION` | Bounded Librarian result snapshots |
 | `MINI_APP_MAX_SELECTIONS` | Browser and final-post selection limit |
 | `MINI_APP_TRUSTED_PROXY_CIDRS` | Optional advanced restriction for forwarded client addresses |
 | `CONTRIBUTION_STORE_FILE` | Absolute private SQLite path; blank disables contribution endpoints and `/contributor` applications |
@@ -432,7 +434,7 @@ After deployment, verify:
 1. cold reader load uses the public Main API;
 2. warm reader load uses IndexedDB and hash policy correctly;
 3. explicit references use Query API;
-4. search is the only Scripture-discovery path through Robot/Librarian;
+4. search goes directly to the Search API and issues no Robot request;
 5. selecting highlights the verse number and body immediately;
 6. selecting the same verse from search and reader does not duplicate it;
 7. a second click unselects it;

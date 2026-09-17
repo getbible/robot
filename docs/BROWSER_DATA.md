@@ -4,14 +4,18 @@ The Telegram Mini App is a browser application. Public Bible content, temporary 
 
 ## Doctrine
 
-Only full-text search and search pagination use Librarian. Robot also provides
-the authenticated control paths for sessions, preferences, final Post, and an
-explicit bookmark chat backup or restore.
+Every Scripture read — catalogs, chapters, explicit references, and full-text
+search — goes from the browser to a public GetBible origin. Robot provides
+the authenticated control paths for sessions, preferences, final Post,
+contributions, and an explicit bookmark chat backup or restore.
 
 The reading and persistence split is:
 
 - `api.getbible.net/v2` supplies translation catalogs, books, chapter maps, chapter text, and hashes;
 - `query.getbible.net/v2` supplies explicit and grouped reference resolution;
+- `search.getbible.net/v2` answers full-text search with offset pagination and
+  exact totals; results stay in page memory and the browser HTTP cache, never
+  IndexedDB;
 - IndexedDB stores validated public content;
 - browser memory owns the current ordered selection;
 - scoped browser `localStorage` owns bounded, coordinate-only reading history;
@@ -32,27 +36,27 @@ The reading and persistence split is:
 
 ## Ownership boundaries
 
-| Capability | Browser / GetBible API | Robot | Librarian |
-| --- | --- | --- | --- |
-| Translation catalog | Yes | No | No |
-| Book catalog | Yes | No | No |
-| Chapter catalog | Yes | No | No |
-| Chapter text | Yes | No | No |
-| Explicit/grouped references | Yes, Query API | No | No |
-| Full-text search | No | Authenticated transport | Yes |
-| Search pagination | No | Authenticated transport | Yes |
-| Selection highlighting | Yes | No | No |
-| Select/unselect/reorder/clear | Yes | No | No |
-| Reading history record/remove/clear | Yes | No | No |
-| Bookmark/topic editing and local import/export | Yes | No | No |
-| Bookmark and last-read device/cloud sync | Telegram Mini App storage | No | No |
-| Global catalog visibility and exclusions | Scoped localStorage + Telegram DeviceStorage | No | No |
-| Contributor journal of explicit global intents | Per-instance scoped IndexedDB | Authenticated event intake/review | No |
-| Reviewed live global catalogue | Strict instance-scoped browser cache + bundled fallback | Revisioned publication | No |
-| Private-chat bookmark backup/restore transport | Confirm/merge in browser | Yes | No |
-| Telegram authentication | No | Yes | No |
-| Reader preference compatibility | Compact Mini App storage copy | Yes | No |
-| Final Telegram posting | Coordinates submitted once | Yes | No |
+| Capability | Browser / GetBible API | Robot |
+| --- | --- | --- |
+| Translation catalog | Yes | No |
+| Book catalog | Yes | No |
+| Chapter catalog | Yes | No |
+| Chapter text | Yes | No |
+| Explicit/grouped references | Yes, Query API | No |
+| Full-text search | Yes, Search API | No |
+| Search pagination | Yes, Search API by offset | No |
+| Selection highlighting | Yes | No |
+| Select/unselect/reorder/clear | Yes | No |
+| Reading history record/remove/clear | Yes | No |
+| Bookmark/topic editing and local import/export | Yes | No |
+| Bookmark and last-read device/cloud sync | Telegram Mini App storage | No |
+| Global catalog visibility and exclusions | Scoped localStorage + Telegram DeviceStorage | No |
+| Contributor journal of explicit global intents | Per-instance scoped IndexedDB | Authenticated event intake/review |
+| Reviewed live global catalogue | Strict instance-scoped browser cache + bundled fallback | Revisioned publication |
+| Private-chat bookmark backup/restore transport | Confirm/merge in browser | Yes |
+| Telegram authentication | No | Yes |
+| Reader preference compatibility | Compact Mini App storage copy | Yes |
+| Final Telegram posting | Coordinates submitted once | Yes |
 
 ## Request flow
 
@@ -62,10 +66,9 @@ flowchart LR
     S -->|opaque session + preferences| T
     T -->|translations / books / chapters / chapter text / hashes| A[api.getbible.net/v2]
     T -->|explicit and grouped references| Q[query.getbible.net/v2]
-    T -->|search only| R[Robot search endpoint]
-    R --> L[Librarian]
+    T -->|full-text search, offset pages| SR[search.getbible.net/v2]
     A --> V[VerseSelection]
-    L --> V
+    SR --> V
     V --> B[BrowserSelectionStore]
     T --> H[Scoped local ReadingHistoryStore]
     T --> M[BookmarkStore]
@@ -74,10 +77,11 @@ flowchart LR
     C -->|bounded idempotent review events| P
     B -->|final ordered coordinates once| P[Robot protected endpoints]
     M -->|explicit bounded JSON backup| P
+    P -->|/bible references, Post text| Q
     P -->|validated Scripture or private backup document| G[Telegram]
 ```
 
-No select, unselect, reorder, clear, reader navigation, catalog, chapter, or explicit-reference operation may call Robot.
+No select, unselect, reorder, clear, reader navigation, catalog, chapter, explicit-reference, or search operation may call Robot.
 
 ## Reading history
 
@@ -211,7 +215,7 @@ backup body in a database or Mini App session.
 
 ## Shared verse contract
 
-Reader verses and Librarian search results are normalized into the same `VerseSelection` interface:
+Reader verses and Search API results are normalized into the same `VerseSelection` interface:
 
 ```text
 selection_id   Stable UI identity
@@ -226,11 +230,11 @@ terms          Optional search metadata
 highlights     Optional search highlights
 ```
 
-Coordinate identity is `translation + book_number + chapter + verse`. Transport-specific tokens are not identity. A verse selected from search must appear selected when the same verse is opened in the reader, and vice versa.
+Coordinate identity is `translation + book_number + chapter + verse`, and both sources carry the same deterministic direct selection identity. A verse selected from search must appear selected when the same verse is opened in the reader, and vice versa.
 
 ## Browser selection lifecycle
 
-1. A reader chapter or Librarian search response produces `VerseSelection` records.
+1. A reader chapter or Search API response produces `VerseSelection` records.
 2. The browser selection store adds or removes records by coordinate identity.
 3. The UI derives `aria-pressed`, highlight styling, range boundaries, counters, copy output, and ordering from that store.
 4. No Robot request occurs while the selection changes.
@@ -242,12 +246,13 @@ Browser text, names, and references are display data only and never posting auth
 
 ## Public API origins
 
-The browser transport has two fixed HTTPS origins:
+The browser transport has three fixed HTTPS origins:
 
 - `https://api.getbible.net/v2/` for mappings, Scripture, and matching `.sha` resources;
-- `https://query.getbible.net/v2/` for explicit and grouped Bible-reference resolution.
+- `https://query.getbible.net/v2/` for explicit and grouped Bible-reference resolution;
+- `https://search.getbible.net/v2/` for full-text search.
 
-The Content Security Policy allows only these two external connection origins in addition to the Mini App origin. Requests omit credentials, disable redirects, send no Telegram data, use `no-referrer`, and do not rely on HTTP cache state.
+The Content Security Policy allows only these three external connection origins in addition to the Mini App origin. Requests omit credentials, disable redirects, send no Telegram data, and use `no-referrer`. Catalogue and chapter requests do not rely on HTTP cache state; search responses are ordinary cacheable `GET`s whose freshness the API declares, and they are never written to IndexedDB. A failed search is `application/problem+json`; `429` and `503` are retried after the announced `Retry-After`, while `400` and `404` are raised at once.
 
 ### Waiting for a chapter
 
@@ -278,7 +283,7 @@ A failed validation never replaces a previously accepted record.
 ## Failure isolation
 
 - A public API failure affects reading only and never invalidates Telegram authentication.
-- A Librarian failure affects search only.
+- A Search API failure affects search only; the search origin is separate from the Main and Query origins and from Robot.
 - A browser selection operation cannot fail because Robot is unavailable.
 - A failed final Post preserves the complete ordered browser selection for retry.
 - A malformed or tampered final selection is rejected by Robot before Telegram output.
@@ -307,8 +312,8 @@ No documentation or test may present legacy routes as the active design.
 
 The release gate must prove:
 
-- catalog, chapter, and explicit/grouped reference traffic goes directly to GetBible API;
-- only full-text search and search pagination use Librarian;
+- catalog, chapter, explicit/grouped reference, and full-text search traffic goes directly to the GetBible APIs;
+- no Robot endpoint serves search, and the removed search routes answer `404`;
 - select, unselect, reorder, and clear issue no Robot request;
 - reader and search records share coordinate identity;
 - selected verses remain highlighted after chapter navigation and source changes;

@@ -861,19 +861,15 @@ migrate_instance_configuration() {
     fi
     ensure_env_value "$python_bin" "$env_file" \
         "SEARCH_MAX_RESPONSE_BYTES" "4194304"
-    ensure_env_value "$python_bin" "$env_file" \
-        "SEARCH_INDEX_BUILD_SECONDS" "120"
+    # Keep a missing legacy key readable by the immediately previous release,
+    # whose loader refused a search budget below its index-build allowance.
+    # The current runtime reads it as the per-request Search API deadline;
+    # fresh installs carry 30 from .env.template.
     ensure_env_value "$python_bin" "$env_file" "SEARCH_TIMEOUT" "150"
-    ensure_env_value "$python_bin" "$env_file" "REFERENCE_CACHE_LIMIT" "1000"
-    ensure_env_value "$python_bin" "$env_file" "BOOKS_CACHE_LIMIT" "16"
-    ensure_env_value "$python_bin" "$env_file" "CHAPTER_CACHE_LIMIT" "256"
-    ensure_env_value "$python_bin" "$env_file" "SEARCH_CORPUS_LIMIT" "1"
     ensure_env_value "$python_bin" "$env_file" \
-        "SEARCH_SHARED_CORPUS_LIMIT" "8"
-    ensure_env_value "$python_bin" "$env_file" "TRANSLATION_CACHE_LIMIT" "1"
-    ensure_env_value "$python_bin" "$env_file" "CACHE_MAX_BYTES" "268435456"
+        "GETBIBLE_QUERY_BASE_URL" "https://query.getbible.net"
     ensure_env_value "$python_bin" "$env_file" \
-        "CACHE_MAINTENANCE_INTERVAL_SECONDS" "21600"
+        "GETBIBLE_SEARCH_BASE_URL" "https://search.getbible.net"
     ensure_env_value "$python_bin" "$env_file" "MAX_CONCURRENT_SEARCHES" \
         "$DEFAULT_MAX_CONCURRENT_SEARCHES"
     migrate_env_default "$python_bin" "$env_file" "MAX_CONCURRENT_LOOKUPS" "2" \
@@ -883,7 +879,6 @@ migrate_instance_configuration() {
     migrate_env_default "$python_bin" "$env_file" "RATE_LIMIT_CACHE_SIZE" "20000" "2000"
     migrate_env_default \
         "$python_bin" "$env_file" "INTERACTION_SESSION_LIMIT" "2000" "200"
-    ensure_env_value "$python_bin" "$env_file" "PREWARM_DEFAULT_TRANSLATION" "true"
     ensure_env_value "$python_bin" "$env_file" \
         "USER_PREFERENCES_FILE" "${STATE_ROOT}/${instance}/preferences.sqlite3"
     ensure_env_value "$python_bin" "$env_file" \
@@ -921,8 +916,6 @@ migrate_instance_configuration() {
     migrate_env_default \
         "$python_bin" "$env_file" "MINI_APP_SESSION_LIMIT" "2000" "200"
     ensure_env_value "$python_bin" "$env_file" "MINI_APP_SESSIONS_PER_USER" "2"
-    ensure_env_value \
-        "$python_bin" "$env_file" "MINI_APP_MAX_SEARCHES_PER_SESSION" "2"
     ensure_env_value \
         "$python_bin" "$env_file" "MINI_APP_MAX_AVAILABLE_SELECTIONS" "256"
     ensure_env_value "$python_bin" "$env_file" "MINI_APP_MAX_SELECTIONS" "100"
