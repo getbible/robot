@@ -473,6 +473,8 @@ class Settings:
     api_base_url: str
     query_base_url: str
     search_base_url: str
+    bookmarks_base_url: str
+    bookmark_catalog_check_interval_seconds: int
     web_base_url: str
     welcome_message: str
     help_message: str
@@ -701,6 +703,12 @@ class Settings:
             ),
             search_base_url=_base_url(
                 "GETBIBLE_SEARCH_BASE_URL", "https://search.getbible.net"
+            ),
+            bookmarks_base_url=_base_url(
+                "GETBIBLE_BOOKMARKS_BASE_URL", "https://bookmarks.getbible.net"
+            ),
+            bookmark_catalog_check_interval_seconds=_integer(
+                "BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS", 6 * 60 * 60, 300, 7 * 24 * 60 * 60
             ),
             web_base_url=_base_url("GETBIBLE_WEB_BASE_URL", "https://getbible.life"),
             welcome_message=_message(
