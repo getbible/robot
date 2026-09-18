@@ -53,6 +53,13 @@ export const ENGLISH_MESSAGES = Object.freeze({
   "search.clear": "Clear",
   "search.results_label": "Scripture search results",
   "search.load_more": "Load more",
+  "search.loading_more": "Loading more verses…",
+  "search.progress": "{loaded} of {total} verses loaded",
+  "search.all_loaded_one": "All results loaded: one verse.",
+  "search.all_loaded_other": "All results loaded: {count} verses.",
+  "search.ceiling":
+    "Showing the first {loaded} of {total} matching verses. Narrow the search to reach the rest.",
+  "search.more_failed": "More verses could not be loaded.",
   "search.enter_query": "Enter words or a phrase to search.",
   "search.found_one": "One verse found.",
   "search.found_other": "{count} verses found.",

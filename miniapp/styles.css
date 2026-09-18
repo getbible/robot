@@ -1371,9 +1371,46 @@ select:focus-visible {
   }
 }
 
-.load-more {
+/*
+ * Long result lists grow while the reader scrolls; a card that is far off
+ * screen keeps its place but is not laid out or painted until it is near.
+ */
+#search-results > .verse-result {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 132px;
+}
+
+.search-more {
+  display: grid;
+  min-height: 72px;
+  margin-top: 4px;
+  padding: 16px 12px 4px;
+  justify-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-align: center;
+}
+
+.search-more__spinner {
+  width: 22px;
+  height: 22px;
+  border-width: 2px;
+}
+
+.search-more__line,
+.search-more__title {
+  margin: 0;
+}
+
+.search-more__title {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.search-more__button {
   width: 100%;
-  margin-top: 12px;
+  margin-top: 4px;
 }
 
 .view--reader {

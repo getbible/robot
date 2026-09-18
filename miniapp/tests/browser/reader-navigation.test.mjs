@@ -1663,12 +1663,12 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   await page.locator("#search-query").fill("text");
   await page.locator("#search-query").press("Enter");
   await page.waitForFunction(() => (
-    document.querySelectorAll("#search-results .verse-result").length === 25
+    document.querySelectorAll("#search-results .verse-result").length === 40
   ));
   assert.equal(searchRequests.length, 1);
   assert.equal(searchRequests[0].origin, "https://search.getbible.net");
   assert.equal(searchRequests[0].searchParams.get("q"), "text");
-  assert.equal(searchRequests[0].searchParams.get("limit"), "25");
+  assert.equal(searchRequests[0].searchParams.get("limit"), "50");
   assert.equal(searchRequests[0].searchParams.get("offset"), "0");
   assert.equal(searchRequests[0].searchParams.get("diacritics"), "exact");
   const searchedTranslation = searchRequests[0].pathname.replace(/^\/v2\//, "");
@@ -1678,15 +1678,22 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     await page.locator("#search-results .verse-result:first-child mark").innerText(),
     "text",
   );
-  assert.equal(await page.locator("#load-more").isVisible(), true);
-  await page.locator("#load-more").click();
+  // Forty matches fit in one page, so the foot of the list closes the search
+  // and scrolling to it asks for nothing more (see search-scroll.test.mjs for
+  // the walk through many pages).
   await page.waitForFunction(() => (
-    document.querySelectorAll("#search-results .verse-result").length === 40
+    document.querySelector("#search-more")?.dataset.reach === "complete"
   ));
-  assert.equal(searchRequests.length, 2);
-  assert.equal(searchRequests[1].searchParams.get("offset"), "25");
-  assert.equal(searchRequests[1].pathname, searchRequests[0].pathname);
-  assert.equal(await page.locator("#load-more").isHidden(), true);
+  assert.match(await page.locator("#search-more").innerText(), /^All results loaded: 40 verses\.$/);
+  assert.equal(await page.locator("#load-more").count(), 0);
+  await page.evaluate(() => {
+    const view = document.querySelector("#search-view");
+    view.scrollTop = view.scrollHeight;
+  });
+  await page.evaluate(() => new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 120)));
+  }));
+  assert.equal(searchRequests.length, 1);
   const lastSearchCard = page.locator("#search-results .verse-result:last-child .verse-card");
   assert.equal(
     await lastSearchCard.getAttribute("data-selection-id"),
