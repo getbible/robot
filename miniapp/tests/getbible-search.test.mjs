@@ -375,6 +375,27 @@ test("has_more and offset let the caller advance by the verses received", async 
   assert.equal(second.sha, first.sha);
 });
 
+test("a restarted search revalidates its first page with the server instead of the browser cache", async () => {
+  const { api, requests } = harness([() => jsonResponse(envelope())]);
+
+  await api.search("kjv", "God", {}, { offset: 0, limit: 25 });
+  await api.search("kjv", "God", {}, { offset: 0, limit: 25, cache: "no-cache" });
+  await assert.rejects(
+    api.search("kjv", "God", {}, { offset: 0, limit: 25, cache: "reload" }),
+    { name: "TypeError", message: "Search cache mode is invalid." },
+  );
+  await assert.rejects(
+    api.search("kjv", "God", {}, { offset: 0, limit: 25, cache: "no-store" }),
+    { name: "TypeError" },
+  );
+
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].options.cache, "default");
+  assert.equal(requests[1].options.cache, "no-cache");
+  assert.equal(requests[1].url, requests[0].url);
+  assert.equal(requests[1].options.credentials, "omit");
+});
+
 test("problem documents map to codes the page can act on", async () => {
   const cases = [
     {

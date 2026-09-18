@@ -256,7 +256,11 @@ export class GetBibleApi {
    * meaningful for one query under one set of criteria, and the browser's own
    * HTTP cache already honours the API's Cache-Control for repeats.
    */
-  async search(translation, query, filters, { offset = 0, limit = 25 } = {}) {
+  async search(translation, query, filters, {
+    offset = 0,
+    limit = 25,
+    cache = "default",
+  } = {}) {
     const code = normalizeTranslationCode(translation);
     const text = normalizeSearchQuery(query);
     const criteria = normalizeSearchCriteria(filters);
@@ -283,6 +287,7 @@ export class GetBibleApi {
     }
     const payload = await this.#transport.search(code, parameters, {
       maximumBytes: SEARCH_RESPONSE_MAX_BYTES,
+      cache,
     });
     return normalizeSearchPayload(payload, {
       translation: code,
