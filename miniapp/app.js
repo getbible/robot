@@ -24,9 +24,19 @@ import {
   resolveBibleEntrypoint,
   routeName,
   uniqueBookLabels,
-  uniqueVerses,
 } from "./lib/model.js";
 import { LatestRequestCoordinator } from "./lib/request-coordinator.js";
+import {
+  SEARCH_PAGE_SIZE,
+  SEARCH_PREFETCH_VIEWPORTS,
+  SEARCH_REACH,
+  SEARCH_RESTART_LIMIT,
+  mergeSearchPage,
+  prefetchRootMargin,
+  retryWaitSeconds,
+  searchReach,
+  withinPrefetchReach,
+} from "./lib/search-pager.js";
 import { ReadingHistoryStore } from "./lib/reading-history-store.js";
 import {
   SCRIPTURE_EXCERPT_MAXIMUM_CONCURRENCY,
@@ -143,10 +153,11 @@ let lastReadRevision = 0;
 let historyExcerptController = null;
 let bookmarkExcerptController = null;
 const searchPageRequests = new LatestRequestCoordinator();
-// The Search API allows up to 100 verses per page and 10 000 skipped matches.
-// A phone renders a quarter page at a time; the offset ceiling is the API's.
-const SEARCH_PAGE_SIZE = 25;
-const SEARCH_MAX_OFFSET = 10_000;
+// Pages of results are requested while the reader scrolls. The page size,
+// the API's offset ceiling and the prefetch distance live with the paging
+// arithmetic in lib/search-pager.js.
+let searchMoreObserver = null;
+let searchRetryTimer = null;
 const MAX_BOOK_CACHE_ENTRIES = 8;
 const MAX_CHAPTER_CACHE_ENTRIES = 24;
 const EXCERPT_HYDRATION_BATCH_SIZE =
@@ -267,7 +278,21 @@ function idleSearchState() {
     total: 0,
     returned: 0,
     offset: 0,
-    hasMore: false,
+    // Where the list stands after the last page (lib/search-pager.js):
+    // "more" with the offset the next page starts at, "complete", "ceiling"
+    // or "stalled". Scrolling requests the next page while `reach` is "more"
+    // and `autoLoad` holds; a failed or stalled page pauses automatic loading
+    // until the reader asks for more, so a failing API is never stormed.
+    reach: null,
+    nextOffset: null,
+    autoLoad: true,
+    moreError: null,
+    retryAt: 0,
+    // The criteria every page of this result set is requested with, fixed
+    // when the search started, and how many times the search restarted by
+    // itself because the translation's content changed between pages.
+    criteria: null,
+    restarts: 0,
     sha: null,
     results: [],
     loadingMore: false,
@@ -299,6 +324,7 @@ const elements = mapElements({
   translationSelect: "translation-select",
   translationDetails: "translation-details",
   closeTranslation: "close-translation",
+  searchView: "search-view",
   searchForm: "search-form",
   searchQuery: "search-query",
   openFilters: "open-filters",
@@ -310,7 +336,7 @@ const elements = mapElements({
   clearSearch: "clear-search",
   searchState: "search-state",
   searchResults: "search-results",
-  loadMore: "load-more",
+  searchMore: "search-more",
   bibleView: "bible-view",
   bibleHeading: "bible-heading",
   biblePrevious: "bible-previous",
@@ -2264,7 +2290,7 @@ function attachListeners() {
     void runSearch(elements.searchQuery.value);
   });
   elements.clearSearch.addEventListener("click", clearSearch);
-  elements.loadMore.addEventListener("click", () => void loadNextSearchPage());
+  installSearchAutoLoad();
   elements.searchSort.addEventListener("change", () => {
     state.filters = normalizeFilters(
       { ...state.filters, sort: elements.searchSort.value },
@@ -3357,11 +3383,18 @@ function resetBibleForTranslationChange(loading) {
 }
 
 function invalidateSearchForTranslationChange() {
+  clearSearchRetryTimer();
   state.search.kind = null;
   state.search.total = 0;
   state.search.returned = 0;
   state.search.offset = 0;
-  state.search.hasMore = false;
+  state.search.reach = null;
+  state.search.nextOffset = null;
+  state.search.autoLoad = true;
+  state.search.moreError = null;
+  state.search.retryAt = 0;
+  state.search.criteria = null;
+  state.search.restarts = 0;
   state.search.sha = null;
   state.search.results = [];
   state.search.loadingMore = false;
@@ -3387,7 +3420,15 @@ function renderLocalizedState() {
   updateContributorPresentation();
 }
 
-async function runSearch(rawQuery) {
+/**
+ * Start a search for `rawQuery` from its first page. A `restart` is the same
+ * search begun again because the translation's content changed under it:
+ * the reader's input is left alone, the first page is revalidated with the
+ * server rather than read from the browser's cache (which may still hold
+ * the page cut from the old corpus), and the list scrolls back to its top so
+ * the fresh result set is read from the beginning.
+ */
+async function runSearch(rawQuery, { restart = false } = {}) {
   const query = rawQuery.trim();
   if (!query) {
     elements.searchQuery.focus();
@@ -3396,12 +3437,20 @@ async function runSearch(rawQuery) {
   }
   const requestId = ++searchRequestId;
   searchPageRequests.invalidate();
+  clearSearchRetryTimer();
   const translation = state.translation;
-  const filters = normalizeFilters(
+  // The criteria are fixed for the life of the result set: every later page
+  // is requested with exactly these, whatever the filter form or the reader
+  // does to `state.filters` in the meantime.
+  const criteria = normalizeFilters(
     { ...state.filters, translation },
     translation,
   );
-  bridge.dismissKeyboard();
+  const restarts = restart ? state.search.restarts + 1 : 0;
+  if (!restart) {
+    bridge.dismissKeyboard();
+    elements.searchQuery.value = query;
+  }
   state.search = {
     ...idleSearchState(),
     query,
@@ -3409,14 +3458,19 @@ async function runSearch(rawQuery) {
     translation,
     // Highlighting reads the verse the way the search read it, so later
     // pages need the same diacritics policy the query ran under.
-    diacritics: filters.diacritics,
+    diacritics: criteria.diacritics,
+    criteria,
+    restarts,
   };
-  elements.searchQuery.value = query;
   renderSearch();
+  if (restart) {
+    elements.searchView.scrollTop = 0;
+  }
   try {
-    const result = await api.search(translation, query, filters, {
+    const result = await api.search(translation, query, criteria, {
       offset: 0,
       limit: SEARCH_PAGE_SIZE,
+      cache: restart ? "no-cache" : "default",
     });
     if (
       requestId !== searchRequestId ||
@@ -3424,6 +3478,7 @@ async function runSearch(rawQuery) {
     ) {
       return;
     }
+    const reach = searchReach(result, 0);
     state.search = {
       ...state.search,
       status: result.items.length === 0 ? "empty" : "ready",
@@ -3432,7 +3487,11 @@ async function runSearch(rawQuery) {
       total: result.total,
       returned: result.returned,
       offset: result.offset ?? 0,
-      hasMore: canLoadMoreSearchResults(result, result.items.length),
+      reach: reach.status,
+      nextOffset: reach.nextOffset,
+      autoLoad: true,
+      moreError: null,
+      retryAt: 0,
       sha: result.sha,
       results: result.items,
     };
@@ -3443,119 +3502,374 @@ async function runSearch(rawQuery) {
     if (requestId !== searchRequestId) {
       return;
     }
+    const failure = safeError(error);
     state.search.status = "error";
-    state.search.error = safeError(error);
+    state.search.error = failure;
+    // The wait the API asks for is honoured here as it is for a later page.
+    scheduleSearchRetry(state.search, retryWaitSeconds(failure));
   }
   renderSearch();
 }
 
 /**
- * Whether another page can follow this one. Only a full-text answer pages,
- * an empty page cannot advance the offset, and the API stops at 10 000.
+ * Automatic loading of further pages. The foot of the result list is watched
+ * by an IntersectionObserver rooted at the scrolling search view, so the next
+ * page is requested as soon as the foot comes within reach of the visible
+ * area — by touch, wheel, keyboard or trackpad alike — and again straight
+ * away when a page did not fill the screen. A browser without the observer
+ * measures the foot on scroll instead.
  */
-function canLoadMoreSearchResults(result, loaded) {
-  return (
-    result.kind === "search" &&
-    result.has_more === true &&
-    result.items.length > 0 &&
-    loaded <= SEARCH_MAX_OFFSET
-  );
+function installSearchAutoLoad() {
+  if (typeof IntersectionObserver === "function") {
+    searchMoreObserver = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        void loadNextSearchPage("scroll");
+      }
+    }, {
+      root: elements.searchView,
+      rootMargin: prefetchRootMargin(SEARCH_PREFETCH_VIEWPORTS),
+      threshold: 0,
+    });
+    return;
+  }
+  let measurePending = false;
+  elements.searchView.addEventListener("scroll", () => {
+    if (measurePending) {
+      return;
+    }
+    measurePending = true;
+    window.requestAnimationFrame(() => {
+      measurePending = false;
+      if (searchFootWithinReach()) {
+        void loadNextSearchPage("scroll");
+      }
+    });
+  }, { passive: true });
 }
 
-async function loadNextSearchPage() {
+/**
+ * Ask afresh whether the foot of the list is within reach. An observer only
+ * reports changes, so after a page is appended the foot is observed again;
+ * without an observer it is measured once the new page has laid out.
+ */
+function armSearchAutoLoad() {
+  if (searchMoreObserver !== null) {
+    searchMoreObserver.unobserve(elements.searchMore);
+    searchMoreObserver.observe(elements.searchMore);
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    if (searchFootWithinReach()) {
+      void loadNextSearchPage("scroll");
+    }
+  });
+}
+
+function searchFootWithinReach() {
+  if (elements.searchMore.hidden || elements.searchView.hidden) {
+    return false;
+  }
+  const view = elements.searchView.getBoundingClientRect();
+  const foot = elements.searchMore.getBoundingClientRect();
+  return withinPrefetchReach({
+    footTop: foot.top,
+    viewBottom: view.bottom,
+    viewHeight: view.height,
+  });
+}
+
+function clearSearchRetryTimer() {
+  if (searchRetryTimer !== null) {
+    window.clearTimeout(searchRetryTimer);
+    searchRetryTimer = null;
+  }
+}
+
+/**
+ * Hold `search`'s retry control for the wait the API announced, then offer
+ * it — at the foot of the list, or in place of the list when the first page
+ * is what failed.
+ */
+function scheduleSearchRetry(search, seconds) {
+  clearSearchRetryTimer();
+  search.retryAt = seconds > 0 ? Date.now() + seconds * 1_000 : 0;
+  if (seconds <= 0) {
+    return;
+  }
+  searchRetryTimer = window.setTimeout(() => {
+    searchRetryTimer = null;
+    if (state.search !== search) {
+      return;
+    }
+    search.retryAt = 0;
+    if (search.status === "error") {
+      renderSearch();
+    } else {
+      renderSearchMore();
+    }
+  }, seconds * 1_000);
+}
+
+/** Whole seconds left of the wait before `search` may be retried. */
+function remainingRetryWait(search) {
+  return Math.max(0, Math.ceil((search.retryAt - Date.now()) / 1_000));
+}
+
+/**
+ * Request the next page of the current search. `trigger` is "scroll" when
+ * the foot of the list came within reach and "manual" when the reader asked
+ * for more after a failure or a stall. Only a manual request resumes
+ * automatic loading, so scrolling never turns a failing API into a storm of
+ * requests, and a page is requested only at the offset the previous page
+ * ended at, so nothing is skipped and nothing is asked for twice.
+ */
+async function loadNextSearchPage(trigger = "manual") {
+  const search = state.search;
   if (
-    state.search.loadingMore ||
-    !state.search.hasMore ||
-    state.search.kind !== "search" ||
-    state.search.status !== "ready"
+    search.loadingMore ||
+    search.status !== "ready" ||
+    search.kind !== "search"
   ) {
     return;
   }
-  const query = state.search.query;
-  const translation = state.search.translation;
-  const sha = state.search.sha;
-  // The next page starts where the verses on screen end, so a page that was
-  // deduplicated on arrival is never counted as ground already covered.
-  const offset = state.search.results.length;
-  if (offset > SEARCH_MAX_OFFSET) {
-    state.search.hasMore = false;
-    renderSearch();
+  const manual = trigger === "manual";
+  if (manual) {
+    if (Date.now() < search.retryAt) {
+      return;
+    }
+    search.autoLoad = true;
+    search.moreError = null;
+    search.restarts = 0;
+  } else if (!search.autoLoad) {
     return;
   }
-  const filters = normalizeFilters(
-    { ...state.filters, translation, diacritics: state.search.diacritics },
+  const canAdvance =
+    search.reach === SEARCH_REACH.MORE ||
+    (manual && search.reach === SEARCH_REACH.STALLED);
+  if (!canAdvance || search.nextOffset === null) {
+    return;
+  }
+  const offset = search.nextOffset;
+  const query = search.query;
+  const translation = search.translation;
+  const sha = search.sha;
+  const criteria = search.criteria ?? normalizeFilters(
+    { ...state.filters, translation, diacritics: search.diacritics },
     translation,
   );
   const request = searchPageRequests.begin({ query, translation, offset });
-  state.search.loadingMore = true;
-  elements.loadMore.disabled = true;
-  elements.loadMore.textContent = i18n.t("common.loading");
+  clearSearchRetryTimer();
+  search.loadingMore = true;
+  renderSearchMore();
   try {
-    const result = await api.search(translation, query, filters, {
+    const result = await api.search(translation, query, criteria, {
       offset,
       limit: SEARCH_PAGE_SIZE,
     });
     if (
       !searchPageRequests.isCurrent(request) ||
-      state.search.query !== query ||
+      state.search !== search ||
       state.translation !== translation
     ) {
       return;
     }
     if (
       result.kind !== "search" ||
-      (sha !== null && result.sha !== sha)
+      (sha !== null && result.sha !== null && result.sha !== sha)
     ) {
       // The translation's content changed underneath the result set, so its
       // pages no longer belong together. Start again from the first page
-      // rather than stitching two editions into one list.
+      // rather than stitching two editions into one list — a bounded number
+      // of times; a corpus that keeps changing is not chased by scrolling.
       toast(i18n.t("search.refreshed"));
       announce(i18n.t("search.refreshed"));
-      void runSearch(query);
+      if (search.restarts >= SEARCH_RESTART_LIMIT) {
+        search.reach = SEARCH_REACH.STALLED;
+        search.nextOffset = offset;
+        search.autoLoad = false;
+        return;
+      }
+      void runSearch(query, { restart: true });
       return;
     }
-    state.search.total = result.total;
-    state.search.returned = result.returned;
-    state.search.offset = result.offset ?? offset;
-    state.search.results = uniqueVerses(state.search.results, result.items);
-    state.search.hasMore = canLoadMoreSearchResults(
-      result,
-      state.search.results.length,
-    );
-    announce(i18n.plural("search.more_loaded", result.items.length));
+    if (sha === null && result.sha !== null) {
+      // The first page named no corpus; the first page that does names the
+      // one every later page has to come from.
+      search.sha = result.sha;
+    }
+    const merged = mergeSearchPage(search.results, result.items);
+    const reach = searchReach(result, offset);
+    search.total = result.total;
+    search.returned = result.returned;
+    search.offset = result.offset ?? offset;
+    search.results = merged.results;
+    search.reach = reach.status;
+    search.nextOffset = reach.nextOffset;
+    search.moreError = null;
+    if (reach.status === SEARCH_REACH.STALLED) {
+      // Nothing arrived to advance by; scrolling must not ask again by itself.
+      search.autoLoad = false;
+    }
+    appendSearchResults(merged.added);
+    announceSearchReach(merged.added.length);
   } catch (error) {
     if (!searchPageRequests.isCurrent(request)) {
       return;
     }
-    toast(searchErrorMessage(safeError(error)));
+    // Scrolling never retries a failure by itself: the foot of the list says
+    // what happened and offers a retry, held back for any announced wait.
+    const failure = safeError(error);
+    search.moreError = failure;
+    search.autoLoad = false;
+    scheduleSearchRetry(search, retryWaitSeconds(failure));
+    announce(`${i18n.t("search.more_failed")} ${searchErrorMessage(
+      failure,
+      remainingRetryWait(search),
+    )}`);
   } finally {
     searchPageRequests.complete(request, () => {
-      if (
-        state.search.query === query &&
-        state.translation === translation
-      ) {
-        state.search.loadingMore = false;
-        renderSearch();
+      // The flag belongs to the search that raised it and comes down whether
+      // or not that search is still the one on screen, so it never sticks.
+      search.loadingMore = false;
+      if (state.search === search) {
+        renderSearchMore();
       }
     });
   }
+}
+
+function appendSearchResults(items) {
+  if (items.length === 0) {
+    return;
+  }
+  const selected = selectedIds();
+  const fragment = document.createDocumentFragment();
+  for (const verse of items) {
+    fragment.append(createVerseCard(verse, selected));
+  }
+  elements.searchResults.append(fragment);
+}
+
+function announceSearchReach(added) {
+  const search = state.search;
+  if (search.reach === SEARCH_REACH.COMPLETE) {
+    announce(i18n.plural("search.all_loaded", search.results.length));
+  } else if (search.reach === SEARCH_REACH.CEILING) {
+    announce(i18n.t("search.ceiling", {
+      loaded: search.results.length,
+      total: search.total,
+    }));
+  } else {
+    announce(i18n.plural("search.more_loaded", added));
+  }
+}
+
+/**
+ * The foot of the result list: a spinner while a page is on its way, the
+ * count loaded so far while more will follow, the reason and a retry control
+ * after a failure, and a closing line once every verse is on screen or the
+ * API's ceiling is reached. It is also what the auto-loader watches.
+ */
+function renderSearchMore() {
+  const search = state.search;
+  const foot = elements.searchMore;
+  if (search.status !== "ready" || search.kind !== "search") {
+    foot.hidden = true;
+    foot.replaceChildren();
+    delete foot.dataset.reach;
+    return;
+  }
+  const loaded = search.results.length;
+  const children = [];
+  let reach = search.reach;
+  if (search.loadingMore) {
+    reach = "loading";
+    const spinner = document.createElement("div");
+    spinner.className = "spinner search-more__spinner";
+    spinner.setAttribute("aria-hidden", "true");
+    children.push(spinner, searchMoreLine(i18n.t("search.loading_more")));
+  } else if (search.moreError) {
+    reach = "failed";
+    const wait = remainingRetryWait(search);
+    children.push(
+      searchMoreLine(i18n.t("search.more_failed"), "search-more__title"),
+      searchMoreLine(searchErrorMessage(search.moreError, wait)),
+      // A refusal that would only repeat is not offered a retry; the reader
+      // can change what is asked for instead.
+      search.moreError.retryable
+        ? searchMoreButton(
+          i18n.t("common.try_again"),
+          () => void loadNextSearchPage("manual"),
+          { disabled: wait > 0 },
+        )
+        : searchMoreButton(
+          i18n.t("search.change_filters"),
+          () => void openFilters(),
+          { id: "search-more-filters" },
+        ),
+    );
+  } else if (search.reach === SEARCH_REACH.COMPLETE) {
+    children.push(searchMoreLine(i18n.plural("search.all_loaded", loaded)));
+  } else if (search.reach === SEARCH_REACH.CEILING) {
+    children.push(searchMoreLine(i18n.t("search.ceiling", {
+      loaded,
+      total: search.total,
+    })));
+  } else {
+    // More will follow. Scrolling asks for it, unless a stall or a failure
+    // handed the decision back to the reader.
+    children.push(searchMoreLine(i18n.t("search.progress", {
+      loaded,
+      total: search.total,
+    })));
+    if (!search.autoLoad) {
+      children.push(searchMoreButton(
+        i18n.t("search.load_more"),
+        () => void loadNextSearchPage("manual"),
+      ));
+    }
+  }
+  foot.dataset.reach = reach;
+  foot.replaceChildren(...children);
+  foot.hidden = false;
+  armSearchAutoLoad();
+}
+
+function searchMoreLine(text, className = "search-more__line") {
+  const line = document.createElement("p");
+  line.className = className;
+  line.textContent = text;
+  return line;
+}
+
+function searchMoreButton(label, onClick, { id = "load-more", disabled = false } = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = id;
+  button.className = "button button--secondary search-more__button";
+  button.textContent = label;
+  button.disabled = disabled;
+  button.addEventListener("click", onClick);
+  return button;
 }
 
 /**
  * The reader-facing text for a failed search: the localized reason, plus
  * the wait the Search API asked for when it named one.
  */
-function searchErrorMessage(error) {
-  const seconds = Math.ceil(Number(error.retryAfter));
-  if (!Number.isFinite(seconds) || seconds <= 0) {
+function searchErrorMessage(error, waitSeconds = 0) {
+  if (!(waitSeconds > 0)) {
     return error.message;
   }
-  return `${error.message} ${i18n.t("search.retry_after_hint", { seconds })}`;
+  return `${error.message} ${i18n.t("search.retry_after_hint", {
+    seconds: waitSeconds,
+  })}`;
 }
 
 function clearSearch() {
   searchRequestId += 1;
   searchPageRequests.invalidate();
+  clearSearchRetryTimer();
   state.search = idleSearchState();
   elements.searchQuery.value = "";
   renderSearch();
@@ -3571,7 +3885,8 @@ function renderSearch() {
   elements.searchSummary.hidden = !["ready", "empty"].includes(search.status);
   elements.searchResults.replaceChildren();
   elements.searchState.hidden = true;
-  elements.loadMore.hidden = true;
+  elements.searchMore.hidden = true;
+  elements.searchMore.replaceChildren();
 
   if (search.status === "idle") {
     return;
@@ -3581,14 +3896,16 @@ function renderSearch() {
     return;
   }
   if (search.status === "error") {
+    const wait = remainingRetryWait(search);
     renderState(elements.searchState, {
       icon: "!",
       title: i18n.t("search.failed"),
-      message: searchErrorMessage(search.error),
+      message: searchErrorMessage(search.error, wait),
       action: search.error.retryable ? i18n.t("common.try_again") : null,
       onAction: search.error.retryable
         ? () => void runSearch(search.query)
         : null,
+      disabled: wait > 0,
     });
     return;
   }
@@ -3612,15 +3929,13 @@ function renderSearch() {
   }
 
   const selected = selectedIds();
+  const fragment = document.createDocumentFragment();
   for (const verse of search.results) {
-    elements.searchResults.append(createVerseCard(verse, selected));
+    fragment.append(createVerseCard(verse, selected));
   }
+  elements.searchResults.append(fragment);
   // A reference answer is complete as delivered; only full-text pages.
-  elements.loadMore.hidden = search.kind !== "search" || !search.hasMore;
-  elements.loadMore.disabled = search.loadingMore;
-  elements.loadMore.textContent = search.loadingMore
-    ? i18n.t("common.loading")
-    : i18n.t("search.load_more");
+  renderSearchMore();
 }
 
 async function openFilters() {
@@ -7396,7 +7711,14 @@ async function postBasket() {
   });
 }
 
-function renderState(container, { icon, title, message, action, onAction }) {
+function renderState(container, {
+  icon,
+  title,
+  message,
+  action,
+  onAction,
+  disabled = false,
+}) {
   container.hidden = false;
   const iconElement = document.createElement("div");
   iconElement.className = "state-panel__icon";
@@ -7413,6 +7735,7 @@ function renderState(container, { icon, title, message, action, onAction }) {
     button.type = "button";
     button.className = "button button--secondary";
     button.textContent = action;
+    button.disabled = disabled;
     button.addEventListener("click", onAction, { once: true });
     children.push(button);
   }
@@ -7594,12 +7917,14 @@ function safeError(error) {
   if (error instanceof ApiError) {
     return {
       message: localizedErrorMessage(error),
+      code: typeof error.code === "string" ? error.code : null,
       retryable: error.retryable,
       retryAfter: error.retryAfter ?? null,
     };
   }
   return {
     message: i18n.t("common.request_failed"),
+    code: null,
     retryable: true,
     retryAfter: null,
   };
