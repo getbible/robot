@@ -213,6 +213,7 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
 - The Mini App searches `search.getbible.net/v2` from the browser; Robot serves no search endpoint and holds no search state.
 - Search failure does not affect reader navigation, because the search origin is separate from the Main and Query origins and from Robot.
 - Stale responses cannot overwrite current query/filter state; a changed corpus `sha` restarts pagination from the first page.
+- Scroll-driven paging requests one page at a time at `offset + returned`, never re-requests a failed page on its own, and reports the API's offset ceiling instead of stopping silently.
 - Search output is bounded and normalized before registration in the browser selection store, with the same direct selection identity as reader verses.
 - The requested filters reach the Search API unaltered in every writing system.
 - The robot's Telegram-native client has its own executor, semaphore, per-request deadline, response bound, and circuit, separate from reference delivery.

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Search results now load themselves while the reader scrolls. The Mini App
+  requests the next page of 50 matches as the foot of the list comes within
+  reach — by touch, wheel, keyboard or trackpad, and measured on scroll where
+  the browser has no IntersectionObserver — appends it in place, keeps going
+  until the foot says **All results loaded**, and reports the Search API's
+  offset ceiling (10 000, so 10 050 matches at most) instead of stopping
+  silently. A failed page pauses automatic loading, honours the announced
+  `Retry-After`, and resumes only from an explicit **Try again**. The exact
+  total shows from the first page; the **Load more** button is gone.
 - Publish accepted bookmarks with one direct GitHub API commit to the builder's
   default branch; update topics, links and optional new-topic translations
   together without a local checkout, contribution branch or pull request.
