@@ -403,6 +403,9 @@ test("later pages keep the criteria the search started with, even after a visit 
   await page.waitForFunction(() => (
     document.querySelector("#app")?.dataset.activeRoute === "search"
   ));
+  // The view restores its remembered scroll position a frame after it is
+  // shown again; a reader's scroll comes after that, so this one does too.
+  await settle(page);
   assert.equal(await cardCount(page), PAGE_SIZE);
   await scrollToFoot(page);
   await waitForCards(page, PAGE_SIZE * 2);
