@@ -14,6 +14,7 @@ REQUIRED_DOCUMENTS = {
     ROOT / "docs" / "INSTALLATION.md",
     ROOT / "docs" / "DOCKER.md",
     ROOT / "docs" / "CONFIGURATION.md",
+    ROOT / "docs" / "CONTRIBUTION_PUBLICATION.md",
     ROOT / "docs" / "TESTING.md",
     ROOT / "docs" / "UPGRADING.md",
     ROOT / "docs" / "UNINSTALL.md",
@@ -77,10 +78,9 @@ EXPECTED_TEMPLATE_KEYS = {
     "CONTRIBUTION_EVENT_LIMIT",
     "CONTRIBUTION_RATE_CAPACITY",
     "CONTRIBUTION_RATE_REFILL_PER_SECOND",
-    "CONTRIBUTION_GIT_CHECKOUT",
-    "CONTRIBUTION_GIT_USER",
     "CONTRIBUTION_GITHUB_TOKEN",
-    "CONTRIBUTION_BUILDER_PYTHON",
+    "CONTRIBUTION_OPENAI_API_KEY",
+    "CONTRIBUTION_TRANSLATION_MODEL",
     "GETBIBLE_API_BASE_URL",
     "GETBIBLE_QUERY_BASE_URL",
     "GETBIBLE_SEARCH_BASE_URL",
@@ -188,8 +188,9 @@ class DocumentationContractTestCase(unittest.TestCase):
         for required in (
             "/contributor",
             "CONTRIBUTION_STORE_FILE",
-            "CONTRIBUTION_GIT_CHECKOUT",
-            "CONTRIBUTION_GIT_USER",
+            "CONTRIBUTION_GITHUB_TOKEN",
+            "CONTRIBUTION_OPENAI_API_KEY",
+            "CONTRIBUTION_TRANSLATION_MODEL",
             "contributions.sqlite3",
             "canonical English",
             "privacy-safe",
@@ -197,7 +198,8 @@ class DocumentationContractTestCase(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, joined)
         self.assertIn("never enter the live", operations)
-        self.assertIn("only for native deployments", docker)
+        self.assertIn("direct API publication", docker)
+        self.assertIn("contributions production commit", docker)
 
     def test_search_style_contribution_sync_contract_is_documented(self) -> None:
         contract = json.loads(
@@ -314,6 +316,7 @@ class DocumentationContractTestCase(unittest.TestCase):
             ROOT / "SECURITY.md",
             ROOT / "docs" / "INSTALLATION.md",
             ROOT / "docs" / "CONFIGURATION.md",
+    ROOT / "docs" / "CONTRIBUTION_PUBLICATION.md",
             ROOT / "docs" / "TESTING.md",
             ROOT / "docs" / "UPGRADING.md",
             ROOT / "docs" / "UNINSTALL.md",

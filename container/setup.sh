@@ -28,7 +28,7 @@ Usage:
   setup.sh restart INSTANCE
   setup.sh reload
   setup.sh contributions [INSTANCE]
-  setup.sh contributions INSTANCE status|export
+  setup.sh contributions INSTANCE status|export|commit
   setup.sh contributions INSTANCE applications|topics|verses|accept
   setup.sh shell
 
@@ -36,12 +36,11 @@ Configuration is supplied by the container environment in single mode or by
 /config/instances/*.env in multi mode. Configuration errors are written to
 standard output/error and are visible through docker logs.
 
-Contribution review and acceptance into the submission ledger are supported
-inside the container. Topic, verse, and acceptance review compare against the
-shared catalogue fetched from bookmarks.getbible.net. The container can also
-write a privacy-safe JSON export, but automated pull-request publication to
-getbible/v1_bookmark_builder from that export is not supported in this
-release; use a native deployment for that.
+Contribution acceptance is preserved in the private instance database. With a
+CONTRIBUTION_GITHUB_TOKEN, acceptance commits directly to the bookmark builder.
+Without it, work remains queued for `contributions INSTANCE commit`. Optional
+CONTRIBUTION_OPENAI_API_KEY translates new topics; without it, publish English.
+No Git executable, working copy, contribution branch or pull request is needed.
 EOF
 }
 
@@ -222,8 +221,26 @@ export_contributions() {
         return 1
     fi
     printf 'Privacy-safe repository export: %s\n' "$destination"
-    printf 'Automated pull-request publication to getbible/v1_bookmark_builder from a container export is not supported in this release.\n'
-    printf 'Retain the JSON only for a separately reviewed manual import with the builder (python3 src/builder.py import-bundle).\n'
+    printf 'The export is optional; contributions INSTANCE commit publishes the accepted ledger directly through the GitHub API.\n'
+
+}
+
+run_contribution_publication() {
+    local command=$1
+    local -a config_arguments=()
+    if [[ "${ROBOT_MODE:-multi}" != "single" ]]; then
+        config_arguments+=(--env-file "$CONTRIBUTION_CONFIG_ROOT/$CONTRIBUTION_INSTANCE.env")
+    fi
+    (
+        cd "$CONTRIBUTION_APP_ROOT"
+        "$CONTRIBUTION_PYTHON" -m scripts.contribution_publish "$command" \
+            --store "$CONTRIBUTION_STORE" "${config_arguments[@]}"
+    )
+}
+
+accept_and_commit_contributions() {
+    run_catalogue_review accept || return 1
+    run_contribution_publication commit
 }
 
 contribution_menu() {
@@ -237,13 +254,13 @@ Container contribution review
   2) Resolve and merge contributor topics
   3) Review verse additions and removals
   4) Show review status
-  5) Accept approved changes into the submission ledger
+  5) Accept approved changes and commit to the builder
   6) Write a privacy-safe repository export
+  7) Commit previously accepted contributions / retry
   0) Return
 
 Topic, verse, and acceptance review fetch the shared catalogue from bookmarks.getbible.net first.
-Automated pull-request publication to getbible/v1_bookmark_builder is unavailable for container instances in this release.
-Use a native deployment for the guarded one-command pull-request publication workflow.
+Publication uses optional GitHub / OpenAI tokens from the instance configuration.
 EOF
         read -r -p "Selection: " selection
         case "$selection" in
@@ -253,9 +270,13 @@ EOF
                 run_catalogue_review verses \
                     --translation "$CONTRIBUTION_TRANSLATION" || true
                 ;;
-            4) run_contribution_review status || true ;;
-            5) run_catalogue_review accept || true ;;
+            4)
+                run_contribution_review status || true
+                run_contribution_publication status || true
+                ;;
+            5) accept_and_commit_contributions || true ;;
             6) export_contributions || true ;;
+            7) run_contribution_publication commit || true ;;
             0) return ;;
             *) printf 'WARNING: Unknown selection.\n' >&2 ;;
         esac
@@ -272,15 +293,23 @@ contributions_command() {
     load_contribution_context "$instance" || return 1
     case "$action" in
         "") contribution_menu ;;
-        status) run_contribution_review status ;;
+        status)
+            run_contribution_review status
+            run_contribution_publication status
+            ;;
+        commit) run_contribution_publication commit ;;
         export) export_contributions ;;
         applications)
             require_interactive || return 1
             run_contribution_review applications
             ;;
-        topics|accept)
+        topics)
             require_interactive || return 1
-            run_catalogue_review "$action"
+            run_catalogue_review topics
+            ;;
+        accept)
+            require_interactive || return 1
+            accept_and_commit_contributions
             ;;
         verses)
             require_interactive || return 1

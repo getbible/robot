@@ -102,8 +102,7 @@ class SetupScriptTestCase(unittest.TestCase):
                 [
                     "bash",
                     "-c",
-                    'source "$1"; ensure_env_value "$2" "$3" '
-                    'CONTRIBUTION_STORE_FILE "$4"',
+                    'source "$1"; ensure_env_value "$2" "$3" CONTRIBUTION_STORE_FILE "$4"',
                     "setup-contribution-migration-test",
                     str(SETUP),
                     sys.executable,
@@ -123,149 +122,70 @@ class SetupScriptTestCase(unittest.TestCase):
     def test_contribution_review_is_privilege_separated_and_catalogue_aware(self) -> None:
         script = SETUP.read_text(encoding="utf-8")
         for fragment in (
-            "29) Review and publish trusted contributions",
             'runuser --user "$ACTIVE_USER"',
-            'runuser --user "$git_user"',
             '"CONTRIBUTION_STORE_FILE"',
-            '"CONTRIBUTION_GIT_CHECKOUT"',
-            '"CONTRIBUTION_GIT_USER"',
             '"CONTRIBUTION_GITHUB_TOKEN"',
-            '"CONTRIBUTION_BUILDER_PYTHON"',
-            'fetch-catalog \\\n        --output "$CONTRIBUTION_CATALOG_FILE"',
+            '"CONTRIBUTION_OPENAI_API_KEY"',
+            '"CONTRIBUTION_TRANSLATION_MODEL"',
             '--catalog-file "$CONTRIBUTION_CATALOG_FILE"',
-            '--builder-python "$builder_python"',
-            '--instance-name "$ACTIVE_INSTANCE"',
-            '/bin/bash -c "$CONTRIBUTION_PUBLISHER_ENTRY"',
-            '<<<"$github_token"',
-            '--pull-request "$pull_request"',
-            "begin-repository-publication",
-            "finish-repository-publication",
-            '--lease-token "$lease_token"',
-            "flock --nonblock",
-            "--lease-seconds 3600",
-            "getbible-robot-contribution-${checkout_lock_key}.lock",
-            '--checksum "$checksum"',
-            '--expected-bundle-checksum "$bundle_checksum"',
-            "copy_verified_contribution_bundle",
-            'mktemp --tmpdir="$export_dir"',
-            "--state failed",
-            "--state pushed",
+            '--env-file "$CONTRIBUTION_ENV_FILE" --run-as "$ACTIVE_USER"',
+            "scripts/contribution_publish.py",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, script)
-
-        verified_copy = script.index("copy_verified_contribution_bundle")
-        helper_install = script.index(
-            'install -o "$git_user" -g "$publisher_group" -m 0700',
-            verified_copy,
+        for retired in (
+            "CONTRIBUTION_GIT_CHECKOUT",
+            "CONTRIBUTION_GIT_USER",
+            "CONTRIBUTION_BUILDER_PYTHON",
+            "publish-repository",
+        ):
+            self.assertNotIn(retired, script)
+        helper = (ROOT / "scripts" / "contribution_publish.py").read_text(encoding="utf-8")
+        self.assertIn('"--credentials-stdin"', helper)
+        self.assertIn("input=json.dumps", helper)
+        self.assertIn('"PYTHONDONTWRITEBYTECODE": "1"', helper)
+        # Both an unchanged-source refresh and a full upgrade offer optional keys.
+        self.assertEqual(
+            script.count('prompt_contribution_tokens "$source_dir" "$python_bin" "$env_file"'), 2
         )
-        parent_handoff = script.index(
-            'chown "$git_user:$publisher_group" "$CONTRIBUTION_TEMP_DIR"',
-            helper_install,
+        version = subprocess.run(
+            ["bash", str(SETUP), "version"], check=True, capture_output=True, text=True
         )
-        publisher_run = script.index('runuser --user "$git_user"', parent_handoff)
-        self.assertLess(verified_copy, helper_install)
-        self.assertLess(helper_install, parent_handoff)
-        self.assertLess(parent_handoff, publisher_run)
-
-        version_result = subprocess.run(
-            ["bash", str(SETUP), "version"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        self.assertIn("getbible-robot setup manager", version_result.stdout)
+        self.assertIn("getbible-robot setup manager", version.stdout)
 
     def test_contribution_menu_submits_to_the_builder_repository(self) -> None:
         script = SETUP.read_text(encoding="utf-8")
-        # The robot no longer ships or generates a catalogue copy; acceptance
-        # ends in a pull request on getbible/v1_bookmark_builder.
         for retired in (
             "global-bookmarks",
-            "import_contribution_bundle",
-            "generate_global_bookmarks",
             "publish-live",
             "--topics-file",
             "--associations-file",
             "api/v1/bookmarks/catalog",
-            "npm --prefix",
-            "live instance",
-            "Live catalogue",
         ):
-            with self.subTest(retired=retired):
-                self.assertNotIn(retired, script)
-        for fragment in (
-            'ensure_env_value "$python_bin" "$env_file" "CONTRIBUTION_GITHUB_TOKEN" ""',
-            'ensure_env_value "$python_bin" "$env_file" "CONTRIBUTION_BUILDER_PYTHON" "python3"',
-            'replace_env_value "$python_bin" "$env_file" "CONTRIBUTION_GITHUB_TOKEN" ""',
-            'replace_env_value "$python_bin" "$env_file" "CONTRIBUTION_BUILDER_PYTHON" "python3"',
-            "  1) Show review status",
-            "  2) Review contributor applications / revoke access",
-            "  3) Resolve and merge contributor topics",
-            "  4) Review verse additions and removals",
-            "  5) Accept approved changes and open a builder pull request",
-            "  0) Return",
-            "bookmarks.getbible.net",
-            "getbible/v1_bookmark_builder",
-            "record_operation contribution-accept",
-            'CONTRIBUTION_CATALOG_FILE="${STATE_ROOT}/${ACTIVE_INSTANCE}/'
-            'contribution-exports/bookmarks-catalog.json"',
-            "json_optional_result_field",
-            "Pull request opened: %s",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, script)
-
-        # The catalogue is fetched, as the service account, before every
-        # command that compares against it; a failed fetch skips the command.
-        menu_start = script.index("cmd_contributions() {")
-        menu = script[menu_start : script.index("\ncmd_menu() {", menu_start)]
-        self.assertNotIn("  6) ", menu)
+            self.assertNotIn(retired, script)
+        for key in ("CONTRIBUTION_GITHUB_TOKEN", "CONTRIBUTION_OPENAI_API_KEY"):
+            self.assertIn(f'ensure_env_value "$python_bin" "$env_file" "{key}" ""', script)
+        self.assertIn("5) Accept approved changes and commit to the builder", script)
+        self.assertIn("6) Commit previously accepted contributions / retry", script)
+        self.assertIn("7) Add missing GitHub / OpenAI credentials", script)
+        start = script.index("cmd_contributions() {")
+        menu = script[start : script.index("\ncmd_menu() {", start)]
         self.assertEqual(menu.count("fetch_contribution_catalog || continue"), 3)
-        for command in ("topics", "verses", "accept"):
-            with self.subTest(command=command):
-                run_at = menu.index(f"run_contribution_cli {command}")
-                self.assertIn(
-                    "fetch_contribution_catalog || continue",
-                    menu[menu.rfind("\n            ", 0, run_at) - 120 : run_at],
-                )
+        accept = menu[menu.index("            5)") : menu.index("            6)")]
         self.assertLess(
-            menu.index("run_contribution_cli accept"),
-            menu.index("publish_contributions_to_repository"),
+            accept.index("run_contribution_cli accept"),
+            accept.index("publish_contributions_to_repository"),
         )
-        fetch_start = script.index("fetch_contribution_catalog() {")
-        fetch = script[fetch_start : script.index("\njson_result_field() {", fetch_start)]
+        self.assertIn("if run_contribution_cli accept", accept)
+        self.assertIn("commit) publish_contributions_to_repository; return", menu)
+        start = script.index("fetch_contribution_catalog() {")
+        fetch = script[start : script.index("\nprompt_contribution_tokens() {", start)]
         self.assertIn('runuser --user "$ACTIVE_USER"', fetch)
         self.assertIn("return 1", fetch)
-
-        # The builder token is optional, reaches the publisher only through
-        # its sanitised stdin, and is never placed on a command line.
-        publish_start = script.index("publish_contributions_to_repository() (")
-        publish = script[publish_start : script.index("\ncmd_contributions() {", publish_start)]
-        self.assertIn('"CONTRIBUTION_GITHUB_TOKEN"', publish)
-        self.assertNotIn('GETBIBLE_BUILDER_TOKEN="$github_token"', script)
-        self.assertNotIn("GETBIBLE_BUILDER_TOKEN=$github_token", script)
-        self.assertNotIn('echo "$github_token"', script)
-        self.assertNotIn('printf.*"$github_token"', script)
-        self.assertLess(publish.index("env -i HOME="), publish.index('<<<"$github_token"'))
-        self.assertIn("IFS= read -r GETBIBLE_BUILDER_TOKEN", script)
-        self.assertIn('exec "$0" "$@"', script)
-        self.assertIn('builder_python=${builder_python:-python3}', publish)
-        self.assertIn("Python 3.12+", publish)
-
-        checkout_start = script.index("validate_publisher_checkout() {")
-        checkout = script[checkout_start : script.index("\n}\n", checkout_start)]
-        self.assertIn('"src/builder.py"', checkout)
-        self.assertIn('"data/topics.json"', checkout)
-        self.assertIn("getbible/v1_bookmark_builder", checkout)
-
-        container = (ROOT / "container" / "setup.sh").read_text(encoding="utf-8")
-        for retired in ("global-bookmarks", "--topics-file", "--associations-file", "publish-live"):
-            with self.subTest(container=retired):
-                self.assertNotIn(retired, container)
-        self.assertIn("fetch-catalog", container)
-        self.assertIn('--catalog-file "$CONTRIBUTION_CATALOG"', container)
-        self.assertIn("5) Accept approved changes into the submission ledger", container)
+        publish_start = script.index("publish_contributions_to_repository() {")
+        publish = script[publish_start : script.index("cmd_contributions() {", publish_start)]
+        self.assertIn("run_contribution_publication commit", publish)
+        self.assertNotIn("git push", publish)
 
     def test_container_setup_entrypoint_is_executable_and_valid(self) -> None:
         container_setup = ROOT / "container" / "setup.sh"
@@ -293,7 +213,7 @@ class SetupScriptTestCase(unittest.TestCase):
     def test_complete_multi_instance_lifecycle(self) -> None:
         result = subprocess.run(
             ["bash", str(LIFECYCLE)],
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
             # This exercises two installs, an upgrade, rollback, and failed
@@ -303,6 +223,7 @@ class SetupScriptTestCase(unittest.TestCase):
             # disks without weakening any lifecycle assertion.
             timeout=300,
         )
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr)[-20000:])
         self.assertIn(
             "Setup manager lifecycle test passed.",
             result.stdout,
@@ -486,16 +407,16 @@ class SetupScriptTestCase(unittest.TestCase):
             with self.subTest(removed=key):
                 self.assertNotIn(key, script)
         self.assertIn(
-            'mini_app_port=${requested_mini_app_port:-$(next_mini_app_port)}',
+            "mini_app_port=${requested_mini_app_port:-$(next_mini_app_port)}",
             script,
         )
         self.assertIn(
-            'webhook_port=${requested_webhook_port:-$(next_webhook_port)}',
+            "webhook_port=${requested_webhook_port:-$(next_webhook_port)}",
             script,
         )
-        self.assertIn('webhook_listen=${requested_webhook_listen:-127.0.0.1}', script)
+        self.assertIn("webhook_listen=${requested_webhook_listen:-127.0.0.1}", script)
         self.assertIn('"TELEGRAM_WEBHOOK_LISTEN" "$webhook_listen"', script)
-        self.assertIn('health_port=$requested_health_port', script)
+        self.assertIn("health_port=$requested_health_port", script)
 
     def test_resource_dropin_is_rendered_from_environment_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -503,7 +424,7 @@ class SetupScriptTestCase(unittest.TestCase):
                 [
                     "bash",
                     "-c",
-                    r'''
+                    r"""
 source "$1"
 dropin_root=$2
 resource_dropin_dir_for() { printf '%s\n' "$dropin_root"; }
@@ -524,7 +445,7 @@ dotenv_value() {
 }
 sync_resource_dropin_from_env /unused/app /unused/env alpha
 cat "$dropin_root/alpha.conf"
-''',
+""",
                     "setup-resource-test",
                     str(SETUP),
                     directory,
@@ -568,7 +489,7 @@ cat "$dropin_root/alpha.conf"
         self.assertIn('REVERSE_PROXY_MODE" "$reverse_proxy_mode"', script)
         self.assertNotIn("Trusted HAProxy source CIDR", script)
         self.assertNotIn("--trusted-proxy-cidrs", script)
-        self.assertIn('mini_app_listen=${requested_mini_app_listen:-0.0.0.0}', script)
+        self.assertIn("mini_app_listen=${requested_mini_app_listen:-0.0.0.0}", script)
         self.assertIn(
             "Port where this bot's Mini App should be publicly available",
             script,
@@ -648,11 +569,11 @@ cat "$dropin_root/alpha.conf"
         script = SETUP.read_text(encoding="utf-8")
         # Reads alone once passed a store the service could not write, which
         # left approved contributors with a visible panel and no token.
-        access = script[script.index("verify_contribution_store_access() {"):]
+        access = script[script.index("verify_contribution_store_access() {") :]
         access = access[: access.index("\nverify_contribution_store_readonly() {")]
         self.assertIn("store.verify_writable()", access)
 
-        doctor = script[script.index("cmd_doctor() {"):]
+        doctor = script[script.index("cmd_doctor() {") :]
         if "\ncmd_repair() {" in doctor:
             doctor = doctor[: doctor.index("\ncmd_repair() {")]
         self.assertIn(
@@ -660,7 +581,7 @@ cat "$dropin_root/alpha.conf"
             doctor,
         )
 
-        validate = script[script.index("validate_contribution_store_path() {"):]
+        validate = script[script.index("validate_contribution_store_path() {") :]
         validate = validate[: validate.index("\nload_contribution_context() {")]
         for suffix in ("-wal", "-shm", "-journal"):
             self.assertIn(f'"{suffix}"', validate)
@@ -709,7 +630,7 @@ cat "$dropin_root/alpha.conf"
         handoff = script.index("handoff_upgrade_to_target_manager() {")
         upgrade = script.index("cmd_upgrade() {", handoff)
         handoff_body = script[handoff:upgrade]
-        upgrade_body = script[upgrade:script.index("\ncmd_rollback() {", upgrade)]
+        upgrade_body = script[upgrade : script.index("\ncmd_rollback() {", upgrade)]
         self.assertIn('[[ "$SCRIPT_PATH" == "$target_manager" ]]', handoff_body)
         self.assertIn('exec "$target_manager" "${arguments[@]}"', handoff_body)
         self.assertLess(
@@ -733,7 +654,7 @@ cat "$dropin_root/alpha.conf"
         readonly_start = script.index("verify_contribution_store_readonly() {")
         readonly_end = script.index("\ndotenv_value() {", readonly_start)
         readonly = script[readonly_start:readonly_end]
-        self.assertIn('?mode=rw', readonly)
+        self.assertIn("?mode=rw", readonly)
         self.assertIn('connection.execute("BEGIN IMMEDIATE")', readonly)
         self.assertIn('connection.execute("ROLLBACK")', readonly)
 
@@ -752,7 +673,7 @@ cat "$dropin_root/alpha.conf"
             f'<script type="module" src="./build/{build_id}/app.js"></script></html>'
         ).encode()
         plain_shell = (
-            b'<html><title>getBible.Life</title>'
+            b"<html><title>getBible.Life</title>"
             b'<script type="module" src="./app.js"></script></html>'
         )
 
@@ -824,8 +745,7 @@ cat "$dropin_root/alpha.conf"
         class Handler(http.server.BaseHTTPRequestHandler):
             def _respond(self) -> None:
                 allowed_origin = (
-                    self.command == "GET"
-                    or self.headers.get("Origin") == "https://bot.example.com"
+                    self.command == "GET" or self.headers.get("Origin") == "https://bot.example.com"
                 )
                 if self.path == "/robot" and allowed_origin:
                     status = 401
@@ -923,9 +843,7 @@ cat "$dropin_root/alpha.conf"
         # transport needs no dedicated path or body budget in the proxy.
         self.assertNotIn("contributions", caddy_renderer)
         for nested in (True, False):
-            marker = "f\"        path {path}/api/v1/*\"" if nested else (
-                '"        path /api/v1/*"'
-            )
+            marker = 'f"        path {path}/api/v1/*"' if nested else ('"        path /api/v1/*"')
             prefix_at = caddy_renderer.index(marker)
             backup_at = caddy_renderer.rfind("_bookmark_backup", 0, prefix_at)
             self.assertGreater(prefix_at, backup_at)

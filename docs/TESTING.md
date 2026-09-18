@@ -341,3 +341,16 @@ After all deterministic gates pass, deploy one validated commit and verify in Te
 - private command and launcher cleanup still behaves as documented.
 
 Record the deployed commit SHA and CI/CodeQL run links with the release evidence.
+
+## Direct publication and live-version upgrade
+
+`tests/test_contribution_publication.py` exercises content-addressed fake GitHub
+and OpenAI transports without live mutations or paid calls: atomic source edits,
+optional tokens, new-topic-only structured translations, cache reuse, non-force
+conflict retries, lost acknowledgement recovery, per-event receipts, out-of-order
+approval, and exclusion of pending work. `tests/support/contributions-v5.sql` is
+a synthetic fixture produced with the deployed live revision; all existing
+columns/rows survive repeated v6 migration before its accepted data is published.
+The native lifecycle fixture includes the new stdlib helper, and container tests
+exercise the same entry point. Historical low-level GitPublisher tests remain
+compatibility coverage; the normal manager flow no longer invokes that publisher.

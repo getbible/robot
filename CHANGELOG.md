@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Publish accepted bookmarks with one direct GitHub API commit to the builder's
+  default branch; update topics, links and optional new-topic translations
+  together without a local checkout, contribution branch or pull request.
+- Offer optional GitHub/OpenAI credentials during native upgrades and expose
+  token configuration plus a `commit` retry command. Missing keys never discard
+  accepted work; no OpenAI key publishes English only.
+- Preserve the live v5 moderation database through the existing v6 migration.
+  Keep publication receipts and reusable translations in a separate private
+  journal; share the implementation between native and container deployments.
+
+
 All notable GetBible Robot changes are documented here. Dates describe repository changes; production deployment remains a separate reviewed decision.
 
 ## Unreleased

@@ -168,23 +168,27 @@ Any code, test, OpenAPI path, or documentation that presents the former Robot-pr
   verses, publish — and reviews topics and verses against a catalogue
   document downloaded from the Bookmarks API and verified against
   `checksums.json`, never against a file in this repository.
-- **Publish** accepts approved work into the store's submission ledger,
-  exports the bundle, pushes a `contributions/<stamp>-<checksum>` branch to a
-  clean clone of `getbible/v1_bookmark_builder` after `import-bundle` and
-  `validate` with Python 3.12 or newer, refuses changes outside
-  `data/topics.json` and `data/links/`, and opens the pull request through the
-  GitHub API when `CONTRIBUTION_GITHUB_TOKEN` is set, otherwise prints the
-  compare URL.
-- Robot serves no catalogue, publishes no overlay, and writes no catalogue
-  data locally; only the upstream merge publishes.
+- Final acceptance records the approved changes before the API publisher
+  runs. Missing GitHub credentials queue the work; a missing OpenAI key selects
+  English-only publication. New-topic translations, when enabled, validate
+  before the same atomic source commit. Neither failure can undo acceptance.
+- Only `data/topics.json`, `data/links/` and `data/locales/` can change. The
+  complete source tree is validated; default-branch updates never force-push.
+  Concurrent colleague edits survive retries, and lost acknowledgements do not
+  produce duplicate commits. Pending/deferred/rejected events are not published.
+- Native and container publishers share the implementation and require no Git
+  checkout or separate publisher account. Upgrade prompts are optional and the
+  live-schema fixture retains every original record. Credentials are private.
+- Robot serves no catalogue and publishes no overlay. The builder's existing
+  push workflow, not a contribution branch/PR, generates the public API.
 - With a contribution store configured, Robot reads the Bookmarks API index
   every `BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS`, verifies and records the
   catalogue when it changed, marks applied events live from it, and queues one
   "contributions live" notice per contributor; an unchanged checksum changes
   nothing and a failed check is retried at the next interval.
 - Both CSP layers list the same four public origins.
-- The token, the bundle, the commit, the branch name, and the pull request
-  carry no Telegram identity or reviewer note.
+- Translation requests and remote commits carry no Telegram identity,
+  reviewer note or credential. Both private SQLite stores are retained together.
 
 ## Bookmark portability and chat recovery
 

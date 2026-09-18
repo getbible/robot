@@ -3209,7 +3209,7 @@ class PublicationRecordingTestCase(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("Accepted ledger revision: none", text)
         self.assertIn("Approved changes awaiting acceptance: 0", text)
-        self.assertIn("Upstream publication: pushed (ledger revision 3)", text)
+        self.assertIn("Legacy Git publication: pushed (ledger revision 3)", text)
         self.assertIn("Upstream branch: contributions/20260917-101010-0123456789", text)
         self.assertIn(f"Last pull request: {PULL_REQUEST_URL}", text)
         self.assertIn("Shared API catalogue version: 12", text)

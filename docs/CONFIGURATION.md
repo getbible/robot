@@ -187,10 +187,9 @@ their manager-owned paths in the environment file.
 | `CONTRIBUTION_RATE_CAPACITY` | `60` | `1`–`100000` | Token-bucket capacity of the dedicated contributor synchronization budget for `POST /api/v1/contributions/events`, separate from the public Mini App and user limits |
 | `CONTRIBUTION_RATE_REFILL_PER_SECOND` | `5.0` | `0.01`–`1000.0` | Refill rate of that contribution budget; requests beyond it wait behind `429` and `Retry-After` pacing instead of failing permanently |
 | `BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS` | `21600` | `300`–`604800` | How often the robot reads the Bookmarks API `index.json` to learn that accepted contributions are live; used only when a contribution store is configured |
-| `CONTRIBUTION_GIT_CHECKOUT` | empty | Empty or an absolute, clean clone of `getbible/v1_bookmark_builder` owned by the publisher | Setup-manager-only publication checkout of the builder repository |
-| `CONTRIBUTION_GIT_USER` | empty | Existing dedicated non-root operating-system user; must differ from the bot service account | Setup-manager-only identity used for the builder import, commit, and push |
-| `CONTRIBUTION_GITHUB_TOKEN` | empty | Empty or a fine-grained GitHub token limited to `getbible/v1_bookmark_builder` with Contents and Pull requests read/write | Setup-manager-only; when set, **Publish** opens the pull request itself, otherwise it prints the compare URL |
-| `CONTRIBUTION_BUILDER_PYTHON` | `python3` | Interpreter name or absolute path reporting Python 3.12 or newer | Setup-manager-only interpreter the publisher runs `src/builder.py` with |
+| `CONTRIBUTION_GITHUB_TOKEN` | empty | PAT or installation token restricted to `getbible/v1_bookmark_builder` with Contents read/write; branch rules must permit it | Direct source commit after acceptance; empty retains work for a later `commit` |
+| `CONTRIBUTION_OPENAI_API_KEY` | empty | Server-side OpenAI API key | Translate new-topic names into all existing source locales; empty means English only |
+| `CONTRIBUTION_TRANSLATION_MODEL` | `gpt-5.6-sol` | Model ID supporting Responses API strict structured output | Configurable translation model; used only when the OpenAI key is present |
 
 Native setup assigns
 `CONTRIBUTION_STORE_FILE=/var/lib/getbible-robot/<instance>/contributions.sqlite3`.
@@ -215,38 +214,31 @@ command report that applications are unavailable.
 
 Contributed source topic names and moderator-created aliases must be English.
 The stable catalogue key is the topic id (`<english-slug>`), and the canonical
-English name is what the pull request adds to the builder's `data/topics.json`.
-This review flow does not generate translations: they are added to the
-builder's locale files separately and reach readers through the catalogue's
-per-locale names. Until then the Mini App intentionally displays the canonical
-English name; already translated topics use their locale names unchanged.
+English name is what the direct API commit adds to `data/topics.json`.
+With an OpenAI key, newly created topics also receive names in the builder's
+existing locale files in that same commit. Without the key, only English is
+published. Existing translations are preserved; adding verses never retranslates
+an established topic. English output is derived by the builder, not stored in
+an English source locale file.
 
-The `CONTRIBUTION_GIT_*`, `CONTRIBUTION_GITHUB_TOKEN`, and
-`CONTRIBUTION_BUILDER_PYTHON` settings are read by
-`getbible-robot contributions`, not by the running Robot, and have no
-container equivalent. Keep Git credentials in the dedicated publisher user's normal
-credential mechanism, never in an instance environment file. The GitHub token
-is the one exception: it lives in the instance environment file, which is
-root-owned and mode-restricted, is handed to the publisher process for one
-publication, and is never echoed or logged. Scope it to the builder
-repository only with Contents and Pull requests read/write; without it,
-**Publish** still pushes the branch and prints the compare URL. Acceptance
-into the submission ledger needs none of these settings and is not rolled
-back when a later export, push, or pull-request creation fails.
+The publisher reads these optional settings on each explicit acceptance or
+commit invocation. Native values remain in the root-owned environment file,
+and cross to the existing service account over stdin, not command arguments or
+inherited environment. Container publication uses its own instance configuration.
+No key reaches the browser, Telegram, GitHub commits, logs or another instance.
 
-Clone the builder repository for the publisher and configure the commit
-identity in that checkout's local Git config. Global configuration, including
-root's identity, is intentionally ignored:
+An upgrade adds missing setting names and prompts only for missing credentials.
+Enter skips either; headless updates continue. Acceptance needs neither key and
+survives publication failures. Add keys later with
+`sudo getbible-robot contributions production tokens`, then run
+`sudo getbible-robot commit production` for the example instance. Use the existing
+configuration editor to replace keys or the model. Legacy `CONTRIBUTION_GIT_*`
+and `CONTRIBUTION_BUILDER_PYTHON` values may remain in old environment files but
+are ignored by the new normal publisher. There is no publisher checkout or Git
+identity to provision.
 
-```bash
-sudo -u getbible-publisher git clone https://github.com/getbible/v1_bookmark_builder.git /srv/getbible-robot-publisher/v1_bookmark_builder
-sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/v1_bookmark_builder config --local user.name "GetBible Contribution Publisher"
-sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/v1_bookmark_builder config --local user.email "publisher@getbible.net"
-```
-
-The builder needs Python 3.12 or newer; when the host's `python3` is older,
-set `CONTRIBUTION_BUILDER_PYTHON` to a newer interpreter the publisher can
-run.
+See [Contribution publication](CONTRIBUTION_PUBLICATION.md) for retries,
+translation validation, branch permissions and journal backup requirements.
 
 ## Repository and worker timeouts
 
@@ -456,10 +448,9 @@ USER_PREFERENCE_LIMIT="10000"
 CONTRIBUTION_STORE_FILE="/var/lib/getbible-robot/production/contributions.sqlite3"
 CONTRIBUTION_CONTRIBUTOR_LIMIT="10000"
 CONTRIBUTION_EVENT_LIMIT="250000"
-CONTRIBUTION_GIT_CHECKOUT="/srv/getbible-robot-publisher/v1_bookmark_builder"
-CONTRIBUTION_GIT_USER="getbible-publisher"
 CONTRIBUTION_GITHUB_TOKEN=""
-CONTRIBUTION_BUILDER_PYTHON="python3"
+CONTRIBUTION_OPENAI_API_KEY=""
+CONTRIBUTION_TRANSLATION_MODEL="gpt-5.6-sol"
 GETBIBLE_API_BASE_URL="https://api.getbible.net"
 GETBIBLE_QUERY_BASE_URL="https://query.getbible.net"
 GETBIBLE_SEARCH_BASE_URL="https://search.getbible.net"
