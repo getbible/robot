@@ -238,7 +238,9 @@ test("reader and search verses use the same local basket contract", async () => 
   await api.addBasketItem(READER_VERSE.selection_id);
   await api.addBasketItem(searchVerse.selection_id);
 
-  assert.deepEqual(searches, [["kjv", "world", { words: "all" }, { offset: 0, limit: 25 }]]);
+  assert.deepEqual(searches, [
+    ["kjv", "world", { words: "all" }, { offset: 0, limit: 25, cache: "default" }],
+  ]);
   assert.deepEqual(page.items[0].highlights, searchVerse.highlights);
   const basket = await api.basket();
   assert.deepEqual(

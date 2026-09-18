@@ -194,9 +194,13 @@ export class MiniAppApi {
    * found by searching can be selected and posted by the same direct
    * selection id as a verse found by reading.
    */
-  async search(translation, query, filters, { offset = 0, limit = 25 } = {}) {
+  async search(translation, query, filters, {
+    offset = 0,
+    limit = 25,
+    cache = "default",
+  } = {}) {
     const payload = await this.#publicRequest(() =>
-      this.#publicApi.search(translation, query, filters, { offset, limit }),
+      this.#publicApi.search(translation, query, filters, { offset, limit, cache }),
     );
     this.#registerPayloadSelections(payload);
     return payload;

@@ -27,6 +27,10 @@ const MAX_PROBLEM_BYTES = 16 * 1024;
 const MAX_RETRY_AFTER_WAIT_MS = 5_000;
 const MAX_RETRY_AFTER_SECONDS = 3_600;
 const MAX_SEARCH_PARAMETERS_LENGTH = 8_192;
+// A search page is normally read through the browser's HTTP cache; a search
+// restarted after a corpus change revalidates its first page with the server
+// instead, so the page cut from the old corpus is never served again.
+const SEARCH_CACHE_MODES = new Set(["default", "no-cache"]);
 const SHA1_PATTERN = /^[0-9a-f]{40}$/;
 const BOOKMARKS_PATH_PATTERN = /^[a-z0-9][a-z0-9_-]*(?:\/[a-z0-9][a-z0-9_-]*)*\.json$/;
 const SEARCH_TRANSLATION_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -233,6 +237,7 @@ export class GetBibleTransport {
    */
   async search(translation, parameters, {
     maximumBytes = this.#maxResponseBytes,
+    cache = "default",
   } = {}) {
     if (
       typeof translation !== "string" ||
@@ -240,12 +245,15 @@ export class GetBibleTransport {
     ) {
       throw new TypeError("Search translation is invalid.");
     }
+    if (!SEARCH_CACHE_MODES.has(cache)) {
+      throw new TypeError("Search cache mode is invalid.");
+    }
     const query = encodeSearchParameters(parameters);
     const url = new URL(`${translation}?${query}`, this.#searchRoot);
     const { bytes } = await this.#read(url, {
       accept: "application/json",
       maximumBytes,
-      cache: "default",
+      cache,
       problem: true,
     });
     return decodeJson(bytes);
