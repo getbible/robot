@@ -1,6 +1,6 @@
 # Telegram Mini App
 
-The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, temporary verse selection, and device-local history belong in the browser. Compact personal bookmarks and last-read coordinates additionally use Telegram Mini App storage when available. Global-topic preferences use scoped browser storage plus Telegram DeviceStorage, but deliberately remain outside CloudStorage and personal backup. Full-text search and the shared bookmark topic catalogue, like every other Scripture read, go from the browser to a public GetBible origin. Robot remains the authenticated Telegram control plane, the bounded relay for an explicit private-chat bookmark backup or restore, and the review boundary for approved contributor events, whose accepted changes reach the public Bookmarks API through a pull request on the builder repository.
+The GetBible Telegram Mini App is a browser application served by the Robot instance. Its public Scripture data plane is independent from the Robot process: catalogs, chapter text, explicit references, cache validation, temporary verse selection, and device-local history belong in the browser. Compact personal bookmarks and last-read coordinates additionally use Telegram Mini App storage when available. Global-topic preferences use scoped browser storage plus Telegram DeviceStorage, but deliberately remain outside CloudStorage and personal backup. Full-text search and the shared bookmark topic catalogue, like every other Scripture read, go from the browser to a public GetBible origin. Robot remains the authenticated Telegram control plane, the bounded relay for an explicit private-chat bookmark backup or restore, and the review boundary for approved contributor events, whose accepted changes reach the public Bookmarks API through a direct API source commit on the builder repository.
 
 ## Active doctrine
 
@@ -305,12 +305,15 @@ again, and the operator can still reject or correct a proposal. An accepted
 topic keeps its canonical English source name and id; translations live in
 the builder repository's locale files and reach readers through the
 catalogue's per-locale names. A locale without a translation resolves to the
-English name; no foreign-language catalogue is synthesized in this flow.
+English name. Optional server-side OpenAI translation adds names only for new
+topics and never sends contributor identities or regenerates existing names.
 
-Acceptance does not publish. **Publish** in the maintainer workflow records
-the approved changes in the store's submission ledger and opens a pull request
-on `getbible/v1_bookmark_builder`; the upstream merge publishes the Bookmarks
-API. Robot then reads `index.json` on its check interval, records the live
+Acceptance is durable before publication. **Accept and commit** records the
+approved changes in the existing submission ledger, then commits sources through
+the GitHub API to `getbible/v1_bookmark_builder`'s default branch. Its push
+workflow publishes the Bookmarks API; no contribution branch or PR is required.
+Missing credentials retain acceptance and can be supplied later. This does not
+change the Mini App's contribution submission or personal bookmark storage. Robot then reads `index.json` on its check interval, records the live
 catalogue, marks the applied events it contains as live, and queues one
 private "contributions live" notice per contributor. The detailed status
 reports a topic as published only once it has been seen in that catalogue, so

@@ -30,3 +30,5 @@ Telegram web links:       https://getbible.life
 ```
 
 Security reports must follow [`SECURITY.md`](../SECURITY.md).
+
+See [Direct contribution publication](CONTRIBUTION_PUBLICATION.md) for optional credentials, atomic source commits, translations and upgrade recovery.

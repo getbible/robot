@@ -124,9 +124,13 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   additional port, or repeated raw Telegram `initData` header. A maintainer
   reviews the queue with `sudo getbible-robot contributions <instance>`
   (status, applications, topics, verses, publish); publishing accepts the
-  approved changes into the ledger and opens a pull request on
-  [getbible/v1_bookmark_builder](https://github.com/getbible/v1_bookmark_builder).
-  Once that pull request merges and the Bookmarks API republishes, the robot
+  approved changes into the ledger, then commits source changes directly to
+  [getbible/v1_bookmark_builder](https://github.com/getbible/v1_bookmark_builder)
+  through the GitHub API. New-topic translations are optional and join the
+  same atomic commit. Missing tokens never discard acceptance; add them later
+  and run `sudo getbible-robot commit <instance>`. See
+  [Contribution publication](docs/CONTRIBUTION_PUBLICATION.md).
+  Once the builder workflow republishes the Bookmarks API, the robot
   notices on its next catalogue check, marks the contributions live, and
   sends each contributor one private notice; the Mini App's **P** marker
   becomes **G** on the next status refresh.
@@ -295,9 +299,9 @@ venv/bin/python -m unittest discover -s tests -v
 
 The global topic catalogue is not part of this repository. The Mini App reads
 it from `https://bookmarks.getbible.net/v1`, and accepted contributions reach
-it through a pull request on
+it through an atomic direct API commit on
 [getbible/v1_bookmark_builder](https://github.com/getbible/v1_bookmark_builder)
-opened by `sudo getbible-robot contributions <instance>`; see
+after final acceptance in `sudo getbible-robot contributions <instance>`; see
 [Operations](docs/OPERATIONS.md#contributor-enrolment-and-moderation). There is
 nothing to regenerate after a review.
 

@@ -270,29 +270,27 @@ The shell runs as the image's unprivileged UID/GID 10001. The root filesystem
 remains read-only; only the instance data volume and bounded `/tmp` tmpfs are
 writable.
 
-The contribution submenu shows status and writes a privacy-safe bundle
-export; topic and verse review, acceptance, and publication are native-only
-because they need the public catalogue download and the publisher account.
-`status` and `export` also work non-interactively. Exports are mode `0600`
-below:
+The contribution submenu supports status, applications, topic/verse review,
+acceptance, and direct API publication. Interactive moderation still requires a
+terminal; `status`, `export` and `commit` also work non-interactively:
 
-```text
-/data/<instance>/state/contribution-exports/reviewed-catalog-<UTC>.json
+```bash
+docker exec getbible-robot-production /app/setup.sh contributions production commit
 ```
 
-The image does not contain Git or a repository credential. Automated
-publication from a container export is not supported in this release; apply
-the bundle by hand in a checkout of `getbible/v1_bookmark_builder` with
-`python3 src/builder.py import-bundle <bundle.json>` and `validate`, and open
-the pull request yourself.
+Set optional `CONTRIBUTION_GITHUB_TOKEN`, `CONTRIBUTION_OPENAI_API_KEY` and
+`CONTRIBUTION_TRANSLATION_MODEL` in the private Compose environment. Recreate a
+single-instance container to apply environment changes; multi-instance mode
+reads only the selected instance's file for publication. Missing keys never
+prevent startup or discard accepted work. No GitHub key retains the acceptance
+for later; no OpenAI key publishes English without changing locale files.
 
-Do not add a Git credential or publisher checkout to the application
-container. The guarded one-command repository publication workflow is
-available only for native deployments through the dedicated non-root publisher
-account described in
-[Operations](OPERATIONS.md#contributor-enrolment-and-moderation); it is not a
-runtime-container permission. Container-to-host publication needs a separate
-privilege-boundary and lease design and is deliberately outside this release.
+The image needs no Git, SSH key, checkout or host publisher account. The same
+publisher used by native installations updates the builder's source files
+atomically through HTTPS. Optional exports remain mode `0600` below
+`/data/<instance>/state/contribution-exports/`; the adjacent publication journal
+is retained in the state volume. Back up the journal together with the existing
+contribution database. See [Contribution publication](CONTRIBUTION_PUBLICATION.md).
 
 ## User experience under load
 

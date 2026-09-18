@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -30,11 +31,17 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
             ROOT / "scripts" / "contribution_review.py",
             self.app / "scripts" / "contribution_review.py",
         )
+        shutil.copy2(
+            ROOT / "scripts" / "contribution_publish.py",
+            self.app / "scripts" / "contribution_publish.py",
+        )
         # The review CLI needs the store, the canon shared with the Bookmarks
         # API client, that client, and the Query client; no catalogue sources
         # ship with the application any more.
         for name in (
             "contributions.py",
+            "bookmark_sources.py",
+            "contribution_publication.py",
             "bible_canon.py",
             "getbible_bookmarks.py",
             "getbible_query.py",
@@ -57,6 +64,8 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
             "TRANSLATION": "kjv",
         }
         self.environment.pop("PYTHONPATH", None)
+        for key in ("CONTRIBUTION_GITHUB_TOKEN", "CONTRIBUTION_OPENAI_API_KEY"):
+            self.environment.pop(key, None)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -83,14 +92,45 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
         self.assertNotIn(str(self.store_path), result.stdout)
         self.assertFalse((self.store_path.parent / "contribution-exports").exists())
 
+    def test_commit_retains_accepted_work_without_credentials(self) -> None:
+        self.store_path.unlink()
+        with sqlite3.connect(self.store_path) as database:
+            database.executescript(
+                (ROOT / "tests" / "support" / "contributions-v5.sql").read_text(encoding="utf-8")
+            )
+        result = self.run_setup("contributions", "production", "commit")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("No GitHub token", result.stdout)
+        self.assertIn("remain queued", result.stdout)
+        with sqlite3.connect(self.store_path) as database:
+            self.assertGreater(
+                database.execute(
+                    "SELECT COUNT(*) FROM contribution_events WHERE state='applied'"
+                ).fetchone()[0],
+                0,
+            )
+        self.assertTrue(Path(str(self.store_path) + ".publication.sqlite3").is_file())
+
+    def test_multi_instance_commit_does_not_inherit_other_instance_credentials(self) -> None:
+        self.environment.update(
+            {
+                "ROBOT_MODE": "multi",
+                "CONTRIBUTION_GITHUB_TOKEN": "other-instance",
+                "CONTRIBUTION_OPENAI_API_KEY": "other-instance",  # pragma: allowlist secret
+            }
+        )
+        (self.config / "production.env").write_text(
+            f'INSTANCE_NAME="production"\nCONTRIBUTION_STORE_FILE="{self.store_path}"\n',
+            encoding="utf-8",
+        )
+        self.test_commit_retains_accepted_work_without_credentials()
+
     def test_export_is_private_deterministic_and_identity_free(self) -> None:
         result = self.run_setup("contributions", "production", "export")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         exports = list(
-            (self.store_path.parent / "contribution-exports").glob(
-                "reviewed-catalog-*.json"
-            )
+            (self.store_path.parent / "contribution-exports").glob("reviewed-catalog-*.json")
         )
         self.assertEqual(len(exports), 1)
         document = json.loads(exports[0].read_text(encoding="utf-8"))
@@ -98,12 +138,7 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
         self.assertNotIn("contributor", exports[0].read_text(encoding="utf-8"))
         self.assertEqual(stat.S_IMODE(exports[0].stat().st_mode), 0o600)
         self.assertIn("Privacy-safe repository export:", result.stdout)
-        self.assertIn(
-            "Automated pull-request publication to getbible/v1_bookmark_builder from a "
-            "container export is not supported",
-            result.stdout,
-        )
-        self.assertIn("src/builder.py import-bundle", result.stdout)
+        self.assertIn("commit publishes the accepted ledger directly", result.stdout)
         self.assertFalse(
             (self.store_path.parent / "contribution-exports" / "bookmarks-catalog.json").exists()
         )
@@ -133,9 +168,7 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
             self.assertEqual(process.returncode, 0, stderr)
             self.assertIn("Privacy-safe repository export:", stdout)
         exports = sorted(
-            (self.store_path.parent / "contribution-exports").glob(
-                "reviewed-catalog-*.json"
-            )
+            (self.store_path.parent / "contribution-exports").glob("reviewed-catalog-*.json")
         )
         self.assertEqual(len(exports), 2)
         self.assertNotEqual(exports[0].name, exports[1].name)
@@ -160,17 +193,13 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Unknown contribution action", result.stderr)
 
-    def test_container_menu_never_claims_repository_push_support(self) -> None:
+    def test_container_menu_uses_the_same_api_publication_as_native(self) -> None:
         script = CONTAINER_SETUP.read_text(encoding="utf-8")
 
         self.assertNotIn("git push", script.casefold())
         self.assertNotIn("publish-repository", script.casefold())
-        self.assertIn(
-            "Automated pull-request publication to getbible/v1_bookmark_builder is "
-            "unavailable for container instances",
-            script,
-        )
-        self.assertIn("Use a native deployment", script)
+        self.assertIn("run_contribution_publication commit", script)
+        self.assertIn("CONTRIBUTION_OPENAI_API_KEY", script)
         for retired in (
             "global-bookmarks",
             "--topics-file",
@@ -183,7 +212,7 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
                 self.assertNotIn(retired, script)
         self.assertIn("fetch-catalog", script)
         self.assertIn("bookmarks.getbible.net", script)
-        self.assertIn("5) Accept approved changes into the submission ledger", script)
+        self.assertIn("5) Accept approved changes and commit to the builder", script)
         # Every catalogue-dependent action fetches first and fails closed.
         for command in ("topics", "accept"):
             self.assertIn(f"run_catalogue_review {command}", script)

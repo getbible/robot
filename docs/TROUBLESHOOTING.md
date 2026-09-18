@@ -261,15 +261,15 @@ own check of the same origin is the next section.
 
 ## Contributions were published but contributors were not told they are live
 
-**Status** in `sudo getbible-robot contributions <instance>` shows a pull
-request but no observed catalogue version, or one older than the merge, and
+**Status** in `sudo getbible-robot contributions <instance>` shows a direct
+source commit but no observed catalogue version, or one older than the commit, and
 the Mini App still shows the **P** marker.
 
 The robot marks contributions live only after reading them from the Bookmarks
 API. In order:
 
-1. The pull request must be merged on GitHub and the builder's publication
-   workflow must have run; `catalog_version` in
+1. The source commit must be on the builder's default branch and its publication
+   workflow must have succeeded; `catalog_version` in
    `https://bookmarks.getbible.net/v1/index.json` increases with every content
    change.
 2. The robot reads that index every `BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS`
@@ -288,29 +288,28 @@ private notice through the same outbox as application decisions; if the
 notice itself does not arrive, see the pending-notification bullet under
 [Monitoring](OPERATIONS.md#monitoring).
 
-## Publish pushed the branch but opened no pull request
+## Accepted contributions have not been committed
 
-**Publish** ends with a compare URL instead of a pull request URL, or reports
-that the pull request could not be created.
+Run `sudo getbible-robot contributions production status` for the example
+instance. Missing `CONTRIBUTION_GITHUB_TOKEN` is a queued state, not lost work.
+Add it with `sudo getbible-robot contributions production tokens` and retry
+`sudo getbible-robot commit production`. The token needs Contents read/write
+on only the builder, and repository rules must allow its direct default-branch
+update. No checkout, SSH key, Git user or pull-request token is required.
 
-The branch is already on GitHub; nothing is lost. Open the printed compare
-URL in a browser and create the pull request by hand, or fix the cause and
-publish again (a new branch is created; close the first). Causes:
+A supplied OpenAI key that fails authorization, quota, completion or string
+validation leaves the publication pending. Correct it and retry; cached valid
+translations are reused. To deliberately publish English instead, remove the
+OpenAI key in the configuration editor. No OpenAI key is needed for verse-only
+updates. A GitHub non-fast-forward is retried against fresh data; branch policy
+rejections do not force-push. If the remote commit succeeded but the local
+receipt did not, `commit` reconciles it rather than duplicating it.
 
-- `CONTRIBUTION_GITHUB_TOKEN` is empty. This is the documented no-token
-  behaviour, not an error.
-- The token lacks **Pull requests: read/write** on
-  `getbible/v1_bookmark_builder`, has expired, or is scoped to another
-  repository; GitHub answers `403` or `404`.
-- The publisher account cannot reach `https://api.github.com` although
-  `git push` succeeded through another route.
-
-A failure earlier in the run — a checkout that is not a clean clone of
-`getbible/v1_bookmark_builder`, an interpreter older than Python 3.12, a
-`validate` failure, or a change outside `data/topics.json` and
-`data/links/` — stops before any push; the message names it, the export is
-retained, and the acceptance in the ledger stands. Rerun **Publish** after
-correcting the checkout or `CONTRIBUTION_BUILDER_PYTHON`.
+Keep the adjacent publication SQLite journal: deleting it is not a retry
+procedure. Old versions may still show historical Git branches or PRs under
+**Legacy Git publication**; the current manager uses **Direct API publication**.
+See [Contribution publication](CONTRIBUTION_PUBLICATION.md) for token scope,
+status, upgrade preservation and backup requirements.
 
 ## Service fails with `status=200/CHDIR`
 

@@ -307,13 +307,19 @@ Contributor state never enters Telegram storage, and a failed request never
 rolls back the personal bookmark mutation.
 
 Acceptance runs outside the browser. A maintainer reviews applications,
-topics, and verses on the host; **publish** accepts the approved events into
-the store's submission ledger, exports the bundle, pushes a
-`contributions/<stamp>-<checksum>` branch to a local checkout of
-`getbible/v1_bookmark_builder` after `python3 src/builder.py import-bundle`
-and `validate`, and opens a pull request through the GitHub API when a token
-is configured. Nothing is published by the robot: the upstream merge runs the
-builder's workflow, which publishes the Bookmarks API. Robot's
+topics and verses; final acceptance saves the existing ledger and invokes the
+API publisher. `bookmark_sources` (layer 0) validates the builder's source
+contract; `contribution_publication` (layer 1) composes that contract with the
+existing durable store and bounded GitHub/OpenAI adapters. The CLI helper
+owns optional configuration and the native privilege handoff.
+
+A separate private receipt/translation journal keeps the moderation schema
+unchanged. The first publication preserves accepted legacy ledger data; later
+ones consume per-event receipts rather than replaying old operations. New-topic
+translation is optional and schema-validated. All changed topics, links and
+locales enter one non-force commit on the builder's default branch through
+HTTPS; no local Git or contribution branch/PR is needed. The builder's push
+workflow generates the Bookmarks API. Robot's
 `watch-bookmark-catalog` task reads `index.json` every
 `BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS`, fetches and verifies the catalogue
 when the version or checksum moved, records it, marks the applied events it
@@ -454,7 +460,7 @@ A release is production-ready only when permanent CI and CodeQL pass on the exac
   revalidation, rejection of an `all.json` whose SHA-256 differs from the
   index, network-required explicit pulls, one-time default-topic seeding, and
   personal-to-global merge only after a day of network-verified coverage;
-- publication through a pull request on `getbible/v1_bookmark_builder`, the
+- publication through an atomic API commit on `getbible/v1_bookmark_builder`, the
   catalogue watcher, and one "contributions live" notice per contributor;
 - bounded JSON download/import plus owner-bound private-chat backup, fresh
   one-time restore launch, compact v4 `colorIndexes` plus v1/v2/v3 import,

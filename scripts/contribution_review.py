@@ -2228,7 +2228,7 @@ def print_status(store: StoreProtocol, *, output: TextIO = sys.stdout) -> None:
     repository = _record_mapping(store.publication_state())
     repo_state = sanitize_terminal(repository.get("repo_state") or "not started")
     repo_revision = repository.get("repo_revision")
-    output.write(f"  Upstream publication: {repo_state}")
+    output.write(f"  Legacy Git publication: {repo_state}")
     if isinstance(repo_revision, int) and repo_revision >= 0:
         output.write(f" (ledger revision {repo_revision})")
     output.write("\n")
@@ -2299,7 +2299,7 @@ def accept_contributions(
     ledger_checksum = _catalog_checksum(revision, bundle)
     output.write(
         f"Recorded accepted ledger revision {_catalog_revision(revision) or 'unknown'} "
-        f"({ledger_checksum}). Publish it upstream to open the pull request.\n"
+        f"({ledger_checksum}). Commit it through the builder API to publish the accepted changes.\n"
     )
     return revision
 

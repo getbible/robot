@@ -38,7 +38,7 @@ Running `sudo getbible-robot` without a command opens the operations menu.
 
 - Linux with `systemd`.
 - Python 3.10, 3.11, 3.12, 3.13, or 3.14.
-- Outbound HTTPS to Telegram, PyPI during installation, GitHub when cloning, and `https://api.getbible.net`, `https://query.getbible.net`, `https://search.getbible.net`, and `https://bookmarks.getbible.net` at runtime; `https://api.github.com` as well from the publisher account when `CONTRIBUTION_GITHUB_TOKEN` is set so that publishing contributions can open the pull request.
+- Outbound HTTPS to Telegram, PyPI during installation, GitHub when cloning, and `https://api.getbible.net`, `https://query.getbible.net`, `https://search.getbible.net`, and `https://bookmarks.getbible.net` at runtime; `https://api.github.com` for direct contribution commits when `CONTRIBUTION_GITHUB_TOKEN` is set, and optionally `https://api.openai.com` for new-topic translations when an OpenAI key is configured.
 - `git`, `curl`, `tar`, `logrotate`, `iproute2`, and the matching Python `venv` package.
 - A dedicated Telegram Bot API token from `@BotFather` for each running instance.
 - The default production resource profile targets an 8 GiB, i3-class or

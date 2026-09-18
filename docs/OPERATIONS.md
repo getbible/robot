@@ -152,9 +152,9 @@ The shared catalogue lives outside this repository. Its source of truth is
 [getbible/v1_bookmark_builder](https://github.com/getbible/v1_bookmark_builder),
 and its published form is the public Bookmarks API at
 `https://bookmarks.getbible.net/v1`. The robot ships no copy of it, serves no
-catalogue route, and never publishes to it directly: a maintainer's
-publication is a pull request on the builder repository, and only the
-upstream merge publishes.
+catalogue route, and never writes the generated API directly. Final maintainer
+acceptance commits the source files on the builder's default branch through
+the GitHub API; its existing push workflow publishes the generated API.
 
 Open the native review workflow with:
 
@@ -162,30 +162,23 @@ Open the native review workflow with:
 sudo getbible-robot contributions production
 ```
 
-For a container instance, status and a privacy-safe export are available
-without granting Git access to the runtime image:
+For a container instance the same review, acceptance and direct API publisher
+are available without Git or a checkout. Status, export and commit can run
+non-interactively:
 
 ```bash
-docker exec -it getbible-robot-production \
-  /app/setup.sh contributions production
-docker exec getbible-robot-production \
-  /app/setup.sh contributions production status
-docker exec getbible-robot-production \
-  /app/setup.sh contributions production export
+docker exec -it getbible-robot-production /app/setup.sh contributions production
+docker exec getbible-robot-production /app/setup.sh contributions production status
+docker exec getbible-robot-production /app/setup.sh contributions production commit
 ```
 
-The export command prints its exact mode-`0600` path below
-`/data/<instance>/state/contribution-exports/`. Automated publication from a
-container export is not supported; apply such a bundle by hand in a checkout
-of the builder repository with `python3 src/builder.py import-bundle
-<bundle.json>` followed by `python3 src/builder.py validate`, and open the
-pull request yourself. Run a native deployment when the guarded one-command
-publication is required.
+The privacy-safe `export` remains optional and writes a mode-`0600` bundle below the instance's
+`state/contribution-exports/`; no export/import step is required to publish.
 
 The native menu has five stages. Use them in order:
 
 1. **Status** — pending applications, unresolved topics, approved work, the
-   ledger revision, the last pull request, and the catalogue version and
+   ledger revision, the last direct commit (and any legacy pull request), and the catalogue version and
    checksum last observed from the Bookmarks API with the time of that check.
 2. **Applications** — review pending applications, optionally revoke an
    enrolled contributor, and optionally reinstate a previously revoked or
@@ -199,9 +192,11 @@ The native menu has five stages. Use them in order:
    canonical topic, or reject/defer it.
 4. **Verses** — review verse additions and removals, only after topic
    mappings are resolved.
-5. **Publish** — accept the approved changes into the submission ledger,
-   export the bundle, push a branch to the builder checkout, and open the
-   pull request.
+5. **Accept and commit** — save the approved changes in the submission ledger,
+   then update the builder sources with one atomic commit using its API.
+
+The menu also offers **Commit previously accepted contributions / retry** and
+**Add missing GitHub / OpenAI credentials**. These do not repeat moderation.
 
 Before stages 3, 4, and 5 the manager downloads the current catalogue from
 the Bookmarks API (`fetch-catalog`, verified against `checksums.json`) into
@@ -255,56 +250,50 @@ topic-and-verse dependency chain automatically.
 
 ### Publishing
 
-**Publish** first accepts the approved topics, additions, and removals into
-the store's submission ledger — a cumulative, checksummed record of what this
-instance has accepted, kept in the same private SQLite store and never served
-to readers. It then exports the bundle, takes a per-checkout lock and a
-publication lease, and runs the publisher as the dedicated Git user:
+Acceptance is durable before publication begins. The publisher commits only
+accepted topics, additions and removals to `getbible/v1_bookmark_builder`'s
+current default branch (`main` or `master`) through HTTPS. No contribution
+branch, pull request, local Git clone, SSH credential or dedicated publisher
+account is needed. Topic definitions, sorted links and optional translations
+are validated together and committed together. Only `data/topics.json`,
+`data/links/<topic>.json` and `data/locales/<locale>.json` can change.
 
-1. verify the bundle checksum, the publisher identity, and the checkout;
-2. fetch `origin/main` and base a unique `contributions/<UTC stamp>-<checksum>`
-   branch on it;
-3. `python3 src/builder.py import-bundle <bundle>`, then
-   `python3 src/builder.py validate`;
-4. refuse any change outside `data/topics.json` and `data/links/<topic>.json`;
-5. commit and `git push --set-upstream origin <branch>`;
-6. open the pull request against `main` through the GitHub API when
-   `CONTRIBUTION_GITHUB_TOKEN` is set; otherwise print the compare URL to open
-   by hand.
+Configure a repository-scoped `CONTRIBUTION_GITHUB_TOKEN` with Contents
+read/write and permission under its branch rules. Optionally configure
+`CONTRIBUTION_OPENAI_API_KEY` for new-topic translations; no key means English
+only. `CONTRIBUTION_TRANSLATION_MODEL` selects the structured-output model.
+Existing topic translations are never regenerated for verse-only changes.
 
-The pull request URL, branch, and commit are recorded in the store and shown
-by **Status**. A failed publisher run cannot roll back the acceptance; the
-export is retained for diagnosis, and **Publish** can be run again. A pushed
-branch whose pull request could not be opened is still complete: open it from
-the printed compare URL.
-
-Configure `CONTRIBUTION_GIT_CHECKOUT`, `CONTRIBUTION_GIT_USER`, and
-optionally `CONTRIBUTION_GITHUB_TOKEN` and `CONTRIBUTION_BUILDER_PYTHON`
-through `getbible-robot config`. The user must be a dedicated non-root
-account, must own a clean clone of `getbible/v1_bookmark_builder` whose
-`origin` resolves to that repository, and must already have a
-non-interactive Git credential with branch-push permission. The builder is
-standard-library Python and requires Python 3.12 or newer; point
-`CONTRIBUTION_BUILDER_PYTHON` at such an interpreter when the system
-`python3` is older. Node.js and npm are no longer needed. The token is a
-fine-grained GitHub token limited to that one repository with Contents and
-Pull requests read/write; it is read by the setup manager only, handed to the
-publisher process for the duration of one publication, and never logged.
-
-Clone the builder for the publisher and set its commit identity in the
-checkout-local Git config; global configuration, including root's identity,
-is not used:
+For the example native instance:
 
 ```bash
-sudo -u getbible-publisher git clone https://github.com/getbible/v1_bookmark_builder.git /srv/getbible-robot-publisher/v1_bookmark_builder
-sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/v1_bookmark_builder config --local user.name "GetBible Contribution Publisher"
-sudo -u getbible-publisher git -C /srv/getbible-robot-publisher/v1_bookmark_builder config --local user.email "publisher@getbible.net"
+sudo getbible-robot contributions production tokens
+sudo getbible-robot commit production
+sudo getbible-robot contributions production status
 ```
+
+Both credentials are optional during upgrade; missing values are prompted
+without echo, and Enter skips them. Add them later with `tokens` or the existing
+configuration editor. A missing GitHub token retains accepted work for the next
+`commit`; a missing OpenAI key skips translation. A supplied but failing OpenAI
+key leaves the job pending, instead of silently publishing partial translations.
+The update itself never starts a publication.
+
+Receipts and translation results live in an adjacent private
+`contributions.sqlite3.publication.sqlite3` journal. Keep this file with the
+contribution database across backups, restores and upgrades. A failed HTTP
+request cannot roll back acceptance. Retries preserve colleague edits, reuse
+successful translations and reconcile a remotely committed but unacknowledged
+commit before creating another. **Status** distinguishes direct publication
+from historical Git publication records.
+
+See [Contribution publication](CONTRIBUTION_PUBLICATION.md) for the source
+contract, model prompt, native/container commands and recovery semantics.
 
 ### Going live
 
-Merging the pull request is a maintainer action on GitHub. The builder's own
-workflow then validates the sources, renders the API, and publishes it. The
+The direct source commit starts the builder's own push workflow, which
+validates the sources, renders the API, and publishes it. The
 robot learns of it on its own: when a contribution store is configured, a
 background task reads `index.json` from `GETBIBLE_BOOKMARKS_BASE_URL` every
 `BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS`, the first time shortly after
@@ -442,8 +431,8 @@ Alert on:
 - Mini App listener loss, authorization failures, expired-launch growth, or
   unexpected public API access without Telegram authorization;
 - contribution-store failures, pending notification retries, sustained event
-  growth near `CONTRIBUTION_EVENT_LIMIT`, accepted work whose pull request
-  has not merged, or a Bookmarks API check that keeps failing (the catalogue
+  growth near `CONTRIBUTION_EVENT_LIMIT`, accepted work whose source commit
+  has not produced a successful build, or a Bookmarks API check that keeps failing (the catalogue
   watcher logs a warning and retries at the next interval);
 - interactive session evictions or saturation;
 - `instance_memory_pressure`, memory approaching `MemoryMax`, or a child RSS

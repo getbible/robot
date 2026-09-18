@@ -201,7 +201,10 @@ install_python_environment() {
     fi
     : "$python_bin"
     mkdir -p "$app_dir/venv/bin"
-    ln -s "$SYSTEM_PYTHON" "$app_dir/venv/bin/python"
+    # A symlink outside a virtualenv loses that environment's pyvenv.cfg.
+    # Execute the selected interpreter at its original path instead.
+    printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$SYSTEM_PYTHON" >"$app_dir/venv/bin/python"
+    chmod 0755 "$app_dir/venv/bin/python"
 }
 
 id() {
@@ -442,6 +445,12 @@ create_source_fixture() {
     cp -- "$ROOT/.env.template" "$SOURCE_DIR/.env.template"
     cp -- "$ROOT/scripts/contribution_review.py" \
         "$SOURCE_DIR/scripts/contribution_review.py"
+    cp -- "$ROOT/scripts/contribution_publish.py" \
+        "$SOURCE_DIR/scripts/contribution_publish.py"
+    mkdir -p "$SOURCE_DIR/modules"
+    for module in __init__.py bible_canon.py contributions.py bookmark_sources.py contribution_publication.py; do
+        cp -- "$ROOT/modules/$module" "$SOURCE_DIR/modules/$module"
+    done
     cp -- "$ROOT/miniapp/lib/bible-canon.js" \
         "$SOURCE_DIR/miniapp/lib/bible-canon.js"
     printf 'print("fixture")\n' >"$SOURCE_DIR/bot.py"
@@ -459,6 +468,8 @@ assert_contribution_assets() {
     # shared catalogue comes from bookmarks.getbible.net at review time.
     local app_dir=$1
     assert_file "$app_dir/scripts/contribution_review.py"
+    assert_file "$app_dir/scripts/contribution_publish.py"
+    assert_file "$app_dir/modules/contribution_publication.py"
     assert_file "$app_dir/miniapp/lib/bible-canon.js"
 }
 

@@ -219,13 +219,14 @@ vocabulary, so rollback is not lossy for preferences.
 
 This release removes the bundled global topic catalogue from the robot. The
 Mini App reads the shared catalogue from `https://bookmarks.getbible.net/v1`,
-and accepted contributions reach it through a pull request on
-`getbible/v1_bookmark_builder` instead of a branch on this repository. See
+and accepted contributions reach it through one direct API commit on
+`getbible/v1_bookmark_builder`, without a contribution branch or pull request. See
 [Operations](OPERATIONS.md#contributor-enrolment-and-moderation). Expect the
 following.
 
 - **Outbound HTTPS from the host now also reaches `bookmarks.getbible.net`**,
-  and from the publisher account `api.github.com` when a token is configured.
+  and from the publishing process `api.github.com` when a token is configured
+  (plus `api.openai.com` when new-topic translation is enabled).
   Update egress firewalls and proxies before the upgrade; a blocked origin
   leaves every accepted contribution pending and is logged as a warning at
   each catalogue check.
@@ -237,26 +238,26 @@ following.
   (`https://bookmarks.getbible.net`, HTTPS only) and
   `BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS` (`21600`, range 300 to 604800).
   The manager adds both on upgrade; the defaults apply where they are absent.
-- **The publisher checkout changes repository.** `CONTRIBUTION_GIT_CHECKOUT`
-  must now be a clean clone of `getbible/v1_bookmark_builder` owned by
-  `CONTRIBUTION_GIT_USER`; a checkout of `getbible/robot` is refused. Clone
-  it, set the checkout-local commit identity, and make sure the publisher can
-  run Python 3.12 or newer. Node.js and npm are no longer used by the
-  publisher.
-- **Two new manager settings.** `CONTRIBUTION_GITHUB_TOKEN` (optional; a
-  fine-grained token limited to the builder repository with Contents and
-  Pull requests read/write lets **Publish** open the pull request itself,
-  otherwise it prints the compare URL) and `CONTRIBUTION_BUILDER_PYTHON`
-  (`python3`; the interpreter the publisher runs the builder with). The
-  manager seeds both on upgrade.
-- **The local live overlay disappears.** "Publish to this live instance" is
-  gone; **Publish** accepts approved work into the submission ledger and opens
-  the pull request, and the instance serves no `GET /api/v1/bookmarks/catalog`.
-  Work published to the live instance but never pushed remains in the ledger
-  and goes out with the next **Publish**, which exports the cumulative ledger.
-  Readers see it only after the pull request merges and the robot's catalogue
-  check observes it; their **P** markers then become **G** and each
-  contributor receives one notice.
+- **No publisher checkout is needed.** Publication uses the GitHub API, the
+  existing instance account and Robot's supported Python version. Git, SSH,
+  Node.js, npm and a separate builder interpreter are not publisher prerequisites.
+- **Optional credentials.** The manager adds `CONTRIBUTION_GITHUB_TOKEN`,
+  `CONTRIBUTION_OPENAI_API_KEY` and `CONTRIBUTION_TRANSLATION_MODEL`. It prompts
+  for missing keys without echo; Enter, EOF or a non-interactive invocation
+  continues without them. Existing values and unrelated settings survive. Legacy
+  Git publisher settings remain untouched but are ignored by the normal flow.
+  The upgrade itself never makes a catalogue commit or paid translation call.
+- **The local live overlay disappears, not the accepted data.** Previously
+  accepted topics and links stay in the same SQLite ledger. The first `commit`
+  imports that cumulative accepted work into the builder. Later publications
+  apply only unprocessed accepted events, preserving colleagues' newer edits.
+  Pending, deferred and rejected work remains in the moderation queue.
+  Use `sudo getbible-robot contributions production tokens` to add missing keys
+  later, then `sudo getbible-robot commit production` for that example instance.
+  With no OpenAI key it publishes English; otherwise it includes all new-topic
+  translations in the same commit. The instance no longer serves a catalogue
+  overlay route. Readers see changes after the builder republishes; Robot's
+  public-catalogue observation controls the **P** to **G** status transition.
 - **Contributed topics read as pending until observed.** A topic reported as
   published by a live-instance revision is reported as published again only
   once the robot has seen it in the public catalogue; the first check runs
@@ -282,6 +283,19 @@ records the last observed public catalogue, a live-at stamp on events, and the
 pull request and observed-catalogue columns of the publication state. It runs
 the next time Robot opens a v5 database, touches no contributor, event, or
 ledger row, is idempotent, and needs no operator action.
+
+The migration fixture is generated with live revision
+`6ec7081bcb4683011151437298891226539e3aa2`. Tests compare all original columns and
+rows after two migrations and verify that accepted topics/links remain
+publishable while pending work is not sent. Browser personal data is not
+modified by this publication-layer change.
+
+The new adjacent `contributions.sqlite3.publication.sqlite3` journal stores
+publication receipts and reusable translations without changing the moderation
+schema. Keep it with the original database in every backup/restore. A rollback
+of application code does not reverse a source commit already published upstream;
+use a deliberate reviewed builder edit for that. See
+[Contribution publication](CONTRIBUTION_PUBLICATION.md).
 
 ## Docker upgrade and rollback
 
