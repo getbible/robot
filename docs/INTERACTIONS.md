@@ -75,7 +75,7 @@ Search is a browser-to-Search API operation. It issues no Robot request.
 3. The browser normalizes the matches into verse descriptors and registers them with the same selection store used by reader chapters.
 4. Selecting a search result highlights the same coordinate when opened in Reader.
 5. Selecting that coordinate in Reader updates its Search representation.
-6. **Load more** requests the next page by offset; a changed corpus `sha` restarts the search from the first page, and a query that was itself a reference shows its verses with no further page.
+6. Scrolling towards the foot of the list requests the next page at `offset + returned`, and keeps doing so until the foot says all results are loaded or that the API's offset ceiling was reached; a failed page waits for an explicit **Try again**; a changed corpus `sha` restarts the search from the first page, and a query that was itself a reference shows its verses with no further page.
 
 Search results and reader verses share one deterministic direct selection identity. Identity is translation, book number, chapter, and verse.
 

@@ -121,7 +121,9 @@ A page is advanced by `offset + returned` while `has_more` is true. `sha`
 identifies the corpus the page was cut from; if a later page reports a
 different `sha`, the translation changed underneath the search and the pages
 would describe two corpora, so the search restarts from offset zero instead of
-combining them.
+combining them. The API accepts an offset of at most 10 000, so a search with
+more matches than one page past that ceiling can hold is never paged to its
+end; a client that reaches the ceiling has to say so rather than stop quietly.
 
 ### Errors
 
@@ -158,11 +160,24 @@ carries the code, the status, whether it is retryable, and the announced
 `miniapp/lib/getbible-api.js` builds the query string from the reader's filters
 (`proximity` only with `words=all`; `book` and `exclude` repeated) and
 `miniapp/lib/getbible-model.js` normalises the answer into verse descriptors
-in `matches` order. `miniapp/app.js` pages 25 matches at a time: the next page
-asks for `offset = results.length`, a changed `sha` restarts from zero, a
-reference-kind answer shows its verses with no **Load more**, the summary shows
-the exact total, and an error shows whether it is worth retrying and how long
-to wait. No session limit is involved; the robot never sees the request.
+in `matches` order. `miniapp/lib/search-pager.js` holds the paging arithmetic
+and `miniapp/app.js` drives it from scrolling: a page is 50 matches, the next
+page asks for the offset the previous one was requested at plus its
+`returned`, and the foot of the result list is watched by an
+IntersectionObserver rooted at the scrolling search view (measured on scroll
+where no observer exists), so the next page is requested as soon as the foot
+comes within one and a half screens of the visible area — by touch, wheel,
+keyboard or trackpad — and again at once when a page did not fill the screen.
+Each page is appended to the list rather than re-rendered. The summary shows
+the exact total from the first page; the foot shows how many of them are
+loaded, then **All results loaded** once `has_more` is false, or, when the
+API's offset ceiling stops the walk first, that the first 10 050 of the total
+are shown and the search should be narrowed. A changed `sha` restarts from
+zero; a reference-kind answer shows its verses with no foot. A failed page
+pauses automatic loading: the foot names the reason, honours the announced
+`Retry-After` before offering **Try again**, and only that explicit retry
+resumes loading from scrolling, so a failing service is never stormed. No
+session limit is involved; the robot never sees the request.
 
 The Content Security Policy — the `<meta>` element in `miniapp/index.html`
 and the header set by the Tornado static handler — allows exactly

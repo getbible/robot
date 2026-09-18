@@ -81,9 +81,15 @@ Tests must prove:
 - a Mini App search is one `GET` to `search.getbible.net/v2/<translation>`
   carrying `q`, the filters, `limit`, and `offset`, with credentials omitted,
   redirects refused, and the bounded problem document parsed on failure;
-- the next page requests `offset + returned` while `has_more` is true, a
-  changed `sha` restarts from the first page, and a reference-kind answer
-  offers no further page;
+- scrolling towards the foot of the list requests the next page at
+  `offset + returned` while `has_more` is true, in order and without
+  repeats, until the foot reports all results loaded or the API's offset
+  ceiling (10 000) was reached; a page that does not fill the screen is
+  followed at once; a changed `sha` restarts from the first page; and a
+  reference-kind answer offers no further page;
+- a failed page pauses scroll-driven loading, honours `Retry-After` before
+  an explicit retry, and that retry resumes loading; a browser without
+  IntersectionObserver still loads to the end;
 - stale search and pagination responses cannot overwrite newer state;
 - a Search API failure does not affect reader navigation, and `429`/`503`
   are reported as retryable with the announced `Retry-After`;
