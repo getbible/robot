@@ -1,0 +1,32 @@
+name: Publication upgrade source snapshots
+on:
+  push:
+    branches: [feat/api-bookmark-publication]
+    paths: [.github/workflows/publication-upgrade-fixtures.yml]
+permissions:
+  contents: read
+jobs:
+  snapshots:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export tracked source snapshots only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p snapshots
+          git archive HEAD > snapshots/robot-current.tar
+          git archive 6ec7081bcb4683011151437298891226539e3aa2 > snapshots/robot-live.tar
+          git clone --depth 1 https://github.com/getbible/v1_bookmark_builder.git "$RUNNER_TEMP/bookmark-builder"
+          git -C "$RUNNER_TEMP/bookmark-builder" archive HEAD > snapshots/bookmark-builder.tar
+          git -C "$RUNNER_TEMP/bookmark-builder" rev-parse HEAD > snapshots/builder-revision.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: publication-upgrade-sources
+          path: snapshots/
+          retention-days: 1
+          if-no-files-found: error
