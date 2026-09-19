@@ -1,45 +1,25 @@
-name: Rebase and prepare search regression sources
+name: Prepare rebased search regression sources
 on:
   push:
     branches: [fix/miniapp-search]
     paths: [.github/workflows/search-investigation.yml]
 permissions:
-  contents: write
-concurrency:
-  group: search-fix-rebase
-  cancel-in-progress: false
+  contents: read
 jobs:
   prepare:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 0
-          ref: fix/miniapp-search
-      - name: Rebase with an explicit remote lease
-        shell: bash
-        env:
-          EXPECTED_HEAD: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
-          git config --local user.name "$(git log -1 --format=%an)"
-          git config --local user.email "$(git log -1 --format=%ae)"
-          git fetch origin master
-          git rebase origin/master
-          git merge-base --is-ancestor origin/master HEAD
-          git push --force-with-lease="refs/heads/fix/miniapp-search:$EXPECTED_HEAD" origin HEAD:refs/heads/fix/miniapp-search
-      - name: Export source snapshots without repository credentials
+          persist-credentials: false
+      - name: Export source snapshot
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/search-sources"
           git archive --format=tar HEAD > "$RUNNER_TEMP/search-sources/robot.tar"
-          git rev-parse HEAD origin/master > "$RUNNER_TEMP/search-sources/robot-revisions.txt"
-          git clone --quiet --depth=1 --branch fix/search-reference-dispatch https://github.com/getbible/api.git "$RUNNER_TEMP/api-source"
-          git -C "$RUNNER_TEMP/api-source" archive --format=tar HEAD > "$RUNNER_TEMP/search-sources/api.tar"
-          git -C "$RUNNER_TEMP/api-source" rev-parse HEAD > "$RUNNER_TEMP/search-sources/api-revision.txt"
+          git rev-parse HEAD > "$RUNNER_TEMP/search-sources/robot-revision.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: rebased-search-sources
