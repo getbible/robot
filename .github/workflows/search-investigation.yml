@@ -1,0 +1,67 @@
+name: Search request investigation
+
+on:
+  push:
+    branches: [fix/miniapp-search]
+    paths: [.github/workflows/search-investigation.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  investigate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Capture source and public API responses
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/search-evidence"
+          git archive HEAD > "$RUNNER_TEMP/search-evidence/robot.tar"
+          git rev-parse HEAD > "$RUNNER_TEMP/search-evidence/revision.txt"
+          cat > "$RUNNER_TEMP/search-evidence/probe.mjs" <<'JS'
+          import { writeFile } from 'node:fs/promises';
+          import { normalizeSearchPayload } from './miniapp/lib/getbible-model.js';
+          const evidence = process.env.RUNNER_TEMP + '/search-evidence';
+          const criteria = 'words=all&match=whole_word&case_sensitive=false&scope=bible&diacritics=fold&sort=canonical&limit=25&offset=0';
+          const probes = [
+            ['contract', 'https://search.getbible.net/v2/openapi.json'],
+            ['man', `https://search.getbible.net/v2/kjv?q=man&${criteria}`],
+            ['grace', `https://search.getbible.net/v2/kjv?q=grace&${criteria}`],
+            ['man-substring', `https://search.getbible.net/v2/kjv?q=man&${criteria.replace('whole_word', 'substring')}`],
+            ['man-minimal', 'https://search.getbible.net/v2/kjv?q=man&limit=25'],
+            ['reference', `https://search.getbible.net/v2/kjv?q=John%203%3A16&${criteria}`],
+          ];
+          for (const [name, url] of probes) {
+            const result = { name, url, time: new Date().toISOString() };
+            try {
+              const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(60000), headers: { Accept: 'application/json', Origin: 'https://getbible.life' } });
+              result.status = response.status;
+              result.headers = Object.fromEntries(response.headers);
+              const text = await response.text();
+              await writeFile(`${evidence}/${name}.json`, text);
+              try {
+                const payload = JSON.parse(text);
+                if (name !== 'contract' && response.ok) {
+                  const normalized = normalizeSearchPayload(payload, { translation: 'kjv', query: name === 'reference' ? 'John 3:16' : name.startsWith('man') ? 'man' : 'grace' });
+                  result.normalized = { total: normalized.total, returned: normalized.returned, first: normalized.items[0] };
+                }
+              } catch (error) { result.normalization_error = String(error); }
+            } catch (error) { result.fetch_error = String(error); }
+            await writeFile(`${evidence}/${name}-response.json`, JSON.stringify(result, null, 2));
+            console.log(JSON.stringify(result));
+          }
+          JS
+          cp "$RUNNER_TEMP/search-evidence/probe.mjs" ./search-probe.mjs
+          node ./search-probe.mjs
+          rm ./search-probe.mjs
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: search-request-evidence
+          path: ${{ runner.temp }}/search-evidence/
+          retention-days: 3
