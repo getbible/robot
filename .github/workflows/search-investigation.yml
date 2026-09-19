@@ -16,52 +16,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Capture source and public API responses
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13'
+      - name: Capture upstream sources and dependencies
         shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/search-evidence"
-          git archive HEAD > "$RUNNER_TEMP/search-evidence/robot.tar"
-          git rev-parse HEAD > "$RUNNER_TEMP/search-evidence/revision.txt"
-          cat > "$RUNNER_TEMP/search-evidence/probe.mjs" <<'JS'
-          import { writeFile } from 'node:fs/promises';
-          import { normalizeSearchPayload } from './miniapp/lib/getbible-model.js';
-          const evidence = process.env.RUNNER_TEMP + '/search-evidence';
-          const criteria = 'words=all&match=whole_word&case_sensitive=false&scope=bible&diacritics=fold&sort=canonical&limit=25&offset=0';
-          const probes = [
-            ['contract', 'https://search.getbible.net/v2/openapi.json'],
-            ['man', `https://search.getbible.net/v2/kjv?q=man&${criteria}`],
-            ['grace', `https://search.getbible.net/v2/kjv?q=grace&${criteria}`],
-            ['man-substring', `https://search.getbible.net/v2/kjv?q=man&${criteria.replace('whole_word', 'substring')}`],
-            ['man-minimal', 'https://search.getbible.net/v2/kjv?q=man&limit=25'],
-            ['reference', `https://search.getbible.net/v2/kjv?q=John%203%3A16&${criteria}`],
-          ];
-          for (const [name, url] of probes) {
-            const result = { name, url, time: new Date().toISOString() };
-            try {
-              const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(60000), headers: { Accept: 'application/json', Origin: 'https://getbible.life' } });
-              result.status = response.status;
-              result.headers = Object.fromEntries(response.headers);
-              const text = await response.text();
-              await writeFile(`${evidence}/${name}.json`, text);
-              try {
-                const payload = JSON.parse(text);
-                if (name !== 'contract' && response.ok) {
-                  const normalized = normalizeSearchPayload(payload, { translation: 'kjv', query: name === 'reference' ? 'John 3:16' : name.startsWith('man') ? 'man' : 'grace' });
-                  result.normalized = { total: normalized.total, returned: normalized.returned, first: normalized.items[0] };
-                }
-              } catch (error) { result.normalization_error = String(error); }
-            } catch (error) { result.fetch_error = String(error); }
-            await writeFile(`${evidence}/${name}-response.json`, JSON.stringify(result, null, 2));
-            console.log(JSON.stringify(result));
-          }
-          JS
-          cp "$RUNNER_TEMP/search-evidence/probe.mjs" ./search-probe.mjs
-          node ./search-probe.mjs
-          rm ./search-probe.mjs
-      - name: Upload diagnostic evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+          mkdir -p "$RUNNER_TEMP/search-sources/wheels"
+          git clone --quiet --depth 1 https://github.com/getbible/api.git "$RUNNER_TEMP/api-source"
+          git -C "$RUNNER_TEMP/api-source" archive HEAD > "$RUNNER_TEMP/search-sources/api.tar"
+          git -C "$RUNNER_TEMP/api-source" rev-parse HEAD > "$RUNNER_TEMP/search-sources/api-revision.txt"
+          grep -R -n 'getbible==' "$RUNNER_TEMP/api-source/src/apps" | head -15 || true
+          python -m pip download --only-binary=:all: flask getbible jsonschema pytest requests gunicorn -d "$RUNNER_TEMP/search-sources/wheels"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: search-request-evidence
-          path: ${{ runner.temp }}/search-evidence/
+          name: search-upstream-sources
+          path: ${{ runner.temp }}/search-sources/
           retention-days: 3
