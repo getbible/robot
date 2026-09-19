@@ -412,11 +412,20 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
   }, readingHistoryStorageKey);
 
   const consoleMessages = [];
+  const expectedNotFoundMessages = [];
+  let expectedNotFoundUrl = "";
   const pageErrors = [];
   const failedRequests = [];
   page.on("console", (message) => {
     if (["error", "warning"].includes(message.type())) {
-      consoleMessages.push(`${message.type()}: ${message.text()}`);
+      // Match only the deliberate network refusal; other console errors fail.
+      if (message.type() === "error" &&
+          expectedNotFoundUrl && message.location().url === expectedNotFoundUrl &&
+          message.text() === "Failed to load resource: the server responded with a status of 404 (Not Found)") {
+        expectedNotFoundMessages.push(message.text());
+      } else {
+        consoleMessages.push(`${message.type()}: ${message.text()}`);
+      }
     }
   });
   page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -510,6 +519,17 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     searchRequests.push(url);
     const translation = url.pathname.replace(/^\/v2\//, "");
     assert.equal(route.request().headers().authorization, undefined);
+    if (url.searchParams.get("q") === "John 999:1") {
+      expectedNotFoundUrl = url.href;
+      return fulfillJson(route, {
+        type: "about:blank",
+        title: "Not Found",
+        status: 404,
+        code: "not_found",
+        detail: "The requested reference was not found.",
+        instance: url.pathname,
+      }, 404, true);
+    }
     if (!/^(?:kjv|aov)$/.test(translation) || url.searchParams.get("q") !== "text") {
       return fulfillJson(route, {
         type: "about:blank",
@@ -1716,6 +1736,31 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     document.querySelectorAll("#search-results .verse-result").length === 0 &&
     document.querySelector("#search-summary")?.hidden === true
   ));
+  // Reference failures are actionable input errors, not service outages.
+  // Preserve infinite scrolling and allow correction without reloading.
+  const requestsBeforeInvalid = searchRequests.length;
+  await page.locator("#search-query").fill("John 999:1");
+  await page.locator("#search-query").press("Enter");
+  await page.waitForFunction(() => (
+    !document.querySelector("#search-state")?.hidden &&
+    document.querySelector("#search-state")?.textContent.includes("Try different words or filters")
+  ));
+  assert.doesNotMatch(await page.locator("#search-state").innerText(), /temporarily unavailable/i);
+  assert.equal(await page.locator("#search-query").inputValue(), "John 999:1");
+  assert.equal(searchRequests.length, requestsBeforeInvalid + 1);
+  assert.equal(await page.locator("#search-more").isHidden(), true);
+  assert.equal(await page.locator("#load-more").count(), 0);
+  await page.locator("#search-query").fill("text");
+  await page.locator("#search-query").press("Enter");
+  await page.waitForFunction(() => (
+    document.querySelectorAll("#search-results .verse-result").length === 40 &&
+    document.querySelector("#search-more")?.dataset.reach === "complete"
+  ));
+  assert.equal(searchRequests.length, requestsBeforeInvalid + 2);
+  await page.locator("#clear-search").click();
+  await page.waitForFunction(() => (
+    document.querySelectorAll("#search-results .verse-result").length === 0
+  ));
   assert.equal(robotRequests.some((path) => path.startsWith("search")), false);
   // Selecting a search result is a reading-history event like selecting in
   // the reader, so the history emptied above now holds exactly that verse.
@@ -1773,6 +1818,7 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
     "browser-local bookmark edits must wait for an explicit contributor sync",
   );
   assert.equal(robotRequests.includes("contributions/sync"), false);
+  assert.equal(expectedNotFoundMessages.length, 1);
   assert.deepEqual(consoleMessages, []);
   assert.deepEqual(pageErrors, []);
   assert.deepEqual(failedRequests, []);

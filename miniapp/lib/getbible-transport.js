@@ -522,7 +522,8 @@ function encodeSearchParameters(parameters) {
  *
  * The problem document is advisory: the HTTP status decides whether the
  * request itself was wrong (400, never retried unchanged), the translation is
- * unknown (404), the public budget is spent (429, wait) or the service is
+ * unknown or a reference cannot resolve (404), the public budget is spent
+ * (429, wait) or the service is
  * temporarily unable to answer (503 and other 5xx, retry). The body's `code`
  * only refines the 404 case, and a body that cannot be read leaves the status
  * mapping intact rather than hiding the refusal behind a parse failure.
@@ -554,7 +555,15 @@ async function problemError(response, { onProgress, onIndefinite, signal }) {
   const detail = typeof problem?.detail === "string"
     ? problem.detail.trim().slice(0, 300)
     : "";
-  if (status === 400) {
+  // Match the native client: an unresolved reference is a request error,
+  // not a temporary outage. Translation/version failures remain distinct,
+  // and no 404 is retried unchanged.
+  if (
+    status === 400 ||
+    (status === 404 &&
+      problemCode !== "translation_not_found" &&
+      problemCode !== "unknown_version")
+  ) {
     return new PublicApiError(
       detail || "The search request was not accepted.",
       { code: "search_invalid", status, retryable: false, retryAfter },
