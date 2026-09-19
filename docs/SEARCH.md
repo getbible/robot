@@ -134,7 +134,8 @@ header when the service asks the caller to wait.
 | Status | Codes | Retry |
 |---:|---|---|
 | `400` | `missing_search`, `invalid_search`, `invalid_body`, `unknown_parameter`, `repeated_parameter`, `request_limit` | no; the request is wrong |
-| `404` | `translation_not_found`, `unknown_version` | no |
+| `404` | `not_found` or an unresolved reference | no; change the query |
+| `404` | `translation_not_found`, `unknown_version` | no; translation/version unavailable |
 | `429` | `rate_limited` | after `Retry-After` |
 | `503` | `busy`, `search_timeout`, `repository_unavailable`, `readiness_failed` | after `Retry-After` |
 
@@ -200,7 +201,9 @@ from the host. It is bounded on every side:
 | Failures | a search circuit separate from the reference circuit |
 
 The client validates the query and filters locally before sending. A `400`
-becomes a validation error shown to the reader; `404 translation_not_found`
+becomes a validation error shown to the reader; a reference-related `404`
+likewise asks the reader to change the query rather than reporting an outage.
+`404 translation_not_found`
 becomes an unknown-translation reply; `429`, `5xx`, and transport failures
 count against the search circuit and are reported as temporary. Nothing here
 can occupy a direct-reference permit: the executor, semaphore, and circuit are

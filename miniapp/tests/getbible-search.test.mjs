@@ -409,6 +409,17 @@ test("problem documents map to codes the page can act on", async () => {
       retryAfter: null,
       attempts: 1,
     },
+    ...["not_found", "invalid_reference", ""].map((code) => ({
+      response: () => jsonResponse(problem(404, code, "The requested reference was not found."), {
+        status: 404,
+        headers: { "Content-Type": "application/problem+json" },
+      }),
+      code: "search_invalid",
+      status: 404,
+      retryable: false,
+      retryAfter: null,
+      attempts: 1,
+    })),
     {
       response: () => jsonResponse(problem(404, "translation_not_found", "unknown translation"), {
         status: 404,
