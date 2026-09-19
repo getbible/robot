@@ -13,153 +13,125 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: fix/miniapp-search
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13'
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '22.17.1'
-      - name: Apply reviewed source patch
+      - name: Apply reviewed source changes
         shell: bash
         env:
           EXPECTED_HEAD: ${{ github.sha }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
-          cat > "$RUNNER_TEMP/search-fix.patch" <<'PATCH'
-          diff --git a/docs/SEARCH.md b/docs/SEARCH.md
-          index 4ee6dc2..e711ad0 100644
-          --- a/docs/SEARCH.md
-          +++ b/docs/SEARCH.md
-          @@ -134,7 +134,8 @@ header when the service asks the caller to wait.
-           | Status | Codes | Retry |
-           |---:|---|---|
-           | `400` | `missing_search`, `invalid_search`, `invalid_body`, `unknown_parameter`, `repeated_parameter`, `request_limit` | no; the request is wrong |
-          -| `404` | `translation_not_found`, `unknown_version` | no |
-          +| `404` | `not_found` or an unresolved reference | no; change the query |
-          +| `404` | `translation_not_found`, `unknown_version` | no; translation/version unavailable |
-           | `429` | `rate_limited` | after `Retry-After` |
-           | `503` | `busy`, `search_timeout`, `repository_unavailable`, `readiness_failed` | after `Retry-After` |
-           
-          @@ -200,7 +201,9 @@ from the host. It is bounded on every side:
-           | Failures | a search circuit separate from the reference circuit |
-           
-           The client validates the query and filters locally before sending. A `400`
-          -becomes a validation error shown to the reader; `404 translation_not_found`
-          +becomes a validation error shown to the reader; a reference-related `404`
-          +likewise asks the reader to change the query rather than reporting an outage.
-          +`404 translation_not_found`
-           becomes an unknown-translation reply; `429`, `5xx`, and transport failures
-           count against the search circuit and are reported as temporary. Nothing here
-           can occupy a direct-reference permit: the executor, semaphore, and circuit are
-          diff --git a/miniapp/lib/getbible-transport.js b/miniapp/lib/getbible-transport.js
-          index 28932f1..9a294e8 100644
-          --- a/miniapp/lib/getbible-transport.js
-          +++ b/miniapp/lib/getbible-transport.js
-          @@ -522,7 +522,8 @@ function encodeSearchParameters(parameters) {
-            *
-            * The problem document is advisory: the HTTP status decides whether the
-            * request itself was wrong (400, never retried unchanged), the translation is
-          - * unknown (404), the public budget is spent (429, wait) or the service is
-          + * unknown or a reference cannot resolve (404), the public budget is spent
-          + * (429, wait) or the service is
-            * temporarily unable to answer (503 and other 5xx, retry). The body's `code`
-            * only refines the 404 case, and a body that cannot be read leaves the status
-            * mapping intact rather than hiding the refusal behind a parse failure.
-          @@ -554,7 +555,15 @@ async function problemError(response, { onProgress, onIndefinite, signal }) {
-             const detail = typeof problem?.detail === "string"
-               ? problem.detail.trim().slice(0, 300)
-               : "";
-          -  if (status === 400) {
-          +  // Match the native client: an unresolved reference is a request error,
-          +  // not a temporary outage. Translation/version failures remain distinct,
-          +  // and no 404 is retried unchanged.
-          +  if (
-          +    status === 400 ||
-          +    (status === 404 &&
-          +      problemCode !== "translation_not_found" &&
-          +      problemCode !== "unknown_version")
-          +  ) {
-               return new PublicApiError(
-                 detail || "The search request was not accepted.",
-                 { code: "search_invalid", status, retryable: false, retryAfter },
-          diff --git a/miniapp/tests/browser/reader-navigation.test.mjs b/miniapp/tests/browser/reader-navigation.test.mjs
-          index d594972..22e1329 100644
-          --- a/miniapp/tests/browser/reader-navigation.test.mjs
-          +++ b/miniapp/tests/browser/reader-navigation.test.mjs
-          @@ -510,6 +510,16 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
-               searchRequests.push(url);
-               const translation = url.pathname.replace(/^\/v2\//, "");
-               assert.equal(route.request().headers().authorization, undefined);
-          +    if (url.searchParams.get("q") === "John 999:1") {
-          +      return fulfillJson(route, {
-          +        type: "about:blank",
-          +        title: "Not Found",
-          +        status: 404,
-          +        code: "not_found",
-          +        detail: "The requested reference was not found.",
-          +        instance: url.pathname,
-          +      }, 404, true);
-          +    }
-               if (!/^(?:kjv|aov)$/.test(translation) || url.searchParams.get("q") !== "text") {
-                 return fulfillJson(route, {
-                   type: "about:blank",
-          @@ -1716,6 +1726,32 @@ test("reader navigation uses direct GetBible API calls in a real browser", async
-               document.querySelectorAll("#search-results .verse-result").length === 0 &&
-               document.querySelector("#search-summary")?.hidden === true
-             ));
-          +  // Reference failures are actionable input errors, not service outages.
-          +  // Preserve infinite-scroll controls and prove a corrected search
-          +  // can succeed without reloading or sending Scripture through Robot.
-          +  const requestsBeforeInvalid = searchRequests.length;
-          +  await page.locator("#search-query").fill("John 999:1");
-          +  await page.locator("#search-query").press("Enter");
-          +  await page.waitForFunction(() => (
-          +    !document.querySelector("#search-state")?.hidden &&
-          +    document.querySelector("#search-state")?.textContent.includes("Try different words or filters")
-          +  ));
-          +  assert.doesNotMatch(await page.locator("#search-state").innerText(), /temporarily unavailable/i);
-          +  assert.equal(await page.locator("#search-query").inputValue(), "John 999:1");
-          +  assert.equal(searchRequests.length, requestsBeforeInvalid + 1);
-          +  assert.equal(await page.locator("#search-more").isHidden(), true);
-          +  assert.equal(await page.locator("#load-more").count(), 0);
-          +  await page.locator("#search-query").fill("text");
-          +  await page.locator("#search-query").press("Enter");
-          +  await page.waitForFunction(() => (
-          +    document.querySelectorAll("#search-results .verse-result").length === 40 &&
-          +    document.querySelector("#search-more")?.dataset.reach === "complete"
-          +  ));
-          +  assert.equal(searchRequests.length, requestsBeforeInvalid + 2);
-          +  await page.locator("#clear-search").click();
-          +  await page.waitForFunction(() => (
-          +    document.querySelectorAll("#search-results .verse-result").length === 0
-          +  ));
-             assert.equal(robotRequests.some((path) => path.startsWith("search")), false);
-             // Selecting a search result is a reading-history event like selecting in
-             // the reader, so the history emptied above now holds exactly that verse.
-          diff --git a/miniapp/tests/getbible-search.test.mjs b/miniapp/tests/getbible-search.test.mjs
-          index bd8abff..9fddd6f 100644
-          --- a/miniapp/tests/getbible-search.test.mjs
-          +++ b/miniapp/tests/getbible-search.test.mjs
-          @@ -409,6 +409,17 @@ test("problem documents map to codes the page can act on", async () => {
-                 retryAfter: null,
-                 attempts: 1,
-               },
-          +    ...["not_found", "invalid_reference", ""].map((code) => ({
-          +      response: () => jsonResponse(problem(404, code, "The requested reference was not found."), {
-          +        status: 404,
-          +        headers: { "Content-Type": "application/problem+json" },
-          +      }),
-          +      code: "search_invalid",
-          +      status: 404,
-          +      retryable: false,
-          +      retryAfter: null,
-          +      attempts: 1,
-          +    })),
-               {
-                 response: () => jsonResponse(problem(404, "translation_not_found", "unknown translation"), {
-                   status: 404,
-          PATCH
-          git apply --check "$RUNNER_TEMP/search-fix.patch"
-          git apply "$RUNNER_TEMP/search-fix.patch"
+          python - <<'PY'
+          from pathlib import Path
+          def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              assert text.count(old) == 1, (path, old)
+              p.write_text(text.replace(old, new))
+          replace('miniapp/lib/getbible-transport.js',
+              ' * unknown (404), the public budget is spent (429, wait) or the service is\n',
+              ' * unknown or a reference cannot resolve (404), the public budget is spent\n * (429, wait) or the service is\n')
+          replace('miniapp/lib/getbible-transport.js', '  if (status === 400) {\n', '''  // Match the native client: an unresolved reference is a request error,
+            // not a temporary outage. Translation/version failures remain distinct,
+            // and no 404 is retried unchanged.
+            if (
+              status === 400 ||
+              (status === 404 &&
+                problemCode !== "translation_not_found" &&
+                problemCode !== "unknown_version")
+            ) {
+          ''')
+          p = 'miniapp/tests/getbible-search.test.mjs'
+          needle = '''    {
+                response: () => jsonResponse(problem(404, "translation_not_found", "unknown translation"), {
+          '''
+          replace(p, needle, '''    ...["not_found", "invalid_reference", ""].map((code) => ({
+                response: () => jsonResponse(problem(404, code, "The requested reference was not found."), {
+                  status: 404,
+                  headers: { "Content-Type": "application/problem+json" },
+                }),
+                code: "search_invalid",
+                status: 404,
+                retryable: false,
+                retryAfter: null,
+                attempts: 1,
+              })),
+          ''' + needle)
+          p = 'miniapp/tests/browser/reader-navigation.test.mjs'
+          replace(p, '  const consoleMessages = [];\n  const pageErrors = [];', '''  const consoleMessages = [];
+            const expectedNotFoundMessages = [];
+            let expectedNotFoundUrl = "";
+            const pageErrors = [];''')
+          replace(p, '''    if (["error", "warning"].includes(message.type())) {
+                consoleMessages.push(`${message.type()}: ${message.text()}`);
+              }''', '''    if (["error", "warning"].includes(message.type())) {
+                // Match only the deliberate network refusal; other console errors fail.
+                if (message.type() === "error" &&
+                    expectedNotFoundUrl && message.location().url === expectedNotFoundUrl &&
+                    message.text() === "Failed to load resource: the server responded with a status of 404 (Not Found)") {
+                  expectedNotFoundMessages.push(message.text());
+                } else {
+                  consoleMessages.push(`${message.type()}: ${message.text()}`);
+                }
+              }''')
+          needle = '''    assert.equal(route.request().headers().authorization, undefined);
+              if (!/^(?:kjv|aov)$/.test(translation) || url.searchParams.get("q") !== "text") {'''
+          replace(p, needle, '''    assert.equal(route.request().headers().authorization, undefined);
+              if (url.searchParams.get("q") === "John 999:1") {
+                expectedNotFoundUrl = url.href;
+                return fulfillJson(route, {
+                  type: "about:blank",
+                  title: "Not Found",
+                  status: 404,
+                  code: "not_found",
+                  detail: "The requested reference was not found.",
+                  instance: url.pathname,
+                }, 404, true);
+              }
+              if (!/^(?:kjv|aov)$/.test(translation) || url.searchParams.get("q") !== "text") {''')
+          needle = '''  assert.equal(robotRequests.some((path) => path.startsWith("search")), false);
+            // Selecting a search result is a reading-history event like selecting in'''
+          replace(p, needle, '''  // Reference failures are actionable input errors, not service outages.
+            // Preserve infinite scrolling and allow correction without reloading.
+            const requestsBeforeInvalid = searchRequests.length;
+            await page.locator("#search-query").fill("John 999:1");
+            await page.locator("#search-query").press("Enter");
+            await page.waitForFunction(() => (
+              !document.querySelector("#search-state")?.hidden &&
+              document.querySelector("#search-state")?.textContent.includes("Try different words or filters")
+            ));
+            assert.doesNotMatch(await page.locator("#search-state").innerText(), /temporarily unavailable/i);
+            assert.equal(await page.locator("#search-query").inputValue(), "John 999:1");
+            assert.equal(searchRequests.length, requestsBeforeInvalid + 1);
+            assert.equal(await page.locator("#search-more").isHidden(), true);
+            assert.equal(await page.locator("#load-more").count(), 0);
+            await page.locator("#search-query").fill("text");
+            await page.locator("#search-query").press("Enter");
+            await page.waitForFunction(() => (
+              document.querySelectorAll("#search-results .verse-result").length === 40 &&
+              document.querySelector("#search-more")?.dataset.reach === "complete"
+            ));
+            assert.equal(searchRequests.length, requestsBeforeInvalid + 2);
+            await page.locator("#clear-search").click();
+            await page.waitForFunction(() => (
+              document.querySelectorAll("#search-results .verse-result").length === 0
+            ));
+          ''' + needle)
+          replace(p, '  assert.deepEqual(consoleMessages, []);\n  assert.deepEqual(pageErrors, []);',
+              '  assert.equal(expectedNotFoundMessages.length, 1);\n  assert.deepEqual(consoleMessages, []);\n  assert.deepEqual(pageErrors, []);')
+          replace('docs/SEARCH.md', '| `404` | `translation_not_found`, `unknown_version` | no |',
+              '| `404` | `not_found` or an unresolved reference | no; change the query |\n| `404` | `translation_not_found`, `unknown_version` | no; translation/version unavailable |')
+          replace('docs/SEARCH.md', 'becomes a validation error shown to the reader; `404 translation_not_found`',
+              'becomes a validation error shown to the reader; a reference-related `404`\nlikewise asks the reader to change the query rather than reporting an outage.\n`404 translation_not_found`')
+          PY
           git diff --check
+      - name: Install exact Python runtime for real-server browser tests
+        run: python -m pip install --require-hashes -r requirements.txt
       - name: Validate Mini App unit and browser suites
         working-directory: miniapp
         shell: bash
@@ -167,7 +139,7 @@ jobs:
           npm ci
           ./node_modules/.bin/playwright install --with-deps chromium
           npm run check
-          npm run test:browser
+          node --test --test-concurrency=1 tests/browser/*.test.mjs
       - name: Commit verified changes to the existing branch
         shell: bash
         run: |
