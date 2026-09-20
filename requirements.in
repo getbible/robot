@@ -7,4 +7,4 @@ python-dotenv==1.2.3
 python-telegram-bot[webhooks]==22.8
 requests==2.34.2
 # Imported directly by the same-process Telegram Mini App HTTP adapter.
-tornado==6.5.8
+tornado==6.5.10
