@@ -59,6 +59,7 @@ class PublicationStatusTests(unittest.TestCase):
         job = journal.prepare(AcceptedSnapshot.read(self.path))
         assert job is not None
         journal.finish(job, "a" * 40, "main", changed=True)
+        journal.put("translation_contract_version", 1)
         journal.close()
         before = self.journal_path.read_bytes()
         status = self.status(PublicationSettings("private-github", "private-openai"))

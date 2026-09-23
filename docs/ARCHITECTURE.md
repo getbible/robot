@@ -310,13 +310,17 @@ Acceptance runs outside the browser. A maintainer reviews applications,
 topics and verses; final acceptance saves the existing ledger and invokes the
 API publisher. `bookmark_sources` (layer 0) validates the builder's source
 contract; `contribution_publication` (layer 1) composes that contract with the
-existing durable store and bounded GitHub/OpenAI adapters. The CLI helper
-owns optional configuration and the native privilege handoff.
+existing durable store and bounded GitHub/OpenAI adapters.
+`contribution_status` (layer 1) reads acceptance and publication receipts to
+show queued work and source/build links without sending a network request.
+The CLI helper owns credential configuration and the native privilege handoff.
 
-A separate private receipt/translation journal keeps the moderation schema
-unchanged. The first publication preserves accepted legacy ledger data; later
-ones consume per-event receipts rather than replaying old operations. New-topic
-translation is optional and schema-validated. All changed topics, links and
+A separate private receipt/translation journal keeps publication recovery
+independent of moderation. Immutable event acceptance provenance in the existing
+contribution store preserves moderation order for deferred submissions.
+The first publication preserves accepted legacy ledger data; later ones consume
+per-event receipts rather than replaying old operations. Missing topic labels
+are translated and schema-validated before publication. All changed topics, links and
 locales enter one non-force commit on the builder's default branch through
 HTTPS; no local Git or contribution branch/PR is needed. The builder's push
 workflow generates the Bookmarks API. Robot's

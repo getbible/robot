@@ -29,6 +29,7 @@ For a native instance named `production`:
 ```bash
 sudo getbible-robot contributions production
 sudo getbible-robot contributions production tokens
+sudo getbible-robot contributions production inspect
 sudo getbible-robot commit production
 sudo getbible-robot contributions production status
 ```
@@ -36,22 +37,29 @@ sudo getbible-robot contributions production status
 The menu's **Accept approved changes and commit to the builder** action performs
 both operations. **Commit previously accepted contributions / retry**, or the
 `commit` command, never asks for those content decisions again. `tokens` prompts
-only for missing credentials, without echo; press Enter to skip either. To
-replace/remove a configured credential or choose another model, use the existing
-`getbible-robot config production` editor. No service restart is needed for these
-publisher-only native settings. Public API detection still runs in the bot.
+for both credentials without echo: Enter keeps the current value, a new value
+replaces it, and `-` removes it. Invalid input or interrupted entry does not save
+a partial credential update. Use `getbible-robot config production` to choose
+another translation model. No service restart is needed for publisher-only
+native settings. Public API detection still runs in the bot.
 
 For a container:
 
 ```bash
 docker exec -it getbible-robot-production /app/setup.sh contributions production
+docker exec -it getbible-robot-production /app/setup.sh contributions production tokens
+docker exec getbible-robot-production /app/setup.sh contributions production inspect
 docker exec getbible-robot-production /app/setup.sh contributions production commit
 docker exec getbible-robot-production /app/setup.sh contributions production status
 ```
 
-Set credentials in the private Compose environment and recreate the single
-container, or edit the selected instance's environment file in multi-instance
-mode. The same publisher works in both modes without Git, SSH, a builder
+The interactive `tokens` command saves a private per-instance override in the
+persistent state volume, applies to the next commit, and survives recreation.
+These overrides take precedence over Compose or mounted instance environment
+values; clearing a token explicitly overrides an environment-supplied token too.
+Alternatively, set credentials in the private Compose environment and recreate
+the single container, or edit the selected instance's environment file in
+multi-instance mode. The same publisher works in both modes without Git, SSH, a builder
 checkout or a separate publisher account. An optional privacy-safe bundle
 export is still available; it is not required for API publication.
 
@@ -60,7 +68,7 @@ export is still available; it is not required for API publication.
 | Variable | Default | Meaning |
 |---|---|---|
 | `CONTRIBUTION_GITHUB_TOKEN` | empty | Fine-grained PAT or installation token with Contents read/write on only `getbible/v1_bookmark_builder` |
-| `CONTRIBUTION_OPENAI_API_KEY` | empty | OpenAI API key; its presence enables new-topic translation |
+| `CONTRIBUTION_OPENAI_API_KEY` | empty | OpenAI API key required when accepted topics need translated labels |
 | `CONTRIBUTION_TRANSLATION_MODEL` | `gpt-5.6-sol` | Responses API model supporting strict JSON-schema output |
 
 Missing GitHub token: acceptance remains queued and no network publication or
@@ -71,11 +79,12 @@ configure the intended identity explicitly. A workflow-generated `GITHUB_TOKEN`
 is not appropriate for the Robot's credential: use a PAT or installation token
 so that the resulting push starts the builder's existing workflow.
 
-Missing OpenAI key: commit the English topic and verse links, preserving all
-locale files. Configured OpenAI key: all requested translations must validate
-before the same commit is published. An invalid, exhausted or unavailable key
-is an error, not permission to silently downgrade to English. Correct the key
-and retry, or deliberately remove it to select English-only publication.
+Missing OpenAI key: publication stops before writing an incomplete multilingual
+topic. Accepted work stays queued. All missing translations must validate before
+the same commit is published. An invalid, exhausted or unavailable key is an
+error, not permission to downgrade to English. Correct the key and retry.
+Verse-only work on topics whose translations are complete requires no OpenAI call.
+Use an OpenAI **API key**, not a ChatGPT browser/session token.
 
 The model default follows OpenAI's documented flagship at implementation time,
 not a claim that it is the best translator of every biblical term in every
@@ -117,12 +126,13 @@ English names and colours are not replaced by this bundle protocol.
 
 ## Translation
 
-Only topics absent from the fetched builder source are translated. The target
-list is discovered from existing `data/locales/*.json` files. English remains
-in `data/topics.json`; the builder generates English locale output. Adding
-verses to an existing topic makes no OpenAI request, even if it lacks some
-translations. Adding an OpenAI key later does not backfill previously published
-English-only topics; that is a separate catalogue-editing operation.
+The target list is discovered from existing `data/locales/*.json` files. English
+remains in `data/topics.json`; the builder generates English locale output.
+Only missing labels are translated: existing translations survive unchanged.
+New topics and accepted topics previously published in English only are checked
+for complete locale coverage. The first commit after upgrading also repairs
+missing translations for previously accepted topics without replaying their old
+verse operations. Verse-only work on fully translated topics makes no OpenAI request.
 
 The Responses API request contains the accepted English name, aliases, target
 locale codes/language names, and a small public terminology sample. It carries
@@ -149,7 +159,9 @@ part of the existing deployment transaction. Existing legacy Git settings are
 left in private files but ignored by the new normal publishing path.
 
 The live schema-v5 database migrates in place with the existing idempotent
-v6 migration. A synthetic fixture produced by the live revision
+v6 migration and additive acceptance-provenance table. New acceptance records
+preserve the order in which events were accepted, so a deferred change is not
+replayed in its earlier submission order. A synthetic fixture produced by the live revision
 `6ec7081bcb4683011151437298891226539e3aa2` checks every original table/column/row
 before and after two opens of the upgraded store. It then verifies that only
 accepted data, not pending work, reaches the publisher.
