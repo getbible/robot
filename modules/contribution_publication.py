@@ -49,6 +49,7 @@ MAX_HTTP_BYTES = 8 * 1024 * 1024
 MAX_EVENTS = 250_000
 TRANSLATION_BATCH_SIZE = 32
 TRANSLATION_PROMPT_VERSION = 1
+TRANSLATION_CONTRACT_VERSION = 1
 TRANSLATION_PROMPT = (
     "Translate the supplied English Bible-topic label into every requested language. "
     "Use concise, natural topic labels in each language's normal script. Preserve the "
@@ -233,11 +234,25 @@ class AcceptedSnapshot:
             ).fetchone()
             if row is None:
                 raise PublicationError("The acceptance ledger has no seed revision.")
-            rows = db.execute(
-                "SELECT id, event_type, canonical_topic_id, book, chapter, verse "
-                "FROM contribution_events WHERE state = 'applied' ORDER BY id LIMIT ?",
-                (MAX_EVENTS + 1,),
-            ).fetchall()
+            provenance = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'contribution_event_acceptance'"
+            ).fetchone()
+            if provenance:
+                rows = db.execute(
+                    "SELECT e.id, e.event_type, e.canonical_topic_id, e.book, e.chapter, "
+                    "e.verse, a.accepted_at FROM contribution_events e "
+                    "LEFT JOIN contribution_event_acceptance a ON a.event_id = e.id "
+                    "WHERE e.state = 'applied' ORDER BY COALESCE(a.accepted_at, 0), e.id LIMIT ?",
+                    (MAX_EVENTS + 1,),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT id, event_type, canonical_topic_id, book, chapter, verse, "
+                    "NULL AS accepted_at FROM contribution_events "
+                    "WHERE state = 'applied' ORDER BY id LIMIT ?",
+                    (MAX_EVENTS + 1,),
+                ).fetchall()
             if len(rows) > MAX_EVENTS:
                 raise PublicationError("The accepted event snapshot exceeds its limit.")
             bundle = normalize_catalog(decode_json(row["catalog_json"]))
@@ -344,9 +359,13 @@ class PublicationJournal:
         processed = {int(row[0]) for row in self.db.execute("SELECT id FROM published_events")}
         events = [event for event in snapshot.events if event["id"] not in processed]
         initial = not self.get("initial_import_complete", False)
-        if not initial and not events:
+        repair_translations = (
+            self.get("translation_contract_version", 0) < TRANSLATION_CONTRACT_VERSION
+        )
+        if not initial and not events and not repair_translations:
             return None
         definitions: list[dict[str, Any]]
+        dependencies: list[dict[str, Any]] = []
         operations: list[dict[str, Any]] = []
         if initial:
             definitions = list(snapshot.bundle["topics"])
@@ -355,6 +374,11 @@ class PublicationJournal:
                     {**item, "action": action} for item in snapshot.bundle["associations"][action]
                 )
         else:
+            touched = {
+                event["canonical_topic_id"]
+                for event in events
+                if event["event_type"] in {"topic_upsert", "verse_add", "verse_remove"}
+            }
             upserts = {
                 event["canonical_topic_id"]
                 for event in events
@@ -371,6 +395,11 @@ class PublicationJournal:
                 for topic in snapshot.bundle["topics"]
                 if topic["id"] in upserts and topic["id"] not in cancelled
             ]
+            dependencies = [
+                topic
+                for topic in snapshot.bundle["topics"]
+                if topic["id"] in touched - upserts - cancelled
+            ]
             for event in events:
                 if event["canonical_topic_id"] in cancelled:
                     continue
@@ -382,9 +411,25 @@ class PublicationJournal:
                             "book": event["book"],
                             "chapter": event["chapter"],
                             "verse": event["verse"],
+                            "accepted_at": event.get("accepted_at"),
                         }
                     )
-        if not definitions and not operations and not events:
+            # Submission IDs do not describe acceptance order: an older,
+            # deferred proposal can be accepted after a newer opposing one.
+            # Resolve opposing unpublished operations against the authoritative
+            # cumulative bundle, never against mutable event timestamps.
+            operations = self._resolved_operations(operations, snapshot.bundle)
+        translation_topics = sorted(
+            {topic["id"] for topic in snapshot.bundle["topics"]}
+            | {
+                event["canonical_topic_id"]
+                for event in snapshot.events
+                if event["canonical_topic_id"] is not None
+            }
+        )
+        if not definitions and not operations and not events and not (
+            repair_translations and not initial and translation_topics
+        ):
             return None
         identity = self.get("identity")
         if identity is None:
@@ -394,14 +439,55 @@ class PublicationJournal:
             "revision": snapshot.revision,
             "checksum": snapshot.checksum,
             "definitions": definitions,
+            "dependencies": dependencies,
             "operations": operations,
             "events": [event["id"] for event in events],
             "initial": initial,
+            "translation_topics": translation_topics,
             "candidate": None,
         }
         job["id"] = _digest({"instance": identity, **job})
         self.put("pending", job)
         return job
+
+    @staticmethod
+    def _resolved_operations(
+        operations: list[dict[str, Any]], bundle: Mapping[str, Any]
+    ) -> list[dict[str, Any]]:
+        def key(item: Mapping[str, Any]) -> tuple[Any, ...]:
+            return item["topic_id"], item["book"], item["chapter"], item["verse"]
+
+        desired = {
+            key(item): action
+            for action in ("add", "remove")
+            for item in bundle["associations"][action]
+        }
+        grouped: dict[tuple[Any, ...], dict[str, dict[str, Any]]] = {}
+        latest: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for operation in operations:
+            grouped.setdefault(key(operation), {})[operation["action"]] = operation
+            if operation.get("accepted_at") is not None:
+                latest[key(operation)] = operation
+        result: list[dict[str, Any]] = []
+        for point, choices in grouped.items():
+            if point in latest:
+                result.append(latest[point])
+            elif len(choices) == 1:
+                result.append(next(iter(choices.values())))
+            elif point in desired:
+                result.append(choices[desired[point]])
+            else:
+                topic, book, chapter, verse = point
+                raise PublicationError(
+                    "Opposing legacy accepted verse changes have no recorded acceptance order "
+                    f"for {topic} at {book}:{chapter}:{verse}. Inspect the accepted revisions, "
+                    "then submit and accept a fresh verse change with the intended action "
+                    "before retrying commit. No source files were committed."
+                )
+        return [
+            {key: value for key, value in item.items() if key != "accepted_at"}
+            for item in result
+        ]
 
     def finish(self, job: Mapping[str, Any], commit: str, branch: str, *, changed: bool) -> None:
         receipt = {
@@ -424,6 +510,12 @@ class PublicationJournal:
                 "INSERT OR REPLACE INTO publication_metadata "
                 "VALUES ('initial_import_complete', 'true')"
             )
+            if "translation_topics" in job:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO publication_metadata VALUES "
+                    "('translation_contract_version', ?)",
+                    (_json(TRANSLATION_CONTRACT_VERSION),),
+                )
             self.db.execute("DELETE FROM publication_metadata WHERE key IN ('pending', 'error')")
 
 
@@ -686,22 +778,28 @@ class ContributionPublisher:
             # snapshot. This also drains work accepted while credentials were
             # absent, without requiring repeated operator commit commands.
             for _ in range(25):
-                job = self.journal.prepare(AcceptedSnapshot.read(store_path))
+                try:
+                    snapshot = AcceptedSnapshot.read(store_path)
+                    job = self.journal.prepare(snapshot)
+                except (PublicationError, SourceError) as error:
+                    self.journal.put("error", str(error))
+                    raise
                 if job is None:
                     if last is None:
                         self.output("No accepted contribution changes are waiting for a commit.")
                     return last
                 if not self.settings.github_token:
-                    self.output(
+                    message = (
                         "No GitHub token: accepted contributions remain queued. "
                         "Configure CONTRIBUTION_GITHUB_TOKEN, then run commit."
                     )
-                    return last
+                    self.journal.put("error", message)
+                    raise PublicationError(message)
                 repository = GitHubSourceRepository(
                     self.github or HttpJsonClient("GitHub", self.settings.github_token)
                 )
                 try:
-                    self._publish_job(repository, job)
+                    self._publish_job(repository, job, snapshot)
                 except (PublicationError, SourceError) as error:
                     self.journal.put("error", str(error))
                     raise
@@ -711,7 +809,12 @@ class ContributionPublisher:
             )
             return last
 
-    def _publish_job(self, repository: GitHubSourceRepository, job: dict[str, Any]) -> None:
+    def _publish_job(
+        self,
+        repository: GitHubSourceRepository,
+        job: dict[str, Any],
+        snapshot: AcceptedSnapshot,
+    ) -> None:
         branch = repository.branch()
         if job.get("branch") not in {None, branch}:
             raise PublicationError("The builder default branch changed during publication.")
@@ -721,29 +824,61 @@ class ContributionPublisher:
             candidate = job.get("candidate")
             if candidate and repository.contains(candidate, head):
                 self.journal.finish(job, candidate, branch, changed=True)
-                self.output(f"Confirmed committed contribution: {REPOSITORY}@{candidate}.")
+                self.output(
+                    "Confirmed committed contribution: "
+                    f"https://github.com/{REPOSITORY}/commit/{candidate}"
+                )
                 return
+            if "translation_topics" not in job:
+                # Older releases froze operations in submission order and
+                # allowed English-only commits. First recover an acknowledged
+                # remote candidate above; otherwise rebuild uncommitted work
+                # using acceptance provenance and the current complete ledger.
+                self.journal.put("pending", None)
+                refreshed = self.journal.prepare(snapshot)
+                if refreshed is None:
+                    return
+                job = refreshed
+                job["branch"] = branch
+                continue
             tree, catalogue = repository.sources(head)
-            new_topics = catalogue.apply(job["definitions"], job["operations"])
-            if new_topics and self.settings.openai_key and catalogue.locales:
+            definitions = [
+                *job["definitions"],
+                *[
+                    topic
+                    for topic in job.get("dependencies", [])
+                    if topic["id"] not in catalogue.topics
+                ],
+            ]
+            catalogue.apply(definitions, job["operations"])
+            topic_ids = set(job.get("translation_topics", [])) | {
+                topic["id"] for topic in job["definitions"]
+            }
+            required = {
+                topic_id: catalogue.missing_translations(topic_id)
+                for topic_id in sorted(topic_ids & catalogue.topics.keys())
+            }
+            required = {topic_id: locales for topic_id, locales in required.items() if locales}
+            if required and not self.settings.openai_key:
+                raise PublicationError(
+                    "OpenAI translations are required before this contribution can be committed. "
+                    "Configure CONTRIBUTION_OPENAI_API_KEY, then run commit again; "
+                    "accepted work remains queued and no source files were committed."
+                )
+            if required:
                 translator = TopicTranslator(
                     self.openai or HttpJsonClient("OpenAI", self.settings.openai_key, timeout=90),
                     self.journal,
                     self.settings.model,
                 )
-                for topic in new_topics:
+                for topic_id, locales in required.items():
+                    topic = catalogue.topics[topic_id]
                     self.output(
-                        f"Translating new topic {topic['id']} "
-                        f"into {len(catalogue.locales)} locales."
+                        f"Translating topic {topic_id} into {len(locales)} missing locales."
                     )
                     catalogue.add_translations(
-                        topic["id"], translator.translate(topic, catalogue.locales)
+                        topic_id, translator.translate(topic, locales)
                     )
-            elif new_topics and not self.settings.openai_key:
-                self.output(
-                    "No OpenAI key: publishing new topics in English; "
-                    "existing locales are preserved."
-                )
             changes = catalogue.changes()
             if not changes:
                 self.journal.finish(job, head, branch, changed=False)
@@ -766,7 +901,11 @@ class ContributionPublisher:
                     continue
                 raise
             self.journal.finish(job, candidate, branch, changed=True)
-            self.output(f"Committed {candidate}. The builder workflow now owns API publication.")
+            self.output(f"Committed https://github.com/{REPOSITORY}/commit/{candidate}")
+            self.output(
+                "The builder workflow now owns API publication: "
+                f"https://github.com/{REPOSITORY}/actions/workflows/build.yml"
+            )
             return
         raise PublicationError(
             "The builder branch kept changing; retry this saved publication later."
