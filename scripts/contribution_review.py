@@ -5,14 +5,15 @@ The public Bookmarks API (``bookmarks.getbible.net``) is the single source of
 truth for the shared topic catalogue.  This tool never serves or overlays a
 copy of it: ``fetch-catalog`` saves a verified ``catalog.json`` for the review
 commands, reviewed changes are *accepted* into the instance's submission
-ledger, and ``publish-repository`` applies the accepted bundle to a checkout
-of ``getbible/v1_bookmark_builder``, pushes a branch and opens a pull request.
-Once upstream merges and publishes, the robot observes the new catalogue
+ledger. The normal setup manager then calls ``contribution_publish.py`` to
+commit validated sources directly to ``getbible/v1_bookmark_builder``.
+The retained legacy ``publish-repository`` command uses a checkout and pull
+request. Once the builder publishes, the robot observes the new catalogue
 version and only then tells contributors their changes are live.
 
 The interactive review commands run as the isolated instance service account.
-Repository publication is intentionally separate and must run as a dedicated,
-non-root Git publisher account.  Telegram identities never enter an export,
+Legacy Git publication requires a dedicated non-root publisher account; the
+normal HTTPS publisher uses the instance account. Telegram identities never enter an export,
 commit, pull request, or Git command argument.
 """
 
@@ -2412,9 +2413,9 @@ def accept_contributions(
 ) -> object | None:
     """Record the approved changes as the next accepted submission-ledger revision.
 
-    Acceptance does not publish anything: the revision is what
-    ``publish-repository`` later exports, applies to the builder checkout and
-    submits upstream as a pull request.  Returns the new revision record, or
+    Acceptance does not publish anything: the setup manager hands the saved
+    revision to the direct HTTPS publisher after this returns.
+    Returns the new revision record, or
     ``None`` when nothing is waiting.  Raises :class:`AcceptanceCancelled`
     when the operator declines.
     """

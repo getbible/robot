@@ -11,6 +11,7 @@ from typing import Any
 from .bookmark_sources import decode_json
 from .contribution_publication import (
     REPOSITORY,
+    TRANSLATION_CONTRACT_VERSION,
     AcceptedSnapshot,
     PublicationSettings,
     _owned_regular,
@@ -57,8 +58,11 @@ def describe_publication(
     )
     translation_check = bool(
         metadata.get("initial_import_complete")
-        and not metadata.get("translation_contract_version")
-        and snapshot.bundle["topics"]
+        and metadata.get("translation_contract_version", 0) < TRANSLATION_CONTRACT_VERSION
+        and (
+            snapshot.bundle["topics"]
+            or any(event["canonical_topic_id"] is not None for event in snapshot.events)
+        )
     )
     waiting = bool(pending or unreceipted or initial_work or translation_check)
     output("Direct API publication: " + ("pending" if waiting else "no queued commit"))

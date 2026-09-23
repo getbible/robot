@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from modules.contribution_publication import (
     AcceptedSnapshot,
@@ -80,3 +81,26 @@ class PublicationStatusTests(unittest.TestCase):
         self.assertIn("last attempt failed", status)
         self.assertIn("resumes saved work", status)
         self.assertNotIn("untrusted-private-provider-payload", status)
+
+    def test_upgrade_translation_check_includes_topics_from_receipted_history(self) -> None:
+        self.accept()
+        original = AcceptedSnapshot.read(self.path)
+        journal = PublicationJournal(self.journal_path)
+        job = journal.prepare(original)
+        assert job is not None
+        journal.finish(job, "b" * 40, "main", changed=True)
+        journal.put("translation_contract_version", 0)
+        with journal.db:
+            journal.db.execute("INSERT INTO published_events VALUES (1)")
+        journal.close()
+        rebased = AcceptedSnapshot(
+            original.revision + 1,
+            original.checksum,
+            {"schema_version": 1, "topics": [], "associations": {"add": [], "remove": []}},
+            ({"id": 1, "canonical_topic_id": "hope"},),
+        )
+        with patch("modules.contribution_status.AcceptedSnapshot.read", return_value=rebased):
+            status = self.status()
+        self.assertIn("Direct API publication: pending", status)
+        self.assertIn("without a builder receipt: 0", status)
+        self.assertIn("missing-translation check", status)

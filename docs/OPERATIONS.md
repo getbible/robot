@@ -195,8 +195,11 @@ The native menu has five stages. Use them in order:
 5. **Accept and commit** — save the approved changes in the submission ledger,
    then update the builder sources with one atomic commit using its API.
 
-The menu also offers **Commit previously accepted contributions / retry** and
-**Add missing GitHub / OpenAI credentials**. These do not repeat moderation.
+The menu also offers **Commit previously accepted contributions / retry**,
+**Add or replace GitHub / OpenAI credentials**, and **Inspect submitted changes
+and accepted revisions**. These do not repeat moderation. The `inspect` command
+shows accepted contents and a paginated history, including work no longer in the
+pending review queue; `inspect --revision NUMBER` opens a historical revision.
 
 Before stages 3, 4, and 5 the manager downloads the current catalogue from
 the Bookmarks API (`fetch-catalog`, verified against `checksums.json`) into
@@ -254,29 +257,32 @@ Acceptance is durable before publication begins. The publisher commits only
 accepted topics, additions and removals to `getbible/v1_bookmark_builder`'s
 current default branch (`main` or `master`) through HTTPS. No contribution
 branch, pull request, local Git clone, SSH credential or dedicated publisher
-account is needed. Topic definitions, sorted links and optional translations
+account is needed. Topic definitions, sorted links and all missing translations
 are validated together and committed together. Only `data/topics.json`,
 `data/links/<topic>.json` and `data/locales/<locale>.json` can change.
 
 Configure a repository-scoped `CONTRIBUTION_GITHUB_TOKEN` with Contents
-read/write and permission under its branch rules. Optionally configure
-`CONTRIBUTION_OPENAI_API_KEY` for new-topic translations; no key means English
-only. `CONTRIBUTION_TRANSLATION_MODEL` selects the structured-output model.
-Existing topic translations are never regenerated for verse-only changes.
+read/write and permission under its branch rules. Configure
+`CONTRIBUTION_OPENAI_API_KEY` for missing topic translations; no key keeps that
+work queued. `CONTRIBUTION_TRANSLATION_MODEL` selects the structured-output model.
+Existing topic translations are preserved, and previously accepted English-only
+topics are checked for missing labels after upgrade.
 
 For the example native instance:
 
 ```bash
 sudo getbible-robot contributions production tokens
+sudo getbible-robot contributions production inspect
 sudo getbible-robot commit production
 sudo getbible-robot contributions production status
 ```
 
 Both credentials are optional during upgrade; missing values are prompted
 without echo, and Enter skips them. Add them later with `tokens` or the existing
-configuration editor. A missing GitHub token retains accepted work for the next
-`commit`; a missing OpenAI key skips translation. A supplied but failing OpenAI
-key leaves the job pending, instead of silently publishing partial translations.
+configuration editor. Explicit `tokens` entry can replace existing keys: Enter
+keeps the value and `-` clears it. A missing GitHub token retains accepted work
+for the next `commit`; a missing or failing OpenAI key leaves work requiring
+translations pending. Publication failures return a nonzero exit status.
 The update itself never starts a publication.
 
 Receipts and translation results live in an adjacent private

@@ -271,19 +271,31 @@ remains read-only; only the instance data volume and bounded `/tmp` tmpfs are
 writable.
 
 The contribution submenu supports status, applications, topic/verse review,
-acceptance, and direct API publication. Interactive moderation still requires a
-terminal; `status`, `export` and `commit` also work non-interactively:
+acceptance, revision inspection, credential setup, and direct API publication.
+Interactive moderation and token entry require a terminal; `status`, `inspect`,
+`export` and `commit` also work non-interactively:
 
 ```bash
+docker exec -it getbible-robot-production /app/setup.sh contributions production tokens
+docker exec getbible-robot-production /app/setup.sh contributions production inspect
 docker exec getbible-robot-production /app/setup.sh contributions production commit
+docker exec getbible-robot-production /app/setup.sh contributions production status
 ```
 
-Set optional `CONTRIBUTION_GITHUB_TOKEN`, `CONTRIBUTION_OPENAI_API_KEY` and
+The hidden `tokens` prompts add or replace credentials; Enter keeps a value and
+`-` clears it. They save a private file at
+`/data/<instance>/state/contribution-credentials.env`, which survives recreation
+and overrides credentials from Compose or the selected instance's environment.
+No restart is needed. The mounted configuration remains unchanged.
+
+Alternatively, set `CONTRIBUTION_GITHUB_TOKEN`, `CONTRIBUTION_OPENAI_API_KEY` and
 `CONTRIBUTION_TRANSLATION_MODEL` in the private Compose environment. Recreate a
 single-instance container to apply environment changes; multi-instance mode
 reads only the selected instance's file for publication. Missing keys never
 prevent startup or discard accepted work. No GitHub key retains the acceptance
-for later; no OpenAI key publishes English without changing locale files.
+for later; no OpenAI key retains work requiring translated topic labels until
+the key is configured. Failures return a nonzero exit status. Existing
+translations are preserved when missing labels are filled.
 
 The image needs no Git, SSH key, checkout or host publisher account. The same
 publisher used by native installations updates the builder's source files
