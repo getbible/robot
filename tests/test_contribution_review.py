@@ -38,6 +38,7 @@ from scripts.contribution_review import (
     compare_url_for,
     export_current_catalog,
     fetch_catalog,
+    inspect_contributions,
     main,
     parse_porcelain_paths,
     print_status,
@@ -3252,6 +3253,73 @@ class AcceptanceTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.store.close()
         self.directory.cleanup()
+
+    def test_inspection_keeps_accepted_content_visible_and_can_open_an_older_revision(self) -> None:
+        accepted = accept_contributions(
+            self.store,
+            actor="test-admin",
+            catalog_file=CATALOG,
+            input_fn=lambda _prompt: "y",
+            output=io.StringIO(),
+        )
+        assert accepted is not None
+        self.store.publish_catalog(ContributionBundle.empty().as_dict(), actor="second-admin")
+        before = self.store.publication_state()
+        output = io.StringIO()
+        inspect_contributions(self.store, revision=accepted.revision, output=output)
+        text = output.getvalue()
+        self.assertLess(text.index("Revision 2 |"), text.index("Revision 1 |"))
+        self.assertIn("Accepted revision 1 contents (cumulative)", text)
+        self.assertIn("TOPIC review-topic-1: Review Topic 1 (#123456)", text)
+        self.assertIn("ADD review-topic-1: book 1, 1:1", text)
+        self.assertIn("No remaining submissions in this page", text)
+        self.assertEqual(self.store.publication_state(), before)
+        self.assertEqual(self.store.current_catalog().revision, 2)
+        with self.assertRaisesRegex(ReviewError, "revision 999 was not found"):
+            inspect_contributions(self.store, revision=999, output=io.StringIO())
+
+    def test_inspection_shows_pending_and_approved_changes_without_an_api_call(self) -> None:
+        self.store.record_events(
+            42, [_verse_event("verse.inspect", "local.topic.1", verse=17)]
+        )
+        output = io.StringIO()
+        inspect_contributions(self.store, output=output)
+        text = output.getvalue()
+        self.assertIn("No accepted revision yet", text)
+        self.assertIn("[approved] topic_upsert review-topic-1: Review Topic 1", text)
+        self.assertIn("[approved] verse_add review-topic-1: book 1, 1:1", text)
+        self.assertIn("[pending] verse_add review-topic-1: book 1, 1:17", text)
+
+    def test_status_distinguishes_topic_events_from_verse_events(self) -> None:
+        for event in self.store.list_events():
+            self.store.decide_event(event.id, "deferred", actor="test-admin")
+        output = io.StringIO()
+        print_status(self.store, output=output)
+        self.assertIn("Topic changes awaiting action: 1", output.getvalue())
+        self.assertIn("Verse changes awaiting action: 1", output.getvalue())
+        self.assertIn("Approved changes awaiting acceptance: 0", output.getvalue())
+
+    def test_inspection_sanitizes_untrusted_names_and_pages_event_history(self) -> None:
+        events = [
+            SimpleNamespace(
+                id=number,
+                state="pending",
+                event_type="topic_upsert",
+                canonical_topic_id=None,
+                local_topic_id="local.topic",
+                topic_name="Bad\x1b[31m Name\nInjected heading",
+            )
+            for number in range(1, 102)
+        ]
+        output = io.StringIO()
+        with patch.object(self.store, "list_events", return_value=events) as listing:
+            inspect_contributions(self.store, after_event_id=12, output=output)
+        self.assertEqual(listing.call_args.kwargs["after_id"], 12)
+        text = output.getvalue()
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("\nInjected heading", text)
+        self.assertIn("inspect --after-event-id 100", text)
+        self.assertNotIn("Event 101", text)
 
     def test_accept_prompts_with_ledger_wording_and_records_the_revision(self) -> None:
         output = io.StringIO()

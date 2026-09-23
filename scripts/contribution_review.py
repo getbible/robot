@@ -263,6 +263,12 @@ class StoreProtocol(Protocol):
 
     def current_catalog(self) -> object | None: ...
 
+    def catalog_revision(self, revision: int) -> object | None: ...
+
+    def list_catalog_revisions(
+        self, *, limit: int = 20, before_revision: int | None = None
+    ) -> Sequence[object]: ...
+
     def published_topic_ids(self) -> Sequence[str]: ...
 
     def publication_state(self) -> Mapping[str, object]: ...
@@ -1340,6 +1346,15 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--store", type=Path, required=True)
         command.add_argument("--actor", required=True)
 
+    inspect_command = subparsers.add_parser(
+        "inspect", help="inspect submitted changes and accepted revision contents"
+    )
+    inspect_command.add_argument("--store", type=Path, required=True)
+    inspect_command.add_argument("--actor", required=True)
+    inspect_command.add_argument("--revision", type=int, help="accepted revision to inspect")
+    inspect_command.add_argument("--before-revision", type=int, help="page older revisions")
+    inspect_command.add_argument("--after-event-id", type=int, default=0, help="page submissions")
+
     for name in ("topics", "verses", "accept"):
         command = subparsers.add_parser(name)
         command.add_argument("--store", type=Path, required=True)
@@ -1455,6 +1470,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif arguments.command == "status":
             print_status(store)
+        elif arguments.command == "inspect":
+            inspect_contributions(
+                store,
+                revision=arguments.revision,
+                before_revision=arguments.before_revision,
+                after_event_id=arguments.after_event_id,
+            )
         elif arguments.command == "accept":
             accept_contributions(
                 store,
@@ -2207,11 +2229,23 @@ def print_status(store: StoreProtocol, *, output: TextIO = sys.stdout) -> None:
     applications = store.list_applications(states={"pending", "deferred"}, limit=10_000)
     topics = store.list_source_topics(states={"pending", "deferred"}, limit=10_000)
     events = _all_events(store, states={"pending", "deferred", "approved"})
+    event_payloads = [_record_mapping(event) for event in events]
     approved = sum(
         1
-        for event in events
-        if str(_record_mapping(event).get("state") or _record_mapping(event).get("status"))
-        == "approved"
+        for event in event_payloads
+        if str(event.get("state") or event.get("status")) == "approved"
+    )
+    pending_verses = sum(
+        1
+        for event in event_payloads
+        if str(event.get("state") or event.get("status")) in {"pending", "deferred"}
+        and str(event.get("event_type") or event.get("type")) in {"verse_add", "verse_remove"}
+    )
+    pending_topics = sum(
+        1
+        for event in event_payloads
+        if str(event.get("state") or event.get("status")) in {"pending", "deferred"}
+        and str(event.get("event_type") or event.get("type")) in {"topic_upsert", "topic_delete"}
     )
     current_record = store.current_catalog()
     current = _catalog_payload(current_record)
@@ -2219,12 +2253,26 @@ def print_status(store: StoreProtocol, *, output: TextIO = sys.stdout) -> None:
     output.write("Contribution review status\n")
     output.write(f"  Applications awaiting action: {len(applications)}\n")
     output.write(f"  Topics awaiting resolution: {len(topics)}\n")
-    output.write(f"  Verse changes awaiting action: {len(events) - approved}\n")
+    output.write(f"  Topic changes awaiting action: {pending_topics}\n")
+    output.write(f"  Verse changes awaiting action: {pending_verses}\n")
     output.write(f"  Approved changes awaiting acceptance: {approved}\n")
     output.write(f"  Accepted ledger revision: {revision or 'none'}\n")
     if current is not None:
         bundle = ContributionBundle.validated(current)
         output.write(f"  Accepted ledger checksum: {_catalog_checksum(current_record, bundle)}\n")
+        output.write(
+            f"  Accepted contents: {len(bundle.topics)} topics, "
+            f"{len(bundle.additions)} bookmark additions, {len(bundle.removals)} removals\n"
+        )
+    output.write("  Inspect submissions and accepted revisions: choose Inspect, or run inspect.\n")
+    if topics or pending_topics:
+        output.write("  Next review step: resolve topics, then review verse changes.\n")
+    elif pending_verses:
+        output.write("  Next review step: review verse additions and removals.\n")
+    elif approved:
+        output.write("  Next review step: accept the approved changes before committing.\n")
+    elif revision:
+        output.write("  Next step: check builder publication status below before committing.\n")
     repository = _record_mapping(store.publication_state())
     repo_state = sanitize_terminal(repository.get("repo_state") or "not started")
     repo_revision = repository.get("repo_revision")
@@ -2251,6 +2299,107 @@ def print_status(store: StoreProtocol, *, output: TextIO = sys.stdout) -> None:
             output.write(f"  Shared API catalogue checked: {_format_timestamp(api_checked_at)}\n")
     else:
         output.write("  Shared API catalogue version: not observed yet\n")
+
+
+def inspect_contributions(
+    store: StoreProtocol,
+    *,
+    revision: int | None = None,
+    before_revision: int | None = None,
+    after_event_id: int = 0,
+    output: TextIO = sys.stdout,
+) -> None:
+    """Show immutable accepted contents and the queue without API access or writes."""
+    if revision is not None:
+        revision = _bounded_integer(revision, "revision", 1, 2**63 - 1)
+    if before_revision is not None:
+        before_revision = _bounded_integer(before_revision, "before revision", 1, 2**63 - 1)
+    after_event_id = _bounded_integer(after_event_id, "after event id", 0, 2**31 - 1)
+    selected = store.current_catalog() if revision is None else store.catalog_revision(revision)
+    if selected is None:
+        raise ReviewError(
+            f"Accepted revision {revision} was not found; run inspect to list revisions."
+        )
+    revisions = list(store.list_catalog_revisions(limit=21, before_revision=before_revision))
+    output.write("Accepted revision history (newest first)\n")
+    output.write(
+        "  Ledger revisions record acceptance on this server; "
+        "builder commits and API catalogue versions have separate publication status.\n"
+    )
+    if not revisions:
+        output.write("  No accepted revisions in this page.\n")
+    for record in revisions[:20]:
+        payload = _record_mapping(record)
+        bundle = ContributionBundle.validated(_catalog_payload(record))
+        output.write(
+            f"  Revision {_catalog_revision(record)} | "
+            f"{_format_timestamp(payload.get('created_at'))} | "
+            f"{len(bundle.topics)} topics, {len(bundle.additions)} additions, "
+            f"{len(bundle.removals)} removals | "
+            f"actor {sanitize_terminal(payload.get('actor'))}\n"
+        )
+    if len(revisions) > 20:
+        output.write(
+            f"  Older revisions: inspect --before-revision {_catalog_revision(revisions[19])}\n"
+        )
+    output.write("  Open an older revision: inspect --revision NUMBER\n")
+
+    selected_revision = _catalog_revision(selected)
+    if selected_revision:
+        bundle = ContributionBundle.validated(_catalog_payload(selected))
+        output.write(f"\nAccepted revision {selected_revision} contents (cumulative)\n")
+        output.write(f"  Checksum: {_catalog_checksum(selected, bundle)}\n")
+        for topic in bundle.topics:
+            aliases = ", ".join(sanitize_terminal(alias) for alias in topic.aliases) or "none"
+            output.write(
+                f"  TOPIC {topic.id}: {sanitize_terminal(topic.name)} "
+                f"({topic.color}); aliases: {aliases}\n"
+            )
+        for action, associations in (("ADD", bundle.additions), ("REMOVE", bundle.removals)):
+            for association in associations:
+                output.write(
+                    f"  {action} {association.topic_id}: "
+                    f"book {association.book}, {association.chapter}:{association.verse}\n"
+                )
+        if not bundle.topics and not bundle.additions and not bundle.removals:
+            output.write("  Empty accepted bundle.\n")
+    else:
+        output.write("\nNo accepted revision yet; review topics and verses, then accept changes.\n")
+
+    events = list(
+        store.list_events(
+            states={"pending", "deferred", "approved", "rejected"},
+            limit=101,
+            after_id=after_event_id,
+        )
+    )
+    output.write("\nSubmitted changes not in an accepted revision (including rejected changes)\n")
+    if not events:
+        output.write("  No remaining submissions in this page.\n")
+    for event in events[:100]:
+        payload = _record_mapping(event)
+        event_type = str(payload.get("event_type") or payload.get("type") or "unknown")
+        state = sanitize_terminal(payload.get("state") or payload.get("status"))
+        topic = sanitize_terminal(
+            payload.get("canonical_topic_id") or payload.get("local_topic_id")
+        )
+        detail = sanitize_terminal(payload.get("topic_name") or "")
+        if event_type in {"verse_add", "verse_remove"}:
+            book, chapter, verse = _event_coordinate(payload)
+            detail = f"book {book}, {chapter}:{verse}"
+        output.write(
+            f"  Event {_event_id(payload)} [{state}] {sanitize_terminal(event_type)} "
+            f"{topic}: {detail}\n"
+        )
+    if len(events) > 100:
+        output.write(
+            "  More submissions: inspect --after-event-id "
+            f"{_event_id(_record_mapping(events[99]))}\n"
+        )
+    output.write(
+        "\nPending/deferred changes need review; approved changes need acceptance. "
+        "Use publication status to check whether an accepted revision reached GitHub.\n"
+    )
 
 
 def accept_contributions(

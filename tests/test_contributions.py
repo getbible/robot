@@ -314,6 +314,83 @@ class ContributionStoreTestCase(unittest.TestCase):
         assert application is not None
         self.assertEqual(application.state, "approved")
 
+    def test_accepted_revision_history_is_paged_and_does_not_mutate_the_ledger(self) -> None:
+        first = self.store.publish_catalog(_catalog(), actor="first")
+        second = self.store.publish_catalog(_empty_catalog(), actor="second")
+        third = self.store.publish_catalog(_catalog(), actor="third")
+        self.assertEqual(
+            [record.revision for record in self.store.list_catalog_revisions(limit=2)],
+            [third.revision, second.revision],
+        )
+        self.assertEqual(
+            self.store.list_catalog_revisions(before_revision=second.revision), (first,)
+        )
+        self.assertEqual(self.store.catalog_revision(first.revision), first)
+        self.assertIsNone(self.store.catalog_revision(999))
+        self.assertEqual(self.store.current_catalog(), third)
+        for invalid in (True, -1, "1"):
+            with self.subTest(invalid=invalid), self.assertRaises(ContributionError):
+                self.store.catalog_revision(invalid)  # type: ignore[arg-type]
+        with self.assertRaises(ContributionError):
+            self.store.list_catalog_revisions(limit=101)
+
+    def test_acceptance_provenance_survives_retries_and_orders_deferred_events(self) -> None:
+        self.approve()
+        recorded = self.store.record_events(
+            42,
+            [
+                _topic_event(),
+                _verse_event("older-remove", operation="verse_remove"),
+                _verse_event("newer-add"),
+            ],
+        )
+        older = recorded.event_ids["older-remove"]
+        newer = recorded.event_ids["newer-add"]
+        self.store.decide_event(older, "deferred", actor="admin")
+        self.store.decide_event(newer, "approved", canonical_topic_id="grace", actor="admin")
+        first = self.store.publish_approved_events_atomically(_catalog(), [newer], actor="admin")
+        self.store.decide_event(older, "approved", canonical_topic_id="grace", actor="admin")
+        second = self.store.publish_approved_events_atomically(
+            _empty_catalog(), [older], actor="admin"
+        )
+        with sqlite3.connect(self.path) as connection:
+            history = connection.execute(
+                "SELECT event_id, accepted_at, revision FROM contribution_event_acceptance "
+                "ORDER BY accepted_at, event_id"
+            ).fetchall()
+        self.assertEqual([row[0] for row in history], [newer, older])
+        self.assertEqual([row[2] for row in history], [first.revision, second.revision])
+        self.assertLess(history[0][1], history[1][1])
+        self.store.record_events(42, [_verse_event("newer-add")])
+        self.store.publish_approved_events_atomically(_empty_catalog(), [older], actor="admin")
+        self.store.close()
+        self.store = ContributionStore(path=str(self.path))
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT event_id, accepted_at, revision FROM contribution_event_acceptance "
+                    "ORDER BY accepted_at, event_id"
+                ).fetchall(),
+                history,
+            )
+
+    def test_existing_store_adds_provenance_without_inventing_legacy_order(self) -> None:
+        self.approve()
+        recorded = self.store.record_events(42, [_topic_event()])
+        event_id = next(iter(recorded.event_ids.values()))
+        self.store.decide_event(event_id, "approved", canonical_topic_id="grace", actor="admin")
+        first = self.store.publish_approved_events_atomically(_catalog(), [event_id], actor="admin")
+        self.store.close()
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("DROP TABLE contribution_event_acceptance")
+        self.store = ContributionStore(path=str(self.path))
+        self.assertEqual(self.store.current_catalog(), first)
+        self.assertEqual(self.store.list_events()[0].state, "applied")
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(
+                connection.execute("SELECT * FROM contribution_event_acceptance").fetchall(), []
+            )
+
     def test_v1_catalog_schema_migrates_without_losing_revisions(self) -> None:
         first = self.store.publish_catalog(_catalog(), actor="admin")
         self.store.close()
