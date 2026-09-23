@@ -134,6 +134,21 @@ class ContributionCredentialTestCase(unittest.TestCase):
         with self.assertRaises(PublicationError):
             credential_overrides(alias / "credentials.env")
 
+    def test_new_container_tokens_do_not_pin_the_translation_model(self) -> None:
+        target = self.root / "credentials.env"
+        with redirect_stdout(io.StringIO()):
+            configure(
+                target,
+                prompt=Mock(side_effect=["replacement-github", "replacement-openai"]),
+                interactive=True,
+                replace=True,
+                create=True,
+            )
+        self.assertEqual(
+            credential_overrides(target),
+            {KEYS[0]: "replacement-github", KEYS[1]: "replacement-openai"},
+        )
+
     def test_commit_merges_private_overrides_without_inheriting_other_instance_tokens(self) -> None:
         store = self.root / "contributions.sqlite3"
         ContributionStore(path=str(store)).close()
