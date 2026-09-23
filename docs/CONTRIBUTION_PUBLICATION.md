@@ -1,5 +1,21 @@
 # Direct contribution publication
 
+## Follow a contribution through the pipeline
+
+There are four distinct milestones. A successful Mini App sync stores the
+contribution on the Robot server; it does not publish it to GitHub. A maintainer
+reviews those stored events and accepts the intended topic and verse changes.
+Publication then commits the accepted source changes to
+`getbible/v1_bookmark_builder`. Finally, that repository's build updates the
+public Bookmarks API. The Robot detects the public change before notifying the
+contributor that it is live.
+
+The builder repository is deliberately fixed in the publisher. Its current
+default branch is discovered from GitHub, and the publisher only permits
+`main` or `master`. The source files are `data/topics.json`,
+`data/links/<topic-id>.json`, and `data/locales/<locale>.json`; the generated API
+repository is not a publication destination.
+
 The contributor submits once. The existing private contribution database keeps
 applications, topic mappings, events, decisions, notifications and accepted
 ledger revisions. Final maintainer acceptance saves that work first, then
