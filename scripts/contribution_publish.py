@@ -21,7 +21,6 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +36,7 @@ from modules.contribution_publication import (  # noqa: E402
     PublicationJournal,
     PublicationSettings,
 )
+from modules.contribution_status import describe_publication  # noqa: E402
 from modules.contributions import ContributionStore  # noqa: E402
 
 KEYS = (
@@ -66,12 +66,21 @@ def read_configuration(path: Path) -> dict[str, str]:
     return values
 
 
-def write_configuration(path: Path, changes: Mapping[str, str]) -> None:
+def write_configuration(
+    path: Path, changes: Mapping[str, str], *, create: bool = False
+) -> None:
     """Replace only selected keys atomically, preserving permissions and owner."""
-    metadata = path.lstat()
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1024 * 1024:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        if not create:
+            raise
+        metadata = None
+    if metadata is not None and (
+        not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1024 * 1024
+    ):
         raise PublicationError("The publication configuration is unsafe.")
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines() if metadata else []
     output: list[str] = []
     seen: set[str] = set()
     for line in lines:
@@ -91,8 +100,8 @@ def write_configuration(path: Path, changes: Mapping[str, str]) -> None:
     descriptor, temporary = tempfile.mkstemp(prefix=".publication-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-            os.fchmod(file.fileno(), stat.S_IMODE(metadata.st_mode) & 0o600)
-            if os.geteuid() == 0:
+            os.fchmod(file.fileno(), stat.S_IMODE(metadata.st_mode) & 0o600 if metadata else 0o600)
+            if metadata is not None and os.geteuid() == 0:
                 os.fchown(file.fileno(), metadata.st_uid, metadata.st_gid)
             file.write("\n".join(output) + "\n")
             file.flush()
@@ -109,36 +118,90 @@ def write_configuration(path: Path, changes: Mapping[str, str]) -> None:
 
 
 def configure(
-    path: Path, *, prompt: Callable[[str], str] = getpass.getpass, interactive: bool | None = None
+    path: Path,
+    *,
+    prompt: Callable[[str], str] = getpass.getpass,
+    interactive: bool | None = None,
+    replace: bool = False,
+    fallback: Mapping[str, str] | None = None,
+    create: bool = False,
 ) -> None:
-    values = read_configuration(path)
+    values = dict(fallback or {})
+    try:
+        values.update(read_configuration(path))
+    except FileNotFoundError:
+        if not create:
+            raise
     changes: dict[str, str] = {}
     if not values.get(KEYS[2]):
         changes[KEYS[2]] = DEFAULT_TRANSLATION_MODEL
     terminal = sys.stdin.isatty() if interactive is None else interactive
+    if replace and not terminal:
+        raise PublicationError("Changing publication credentials requires an interactive terminal.")
     labels = {
         KEYS[0]: "GitHub token for the bookmarks builder (optional; Enter to skip): ",
         KEYS[1]: "OpenAI API key for new-topic translations (optional; Enter to skip): ",
     }
     for key, label in labels.items():
-        if values.get(key):
+        if values.get(key) and not replace:
             continue
+        if replace:
+            state = "configured" if values.get(key) else "not configured"
+            label = f"{key} ({state}; Enter to keep, '-' to clear): "
         token = ""
         if terminal:
-            with suppress(EOFError):
+            try:
                 token = prompt(label).strip()
+            except EOFError:
+                if replace:
+                    raise PublicationError(
+                        "Credential entry was cancelled; no credentials were changed."
+                    ) from None
         if token:
+            if replace and token == "-":
+                changes[key] = ""
+                continue
             # Reject shell/dotenv syntax as well as controls. Neither token
             # provider uses these characters in its generated credentials.
             if not re.fullmatch(r"[A-Za-z0-9_.-]{1,512}", token):
+                if replace:
+                    raise PublicationError(
+                        "The credential format was rejected; no credentials were changed."
+                    )
                 print("The credential format was rejected; update will continue without it.")
                 continue
             changes[key] = token
-        else:
+        elif not values.get(key):
             print(f"{key} was not supplied; update will continue.")
     if changes:
-        write_configuration(path, changes)
-    print("Publication credentials can be added later with contributions INSTANCE tokens.")
+        write_configuration(path, changes, create=create)
+        values.update(changes)
+    if replace:
+        print("Publication credentials saved." if changes else "Publication credentials unchanged.")
+        for key in KEYS[:2]:
+            print(f"  {key}: {'configured' if values.get(key) else 'not configured'}")
+        print("Changes apply to the next contribution commit; no bot restart is needed.")
+    else:
+        print("Publication credentials can be added later with contributions INSTANCE tokens.")
+
+
+def credential_overrides(path: Path) -> dict[str, str]:
+    """Read only the selected instance's optional private, persistent overrides."""
+    if not path.is_absolute():
+        raise PublicationError("The publication credential file must use an absolute path.")
+    for parent in (path.parent, *path.parent.parents):
+        if parent.is_symlink():
+            raise PublicationError("The publication credential directory is unsafe.")
+    parent_metadata = path.parent.stat()
+    if parent_metadata.st_uid != os.geteuid() or parent_metadata.st_mode & 0o022:
+        raise PublicationError("The publication credential directory is not private to its owner.")
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return {}
+    if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+        raise PublicationError("The publication credential file must be private to its owner.")
+    return read_configuration(path)
 
 
 def _handoff(args: argparse.Namespace, values: Mapping[str, Any]) -> int:
@@ -184,40 +247,41 @@ def _handoff(args: argparse.Namespace, values: Mapping[str, Any]) -> int:
     return process.returncode
 
 
-def publication_status(path: Path) -> None:
-    if not path.exists():
-        print("Direct API publication: not started; the acceptance ledger is unchanged.")
-        return
-    journal = PublicationJournal(path)
-    try:
-        pending = journal.get("pending")
-        last = journal.get("last")
-        print("Direct API publication: " + ("pending" if pending else "no queued commit"))
-        if last:
-            print(f"  Last builder commit: {last['commit']} ({last['branch']})")
-            print(f"  Accepted ledger revision: {last['revision']}")
-        if pending:
-            print(f"  Pending accepted revision: {pending['revision']}")
-        if journal.get("error"):
-            print("  The last attempt failed; run commit to retry the saved publication.")
-    finally:
-        journal.close()
+def publication_status(path: Path, settings: PublicationSettings) -> None:
+    describe_publication(path, settings)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("configure", "commit", "status"))
     parser.add_argument("--env-file", type=Path)
+    parser.add_argument("--credentials-file", type=Path)
+    parser.add_argument("--replace", action="store_true")
     parser.add_argument("--store", type=Path)
     parser.add_argument("--run-as")
     parser.add_argument("--credentials-stdin", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.command == "configure":
-            if args.env_file is None:
-                parser.error("configure requires --env-file")
-            configure(args.env_file)
+            if args.env_file is None and args.credentials_file is None:
+                parser.error("configure requires --env-file or --credentials-file")
+            if args.credentials_file:
+                credential_overrides(args.credentials_file)
+                fallback = (
+                    read_configuration(args.env_file)
+                    if args.env_file
+                    else {key: os.environ.get(key, "") for key in KEYS}
+                )
+                configure(
+                    args.credentials_file, replace=args.replace, fallback=fallback, create=True
+                )
+            else:
+                configure(args.env_file, replace=args.replace)
             return 0
+        if args.replace:
+            parser.error("--replace is only available for configure")
+        if args.credentials_stdin and args.credentials_file:
+            parser.error("--credentials-stdin and --credentials-file cannot be combined")
         if args.store is None or not args.store.is_absolute():
             parser.error("commit/status requires an absolute --store path")
         if args.credentials_stdin:
@@ -235,12 +299,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.env_file
                 else {key: os.environ.get(key, "") for key in KEYS}
             )
+            if args.credentials_file:
+                values.update(credential_overrides(args.credentials_file))
         settings = PublicationSettings.from_mapping(values)
         if args.run_as:
             return _handoff(args, values)
         journal_path = args.store.with_name(args.store.name + ".publication.sqlite3")
         if args.command == "status":
-            publication_status(journal_path)
+            publication_status(args.store, settings)
             return 0
         # This uses the existing idempotent v1..v6 migration, never a fresh
         # replacement database. The separate journal is not a schema upgrade.

@@ -149,7 +149,7 @@ Commands:
   contributions
               Review trusted topic/verse contributions and submit them
               directly to getbible/v1_bookmark_builder through its HTTPS API
-              contributions INSTANCE status|commit|tokens
+              contributions INSTANCE status|inspect|commit|tokens
   commit      Commit already accepted contributions (alias for contributions INSTANCE commit)
   update      Deploy the current reviewed checkout (alias for upgrade)
   upgrade     Deploy the exact commit from a reviewed source checkout
@@ -4520,6 +4520,11 @@ prompt_contribution_tokens() {
     local source_dir=$1
     local python_bin=$2
     local env_file=$3
+    if [[ "${4:-}" == "--replace" ]]; then
+        "$python_bin" "$source_dir/scripts/contribution_publish.py" configure \
+            --env-file "$env_file" --replace
+        return
+    fi
     # Missing credentials are never a deployment prerequisite. The helper
     # prompts without echo and atomically preserves every other .env value.
     if ! "$python_bin" "$source_dir/scripts/contribution_publish.py" configure \
@@ -4547,6 +4552,16 @@ cmd_contributions() {
     local action=${2:-}
     [[ -n "$action" ]] || require_tty
     select_instance "${1:-}"
+    # Token repair must remain available even when the contribution store is
+    # disabled or damaged. Publication alone needs the database preflight.
+    if [[ "$action" == "tokens" ]]; then
+        require_tty
+        local app_dir
+        app_dir=$(application_dir_for "$ACTIVE_INSTANCE")
+        prompt_contribution_tokens "$app_dir" "$app_dir/venv/bin/python" \
+            "$(environment_file_for "$ACTIVE_INSTANCE")" --replace
+        return
+    fi
     load_contribution_context
     case "$action" in
         status)
@@ -4555,12 +4570,7 @@ cmd_contributions() {
             return
             ;;
         commit) publish_contributions_to_repository; return ;;
-        tokens)
-            require_tty
-            prompt_contribution_tokens "$CONTRIBUTION_APP_DIR" \
-                "$CONTRIBUTION_APP_DIR/venv/bin/python" "$CONTRIBUTION_ENV_FILE"
-            return
-            ;;
+        inspect) run_contribution_cli inspect "${@:3}"; return ;;
         "") ;;
         *) die "Unknown contribution action: $action" ;;
     esac
@@ -4579,7 +4589,8 @@ Contribution review
   4) Review verse additions and removals
   5) Accept approved changes and commit to the builder
   6) Commit previously accepted contributions / retry
-  7) Add missing GitHub / OpenAI credentials
+  7) Add, replace or clear GitHub / OpenAI credentials
+  8) Inspect submitted changes and accepted revisions
   0) Return
 
 Review uses the current shared catalogue from bookmarks.getbible.net.
@@ -4613,8 +4624,10 @@ EOF
             6) publish_contributions_to_repository || true ;;
             7)
                 prompt_contribution_tokens "$CONTRIBUTION_APP_DIR" \
-                    "$CONTRIBUTION_APP_DIR/venv/bin/python" "$CONTRIBUTION_ENV_FILE"
+                    "$CONTRIBUTION_APP_DIR/venv/bin/python" "$CONTRIBUTION_ENV_FILE" \
+                    --replace || true
                 ;;
+            8) run_contribution_cli inspect || true ;;
             0) return ;;
             *) warn "Unknown selection." ;;
         esac

@@ -167,7 +167,7 @@ class SetupScriptTestCase(unittest.TestCase):
             self.assertIn(f'ensure_env_value "$python_bin" "$env_file" "{key}" ""', script)
         self.assertIn("5) Accept approved changes and commit to the builder", script)
         self.assertIn("6) Commit previously accepted contributions / retry", script)
-        self.assertIn("7) Add missing GitHub / OpenAI credentials", script)
+        self.assertIn("7) Add, replace or clear GitHub / OpenAI credentials", script)
         start = script.index("cmd_contributions() {")
         menu = script[start : script.index("\ncmd_menu() {", start)]
         self.assertEqual(menu.count("fetch_contribution_catalog || continue"), 3)
