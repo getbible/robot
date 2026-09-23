@@ -97,7 +97,7 @@ def translated_name(value: Any) -> str:
         raise SourceError("A translated topic name must be a string.")
     result = unicodedata.normalize("NFC", value.strip())
     if not 1 <= len(result) <= 120 or any(
-        unicodedata.category(char) in {"Cc", "Cs"} for char in result
+        unicodedata.category(char).startswith("C") for char in result
     ):
         raise SourceError("A translated topic name is empty, too long or contains controls.")
     return result
@@ -213,9 +213,7 @@ class SourceCatalogue:
                 _object(document, {"schema_version", "locale", "topics"}, {"name"})
                 if document["locale"] != stem:
                     raise SourceError("A locale code does not match its filename.")
-                if "name" in document and (
-                    not isinstance(document["name"], str) or len(document["name"]) > 80
-                ):
+                if document.get("name") is not None and len(translated_name(document["name"])) > 80:
                     raise SourceError("A locale language name is invalid.")
                 entries = document["topics"]
                 if not isinstance(entries, dict) or list(entries) != sorted(entries):
@@ -241,7 +239,7 @@ class SourceCatalogue:
             topic_id = _topic_id(definition["id"])
             if topic_id in topics:
                 previous = topics[topic_id]
-                if previous["name"] != definition["name"] or (
+                if previous["name"].casefold() != str(definition["name"]).casefold() or (
                     previous["color"].lower() != str(definition["color"]).lower()
                 ):
                     raise SourceError("An accepted topic conflicts with the upstream definition.")
@@ -286,11 +284,21 @@ class SourceCatalogue:
         self.validate()
         return new_topics
 
+    def missing_translations(self, topic_id: str) -> dict[str, Any]:
+        """Return locales which still need this topic, preserving human translations."""
+        if topic_id not in self.topics:
+            raise SourceError("Translations refer to an unknown topic.")
+        return {
+            locale: document
+            for locale, document in self.locales.items()
+            if topic_id not in document["topics"]
+        }
+
     def add_translations(self, topic_id: str, names: Mapping[str, str]) -> None:
         if topic_id not in self.topics:
             raise SourceError("Translations refer to an unknown topic.")
         locales = self.locales
-        if set(names) != set(locales):
+        if not set(self.missing_translations(topic_id)) <= set(names) <= set(locales):
             raise SourceError("Translations do not cover exactly the requested locales.")
         for locale, value in names.items():
             entries = locales[locale]["topics"]
@@ -301,8 +309,15 @@ class SourceCatalogue:
     def changes(self) -> dict[str, str]:
         self.validate()
         changed: dict[str, str] = {}
+        total_bytes = 0
         for path, document in self.documents.items():
             before = self.original.get(path)
             if before is None or decode_json(before) != document:
                 changed[path] = encode_document(path, document)
+            size = len((changed.get(path) or before or "").encode("utf-8"))
+            if size > MAX_FILE_BYTES:
+                raise SourceError("A generated builder source exceeds its byte limit.")
+            total_bytes += size
+        if total_bytes > MAX_SOURCE_BYTES:
+            raise SourceError("The generated builder source tree exceeds its byte limit.")
         return changed

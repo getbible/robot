@@ -322,7 +322,7 @@ class PublicationTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def publisher(
-        self, *, github_token: str = "fixture-github", openai_key: str = ""
+        self, *, github_token: str = "fixture-github", openai_key: str = "fixture-ai"
     ) -> ContributionPublisher:
         return ContributionPublisher(
             PublicationSettings(github_token, openai_key),
@@ -386,13 +386,18 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(self.github.calls, [])
         self.assertEqual(self.openai.calls, [])
 
-    def test_missing_tokens_retain_work_then_commit_english_only(self) -> None:
+    def test_missing_tokens_retain_work_until_all_translations_can_commit(self) -> None:
         self.seed()
         before = AcceptedSnapshot.read(self.path)
-        self.assertIsNone(self.publisher(github_token="").publish(self.path))
+        with self.assertRaisesRegex(PublicationError, "CONTRIBUTION_GITHUB_TOKEN"):
+            self.publisher(github_token="").publish(self.path)
         self.assertIsNotNone(self.journal.get("pending"))
         self.assertEqual(self.github.calls, [])
         self.assertEqual(AcceptedSnapshot.read(self.path), before)
+        with self.assertRaisesRegex(PublicationError, "CONTRIBUTION_OPENAI_API_KEY"):
+            self.publisher(openai_key="").publish(self.path)
+        self.assertEqual(self.github.advances, 0)
+        self.assertIsNotNone(self.journal.get("pending"))
         result = self.publisher().publish(self.path)
         self.assertTrue(result["changed"])
         tree_calls = [
@@ -403,9 +408,15 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(len(tree_calls), 1)
         self.assertEqual(
             {entry["path"] for entry in tree_calls[0]["tree"]},
-            {"data/topics.json", "data/links/mercy.json"},
+            {
+                "data/topics.json",
+                "data/links/mercy.json",
+                "data/locales/af.json",
+                "data/locales/ar.json",
+                "data/locales/fr.json",
+            },
         )
-        self.assertEqual(self.openai.calls, [])
+        self.assertEqual(len(self.openai.calls), 1)
         self.assertEqual(AcceptedSnapshot.read(self.path), before)
         self.assertEqual(self.github.advances, 1)
         self.publisher().publish(self.path)
@@ -431,6 +442,213 @@ class PublicationTests(unittest.TestCase):
             "pulls",
         ]:
             self.assertNotIn(private, serialized)
+
+    def test_existing_topic_missing_locales_is_repaired_without_replacing_human_labels(
+        self,
+    ) -> None:
+        catalogue = SourceCatalogue.read(self.github.files)
+        catalogue.apply([TOPIC], [{**BUNDLE["associations"]["add"][0], "action": "add"}])
+        catalogue.locales["af"]["topics"]["mercy"] = "Reviewed human translation"
+        self.github = FakeGitHub({**self.github.files, **catalogue.changes()})
+        self.seed()
+        self.publisher().publish(self.path)
+        names = json.loads(self.openai.calls[0]["input"][1]["content"])["languages"]
+        self.assertEqual({entry["locale"] for entry in names}, {"fr", "ar"})
+        updated = SourceCatalogue.read(self.github.files)
+        self.assertEqual(updated.locales["af"]["topics"]["mercy"], "Reviewed human translation")
+        self.assertEqual(updated.locales["fr"]["topics"]["mercy"], "Miséricorde")
+        self.assertEqual(self.github.advances, 1)
+
+    def test_upgrade_repairs_published_english_only_topics_without_replaying_verse_changes(
+        self,
+    ) -> None:
+        self.seed()
+        self.publisher().publish(self.path)
+        for locale in ("af", "ar", "fr"):
+            path = f"data/locales/{locale}.json"
+            document = json.loads(self.github.files[path])
+            del document["topics"]["mercy"]
+            self.github.external_edit(path, document)
+        self.github.external_edit(
+            "data/links/mercy.json",
+            {"schema_version": 1, "topic": "mercy", "verses": [[43, 3, 18]]},
+        )
+        with self.journal.db:
+            self.journal.db.execute(
+                "DELETE FROM publication_metadata WHERE key = 'translation_contract_version'"
+            )
+        self.github.calls.clear()
+        self.publisher().publish(self.path)
+        changed = [
+            entry["path"]
+            for method, path, payload in self.github.calls
+            if method == "POST" and path.endswith("/git/trees")
+            for entry in payload["tree"]
+        ]
+        self.assertEqual(
+            set(changed), {f"data/locales/{locale}.json" for locale in ("af", "ar", "fr")}
+        )
+        self.assertEqual(
+            json.loads(self.github.files["data/links/mercy.json"])["verses"], [[43, 3, 18]]
+        )
+        self.github.calls.clear()
+        self.assertIsNone(self.publisher().publish(self.path))
+        self.assertEqual(self.github.calls, [])
+
+    def test_verse_only_changes_work_without_openai_when_topic_has_all_locales(self) -> None:
+        self.enroll()
+        self.seed()
+        self.publisher().publish(self.path)
+        event_id = self.event(17)
+        self.accept([event_id])
+        self.openai.calls.clear()
+        self.publisher(openai_key="").publish(self.path)
+        self.assertEqual(self.openai.calls, [])
+        self.assertIn([43, 3, 17], json.loads(self.github.files["data/links/mercy.json"])["verses"])
+
+    def test_delayed_acceptance_wins_over_submission_order_and_mutable_update_time(self) -> None:
+        self.enroll()
+        self.seed()
+        self.publisher().publish(self.path)
+        older = self.event(16, state="deferred", operation="verse_remove")
+        newer = self.event(16)
+        self.accept([newer])
+        self.store.decide_event(older, "approved", actor="reviewer", canonical_topic_id="mercy")
+        bundle = copy.deepcopy(BUNDLE)
+        bundle["topics"] = []
+        bundle["associations"] = {"add": [], "remove": BUNDLE["associations"]["add"]}
+        self.store.publish_approved_events_atomically(bundle, [older], actor="reviewer")
+        # API observation or a repeated client sync can update an older accepted
+        # row after the later acceptance. Publication must not reorder it.
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "UPDATE contribution_events SET updated_at = ? WHERE id = ?", (2**63 - 1, newer)
+            )
+        snapshot = AcceptedSnapshot.read(self.path)
+        self.assertEqual([event["id"] for event in snapshot.events][-2:], [newer, older])
+        self.publisher().publish(self.path)
+        self.assertEqual(json.loads(self.github.files["data/links/mercy.json"])["verses"], [])
+
+    def test_incremental_verse_can_create_its_accepted_canonical_definition(self) -> None:
+        self.enroll()
+        self.journal.put("initial_import_complete", True)
+        self.journal.put("translation_contract_version", 1)
+        event_id = self.event(16)
+        self.accept([event_id])
+        self.publisher().publish(self.path)
+        self.assertEqual(
+            json.loads(self.github.files["data/links/mercy.json"])["verses"], [[43, 3, 16]]
+        )
+        self.assertEqual(self.github.advances, 1)
+
+    def test_legacy_opposing_events_follow_current_cumulative_intent(self) -> None:
+        self.enroll()
+        self.seed()
+        self.publisher().publish(self.path)
+        older = self.event(16, state="deferred", operation="verse_remove")
+        newer = self.event(16)
+        self.accept([newer])
+        self.store.decide_event(older, "approved", actor="reviewer", canonical_topic_id="mercy")
+        bundle = copy.deepcopy(BUNDLE)
+        bundle["topics"] = []
+        bundle["associations"] = {"add": [], "remove": BUNDLE["associations"]["add"]}
+        self.store.publish_approved_events_atomically(bundle, [older], actor="reviewer")
+        with sqlite3.connect(self.path) as db:
+            db.execute("DELETE FROM contribution_event_acceptance")
+        self.publisher().publish(self.path)
+        self.assertEqual(json.loads(self.github.files["data/links/mercy.json"])["verses"], [])
+
+    def test_legacy_unknown_order_blocks_until_a_fresh_accepted_action_resolves_it(self) -> None:
+        self.enroll()
+        self.seed()
+        self.publisher().publish(self.path)
+        older = self.event(16, operation="verse_remove")
+        newer = self.event(16)
+        empty = {"schema_version": 1, "topics": [], "associations": {"add": [], "remove": []}}
+        self.store.publish_approved_events_atomically(empty, [older, newer], actor="reviewer")
+        with sqlite3.connect(self.path) as db:
+            db.execute("DELETE FROM contribution_event_acceptance")
+        with self.assertRaisesRegex(PublicationError, "Opposing legacy.*mercy at 43:3:16"):
+            self.publisher().publish(self.path)
+        self.assertEqual(self.github.advances, 1)
+        self.assertNotIn(
+            older, [row[0] for row in self.journal.db.execute("SELECT id FROM published_events")]
+        )
+        self.store.record_events(
+            42,
+            [
+                {
+                    "client_event_id": "fresh-reviewed-removal",
+                    "type": "verse_remove",
+                    "topic": {"local_topic_id": "local.mercy"},
+                    "verse": {"book": 43, "chapter": 3, "verse": 16},
+                }
+            ],
+        )
+        fresh = self.store.list_events(limit=1000)[-1].id
+        self.store.decide_event(fresh, "approved", actor="reviewer", canonical_topic_id="mercy")
+        bundle = copy.deepcopy(empty)
+        bundle["associations"]["remove"] = BUNDLE["associations"]["add"]
+        self.store.publish_approved_events_atomically(bundle, [fresh], actor="reviewer")
+        self.publisher().publish(self.path)
+        self.assertEqual(json.loads(self.github.files["data/links/mercy.json"])["verses"], [])
+        self.assertIsNone(self.journal.get("error"))
+
+    def test_concurrent_human_translation_is_preserved_on_rebase(self) -> None:
+        self.seed()
+
+        def concurrent_edit() -> None:
+            catalogue = SourceCatalogue.read(self.github.files)
+            catalogue.apply([TOPIC], [{**BUNDLE["associations"]["add"][0], "action": "add"}])
+            catalogue.locales["af"]["topics"]["mercy"] = "Human-approved wording"
+            for path, text in catalogue.changes().items():
+                self.github.external_edit(path, json.loads(text))
+
+        self.github.before_advance = concurrent_edit
+        self.publisher().publish(self.path)
+        catalogue = SourceCatalogue.read(self.github.files)
+        self.assertEqual(catalogue.locales["af"]["topics"]["mercy"], "Human-approved wording")
+        self.assertEqual(catalogue.locales["fr"]["topics"]["mercy"], "Miséricorde")
+        self.assertEqual(len(self.openai.calls), 1, "cached missing locales survive a rebase")
+        self.assertEqual(self.github.advances, 2)
+
+    def test_upgrade_rebuilds_an_uncommitted_legacy_job_before_publication(self) -> None:
+        self.enroll()
+        self.seed()
+        self.publisher().publish(self.path)
+        older = self.event(16, state="deferred", operation="verse_remove")
+        newer = self.event(16)
+        self.accept([newer])
+        pending = self.journal.prepare(AcceptedSnapshot.read(self.path))
+        del pending["translation_topics"]
+        del pending["dependencies"]
+        self.journal.put("pending", pending)
+        self.store.decide_event(older, "approved", actor="reviewer", canonical_topic_id="mercy")
+        bundle = {
+            "schema_version": 1,
+            "topics": [],
+            "associations": {
+                "add": [],
+                "remove": BUNDLE["associations"]["add"],
+            },
+        }
+        self.store.publish_approved_events_atomically(bundle, [older], actor="reviewer")
+        self.publisher().publish(self.path)
+        self.assertEqual(json.loads(self.github.files["data/links/mercy.json"])["verses"], [])
+
+    def test_upgrade_recovers_legacy_committed_candidate_without_duplicate_commit(self) -> None:
+        self.seed()
+        self.github.lose_ack = True
+        with self.assertRaises(RemoteError):
+            self.publisher().publish(self.path)
+        pending = self.journal.get("pending")
+        del pending["translation_topics"]
+        del pending["dependencies"]
+        self.journal.put("pending", pending)
+        self.publisher().publish(self.path)
+        self.assertEqual(self.github.advances, 1)
+        self.assertIsNone(self.journal.get("pending"))
+        self.assertEqual(self.journal.get("translation_contract_version"), 1)
 
     def test_existing_topic_addition_never_retranslates_or_replays_old_changes(self) -> None:
         self.enroll()
@@ -508,7 +726,11 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaises(RemoteError):
             self.publisher(openai_key="fixture-ai").publish(self.path)
         self.assertEqual(self.github.advances, 0)
-        self.publisher(openai_key="").publish(self.path)
+        with self.assertRaisesRegex(PublicationError, "CONTRIBUTION_OPENAI_API_KEY"):
+            self.publisher(openai_key="").publish(self.path)
+        self.assertEqual(self.github.advances, 0)
+        self.openai.error = False
+        self.publisher().publish(self.path)
         self.assertEqual(self.github.advances, 1)
 
     def test_branch_protection_error_leaves_pending_job_and_no_forced_retry(self) -> None:
@@ -522,6 +744,9 @@ class PublicationTests(unittest.TestCase):
     def test_master_default_branch_and_already_present_bundle(self) -> None:
         catalogue = SourceCatalogue.read(self.github.files)
         catalogue.apply([TOPIC], [{**BUNDLE["associations"]["add"][0], "action": "add"}])
+        catalogue.add_translations(
+            "mercy", dict.fromkeys(catalogue.locales, "Existing translation")
+        )
         self.github = FakeGitHub({**self.github.files, **catalogue.changes()})
         self.github.branch = "master"
         self.seed()
@@ -548,7 +773,8 @@ class PublicationTests(unittest.TestCase):
     def test_multiple_acceptances_while_token_missing_are_drained(self) -> None:
         self.enroll()
         self.seed()
-        self.publisher(github_token="").publish(self.path)
+        with self.assertRaisesRegex(PublicationError, "CONTRIBUTION_GITHUB_TOKEN"):
+            self.publisher(github_token="").publish(self.path)
         event_id = self.event(17)
         self.accept([event_id])
         self.publisher().publish(self.path)
@@ -597,9 +823,10 @@ class UpgradeAndConfigurationTests(unittest.TestCase):
             try:
                 github = FakeGitHub()
                 publisher = ContributionPublisher(
-                    PublicationSettings("fixture-github"),
+                    PublicationSettings("fixture-github", "fixture-ai"),
                     journal,
                     github=github,
+                    openai=FakeOpenAI(),
                     output=lambda _: None,
                 )
                 publisher.publish(path)
@@ -693,8 +920,8 @@ class UpgradeAndConfigurationTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("accepted contributions remain queued", result.stdout)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("accepted contributions remain queued", result.stderr)
             self.assertEqual(AcceptedSnapshot.read(path).bundle, BUNDLE)
             with redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(main(["status", "--store", str(path)]), 0)
