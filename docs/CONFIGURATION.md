@@ -188,7 +188,7 @@ their manager-owned paths in the environment file.
 | `CONTRIBUTION_RATE_REFILL_PER_SECOND` | `5.0` | `0.01`–`1000.0` | Refill rate of that contribution budget; requests beyond it wait behind `429` and `Retry-After` pacing instead of failing permanently |
 | `BOOKMARK_CATALOG_CHECK_INTERVAL_SECONDS` | `21600` | `300`–`604800` | How often the robot reads the Bookmarks API `index.json` to learn that accepted contributions are live; used only when a contribution store is configured |
 | `CONTRIBUTION_GITHUB_TOKEN` | empty | PAT or installation token restricted to `getbible/v1_bookmark_builder` with Contents read/write; branch rules must permit it | Direct source commit after acceptance; empty retains work for a later `commit` |
-| `CONTRIBUTION_OPENAI_API_KEY` | empty | Server-side OpenAI API key | Translate new-topic names into all existing source locales; empty means English only |
+| `CONTRIBUTION_OPENAI_API_KEY` | empty | Server-side OpenAI API key | Complete missing topic labels in all source locales; absent or failing credentials leave translation work queued |
 | `CONTRIBUTION_TRANSLATION_MODEL` | `gpt-5.6-sol` | Model ID supporting Responses API strict structured output | Configurable translation model; used only when the OpenAI key is present |
 
 Native setup assigns
@@ -215,10 +215,12 @@ command report that applications are unavailable.
 Contributed source topic names and moderator-created aliases must be English.
 The stable catalogue key is the topic id (`<english-slug>`), and the canonical
 English name is what the direct API commit adds to `data/topics.json`.
-With an OpenAI key, newly created topics also receive names in the builder's
-existing locale files in that same commit. Without the key, only English is
-published. Existing translations are preserved; adding verses never retranslates
-an established topic. English output is derived by the builder, not stored in
+Newly created topics receive names in the builder's existing locale files in
+that same commit. Without the OpenAI key, work requiring translations stays
+queued. Existing translations are preserved; adding verses to a fully translated
+topic makes no translation request. Older accepted English-only topics receive
+missing labels when publication resumes after upgrade. English output is derived
+by the builder, not stored in
 an English source locale file.
 
 The publisher reads these optional settings on each explicit acceptance or
@@ -232,7 +234,10 @@ Enter skips either; headless updates continue. Acceptance needs neither key and
 survives publication failures. Add keys later with
 `sudo getbible-robot contributions production tokens`, then run
 `sudo getbible-robot commit production` for the example instance. Use the existing
-configuration editor to replace keys or the model. Legacy `CONTRIBUTION_GIT_*`
+`tokens` command to replace keys (Enter keeps, `-` clears), and the configuration
+editor to change the model. In containers, `tokens` saves a private persistent
+per-instance credential override; it takes precedence over environment-supplied
+credentials and applies immediately to publication. Legacy `CONTRIBUTION_GIT_*`
 and `CONTRIBUTION_BUILDER_PYTHON` values may remain in old environment files but
 are ignored by the new normal publisher. There is no publisher checkout or Git
 identity to provision.
