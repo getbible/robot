@@ -36,7 +36,7 @@ COPY --chown=robot:robot modules /app/modules
 COPY --chown=robot:robot miniapp /app/miniapp
 COPY --chown=robot:robot container /app/container
 COPY --chown=robot:robot --chmod=0555 \
-    scripts/contribution_review.py /app/scripts/contribution_review.py
+    scripts/contribution_review.py scripts/contribution_publish.py /app/scripts/
 COPY --chown=robot:robot LICENSE /app/LICENSE
 COPY --chmod=0755 container/getbible-robot-container \
     /usr/local/bin/getbible-robot-container

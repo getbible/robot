@@ -13,6 +13,7 @@ CONTRIBUTION_TRANSLATION=""
 CONTRIBUTION_CATALOG=""
 CONTRIBUTION_EXPORT_ROOT=""
 CONTRIBUTION_SCRIPT=""
+CONTRIBUTION_CREDENTIALS_FILE=""
 
 usage() {
     cat <<'EOF'
@@ -28,7 +29,8 @@ Usage:
   setup.sh restart INSTANCE
   setup.sh reload
   setup.sh contributions [INSTANCE]
-  setup.sh contributions INSTANCE status|export|commit
+  setup.sh contributions INSTANCE status|inspect|export|commit|tokens
+  setup.sh contributions INSTANCE inspect --revision NUMBER
   setup.sh contributions INSTANCE applications|topics|verses|accept
   setup.sh shell
 
@@ -39,7 +41,10 @@ standard output/error and are visible through docker logs.
 Contribution acceptance is preserved in the private instance database. With a
 CONTRIBUTION_GITHUB_TOKEN, acceptance commits directly to the bookmark builder.
 Without it, work remains queued for `contributions INSTANCE commit`. Optional
-CONTRIBUTION_OPENAI_API_KEY translates new topics; without it, publish English.
+CONTRIBUTION_OPENAI_API_KEY translates new topics.
+Use `contributions INSTANCE tokens` to add, replace or clear publication tokens.
+They are saved privately in the instance's persistent /data state directory,
+overriding the environment or mounted instance file for subsequent commits.
 No Git executable, working copy, contribution branch or pull request is needed.
 EOF
 }
@@ -118,6 +123,7 @@ PY
 
 load_contribution_context() {
     local instance=$1
+    local action=${2:-}
     validate_instance "$instance" || return 1
     [[ "$CONTRIBUTION_APP_ROOT" == /* && "$CONTRIBUTION_DATA_ROOT" == /* &&
         "$CONTRIBUTION_CONFIG_ROOT" == /* ]] || {
@@ -128,6 +134,7 @@ load_contribution_context() {
     local instance_root="${CONTRIBUTION_DATA_ROOT}/${instance}"
     local state_root="${instance_root}/state"
     CONTRIBUTION_STORE="${state_root}/contributions.sqlite3"
+    CONTRIBUTION_CREDENTIALS_FILE="${state_root}/contribution-credentials.env"
     CONTRIBUTION_EXPORT_ROOT="${state_root}/contribution-exports"
     CONTRIBUTION_CATALOG="${CONTRIBUTION_EXPORT_ROOT}/bookmarks-catalog.json"
     [[ -f "$CONTRIBUTION_SCRIPT" && ! -L "$CONTRIBUTION_SCRIPT" ]] || {
@@ -141,7 +148,7 @@ load_contribution_context() {
         printf 'ERROR: Start the instance once before reviewing contributions.\n' >&2
         return 1
     }
-    [[ -f "$CONTRIBUTION_STORE" && ! -L "$CONTRIBUTION_STORE" ]] || {
+    [[ "$action" == "tokens" || ( -f "$CONTRIBUTION_STORE" && ! -L "$CONTRIBUTION_STORE" ) ]] || {
         printf 'ERROR: The private contribution store is unavailable for this instance.\n' >&2
         return 1
     }
@@ -227,15 +234,24 @@ export_contributions() {
 
 run_contribution_publication() {
     local command=$1
+    shift
     local -a config_arguments=()
-    if [[ "${ROBOT_MODE:-multi}" != "single" ]]; then
+    local mode=${ROBOT_MODE:-multi}
+    if [[ "${mode,,}" != "single" ]]; then
         config_arguments+=(--env-file "$CONTRIBUTION_CONFIG_ROOT/$CONTRIBUTION_INSTANCE.env")
     fi
     (
         cd "$CONTRIBUTION_APP_ROOT"
         "$CONTRIBUTION_PYTHON" -m scripts.contribution_publish "$command" \
-            --store "$CONTRIBUTION_STORE" "${config_arguments[@]}"
+            --store "$CONTRIBUTION_STORE" \
+            --credentials-file "$CONTRIBUTION_CREDENTIALS_FILE" \
+            "${config_arguments[@]}" "$@"
     )
+}
+
+configure_contribution_tokens() {
+    require_interactive || return 1
+    run_contribution_publication configure --replace
 }
 
 accept_and_commit_contributions() {
@@ -257,6 +273,8 @@ Container contribution review
   5) Accept approved changes and commit to the builder
   6) Write a privacy-safe repository export
   7) Commit previously accepted contributions / retry
+  8) Add, replace or clear GitHub / OpenAI credentials
+  9) Inspect submitted changes and accepted revisions
   0) Return
 
 Topic, verse, and acceptance review fetch the shared catalogue from bookmarks.getbible.net first.
@@ -277,6 +295,8 @@ EOF
             5) accept_and_commit_contributions || true ;;
             6) export_contributions || true ;;
             7) run_contribution_publication commit || true ;;
+            8) configure_contribution_tokens || true ;;
+            9) run_contribution_review inspect || true ;;
             0) return ;;
             *) printf 'WARNING: Unknown selection.\n' >&2 ;;
         esac
@@ -290,7 +310,7 @@ contributions_command() {
         require_interactive || return 1
         instance=$(prompt_instance) || return 1
     fi
-    load_contribution_context "$instance" || return 1
+    load_contribution_context "$instance" "$action" || return 1
     case "$action" in
         "") contribution_menu ;;
         status)
@@ -298,6 +318,8 @@ contributions_command() {
             run_contribution_publication status
             ;;
         commit) run_contribution_publication commit ;;
+        tokens) configure_contribution_tokens ;;
+        inspect) run_contribution_review inspect "${@:3}" ;;
         export) export_contributions ;;
         applications)
             require_interactive || return 1
@@ -396,7 +418,7 @@ main() {
         status|doctor) run_control "$command" "$@" ;;
         start|stop|restart) instance_command "$command" "${1:-}" ;;
         reload) run_control reload ;;
-        contributions) contributions_command "${1:-}" "${2:-}" ;;
+        contributions) contributions_command "$@" ;;
         shell) exec /bin/bash ;;
         help|-h|--help) usage ;;
         *) usage >&2; printf 'ERROR: Unknown command: %s\n' "$command" >&2; return 1 ;;

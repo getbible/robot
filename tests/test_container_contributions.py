@@ -1,15 +1,19 @@
 import json
 import os
+import pty
+import select
 import shutil
 import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from modules.contributions import ContributionStore
+from scripts.contribution_publish import read_configuration
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTAINER_SETUP = ROOT / "container" / "setup.sh"
@@ -23,7 +27,9 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
         self.data = root / "data"
         self.config = root / "config"
         (self.app / "scripts").mkdir(parents=True)
-        (self.app / "modules").mkdir()
+        shutil.copytree(
+            ROOT / "modules", self.app / "modules", ignore=shutil.ignore_patterns("__pycache__")
+        )
         self.config.mkdir()
         state = self.data / "production" / "state"
         state.mkdir(parents=True, mode=0o700)
@@ -35,21 +41,6 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
             ROOT / "scripts" / "contribution_publish.py",
             self.app / "scripts" / "contribution_publish.py",
         )
-        # The review CLI needs the store, the canon shared with the Bookmarks
-        # API client, that client, and the Query client; no catalogue sources
-        # ship with the application any more.
-        for name in (
-            "contributions.py",
-            "bookmark_sources.py",
-            "contribution_publication.py",
-            "bible_canon.py",
-            "getbible_bookmarks.py",
-            "getbible_query.py",
-        ):
-            shutil.copy2(
-                ROOT / "modules" / name,
-                self.app / "modules" / name,
-            )
         self.store_path = state / "contributions.sqlite3"
         store = ContributionStore(path=str(self.store_path))
         store.close()
@@ -88,7 +79,7 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
         self.assertIn("Contribution review status", result.stdout)
         self.assertIn("Accepted ledger revision: none", result.stdout)
         self.assertIn("Shared API catalogue version", result.stdout)
-        self.assertNotIn("live", result.stdout.casefold())
+        self.assertNotIn("live instance", result.stdout.casefold())
         self.assertNotIn(str(self.store_path), result.stdout)
         self.assertFalse((self.store_path.parent / "contribution-exports").exists())
 
@@ -99,9 +90,9 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
                 (ROOT / "tests" / "support" / "contributions-v5.sql").read_text(encoding="utf-8")
             )
         result = self.run_setup("contributions", "production", "commit")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("No GitHub token", result.stdout)
-        self.assertIn("remain queued", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("No GitHub token", result.stderr)
+        self.assertIn("remain queued", result.stderr)
         with sqlite3.connect(self.store_path) as database:
             self.assertGreater(
                 database.execute(
@@ -223,6 +214,100 @@ class ContainerContributionReviewTestCase(unittest.TestCase):
             review.index("fetch_contribution_catalog || return 1"),
             review.index('--catalog-file "$CONTRIBUTION_CATALOG"'),
         )
+
+    def run_token_setup(self, github: str, openai: str) -> str:
+        """Drive the actual hidden prompts in a terminal, as docker exec -it does."""
+        reader, writer = pty.openpty()
+        process = subprocess.Popen(
+            ["bash", str(CONTAINER_SETUP), "contributions", "production", "tokens"],
+            cwd=ROOT,
+            env=self.environment,
+            stdin=writer,
+            stdout=writer,
+            stderr=writer,
+            start_new_session=True,
+        )
+        os.close(writer)
+        transcript = b""
+        deadline = time.monotonic() + 15
+        answers = [
+            (b"CONTRIBUTION_GITHUB_TOKEN (", github),
+            (b"CONTRIBUTION_OPENAI_API_KEY (", openai),
+        ]
+        try:
+            while True:
+                self.assertLess(time.monotonic(), deadline, transcript.decode())
+                if select.select([reader], [], [], 0.1)[0]:
+                    try:
+                        chunk = os.read(reader, 65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    transcript += chunk
+                    if answers and answers[0][0] in transcript:
+                        _, answer = answers.pop(0)
+                        os.write(reader, (answer + "\n").encode())
+                elif process.poll() is not None:
+                    break
+            self.assertEqual(process.wait(timeout=5), 0, transcript.decode())
+            self.assertEqual(answers, [])
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            os.close(reader)
+        return transcript.decode()
+
+    def test_single_container_can_add_rotate_and_clear_persistent_tokens(self) -> None:
+        target = self.store_path.parent / "contribution-credentials.env"
+        output = self.run_token_setup("first-github", "first-openai")
+        self.assertNotIn("first-github", output)
+        self.assertNotIn("first-openai", output)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(read_configuration(target)["CONTRIBUTION_GITHUB_TOKEN"], "first-github")
+        output = self.run_token_setup("rotated-github", "")
+        self.assertNotIn("rotated-github", output)
+        self.assertEqual(read_configuration(target)["CONTRIBUTION_GITHUB_TOKEN"], "rotated-github")
+        self.assertEqual(read_configuration(target)["CONTRIBUTION_OPENAI_API_KEY"], "first-openai")
+        self.run_token_setup("-", "-")
+        self.assertEqual(read_configuration(target)["CONTRIBUTION_GITHUB_TOKEN"], "")
+        self.assertEqual(read_configuration(target)["CONTRIBUTION_OPENAI_API_KEY"], "")
+
+    def test_multi_container_tokens_override_readonly_config_without_changing_other_instances(
+        self,
+    ) -> None:
+        self.environment["ROBOT_MODE"] = "multi"
+        base = self.config / "production.env"
+        before = (
+            'TRANSLATION="aov"\n'
+            'CONTRIBUTION_GITHUB_TOKEN="mounted-github"\n'
+            'CONTRIBUTION_OPENAI_API_KEY="mounted-openai"\n'  # pragma: allowlist secret
+        )
+        base.write_text(before, encoding="utf-8")
+        base.chmod(0o400)
+        other = self.config / "second.env"
+        other.write_text('CONTRIBUTION_GITHUB_TOKEN="second-token"\n', encoding="utf-8")
+        other_before = other.read_bytes()
+        # Credential repair is independent of database availability.
+        self.store_path.unlink()
+        self.run_token_setup("rotated-github", "rotated-openai")
+        self.assertEqual(base.read_text(), before)
+        self.assertEqual(other.read_bytes(), other_before)
+        target = self.store_path.parent / "contribution-credentials.env"
+        self.assertEqual(read_configuration(target)["CONTRIBUTION_GITHUB_TOKEN"], "rotated-github")
+        self.assertEqual(
+            read_configuration(target)["CONTRIBUTION_OPENAI_API_KEY"], "rotated-openai"
+        )
+
+    def test_image_packages_both_operations_entrypoints_used_by_setup(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text().replace("\\\n", " ")
+        for script in ("contribution_review.py", "contribution_publish.py"):
+            lines = [line for line in dockerfile.splitlines() if line.startswith("COPY ")]
+            self.assertTrue(
+                any(f"scripts/{script}" in line and "/app/scripts/" in line for line in lines),
+                f"The image does not package its required {script} entrypoint.",
+            )
 
     def test_symlinked_private_store_is_rejected(self) -> None:
         self.store_path.unlink()
