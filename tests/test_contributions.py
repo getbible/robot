@@ -397,6 +397,7 @@ class ContributionStoreTestCase(unittest.TestCase):
         with sqlite3.connect(self.path) as connection:
             connection.executescript(
                 """
+                DROP TABLE contribution_event_acceptance;
                 ALTER TABLE contribution_catalog_revisions
                     RENAME TO contribution_catalog_revisions_v2;
                 CREATE TABLE contribution_catalog_revisions (
@@ -417,6 +418,21 @@ class ContributionStoreTestCase(unittest.TestCase):
         with sqlite3.connect(self.path) as connection:
             self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 6)
         self.assertEqual(self.store.current_catalog().checksum, first.checksum)
+        self.approve()
+        result = self.store.record_events(42, [_topic_event(), _verse_event()])
+        for event_id in result.event_ids.values():
+            self.store.decide_event(
+                event_id, "approved", canonical_topic_id="grace", actor="admin"
+            )
+        self.store.publish_approved_events_atomically(
+            _catalog(), list(result.event_ids.values()), actor="admin"
+        )
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM contribution_event_acceptance").fetchone(),
+                (2,),
+            )
 
     def test_v3_notification_schema_migrates_and_recovers_unclaimable_leases(
         self,
