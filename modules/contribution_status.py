@@ -55,12 +55,19 @@ def describe_publication(
         or snapshot.bundle["associations"]["add"]
         or snapshot.bundle["associations"]["remove"]
     )
-    waiting = bool(pending or unreceipted or initial_work)
+    translation_check = bool(
+        metadata.get("initial_import_complete")
+        and not metadata.get("translation_contract_version")
+        and snapshot.bundle["topics"]
+    )
+    waiting = bool(pending or unreceipted or initial_work or translation_check)
     output("Direct API publication: " + ("pending" if waiting else "no queued commit"))
     output(f"  Latest accepted ledger revision: {snapshot.revision}")
     output(f"  Accepted events without a builder receipt: {unreceipted}")
     if initial_work:
         output("  Previously accepted catalogue changes await their first publication check.")
+    if translation_check:
+        output("  Previously accepted topics await the upgrade's missing-translation check.")
     if pending:
         output(f"  Saved publication revision: {pending['revision']}")
         output(
@@ -88,4 +95,4 @@ def describe_publication(
     else:
         output("Use contributions INSTANCE inspect to see submitted and accepted changes.")
     output(f"Builder runs: https://github.com/{REPOSITORY}/actions/workflows/build.yml")
-    output("A source commit is not proof of a successful build or a live API update.")
+    output("A source commit is not proof of a successful build or a published API update.")

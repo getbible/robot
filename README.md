@@ -126,10 +126,14 @@ The Mini App has Home, Search, Bible, History, and Selected in one permanent bot
   (status, applications, topics, verses, publish); publishing accepts the
   approved changes into the ledger, then commits source changes directly to
   [getbible/v1_bookmark_builder](https://github.com/getbible/v1_bookmark_builder)
-  through the GitHub API. New-topic translations are optional and join the
-  same atomic commit. Missing tokens never discard acceptance; add them later
+  through the GitHub API. Missing topic translations are completed in every
+  builder locale and join the same atomic commit. Missing tokens never discard acceptance; add them later
   and run `sudo getbible-robot commit <instance>`. See
   [Contribution publication](docs/CONTRIBUTION_PUBLICATION.md).
+  Use `contributions <instance> inspect` to review submitted events and accepted
+  revisions, `tokens` to add or replace credentials, and `status` to see queued
+  work plus links to the source commit and builder workflow. These commands also
+  work through `/app/setup.sh` inside the Docker container.
   Once the builder workflow republishes the Bookmarks API, the robot
   notices on its next catalogue check, marks the contributions live, and
   sends each contributor one private notice; the Mini App's **P** marker

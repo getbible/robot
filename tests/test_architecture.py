@@ -17,6 +17,7 @@ LAYERS = {
     "modules.bookmark_backup": 0,
     "modules.bookmark_sources": 0,
     "modules.contribution_publication": 1,
+    "modules.contribution_status": 1,
     "modules.catalog": 0,
     "modules.contributions": 0,
     "modules.ephemeral": 0,
