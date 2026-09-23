@@ -95,6 +95,7 @@ _REQUIRED_TABLES = frozenset(
         "contribution_canonical_topics",
         "contributor_source_topics",
         "contribution_events",
+        "contribution_event_acceptance",
         "contribution_decisions",
         "contribution_audit",
         "contribution_notifications",
@@ -1621,6 +1622,58 @@ class ContributionStore:
             actor=str(row[4]),
         )
 
+    def catalog_revision(self, revision: int) -> CatalogRevision | None:
+        """Read an immutable accepted revision without changing publication state."""
+        number = _positive_integer(revision, "revision", 2**63 - 1, minimum=0)
+        with self._guard:
+            row = self._connection_required().execute(
+                """
+                SELECT revision, checksum, catalog_json, created_at, actor
+                FROM contribution_catalog_revisions WHERE revision = ?
+                """,
+                (number,),
+            ).fetchone()
+        if row is None:
+            return None
+        return CatalogRevision(
+            revision=int(row[0]),
+            checksum=str(row[1]),
+            catalog=cast(dict[str, Any], json.loads(str(row[2]))),
+            created_at=int(row[3]),
+            actor=str(row[4]),
+        )
+
+    def list_catalog_revisions(
+        self, *, limit: int = 20, before_revision: int | None = None
+    ) -> tuple[CatalogRevision, ...]:
+        """Page accepted revisions newest first; omit the empty seed revision."""
+        count = _positive_integer(limit, "limit", 100)
+        before = (
+            _positive_integer(before_revision, "before_revision", 2**63 - 1)
+            if before_revision is not None
+            else 2**63 - 1
+        )
+        with self._guard:
+            rows = self._connection_required().execute(
+                """
+                SELECT revision, checksum, catalog_json, created_at, actor
+                FROM contribution_catalog_revisions
+                WHERE revision > 0 AND revision < ?
+                ORDER BY revision DESC LIMIT ?
+                """,
+                (before, count),
+            ).fetchall()
+        return tuple(
+            CatalogRevision(
+                revision=int(row[0]),
+                checksum=str(row[1]),
+                catalog=cast(dict[str, Any], json.loads(str(row[2]))),
+                created_at=int(row[3]),
+                actor=str(row[4]),
+            )
+            for row in rows
+        )
+
     def published_topic_ids(self) -> tuple[str, ...]:
         """Return every contributed topic that has appeared in an accepted revision.
 
@@ -1757,6 +1810,25 @@ class ContributionStore:
             changed = 0
             if values:
                 placeholders = ",".join("?" for _ in values)
+                # Submission IDs and mutable updated_at timestamps do not
+                # describe acceptance order: an old deferred removal can be
+                # accepted after a newer addition. Preserve the atomic review
+                # order even when sync retries or API observations touch events.
+                previous_acceptance = connection.execute(
+                    "SELECT COALESCE(MAX(accepted_at), 0) FROM contribution_event_acceptance"
+                ).fetchone()
+                assert previous_acceptance is not None
+                accepted_at = max(now, int(previous_acceptance[0]) + 1)
+                connection.execute(
+                    f"""
+                    INSERT OR IGNORE INTO contribution_event_acceptance (
+                        event_id, accepted_at, revision
+                    )
+                    SELECT id, ?, ? FROM contribution_events
+                    WHERE id IN ({placeholders}) AND state = 'approved'
+                    """,  # nosec B608 -- bounded integer placeholders
+                    (accepted_at, revision.revision, *values),
+                )
                 cursor = connection.execute(
                     f"""
                     UPDATE contribution_events
@@ -2656,6 +2728,16 @@ class ContributionStore:
                 created_at INTEGER NOT NULL,
                 actor TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS contribution_event_acceptance (
+                event_id INTEGER PRIMARY KEY,
+                accepted_at INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                FOREIGN KEY (event_id) REFERENCES contribution_events(id),
+                FOREIGN KEY (revision) REFERENCES contribution_catalog_revisions(revision)
+            );
+            CREATE INDEX IF NOT EXISTS contribution_event_acceptance_order
+                ON contribution_event_acceptance (accepted_at, event_id);
 
             CREATE TABLE IF NOT EXISTS contribution_publication_state (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
