@@ -448,9 +448,13 @@ create_source_fixture() {
     cp -- "$ROOT/scripts/contribution_publish.py" \
         "$SOURCE_DIR/scripts/contribution_publish.py"
     mkdir -p "$SOURCE_DIR/modules"
-    for module in __init__.py bible_canon.py contributions.py bookmark_sources.py contribution_publication.py; do
+    for module in __init__.py bible_canon.py contributions.py bookmark_sources.py \
+        contribution_publication.py contribution_status.py; do
         cp -- "$ROOT/modules/$module" "$SOURCE_DIR/modules/$module"
     done
+    # Upgrade credential prompts run before dependency installation and must
+    # remain available even with site-packages disabled.
+    "$SYSTEM_PYTHON" -S "$SOURCE_DIR/scripts/contribution_publish.py" --help >/dev/null
     cp -- "$ROOT/miniapp/lib/bible-canon.js" \
         "$SOURCE_DIR/miniapp/lib/bible-canon.js"
     printf 'print("fixture")\n' >"$SOURCE_DIR/bot.py"
@@ -464,12 +468,13 @@ create_source_fixture() {
 }
 
 assert_contribution_assets() {
-    # The review CLI is the only contribution asset a deployment carries; the
-    # shared catalogue comes from bookmarks.getbible.net at review time.
+    # Both review and publication CLIs ship with deployment; the shared
+    # catalogue comes from bookmarks.getbible.net at review time.
     local app_dir=$1
     assert_file "$app_dir/scripts/contribution_review.py"
     assert_file "$app_dir/scripts/contribution_publish.py"
     assert_file "$app_dir/modules/contribution_publication.py"
+    assert_file "$app_dir/modules/contribution_status.py"
     assert_file "$app_dir/miniapp/lib/bible-canon.js"
 }
 

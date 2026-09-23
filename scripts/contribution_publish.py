@@ -133,7 +133,9 @@ def configure(
         if not create:
             raise
     changes: dict[str, str] = {}
-    if not values.get(KEYS[2]):
+    # Container override files hold operator changes only. Writing a default
+    # model there would silently shadow later Compose/instance model changes.
+    if not create and not values.get(KEYS[2]):
         changes[KEYS[2]] = DEFAULT_TRANSLATION_MODEL
     terminal = sys.stdin.isatty() if interactive is None else interactive
     if replace and not terminal:
