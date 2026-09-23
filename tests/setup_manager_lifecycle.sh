@@ -35,6 +35,10 @@ DNS_LOG="${TEST_ROOT}/dns.log"
 MINI_APP_VERIFY_LOG="${TEST_ROOT}/mini-app-verify.log"
 CONTRIBUTION_STORE_VERIFY_LOG="${TEST_ROOT}/contribution-store-verify.log"
 SYSTEM_PYTHON=$(command -v python3)
+# Synthetic Telegram credentials shared by prompt and duplicate-token fixtures.
+FIXTURE_ALPHA_TOKEN="123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"  # pragma: allowlist secret
+FIXTURE_GAMMA_TOKEN="555555555:ABCDEFGHIJKLMNOPQRSTUVWXYZa12345678"  # pragma: allowlist secret
+FIXTURE_DELTA_TOKEN="246813579:ABCDEFGHIJKLMNOPQRSTUVWXYZabcde1234"  # pragma: allowlist secret
 mkdir -p \
     "$METADATA_ROOT" \
     "$(dirname "$UNIT_PATH")" \
@@ -515,7 +519,7 @@ FIRST_SHA=$(git -C "$SOURCE_DIR" rev-parse HEAD)
 
 install_instance \
     "alpha" \
-    "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+    "${FIXTURE_ALPHA_TOKEN}"
 install_instance \
     "beta" \
     "987654321:ZYXWVUTSRQPONMLKJIHGFEDCBAabcdefghi"
@@ -593,8 +597,8 @@ assert_contains "$(environment_file_for beta)" \
 cmd_install --source "$SOURCE_DIR" <<EOF
 
 gamma
-555555555:ABCDEFGHIJKLMNOPQRSTUVWXYZa12345678
-555555555:ABCDEFGHIJKLMNOPQRSTUVWXYZa12345678
+${FIXTURE_GAMMA_TOKEN}
+${FIXTURE_GAMMA_TOKEN}
 
 
 
@@ -624,7 +628,7 @@ assert_absent "$(metadata_file_for gamma)"
 
 assert_equal "$(wc -l <"$USERS_FILE")" "2"
 ! ensure_unique_token \
-    "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi" \
+    "${FIXTURE_ALPHA_TOKEN}" \
     "beta" || fail "duplicate token was accepted"
 
 if (
@@ -783,8 +787,8 @@ if (
         --mini-app-port 9201 <<EOF
 
 delta
-246813579:ABCDEFGHIJKLMNOPQRSTUVWXYZabcde1234
-246813579:ABCDEFGHIJKLMNOPQRSTUVWXYZabcde1234
+${FIXTURE_DELTA_TOKEN}
+${FIXTURE_DELTA_TOKEN}
 
 
 
@@ -808,8 +812,8 @@ cmd_install \
     --mini-app-port 9250 <<EOF
 
 delta
-246813579:ABCDEFGHIJKLMNOPQRSTUVWXYZabcde1234
-246813579:ABCDEFGHIJKLMNOPQRSTUVWXYZabcde1234
+${FIXTURE_DELTA_TOKEN}
+${FIXTURE_DELTA_TOKEN}
 
 
 
