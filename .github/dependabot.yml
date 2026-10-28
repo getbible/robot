@@ -7,7 +7,6 @@ updates:
     target-branch: master
     open-pull-requests-limit: 10
     rebase-strategy: auto
-    labels: [dependencies, security]
     commit-message:
       prefix: dependencies
     groups:
@@ -23,7 +22,6 @@ updates:
     target-branch: master
     open-pull-requests-limit: 5
     rebase-strategy: auto
-    labels: [dependencies, security]
     commit-message:
       prefix: actions
     groups:
